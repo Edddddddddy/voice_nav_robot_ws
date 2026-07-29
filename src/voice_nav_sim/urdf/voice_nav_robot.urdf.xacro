@@ -1,0 +1,95 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="voice_nav_robot">
+
+  <!-- 车体参数：X 前方，Y 左方，Z 上方 -->
+  <xacro:property name="base_radius" value="0.20"/>
+  <xacro:property name="base_height" value="0.18"/>
+  <xacro:property name="wheel_radius" value="0.035"/>
+  <xacro:property name="wheel_width" value="0.025"/>
+  <xacro:property name="wheel_y" value="0.20"/>
+  <xacro:property name="caster_radius" value="0.045"/>
+  <xacro:property name="laser_radius" value="0.04"/>
+  <xacro:property name="laser_height" value="0.05"/>
+
+  <material name="blue"><color rgba="0 0 0.8 1"/></material>
+  <material name="black"><color rgba="0 0 0 1"/></material>
+  <material name="red"><color rgba="0.8 0.1 0.1 1"/></material>
+
+  <!-- TF 根：地面投影坐标系 -->
+  <link name="base_footprint"/>
+  <joint name="base_footprint_to_base_link" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 ${wheel_radius}"/>
+  </joint>
+
+  <!-- 主车身 -->
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 ${base_height / 2}"/>
+      <geometry><cylinder radius="${base_radius}" length="${base_height}"/></geometry>
+      <material name="blue"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 ${base_height / 2}"/>
+      <geometry><cylinder radius="${base_radius}" length="${base_height}"/></geometry>
+    </collision>
+  </link>
+
+  <!-- 左右两个驱动轮；轮轴沿 Y，关节可连续旋转 -->
+  <xacro:macro name="drive_wheel" params="side y">
+    <link name="${side}_wheel">
+      <visual>
+        <origin rpy="1.5708 0 0"/>
+        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+        <material name="black"/>
+      </visual>
+      <collision>
+        <origin rpy="1.5708 0 0"/>
+        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+      </collision>
+    </link>
+    <joint name="${side}_wheel_joint" type="continuous">
+      <parent link="base_link"/>
+      <child link="${side}_wheel"/>
+      <origin xyz="0 ${y} 0"/>
+      <axis xyz="0 1 0"/>
+    </joint>
+  </xacro:macro>
+
+  <xacro:drive_wheel side="left"  y="${wheel_y}"/>
+  <xacro:drive_wheel side="right" y="-${wheel_y}"/>
+
+  <!-- 后置万向支撑轮（caster 不参与驱动） -->
+  <link name="caster_link">
+    <visual>
+      <origin xyz="0 0 ${caster_radius}"/>
+      <geometry><sphere radius="${caster_radius}"/></geometry>
+      <material name="black"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 ${caster_radius}"/>
+      <geometry><sphere radius="${caster_radius}"/></geometry>
+    </collision>
+  </link>
+  <joint name="caster_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="caster_link"/>
+    <origin xyz="-${base_radius * 0.65} 0 -${wheel_radius}"/>
+  </joint>
+
+  <!-- 激光雷达 -->
+  <link name="laser_link">
+    <visual>
+      <origin xyz="0 0 ${laser_height / 2}"/>
+      <geometry><cylinder radius="${laser_radius}" length="${laser_height}"/></geometry>
+      <material name="red"/>
+    </visual>
+  </link>
+  <joint name="laser_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="laser_link"/>
+    <origin xyz="0 0 ${base_height}"/>
+  </joint>
+
+</robot>

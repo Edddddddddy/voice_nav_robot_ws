@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lesson 0002：定义第一个 Mission Interface</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+    <style>
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        background: var(--panel);
+      }
+
+      th,
+      td {
+        padding: 10px 12px;
+        border: 1px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>定义第一个 Mission Interface</h1>
+      <p class="subtitle">Lesson 0002 · 目标时间 30–45 分钟</p>
+
+      <div class="goal">
+        <strong>本课唯一成果：</strong>
+        手写 <code>MissionStep.msg</code> 和 <code>ExecuteMission.action</code>，
+        完成代码生成，并能用 ROS CLI 查看生成后的 Interface。
+      </div>
+
+      <h2>设计限制</h2>
+      <p>这次只写 Interface，不写 Action server、client、Guard 或业务节点。</p>
+      <ul>
+        <li>LLM 只能表达语义动作，不能指定速度、加速度或控制器话题。</li>
+        <li>STOP 不属于普通 MissionStep，它以后走独立的 Emergency Stop。</li>
+        <li>Result 的程序逻辑读取稳定错误码，不解析人类可读字符串。</li>
+      </ul>
+
+      <h2>1. MissionStep.msg</h2>
+      <p>
+        在 <code>voice_nav_interfaces/msg/MissionStep.msg</code> 中定义以下内容，
+        具体 ROS IDL 语法由你手写：
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>类别</th>
+            <th>要求</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>uint8 常量</td>
+            <td><code>MOVE_DISTANCE=1</code>、<code>ROTATE_ANGLE=2</code>、<code>NAVIGATE_TO=3</code>、<code>SAVE_MAP=4</code></td>
+          </tr>
+          <tr>
+            <td>动作类型</td>
+            <td><code>uint8 kind</code></td>
+          </tr>
+          <tr>
+            <td>相对移动</td>
+            <td><code>float32 distance_m</code></td>
+          </tr>
+          <tr>
+            <td>相对旋转</td>
+            <td><code>float32 angle_rad</code></td>
+          </tr>
+          <tr>
+            <td>逻辑目标</td>
+            <td><code>string target_id</code></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>2. ExecuteMission.action</h2>
+      <p>
+        在 <code>voice_nav_interfaces/action/ExecuteMission.action</code> 中定义
+        Goal、Result、Feedback 三段。
+      </p>
+
+      <h3>Goal</h3>
+      <ul>
+        <li><code>string source_instance_id</code></li>
+        <li><code>uint64 source_seq</code></li>
+        <li><code>string session_id</code></li>
+        <li><code>string turn_id</code></li>
+        <li>同 package 的可变长 <code>MissionStep</code> 数组 <code>steps</code></li>
+      </ul>
+
+      <h3>Result</h3>
+      <p>定义以下 <code>uint16</code> 常量：</p>
+      <pre><code>SUCCEEDED=0
+INVALID_PLAN=10
+BUSY=11
+MODE_MISMATCH=12
+UNKNOWN_TARGET=13
+DEPENDENCY_UNAVAILABLE=20
+EXECUTION_FAILED=21
+TIMEOUT=22
+CANCELED=30
+STOPPED=31
+INTERNAL_ERROR=99</code></pre>
+      <p>再定义：</p>
+      <ul>
+        <li><code>uint16 code</code></li>
+        <li><code>int32 failed_step</code>，其中 <code>-1</code> 表示没有具体失败步骤</li>
+        <li><code>string detail</code>，只用于诊断，调用方不得解析</li>
+      </ul>
+
+      <h3>Feedback</h3>
+      <p>定义 <code>uint8</code> 常量 <code>VALIDATING=1</code>、<code>EXECUTING=2</code>、<code>SAFE_STOPPING=3</code>，再定义：</p>
+      <ul>
+        <li><code>uint8 phase</code></li>
+        <li><code>uint32 step_index</code></li>
+        <li><code>float32 progress</code></li>
+      </ul>
+
+      <h2>3. 接入 rosidl</h2>
+      <p>自行修改 <code>CMakeLists.txt</code>，完成：</p>
+      <ul>
+        <li>查找 <code>rosidl_default_generators</code>。</li>
+        <li>调用 <code>rosidl_generate_interfaces</code> 注册两个文件。</li>
+        <li>导出 <code>rosidl_default_runtime</code>。</li>
+      </ul>
+      <p>自行修改 <code>package.xml</code>，加入：</p>
+      <ul>
+        <li><code>rosidl_default_generators</code> 的 build dependency。</li>
+        <li><code>rosidl_default_runtime</code> 的 exec dependency。</li>
+        <li><code>rosidl_interface_packages</code> group membership。</li>
+      </ul>
+
+      <h2>4. 构建与检查</h2>
+      <pre><code>cd /mnt/c/Users/lcy/code/ros2/voice_nav_robot_ws
+source /opt/ros/jazzy/setup.bash
+
+colcon build --packages-select voice_nav_interfaces \
+  --symlink-install --event-handlers console_direct+
+
+source install/setup.bash
+
+ros2 interface show voice_nav_interfaces/msg/MissionStep
+ros2 interface show voice_nav_interfaces/action/ExecuteMission
+
+rosdep check --from-paths src/voice_nav_interfaces --ignore-src
+
+colcon test --packages-select voice_nav_interfaces
+colcon test-result --verbose</code></pre>
+
+      <div class="checkpoint">
+        <strong>验收：</strong>
+        两个 <code>ros2 interface show</code> 命令成功，
+        <code>rosdep check</code> 报告所有系统依赖均已满足，测试没有失败；
+        生成的 Action 必须包含 Goal、Result 和 Feedback 三部分。
+      </div>
+
+      <h2>提交给教师</h2>
+      <ol>
+        <li>两个 Interface 文件的完整内容。</li>
+        <li><code>CMakeLists.txt</code> 和 <code>package.xml</code> 的完整内容。</li>
+        <li>两个 <code>ros2 interface show</code> 的输出。</li>
+        <li><code>rosdep check</code> 输出。</li>
+        <li><code>colcon test-result --verbose</code> 输出。</li>
+        <li>回答：为什么速度和超时不应该由 LLM 写入 MissionStep？</li>
+      </ol>
+
+      <h2>主要资料</h2>
+      <p>
+        先阅读
+        <a href="https://docs.ros.org/en/jazzy/Concepts/Basic/About-Interfaces.html"
+          >ROS 2 Jazzy：Interfaces</a
+        >
+        中的 Messages 和 Actions。需要复习选型时查看
+        <a href="../reference/ros-interface-selection.html">ROS Interface 选型速查</a>。
+        遇到任何不理解的 rosidl 语法，先停下来问教师。
+      </p>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VoiceNav Robot：TF Frame Contract</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <h1>TF Frame Contract</h1>
+      <p class="subtitle">VoiceNav Robot reference</p>
+
+      <pre><code>map
+└── odom
+    └── base_footprint
+        └── base_link
+            ├── left_wheel_link
+            ├── right_wheel_link
+            ├── caster_link
+            └── laser_link</code></pre>
+
+      <h2>Frame 的职责</h2>
+      <ul>
+        <li><code>map</code>：长期地图坐标；mapping 时由 slam_toolbox、navigation 时由 AMCL 负责。</li>
+        <li><code>odom</code>：局部连续里程计坐标，允许长期漂移。</li>
+        <li><code>base_footprint</code>：机器人在地面的二维投影，适合 2D 导航。</li>
+        <li><code>base_link</code>：机器人实体主体坐标。</li>
+        <li><code>laser_link</code>：LiDAR 的安装坐标，后续 LaserScan 的 frame_id 必须与它一致。</li>
+      </ul>
+
+      <h2>唯一发布者</h2>
+      <ul>
+        <li><code>map → odom</code>：slam_toolbox 或 AMCL，二者不能同时拥有。</li>
+        <li><code>odom → base_footprint</code>：后续由差速控制器/里程计发布。</li>
+        <li>机器人内部各 frame：由 URDF 和 robot_state_publisher 发布。</li>
+      </ul>
+
+      <p>
+        静态模型阶段暂时没有 <code>map</code>、<code>odom</code>；
+        TF 树从 <code>base_footprint</code> 开始。不要为了让树“看起来完整”而伪造未来的动态变换。
+      </p>
+
+      <p>
+        依据：
+        <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/URDF/Using-URDF-with-Robot-State-Publisher.html"
+          >ROS 2 Jazzy：Using URDF with robot_state_publisher</a
+        >。
+      </p>
+    </main>
+  </body>
+</html>

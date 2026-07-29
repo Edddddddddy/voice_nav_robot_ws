@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lesson 0003：手写最小机器人模型与 TF</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <h1>手写最小机器人模型与 TF</h1>
+      <p class="subtitle">Lesson 0003 · 目标时间 45–70 分钟</p>
+
+      <div class="goal">
+        <strong>本课唯一成果：</strong>
+        在 RViz 中显示你亲手写的差速机器人，并验证
+        <code>base_footprint → laser_link</code> 的 TF。
+      </div>
+
+      <h2>本课不做什么</h2>
+      <p>
+        暂不加入 Gazebo、碰撞、惯性、ros2_control、LiDAR 插件和轮子驱动。
+        先把几何结构与 frame 语义做对。
+      </p>
+
+      <h2>1. 固定模型契约</h2>
+      <pre><code>base_footprint
+└── base_link
+    ├── left_wheel_link
+    ├── right_wheel_link
+    ├── caster_link
+    └── laser_link</code></pre>
+
+      <p>模型尺寸统一使用米和弧度：</p>
+      <ul>
+        <li>底盘盒：长 0.40、宽 0.28、高 0.12。</li>
+        <li>轮子：半径 0.075、宽 0.04，左右中心的 y 为 ±0.16。</li>
+        <li><code>base_link</code> 相对地面高度为 0.075。</li>
+        <li>底盘盒中心相对 <code>base_link</code> 的 z 为 0.06。</li>
+        <li>万向轮使用半径 0.02 的球体，x 为 -0.15。</li>
+        <li>LiDAR 相对 <code>base_link</code>：x=0.10、y=0、z=0.16。</li>
+      </ul>
+
+      <h2>2. 手写 Xacro</h2>
+      <p>创建：</p>
+      <pre><code>src/voice_nav_sim/urdf/voice_nav_robot.urdf.xacro</code></pre>
+
+      <p>要求：</p>
+      <ul>
+        <li>根元素使用 <code>robot</code>，声明 xacro XML namespace。</li>
+        <li>尺寸先定义为 <code>xacro:property</code>，几何和 joint origin 引用属性。</li>
+        <li><code>base_footprint → base_link</code> 使用 fixed joint。</li>
+        <li>左右轮使用 continuous joint，joint axis 为 y 轴。</li>
+        <li>URDF 圆柱默认沿 z 轴，轮子 visual 需要旋转到 y 轴。</li>
+        <li>caster 和 laser 使用 fixed joint。</li>
+        <li>每个可见 link 至少有 visual、geometry 和 material。</li>
+        <li>不要复制现有 TurtleBot 模型，也不要加入 Gazebo 标签。</li>
+      </ul>
+
+      <h2>3. 先做离线校验</h2>
+      <pre><code>cd /mnt/c/Users/lcy/code/ros2/voice_nav_robot_ws
+source /opt/ros/jazzy/setup.bash
+
+mkdir -p /tmp/voice_nav_robot
+
+xacro src/voice_nav_sim/urdf/voice_nav_robot.urdf.xacro \
+  &gt; /tmp/voice_nav_robot/model.urdf
+
+check_urdf /tmp/voice_nav_robot/model.urdf</code></pre>
+
+      <p>
+        预期为 6 个 link、5 个 joint，并以 <code>base_footprint</code> 为根。
+        这一步失败时不要继续写 launch。
+      </p>
+
+      <h2>4. 编写显示 launch</h2>
+      <p>创建：</p>
+      <pre><code>src/voice_nav_sim/launch/display.launch.py</code></pre>
+
+      <p>launch 只启动：</p>
+      <ul>
+        <li><code>robot_state_publisher</code>，其 <code>robot_description</code> 来自运行 xacro 的 Command substitution。</li>
+        <li><code>joint_state_publisher</code>，为两个 continuous wheel joint 发布零位置。</li>
+      </ul>
+
+      <p>
+        不要在 Python 中硬编码绝对路径；使用
+        <code>FindPackageShare</code> 和 <code>PathJoinSubstitution</code>。
+        暂时在另一个终端手动运行 <code>rviz2</code>，不要把 RViz 塞进 launch。
+      </p>
+
+      <h2>5. 安装运行资产</h2>
+      <p>修改 <code>voice_nav_sim/CMakeLists.txt</code>，把 <code>urdf</code> 和 <code>launch</code> 安装到 package share。</p>
+      <p>修改 <code>voice_nav_sim/package.xml</code>，声明运行时依赖：</p>
+      <pre><code>xacro
+robot_state_publisher
+joint_state_publisher
+launch
+launch_ros</code></pre>
+
+      <h2>6. 构建与运行</h2>
+      <pre><code>cd /mnt/c/Users/lcy/code/ros2/voice_nav_robot_ws
+source /opt/ros/jazzy/setup.bash
+
+rosdep check --from-paths src/voice_nav_sim --ignore-src
+
+colcon build --packages-select voice_nav_sim \
+  --symlink-install --event-handlers console_direct+
+
+source install/setup.bash
+ros2 launch voice_nav_sim display.launch.py</code></pre>
+
+      <p>新开 WSL 终端：</p>
+      <pre><code>cd /mnt/c/Users/lcy/code/ros2/voice_nav_robot_ws
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+
+rviz2</code></pre>
+
+      <p>
+        在 RViz 中把 Fixed Frame 设为 <code>base_footprint</code>，
+        添加 RobotModel 和 TF display。
+      </p>
+
+      <h2>7. TF 验收</h2>
+      <pre><code>ros2 run tf2_ros tf2_echo base_footprint laser_link</code></pre>
+
+      <div class="checkpoint">
+        <strong>验收：</strong>
+        RViz 模型结构合理、轮子接地；TF 能从
+        <code>base_footprint</code> 连到 <code>laser_link</code>；
+        该变换的期望平移约为 x=0.10、y=0、z=0.235。
+      </div>
+
+      <h2>提交给教师</h2>
+      <ol>
+        <li>Xacro、display launch、CMakeLists 和 package.xml 的完整内容。</li>
+        <li><code>check_urdf</code> 完整输出。</li>
+        <li><code>rosdep check</code> 和构建摘要。</li>
+        <li><code>tf2_echo base_footprint laser_link</code> 的一帧输出。</li>
+        <li>一张 RViz 截图。</li>
+        <li>回答：为什么 2D 导航仍要区分 <code>base_footprint</code> 和 <code>base_link</code>？</li>
+      </ol>
+
+      <h2>主要资料</h2>
+      <p>
+        阅读
+        <a href="https://docs.ros.org/en/jazzy/Tutorials/Intermediate/URDF/Using-URDF-with-Robot-State-Publisher.html"
+          >ROS 2 Jazzy：Using URDF with robot_state_publisher</a
+        >
+        和
+        <a href="https://docs.ros.org/en/jazzy/p/xacro/">xacro 官方文档</a>。
+        项目自己的 frame 约定见
+        <a href="../reference/tf-frame-contract.html">TF Frame Contract</a>。
+        遇到坐标轴、joint origin 或 launch substitution 不清楚时，先停下来问教师。
+      </p>
+    </main>
+  </body>
+</html>

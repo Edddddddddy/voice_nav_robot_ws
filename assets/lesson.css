@@ -1,0 +1,84 @@
+:root {
+  color-scheme: light;
+  --ink: #17202a;
+  --muted: #5f6b76;
+  --paper: #fbfaf7;
+  --panel: #ffffff;
+  --accent: #185b7d;
+  --line: #d9dee3;
+  --code: #eef3f6;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  line-height: 1.65;
+}
+
+main {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 48px 28px 80px;
+}
+
+h1,
+h2 {
+  line-height: 1.25;
+}
+
+h1 {
+  font-size: 2.2rem;
+  margin-bottom: 0.3rem;
+}
+
+h2 {
+  margin-top: 2rem;
+  color: var(--accent);
+}
+
+.subtitle,
+.note {
+  color: var(--muted);
+}
+
+.goal,
+.checkpoint {
+  padding: 18px 20px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--accent);
+  border-radius: 8px;
+}
+
+pre {
+  overflow-x: auto;
+  padding: 16px 18px;
+  background: var(--code);
+  border-radius: 8px;
+  border: 1px solid var(--line);
+}
+
+code {
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+}
+
+a {
+  color: var(--accent);
+}
+
+@media print {
+  body {
+    background: white;
+  }
+
+  main {
+    max-width: none;
+    padding: 0;
+  }
+}
