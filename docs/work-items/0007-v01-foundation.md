@@ -358,12 +358,20 @@ Post-review-fix local gate completed in the same environment on 2026-07-30:
 
 ```text
 Repository contract passed.
-19 repository/SDF tests: OK
+20 repository/SDF/CI-contract tests: OK
 All system dependencies have been satisfied
 robot name is: voice_nav_robot
 SDF contract passed.
-Build summary: 6 packages finished [14.1s]
-Test summary: 6 packages finished [21.1s]
+Build summary: 6 packages finished [13.7s]
+Test summary: 6 packages finished [21.0s]
 Summary: 27 tests, 0 errors, 0 failures, 1 skipped
 VoiceNav Robot verification passed.
 ```
+
+The first hosted run,
+[30557679323](https://github.com/Edddddddddy/voice_nav_robot_ws/actions/runs/30557679323),
+failed before workspace verification because `rosdep install` was given apt's
+unsupported `--yes` spelling. A red regression test reproduced the workflow
+contract error; the invocation now uses rosdep's supported `-y`. The 20-test
+repository suite, pinned actionlint, and the full WSL gate above passed before
+the fix was pushed for a second hosted run.
