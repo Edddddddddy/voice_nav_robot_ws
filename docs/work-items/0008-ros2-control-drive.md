@@ -1,6 +1,6 @@
 # VN-0008: Migrate the simulation drive path to ros2_control
 
-**Status:** In Review
+**Status:** Done
 
 **GitHub Issue:**
 [#5](https://github.com/Edddddddddy/voice_nav_robot_ws/issues/5)
@@ -97,9 +97,9 @@ documentation wherever that stale parameter name appears.
   gates pass in WSL2 with ROS 2 Jazzy and Gazebo Harmonic.
 - [x] Lesson 0007 contains the tests-first workflow, failure injection,
   troubleshooting path, submission evidence, and reflection questions.
-- [ ] The learner record contains real commands, results, commit identities,
+- [x] The learner record contains real commands, results, commit identities,
   PR/CI links, and review findings before its status changes from Pending.
-- [ ] A reviewed PR passes the required hosted CI and is rebase-merged to
+- [x] A reviewed PR passes the required hosted CI and is rebase-merged to
   `main`; only then is annotated tag `course/0007-solution` created.
 
 ## Risks and rollback
@@ -223,10 +223,9 @@ controller_manager: 4.45.2
 These local apt versions are environment evidence, not a substitute for
 declaring package dependencies and verifying a clean CI resolution.
 
-The green implementation evidence follows. The implementation commit is
-`ed621353c6ab4c3544a29b5763106a63539833d9`. PR
-[#6](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/6) is open;
-hosted-CI, public merge, and solution-tag evidence remain pending.
+The green implementation evidence follows. The local implementation commit is
+`ed621353c6ab4c3544a29b5763106a63539833d9`; its public rebase identity is
+`66d771f302fdcc9ae160e706bcaa54797582734f`.
 
 ### Local implementation and integration evidence
 
@@ -274,5 +273,53 @@ controller-computed odometry as physical ground truth. All launch-owned
 processes exited cleanly, and a post-run process audit found no simulator or
 ROS graph residue.
 
-Hosted CI, public merge, and solution tag are recorded in the next evidence
-updates.
+### Remote review and completion evidence
+
+- [Issue #5](https://github.com/Edddddddddy/voice_nav_robot_ws/issues/5)
+  tracked the Work Item and closed when the implementation merged.
+- [PR #6](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/6) contains
+  only the VN-0008 implementation, course, architecture, and test scope.
+- The required
+  [`required / ubuntu-24.04 / ros-jazzy`](https://github.com/Edddddddddy/voice_nav_robot_ws/actions/runs/30565921460/job/90950343524)
+  check passed in 5 minutes 6 seconds on feature head
+  `bfac7a98fcfe322bec24ecf25a7536eeb81c479a`.
+- The
+  [independent review record](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/6#issuecomment-5134178763)
+  reports no remaining P0/P1 finding and explicitly bounds deferred Lesson
+  0008–0010 work.
+- PR #6 was rebase-merged at `2026-07-30T17:32:07Z`; the public
+  implementation tip is `68bb49051680e1cd5cd138982b70bd4c89c5c920`.
+- The remote feature branch was automatically deleted after merge.
+
+GitHub's rebase merge produced these exact public identities:
+
+| Local feature identity | Public rebase identity | Subject |
+| --- | --- | --- |
+| `a7feee41ee9330676a09ebc50c4461a9af76a90e` | `b4ebb81a96933f7495e82df96096563673283cd7` | `test(sim): define Lesson 0007 control contract` |
+| `ed621353c6ab4c3544a29b5763106a63539833d9` | `66d771f302fdcc9ae160e706bcaa54797582734f` | `feat(sim): migrate drive path to ros2 control` |
+| `742c82956a67a84a20d22b982bee14759712bdfc` | `4dfae5f97bae84fb462d230d5cd99aeffab6e6bc` | `docs(course): record Lesson 0007 implementation evidence` |
+| `bfac7a98fcfe322bec24ecf25a7536eeb81c479a` | `68bb49051680e1cd5cd138982b70bd4c89c5c920` | `docs(work-item): record Lesson 0007 review identity` |
+
+Only after that reviewed public merge, annotated tag
+`course/0007-solution` was created. Tag object
+`a4e75e8205f1e59c516e28d5ef8f7e02c30aaaad` peels to the public reviewed
+solution `68bb49051680e1cd5cd138982b70bd4c89c5c920`; neither the start nor solution
+tag was rewritten.
+
+The closure diff, including the completed course status and exact remote
+identity map, then passed the full local gate:
+
+```text
+Command:
+  bash scripts/verify.sh
+Repository contracts:
+  38 tests, all passed
+Build result:
+  6 packages finished
+Package result:
+  32 tests, 0 errors, 0 failures, 1 skipped
+Final marker:
+  VoiceNav Robot verification passed.
+Post-run process/source audit:
+  no Gazebo/ROS process residue; no source __pycache__ or *.pyc
+```
