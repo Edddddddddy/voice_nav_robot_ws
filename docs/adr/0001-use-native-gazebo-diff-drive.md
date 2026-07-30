@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: superseded by ADR-0002
 ---
 
 # Use Gazebo native DiffDrive behind a ROS adapter
@@ -10,6 +10,11 @@ base and will translate its model-scoped Gazebo Transport topics through a
 the Nav2 Gazebo odometry path while preventing Gazebo names from leaking into
 Mission, Agent, or audio Interfaces.
 
+This decision describes the completed early learning baseline. It was
+superseded for the product target by
+[ADR-0002](0002-migrate-to-gz-ros2-control.md); historical lessons and evidence
+remain valid.
+
 ## Considered options
 
 - Gazebo native DiffDrive plus `ros_gz_bridge`;
@@ -17,9 +22,9 @@ Mission, Agent, or audio Interfaces.
 
 ## Consequences
 
-Native DiffDrive has velocity and acceleration limits but no command timeout,
-so every manual test must send zero velocity and the ROS motion output must gain
-a configured watchdog before Nav2 or voice control is connected. Migration to
-`gz_ros2_control` is reconsidered if the project adds real hardware, multiple
-controllers, controller lifecycle requirements, or requires the base
-controller itself to own the timeout.
+The original consequence was that Native DiffDrive has velocity and
+acceleration limits but no command timeout, so every manual test had to send
+zero velocity. The project later chose the standard-controller path even
+without adding hardware because independent gate supervision, consumer timeout,
+Nav2 integration, odometry/TF ownership, and a minimal bridge became product
+requirements; ADR-0002 records that superseding trade-off.

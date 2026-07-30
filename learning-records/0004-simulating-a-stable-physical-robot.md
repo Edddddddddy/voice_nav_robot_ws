@@ -1,3 +1,0 @@
-# Can create and diagnose a stable physical Gazebo robot
-
-The learner added collision geometry, positive masses, shape-correct inertia tensors, joint limits, and dynamics to the hand-written Xacro model. They kept `base_footprint` as a frame-only empty link, used `gz sdf -p` to catch a physical-model error that `check_urdf` did not catch, and verified that the spawned robot settled without drift, tipping, penetration, or invalid pose values. Future lessons can assume fluency with the different roles of visual, collision, and inertial elements, basic inertia validity, support geometry, URDF-to-SDF conversion, and stable Gazebo spawning.

@@ -9,13 +9,14 @@ those properties.
 
 1. Create or update one file in `docs/work-items/` with the goal, non-goals,
    acceptance criteria, risk, test plan, and documentation impact.
-2. Create a short-lived branch from `main`.
-3. Implement the smallest vertical slice that satisfies the work item.
-4. Add or update tests at the nearest stable Interface.
+2. Open the matching GitHub Issue and link the repository Work Item.
+3. Create a short-lived branch from `main`.
+4. Implement the smallest vertical slice that satisfies the work item, with
+   the first failing test recorded before production behavior is added.
 5. Update user documentation, the changelog, and an ADR only when applicable.
-6. Run the local quality gate.
-7. Review the diff and verification evidence.
-8. Merge only after every Definition of Done item is satisfied.
+6. Run the local quality gate and record exact evidence in the Work Item.
+7. Open a PR, review the complete diff, and let hosted CI pass.
+8. Rebase-merge only after every Definition of Done item is satisfied.
 
 Do not develop directly on `main`. A long-lived `develop` branch is not used;
 small branches reduce integration delay and keep the main line authoritative.
@@ -67,6 +68,12 @@ bash scripts/verify.sh
 Generated `build/`, `install/`, `log/`, model weights, recordings, bags,
 credentials, and runtime evidence must never be committed.
 
+Run the repository-only fast gate before ROS work:
+
+```bash
+python3 -m unittest discover -s tests -p "test_*.py" -v
+```
+
 Review what will be committed with:
 
 ```bash
@@ -90,7 +97,8 @@ A change is done only when:
   ordering constraints are documented when they form part of an Interface;
 - motion tests always request zero velocity during normal and failure cleanup;
 - user-visible behavior is recorded under `Unreleased` in `CHANGELOG.md`;
-- architecture documentation describes the current implementation accurately;
+- architecture documentation distinguishes current implementation from the
+  accepted target architecture;
 - a qualifying architectural trade-off has an ADR;
 - the diff contains no generated data, secrets, private audio, or model weights;
 - verification evidence is recorded in the work item or linked learning record;
@@ -116,5 +124,12 @@ belongs in code, tests, or the relevant Interface documentation.
 
 ## Releases
 
-Individual lessons are changes, not releases. Releases happen at coherent
-capability milestones and follow [docs/release-policy.md](docs/release-policy.md).
+Individual lessons are changes, not releases. Lesson start/solution tags are
+annotated teaching checkpoints, not supported product versions. Releases
+happen at coherent capability milestones and follow
+[docs/process/release-policy.md](docs/process/release-policy.md).
+
+The repository currently has one maintainer. CI and resolved conversations are
+required; approval by the PR author never substitutes for independent review.
+An approval requirement is enabled only after a real second reviewer exists,
+so branch protection cannot deadlock the repository.

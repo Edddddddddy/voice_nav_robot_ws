@@ -60,4 +60,21 @@ with explicit development, quality, testing, architecture, and release rules.
 
 ## Verification evidence
 
-Pending learner execution of Lesson 0006.
+Completed and closed on 2026-07-30.
+
+- Closure commit:
+  `bd93dffcd8936182821daad89761a752a0dd0447`
+  (`docs(work-item): close engineering baseline`).
+- The closure review recorded the full `bash scripts/verify.sh` criterion as
+  passed. Generated colcon logs were intentionally not committed.
+- Read-only re-audit on 2026-07-30:
+  - `git ls-files build install log` returned zero tracked files;
+  - local `build/`, `install/`, and `log/` directories all still existed;
+  - `c402fd0` established clean workspace boundaries;
+  - `46b6d2f` recorded the physical simulation implementation;
+  - `a9747d4` recorded course and learning evidence;
+  - `14b82e1` established governance;
+  - `dbaefad` completed package maintainer and description metadata;
+  - `bd93dff` closed VN-0006.
+- The later addition of `origin` does not change the historical non-goal:
+  hosted CI and branch protection were not part of VN-0006.

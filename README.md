@@ -1,103 +1,115 @@
 # VoiceNav Robot
 
-VoiceNav Robot is a simulation-only ROS 2 learning product that is being
-implemented from first principles. Its end-to-end goal is:
+VoiceNav Robot 是一套从零手写的 ROS 2 纯仿真学习项目：让普通话语音经过
+本地 KWS、AEC、ASR、规则与 LLM，转换为受约束的强类型 Mission，再由安全
+运动链驱动 Gazebo 差速机器人完成建图与导航，最后使用本地 TTS 回复。
+
+运行基线固定为 WSL2 Ubuntu 24.04、ROS 2 Jazzy 和 Gazebo Harmonic。不包含
+真机、机械臂、相机、云服务或经过功能安全认证的急停系统。
+
+## 当前状态
+
+Lesson 0001–0006 已完成并迁入版本化课程目录，包括：
+
+- 六个职责明确的 ROS package；
+- 第一版 `MissionStep` 和 `ExecuteMission` 教学接口；
+- 手写差速机器人 Xacro、TF、碰撞、惯量和稳定落地；
+- Gazebo 原生 DiffDrive 教学 checkpoint；
+- Work Item、质量门禁、变更记录和课程记录。
+
+当前正在建设 `v0.1.0` 工程与课程基线。原生 DiffDrive 仅保留为历史教学
+checkpoint；Lesson 0007 起按目标架构迁移到 `gz_ros2_control`、
+`diff_drive_controller` 和独立 MotionGate。
+
+实现状态与目标设计必须区分阅读：
+
+- [课程目录](course/README.md) 说明已经完成的学习 checkpoint；
+- [v1.0 产品规范](docs/product/v1.0-product-spec.md) 定义最终验收；
+- [架构总览](docs/architecture/overview.md) 区分 current 与 target；
+- [发布策略](docs/process/release-policy.md) 给出逐版本交付边界。
+
+## 目标链路
 
 ```text
-Mandarin voice
-  → wake word / AEC / ASR
-  → rules + local LLM
-  → strongly typed Mission
-  → motion gate and workflow
-  → SLAM or Nav2
-  → Gazebo differential-drive robot
-  → local TTS
+单麦克风 + 外放
+  → 本地 AEC / 唤醒词“小智” / VAD / ASR
+  → STOP 快路径或规则优先的 Agent + 本地 LLM fallback
+  → 强类型 Mission、整计划验证、单执行槽和 admission fencing
+  → Nav2 / 相对运动候选速度
+  → velocity smoother → collision monitor → MotionGate
+  → diff_drive_controller → Gazebo
+  → slam_toolbox 建图，或 AMCL + Nav2 导航
+  → 本地 TTS
 ```
 
-The project targets WSL2 Ubuntu 24.04, ROS 2 Jazzy, and Gazebo Harmonic.
-Hardware, cloud speech services, cameras, IMU/EKF, and robot arms are out of
-scope.
+Mapping 与 Navigation 是两个独立启动模式，分别由 `slam_toolbox` 和 AMCL
+拥有 `map → odom`。它们不能同时运行。MotionGate 是唯一最终速度发布者；
+LLM、Agent、Nav2 和 Gazebo bridge 都不能绕过它。
 
-## Current status
+## 仓库结构
 
-Implemented:
-
-- six ROS 2 package skeletons;
-- strongly typed `MissionStep` and `ExecuteMission` interfaces;
-- a hand-written differential-drive Xacro model and TF tree;
-- physical collision and inertia suitable for Gazebo;
-- Gazebo native DiffDrive motion and odometry.
-
-Planned next:
-
-- ROS–Gazebo bridge for command, odometry, TF, joint state, and simulation time;
-- 2D LiDAR;
-- two-stage SLAM and map-based Nav2 navigation;
-- Mission runtime, motion gate, cancellation, and safety stop;
-- local Mandarin wake-word, ASR, LLM, AEC, and TTS.
-
-## Repository layout
-
-| Path | Responsibility |
+| 路径 | 职责 |
 | --- | --- |
-| `src/voice_nav_interfaces` | Stable ROS messages, services, and actions |
-| `src/voice_nav_sim` | Robot description and Gazebo-only adapters |
-| `src/voice_nav_mission` | Trusted Mission validation and execution |
-| `src/voice_nav_agent` | Rules, local LLM adapter, and dialogue policy |
-| `src/voice_nav_audio` | Audio I/O, AEC, KWS, VAD, ASR, and TTS |
-| `src/voice_nav_bringup` | Composition, configuration, and operating modes |
-| `docs/` | Architecture, decisions, work items, quality, and release policy |
-| `lessons/` | Incremental implementation lessons |
-| `reference/` | Compact engineering reference material |
-| `learning-records/` | Verified learning outcomes |
+| `src/voice_nav_interfaces` | 稳定的 ROS msg、srv、action |
+| `src/voice_nav_sim` | Xacro、Gazebo 与仿真适配 |
+| `src/voice_nav_mission` | Mission Core、运行时与 MotionGate |
+| `src/voice_nav_agent` | 中文规则、本地 LLM 适配与对话策略 |
+| `src/voice_nav_audio` | Audio I/O、AEC、KWS、VAD、ASR、TTS |
+| `src/voice_nav_bringup` | 模式化 launch、配置与组合根 |
+| `docs/product` | 产品范围、成功标准与术语 |
+| `docs/architecture` | 系统、Interface、运动安全、TF 与模式 |
+| `docs/process` | 质量、测试、变更和发布流程 |
+| `docs/adr` | 有后果的架构决策及 superseded 关系 |
+| `docs/work-items` | 版本化变更契约和验收证据 |
+| `course/lessons` | 可复现课程 |
+| `course/records` | 学习者提交与复盘 |
+| `course/reference` | ROS、Gazebo、SLAM、Nav2 与语音参考 |
 
-See [Architecture](docs/architecture.md) for current and target dependency
-directions.
+六个 ROS package 是部署和依赖边界，不为目录整齐继续拆分浅包。运行时的
+深 Module 可以在同一 package 内拥有多个进程或私有 target。
 
-## Build and verify
+## 构建与验证
 
-Run commands inside WSL:
+在 WSL 中运行完整质量门禁：
 
 ```bash
 cd /mnt/c/Users/lcy/code/ros2/voice_nav_robot_ws
 bash scripts/verify.sh
 ```
 
-For a shorter loop that builds dependencies and tests selected packages:
+只验证某个 package 及其依赖：
 
 ```bash
 bash scripts/verify.sh voice_nav_sim
 ```
 
-The script checks declared dependencies, expands and validates the robot model,
-builds the workspace, runs tests, and reports all test results.
+门禁会检查仓库与课程契约、Markdown 本地链接、ROS package 版本一致性、
+声明依赖、Xacro/URDF/SDF 契约、构建以及全部测试。`build/`、`install/`、
+`log/`、模型权重、地图、录音和运行证据不得提交。
 
-## Development workflow
+## 开发与学习
 
-All changes use a short-lived branch and a documented work item:
+工程变更遵循：
 
 ```text
-work item → branch → implementation + tests + docs
-          → local quality gate → review → merge → optional release
+Work Item → GitHub Issue → branch
+→ tests-first implementation → docs / ADR / changelog
+→ local verify → PR → CI → rebase merge → tag / release
 ```
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing the repository. The
-project uses Conventional Commits, a Definition of Done, SemVer releases, and
-ADRs only for consequential architectural trade-offs.
+`main` 始终保存参考 solution。Lesson 0007 起，每课使用
+`course/NNNN-start` 与 `course/NNNN-solution` annotated tag；学习者从
+start tag 创建独立 `learn/NNNN` 分支或 worktree，完成后与 solution tag
+比较，不复制第二份源码。
 
-## Documentation index
+开始修改前阅读 [贡献流程](CONTRIBUTING.md)、[变更生命周期](docs/process/change-lifecycle.md)
+和相应 [Work Item](docs/work-items/)。
 
-- [Mission](MISSION.md)
-- [Domain language](CONTEXT.md)
-- [Architecture](docs/architecture.md)
-- [Quality policy](docs/quality-policy.md)
-- [Testing strategy](docs/testing-strategy.md)
-- [Release policy](docs/release-policy.md)
-- [Architecture decisions](docs/adr/)
-- [Work items](docs/work-items/)
-- [Changelog](CHANGELOG.md)
-- [Third-party notices](THIRD_PARTY_NOTICES.md)
+## 安全、许可证与报告
 
-## License
+项目中的“停止”是仿真项目的高优先级 operational stop，不代表机器人已经
+物理停稳，也不宣称满足功能安全标准。安全边界与漏洞报告方式见
+[SECURITY.md](SECURITY.md)。
 
-Apache License 2.0. See [LICENSE](LICENSE).
+项目使用 Apache License 2.0。第三方来源和限制记录在
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

@@ -1,0 +1,170 @@
+# Testing strategy
+
+Tests follow the deepest stable Interface. A behavior test should retain its value when the Implementation behind that Interface is refactored.
+
+## Test layers
+
+| Layer | Purpose | Examples |
+| --- | --- | --- |
+| Static | Reject malformed source and metadata | XML, YAML, Python, CMake, license |
+| Unit | Exercise deterministic behavior and state | Mission Validator/FSM, Agent rules, audio buffers |
+| Contract | Protect externally visible semantics | ROS IDL, topic type, QoS, TF owner, units, limits |
+| Integration | Verify connected ROS Modules | launch, Action cancel, bridge directions, lifecycle |
+| Headless simulation | Verify physics and bounded flows | drive, stop, odom, scan, map, Named Place |
+| Model fixture | Verify locked local models and offline audio | KWS, ASR, TTS, LLM, AEC fixtures |
+| Manual release gate | Validate the supported WSL audio path | real single microphone, speaker, AEC, barge-in |
+
+## Developer and CI loops
+
+During implementation:
+
+```bash
+bash scripts/verify.sh <changed-package>
+```
+
+Before review or merge:
+
+```bash
+bash scripts/verify.sh
+```
+
+The full gate starts from declared dependencies, validates repository and robot-model contracts, builds all packages, runs all tests, and reports a zero-error `colcon test-result`.
+
+PR CI uses in-memory fakes and headless Gazebo. Nightly validation uses the locked model set. Real-audio metrics are manual hardware Release Gates for `v0.7` and `v1.0`; they are not weakened into CI simulations.
+
+## Adapter and time strategy
+
+Internal seams have production and deterministic in-memory Adapters:
+
+| Seam | Production Adapter | Deterministic test Adapter |
+| --- | --- | --- |
+| Navigation | Nav2 `NavigateToPose` | scripted goal/result/cancel fake |
+| Relative motion | odom feedback and candidate Twist | scripted motion fake |
+| Motion authority | independent MotionGate | event recorder with lease expiry |
+| Map saving | slam_toolbox/map saver | in-memory map registry |
+| Clock | steady monotonic clock | manual clock |
+| ASR/TTS/LLM | locked local runtimes | scripted text/audio/result fakes |
+
+Mission behavior tests cross the Mission Module Interface and replace downstream Adapters. They do not assert private FSM states. Adapter contract tests prove that production Adapters map upstream ROS behavior to the same internal semantics.
+
+- Physics, TF, SLAM, AMCL, and Nav2 use simulation time where appropriate.
+- Mission timeouts, cancel grace, command leases, audio liveness, and cleanup deadlines use a steady monotonic clock.
+- Unit tests advance a manual clock instead of sleeping.
+- Fakes inject timeout, abort, partial map, delayed cancel, late success, and dependency loss.
+- Random seeds, worlds, initial poses, model versions, and resource limits are fixed in acceptance evidence.
+
+## Coverage gates
+
+- Mission Core and Agent: at least 90% line coverage and at least 80% branch coverage.
+- Audio code that does not require real hardware: at least 80% line coverage.
+
+Coverage is a release gate for the relevant milestone. It supplements behavior assertions and does not replace them.
+
+## Mission completion criteria
+
+Mission unit and contract tests cover:
+
+- invalid combinations of discriminant and payload fields;
+- NaN and Inf rejection;
+- Mapping/Navigation Mode policy;
+- atomic whole-plan validation for a three-step Mission before any motion side effect;
+- single execution-slot `BUSY` behavior;
+- source ordering, `runtime_instance_id`, and `admission_epoch`;
+- Runtime restart invalidating an old request;
+- Cancel, STOP, natural success, and timeout races through one terminal linearization point;
+- late Nav2, relative-motion, map, and Agent callbacks;
+- exactly one Result and non-decreasing best-estimate feedback;
+- steady-clock timeout behavior while ROS time is paused or changed.
+
+The test suite also proves that a rejected plan starts no downstream Adapter and that late results cannot reopen the MotionGate or advance the next step.
+
+## MotionGate and stopping completion criteria
+
+Every automated motion test uses configured limits, a steady-clock deadline, zero output in success and cleanup paths, odometry-based stationarity checks, and bounded process cleanup. `Ctrl+C`, publisher exit, Action Result, or a single zero publication is not proof of stopping.
+
+The quantitative acceptance criteria are:
+
+- From a `StopMission` request to the final zero-velocity output:
+  - P95 ≤ 100 ms;
+  - P99 ≤ 200 ms;
+  - maximum ≤ 300 ms.
+- From maximum configured speed, STOP causes odometry to enter the stationary tolerance within 1.2 seconds and remain there for 200 ms.
+- Killing MissionRuntime causes the independent MotionGate lease to expire and automatically select zero velocity.
+- Killing MotionGate causes `diff_drive_controller.cmd_vel_timeout` to stop the command within 0.35 seconds of simulation time.
+- Pausing and resuming Gazebo never restores an old non-zero command.
+
+These command-inhibition thresholds do not claim that the system is a functionally certified emergency stop.
+
+## Mapping completion criteria
+
+- A TF ownership check proves that each required transform has one semantic owner.
+- Saving produces a complete atomic map directory containing occupancy YAML, image, and posegraph.
+- The saved map package can be loaded again.
+- A partial failure exposes no half-written map package.
+- Map ID handling rejects path traversal.
+
+## Navigation completion criteria
+
+- All three predefined Named Places succeed without collision.
+- Each final pose has position error ≤ 0.25 m and yaw error ≤ 0.25 rad.
+- Successful, failed, canceled, and timed-out navigation paths return to zero velocity.
+- A launch that tries to start SLAM and AMCL together fails instead of creating two `map → odom` owners.
+
+The mode checks also prove:
+
+- Mapping uses slam_toolbox for `map → odom`;
+- Navigation uses AMCL for `map → odom`;
+- both modes use `diff_drive_controller` for `odom → base_footprint`;
+- robot-internal frames belong to `robot_state_publisher`;
+- `ros_gz_bridge` bridges only `/clock` and `/scan`.
+
+## Agent completion criteria
+
+The fixed Mandarin corpus covers:
+
+- deterministic rules;
+- clarification;
+- local LLM fallback;
+- schema-valid but semantically invalid output;
+- LLM timeout;
+- a late LLM response after a newer turn or STOP.
+
+For every case, arbitrary LLM output is unable to publish velocity, provide a path, or override trusted speed, acceleration, tolerance, timeout, map-path, or admission policy.
+
+## Offline voice and audio completion criteria
+
+Deterministic offline fixtures cover:
+
+- far-end only audio;
+- near-end only audio;
+- double-talk;
+- acoustic delay from 40 ms through 250 ms;
+- clock drift of ±100 ppm;
+- PortAudio xrun;
+- ring-buffer overflow;
+- late TTS PCM;
+- fixed STOP preemption.
+
+The fixtures also verify the 48 kHz mono full-duplex callback boundary, 10 ms/480-sample DSP framing, render-reference ordering, 16 kHz KWS/ASR input, and stale playback/turn result isolation. The real-time callback performs no allocation, blocking, logging, ROS calls, or model inference.
+
+## Real single-microphone and speaker completion criteria
+
+Acceptance uses the supported motherboard analog microphone input and speaker output, with Windows audio enhancements and spatial audio disabled.
+
+- Far-end-only ERLE median ≥ 6 dB, excluding the first 2 seconds of convergence.
+- Wake-word recall:
+  - quiet environment ≥ 95%;
+  - during playback ≥ 90%.
+- Double-talk command semantic success rate ≥ 85%.
+- A two-hour TTS-only run produces zero erroneous Missions.
+- Fixed STOP recall ≥ 95%.
+- From the end of the STOP phrase to MotionGate zero velocity, P95 ≤ 500 ms.
+- A 30-minute soak has no unhandled overflow, no uncontrolled playback, and no obvious memory growth.
+
+## Evidence and current gaps
+
+Automated evidence is a command, exit status, concise test-result summary, and the relevant coverage or latency report. Manual evidence may add a screenshot, pose sample, TF graph, sanitized audio clip, or model manifest, but cannot replace an automatable assertion.
+
+Evidence belongs in the Work Item or course record. Generated logs and private artifacts do not enter Git.
+
+At the v0.1 foundation audit, the unified gate covered repository metadata, model expansion, URDF/SDF semantics, build, and package tests. It did not yet contain `gz_ros2_control`, LiDAR, MotionGate, Mission Runtime, SLAM, Nav2, Agent, or voice behavior tests. Each gap is closed by the release and lessons assigned in the approved roadmap.

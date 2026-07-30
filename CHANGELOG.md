@@ -12,11 +12,37 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Hand-written differential-drive Xacro model and internal TF tree.
 - Gazebo collision, inertia, stable spawning, native DiffDrive, velocity
   limits, and odometry.
-- Incremental lessons, engineering references, and learning records.
-- Repository governance, architecture, quality, testing, and release policies.
+- Versioned Markdown course catalog, Lessons 0001–0006, engineering references,
+  and evidence-backed learning records.
+- Repository contract tests for course ordering, path confinement, local links,
+  documentation layout, and synchronized ROS package versions.
+- GitHub Issue and PR templates, pinned Ubuntu 24.04 / ROS 2 Jazzy CI, and
+  monthly GitHub Actions dependency updates.
+- Product, architecture, Mission, motion, TF/mode, quality, testing, release,
+  security, ADR, and Work Item documentation for the accepted v1.0 plan.
+
+### Changed
+
+- Reorganized documentation into `docs/product`, `docs/architecture`,
+  `docs/process`, `docs/adr`, `docs/work-items`, and `course`.
+- Synchronized all ROS package metadata with the repository `0.1.0` version.
+- Defined native Gazebo DiffDrive as a historical teaching checkpoint; the
+  product path now migrates to `gz_ros2_control`, `diff_drive_controller`, an
+  independent MotionGate, and consumer-side command timeout.
+- Extended the canonical verification command to run repository contracts and
+  reject tracked colcon outputs before building.
+
+### Fixed
+
+- Corrected Lesson 0003 and TF reference geometry to match the implemented
+  cylinder robot, wheel links, dimensions, and measured LiDAR transform.
+- Closed the Lesson 0006 evidence gap using the learner's recorded commits and
+  verification output.
 
 ### Security
 
-- Ignore rules prevent newly created generated data, local credentials,
-  recordings, bags, and model weights from being added. Removal of the
-  already-tracked colcon outputs is tracked by work item VN-0006.
+- Ignore rules exclude generated data, local dependencies, credentials,
+  recordings, bags, model weights, and runtime evidence.
+- The quality gate rejects tracked `build/`, `install/`, and `log/` paths.
+- Operational stop terminology no longer implies a certified emergency-stop
+  or physical-stop guarantee.
