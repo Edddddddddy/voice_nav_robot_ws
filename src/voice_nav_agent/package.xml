@@ -3,8 +3,8 @@
 <package format="3">
   <name>voice_nav_agent</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
-  <maintainer email="ubuntu@todo.todo">ubuntu</maintainer>
+  <description>Local command interpretation and dialogue orchestration for VoiceNav Robot</description>
+  <maintainer email="983166955@qq.com">Edddddddddy</maintainer>
   <license>Apache-2.0</license>
 
   <test_depend>ament_copyright</test_depend>

@@ -13,9 +13,9 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='ubuntu',
-    maintainer_email='ubuntu@todo.todo',
-    description='TODO: Package description',
+    maintainer='Edddddddddy',
+    maintainer_email='983166955@qq.com',
+    description='Local command interpretation and dialogue orchestration for VoiceNav Robot',
     license='Apache-2.0',
     extras_require={
         'test': [
