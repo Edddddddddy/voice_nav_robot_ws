@@ -2,6 +2,13 @@
 
 VoiceNav Robot reference
 
+## 当前 checkpoint 与目标状态
+
+Lesson 0001–0006 的当前源码只有临时的 `MissionStep.msg` 和
+`ExecuteMission.action`，尚未实现 `/mission/state`、`StopMission.srv`、
+`VoiceTurn.msg` 或 `Speak.action`。下表用这些名字说明最终接口选型；它们
+是 v1.0 目标契约，不是当前运行端点。
+
 | Interface | 交互语义 | 适合 | 本项目示例 |
 | --- | --- | --- | --- |
 | Topic | 异步、单向、连续数据流 | 状态和传感器流 | `/scan`、`/odom`、`/mission/state` |

@@ -67,7 +67,9 @@ Mission、Agent 和 Voice 不知道 Gazebo topic，也不能直接控制轮关�
 
 - 所有速度必须经过可信 YAML 的配置上限，并拒绝非有限数值和非法轴。
 - 运动测试在正常路径和异常清理路径都必须请求零速度。
-- MotionGate 默认关闭，以 steady clock 管理短 lease；lease 失效后持续发布零。
+- MotionGate 默认关闭，以 steady clock 管理只由 MissionRuntime 续期的短
+  authority lease；候选速度只受独立新鲜度检查，不能续 authority。
+  任一 deadline 失效后持续发布零。
 - `diff_drive_controller.cmd_vel_timeout` 覆盖 MotionGate 进程崩溃后最后一条命令被保持的风险。
 - 上层任务超时不能代替底层速度 lease。
 - Stop 确认只表示 Gate 已禁止运动并发布零速度，不表示机器人已经物理停稳。

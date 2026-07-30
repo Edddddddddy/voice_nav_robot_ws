@@ -4,6 +4,11 @@ Lesson 0003 · 目标时间 45–70 分钟
 
 **本课唯一成果：** 在 RViz 中显示你亲手写的差速机器人，并验证 `base_footprint → laser_link` 的 TF。
 
+> 历史保真说明：正文迁移原 HTML 作业契约，不按后来的实现反向改写。
+> 学习者最终提交与原始几何草案的差异单独记录在
+> [Lesson 0003 验收实现勘误](../reference/lesson-0003-model-errata.md)；
+> 当前 `main` 对应勘误中的已验收实现。
+
 ## 本课不做什么
 
 暂不加入 Gazebo、碰撞、惯性、ros2_control、LiDAR 插件和轮子驱动。先把几何结构与 frame 语义做对。
@@ -13,19 +18,19 @@ Lesson 0003 · 目标时间 45–70 分钟
 ```
 base_footprint
 └── base_link
-    ├── left_wheel
-    ├── right_wheel
+    ├── left_wheel_link
+    ├── right_wheel_link
     ├── caster_link
     └── laser_link
 ```
 
 模型尺寸统一使用米和弧度：
 
-- 底盘为 z 轴圆柱：半径 0.20、高 0.18。
-- 轮子：半径 0.035、宽 0.025，左右中心的 y 为 ±0.20。
-- `base_link` 相对地面高度为 0.035。
-- 底盘圆柱中心相对 `base_link` 的 z 为 0.09。
-- 万向支撑轮使用半径 0.045 的球体，x 为 -0.13。
+- 底盘盒：长 0.40、宽 0.28、高 0.12。
+- 轮子：半径 0.075、宽 0.04，左右中心的 y 为 ±0.16。
+- `base_link` 相对地面高度为 0.075。
+- 底盘盒中心相对 `base_link` 的 z 为 0.06。
+- 万向轮使用半径 0.02 的球体，x 为 -0.15。
 - LiDAR 相对 `base_link`：x=0.10、y=0、z=0.16。
 
 ## 2. 手写 Xacro
@@ -131,7 +136,7 @@ rviz2
 ros2 run tf2_ros tf2_echo base_footprint laser_link
 ```
 
-**验收：** RViz 模型结构合理、轮子接地；TF 能从 `base_footprint` 连到 `laser_link`；该变换能由模型尺寸正确推导。当前模型的预期平移为 `[0.100, 0.000, 0.195]`，全部 package 测试无失败。
+**验收：** RViz 模型结构合理、轮子接地；TF 能从 `base_footprint` 连到 `laser_link`；该变换能由模型尺寸正确推导；全部 package 测试无失败。
 
 ## 提交给教师
 

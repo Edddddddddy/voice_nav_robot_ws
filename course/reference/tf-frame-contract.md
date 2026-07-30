@@ -27,7 +27,15 @@ map
 base_footprint → laser_link = [0.100, 0.000, 0.195]
 ```
 
-## 唯一发布者
+## 当前课程 checkpoint
+
+- Lesson 0003 只有 `robot_state_publisher` 发布的机器人内部静态/关节
+  frame；当时不存在 `map` 或 `odom`。
+- Lesson 0005 的原生 Gazebo DiffDrive 在 Gazebo Transport 中生成
+  odometry/TF 数据，但仓库尚未建立产品标准 ROS TF 链，也不能把它写成
+  `diff_drive_controller` 已经在运行。
+
+## v1.0 目标唯一发布者
 
 | Transform | Mapping | Navigation |
 | --- | --- | --- |
@@ -35,6 +43,9 @@ base_footprint → laser_link = [0.100, 0.000, 0.195]
 | `odom → base_footprint` | `diff_drive_controller` | `diff_drive_controller` |
 | 机器人内部 frame | `robot_state_publisher` | `robot_state_publisher` |
 
-`slam_toolbox` 与 AMCL 不能同时启动。`ros_gz_bridge` 是 transport adapter，不是 TF 语义 owner，也不桥接 `/tf`。静态模型阶段暂时没有 `map`、`odom`；TF 树从 `base_footprint` 开始，不要伪造未来的动态变换。
+这张表从 Lesson 0007 的 `gz_ros2_control` 迁移开始逐步实现，不描述当前
+0001–0006 checkpoint。目标状态中 `slam_toolbox` 与 AMCL 不能同时启动；
+`ros_gz_bridge` 是 transport adapter，不是 TF 语义 owner，也不桥接
+`/tf`。
 
 资料：[ROS 2 Jazzy：Using URDF with robot_state_publisher](https://docs.ros.org/en/jazzy/Tutorials/Intermediate/URDF/Using-URDF-with-Robot-State-Publisher.html)。

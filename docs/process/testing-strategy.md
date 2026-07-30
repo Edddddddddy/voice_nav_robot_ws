@@ -30,7 +30,13 @@ bash scripts/verify.sh
 
 The full gate starts from declared dependencies, validates repository and robot-model contracts, builds all packages, runs all tests, and reports a zero-error `colcon test-result`.
 
-PR CI uses in-memory fakes and headless Gazebo. Nightly validation uses the locked model set. Real-audio metrics are manual hardware Release Gates for `v0.7` and `v1.0`; they are not weakened into CI simulations.
+PR CI uses deterministic in-memory fakes as soon as their Module exists and
+adds bounded headless Gazebo tests with the v0.2 simulation milestones. At
+v0.1 the hosted gate covers repository metadata, static robot-model
+validation, package build, and package tests; it does not claim to launch
+Gazebo. Nightly validation uses the locked model set after the model fixtures
+are introduced. Real-audio metrics are manual hardware Release Gates for
+`v0.7` and `v1.0`; they are not weakened into CI simulations.
 
 ## Adapter and time strategy
 
@@ -91,7 +97,23 @@ The quantitative acceptance criteria are:
 - From maximum configured speed, STOP causes odometry to enter the stationary tolerance within 1.2 seconds and remain there for 200 ms.
 - Killing MissionRuntime causes the independent MotionGate lease to expire and automatically select zero velocity.
 - Killing MotionGate causes `diff_drive_controller.cmd_vel_timeout` to stop the command within 0.35 seconds of simulation time.
-- Pausing and resuming Gazebo never restores an old non-zero command.
+- Candidate samples never renew Runtime authority; a test continues feeding
+  valid-looking smoother output after killing Runtime and still observes Gate
+  inhibition.
+- Every step handover recreates the candidate data plane. Tests inject samples
+  from the old topic generation and writer GID after the new lease opens and
+  prove they are rejected.
+- Managed Gazebo safe-pause first proves Gate output, controller output, and
+  wheel command are zero while simulation still advances, then pauses and
+  records a token. After MotionGate dies during that pause, the first resumed
+  wheel command is still asserted to be zero.
+- A fault-injection case kills MotionGate before zero proof. Controller
+  inactivity or released command interfaces are insufficient: the harness
+  issues a token only after directly observing zero wheel command for the
+  configured periods; otherwise it selects full restart.
+- A direct GUI/Transport pause has no safe-pause token; in-place resume is
+  refused and the tested recovery is a full simulation/control restart from
+  an inactive zero-command state.
 
 These command-inhibition thresholds do not claim that the system is a functionally certified emergency stop.
 

@@ -12,9 +12,17 @@
   - `Summary: 6 packages finished [19.6s]`
   - `Summary: 27 tests, 0 errors, 0 failures, 1 skipped`
   - `VoiceNav Robot verification passed.`
-- package metadata 提交：`dbaefad chore(repo): complete package metadata`。
-- Work Item 关闭提交：`bd93dff docs(work-item): close engineering baseline`。
+- package metadata 提交：公开重写身份
+  `08fd6e3 chore(repo): complete package metadata`；原始 bundle 身份为
+  `dbaefad`。
+- Work Item 关闭提交：公开重写身份
+  `a9ac21f docs(work-item): close engineering baseline`；原始 bundle 身份为
+  `bd93dff`。
 - GitHub 公开仓库已选择，maintainer 为 `Edddddddddy <983166955@qq.com>`。
+
+v0.1 按批准方案删除了所有可达历史中的 `build/install/log`，所以 Git
+提交身份发生变化。VN-0007 保存完整 old→new 映射，外部恢复 bundle
+保留原始对象；上面的“公开重写身份”才是清理后仓库使用的稳定证据。
 
 ## 复盘
 

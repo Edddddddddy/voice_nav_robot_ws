@@ -20,6 +20,8 @@ remains open until both its local and remote gates are completed.
 - Implementing Mission Runtime, Motion Gate, SLAM, Nav2, or voice behavior.
 - Semantically rewriting completed lessons, ADR decisions, or earlier source
   commits beyond the approved removal of `build/`, `install/`, and `log/`.
+  Later implementation differences are recorded as separate errata rather than
+  retroactively changing the historical assignment.
 - Committing local models, generated maps, bags, recordings, or build output.
 - Changing repository visibility, adding collaborators, or weakening security
   settings outside the approved v0.1 governance scope.
@@ -40,8 +42,9 @@ remains open until both its local and remote gates are completed.
 - [x] The target process names and package ownership are explicit.
 - [x] Mission fencing, bounded IDL, `StopMission.srv`, and transient-local
   `/mission/state` are specified.
-- [x] The target motion chain, independent Motion Gate, 250 ms lease, and
-  0.35 s controller timeout are specified.
+- [x] The target motion chain, independent Motion Gate, Runtime-renewed 250 ms
+  authority lease, per-lease candidate data-plane binding, managed
+  safe-pause/resume barrier, and 0.35 s controller timeout are specified.
 - [x] TF owners, exact wheel frames, separate Mapping/Navigation modes, and the
   `/clock`/`/scan`-only bridge are specified.
 - [x] Voice/Agent audio, model, decision-order, and latest-wins constraints are
@@ -71,8 +74,12 @@ remains open until both its local and remote gates are completed.
   `Edddddddddy/voice_nav_robot_ws` destination on 2026-07-30.
 - [ ] Immediately before writing, remote `main`, branch set, and collaborators
   still match the audited baseline; otherwise work stops without overwriting.
-- [ ] Rewritten `main` is updated once with an exact
-  `--force-with-lease=<old-sha>` and no broad force.
+- [ ] Rewritten `main` is updated once from the audited remote SHA to the
+  rewritten VN-0006 baseline with this exact refspec and lease:
+  `git push origin
+  a9ac21fa54de9ce69dd19d5cc6eaf65de7251ffb:refs/heads/main
+  --force-with-lease=refs/heads/main:bc2264257aea246c61ec183f3736c663a86a65d1`.
+  No broad force is used.
 - [ ] The Work Item has a GitHub Issue and the feature branch has a reviewed PR.
 - [ ] The reviewed v0.1 foundation commit is present on the intended remote
   branch and is rebase-merged into remote `main`.
@@ -80,9 +87,9 @@ remains open until both its local and remote gates are completed.
 - [ ] `main` requires PRs, the stable CI check, conversation resolution, and
   linear history; force-push and deletion are disabled.
 - [ ] Remote review/merge evidence and the final remote commit ID are recorded
-  here.
-- [ ] The `v0.1.0` annotated tag and GitHub Release are created only after the
-  release gate is satisfied.
+  here, including the local-post-filter to public-rebase identity mapping.
+- [ ] Release eligibility and all v0.1 evidence are prepared so this Work Item
+  can close before the separate annotated-tag and GitHub Release step.
 
 ## Recovery bundle
 
@@ -174,6 +181,38 @@ reachable generated-path count remained zero. `filter-repo` removed the
 `origin` configuration as expected; it was restored to the audited SSH URL
 without fetching old objects.
 
+### Commit identity map
+
+The history cleanup necessarily changed every descendant commit identity. The
+external bundles retain the pre-rewrite objects; the second column records the
+exact local identities produced by the verified `git-filter-repo` run.
+
+| Pre-rewrite identity | Local post-filter identity | Subject |
+| --- | --- | --- |
+| `bc2264257aea246c61ec183f3736c663a86a65d1` | `b895e174a2c3afd6ec42d99d0a905f32c6ee9100` | `Init` |
+| `c402fd050397af89d3a6889c7a28d928b1f4d133` | `2855943fa4cad72c6b7c1a401796f3145bd3b893` | `chore(repo): establish clean workspace boundaries` |
+| `46b6d2fad7187d54948dad3aca304d2d9c5902ec` | `e1dc36c79038d4a92b21db87dee4aec392a7c86c` | `feat(sim): add physical differential-drive robot` |
+| `a9747d4c8f7c1506c04973ecb8671eb6d7d931f3` | `eef682f53225bf4cef49d48eef27b34cdeab6236` | `docs(course): record robot modeling and motion lessons` |
+| `14b82e1f79f3eb09af8af94d8bc6586af5d6f79e` | `2cf50e79459571c861d1f8754415147ed48efcfb` | `docs(repo): establish engineering governance baseline` |
+| `dbaefad4b0fe03e04e131353c81870697e07728e` | `08fd6e30277cd25b323abea3a6dbd9861f0a0068` | `chore(repo): complete package metadata` |
+| `bd93dffcd8936182821daad89761a752a0dd0447` | `a9ac21fa54de9ce69dd19d5cc6eaf65de7251ffb` | `docs(work-item): close engineering baseline` |
+| `fd8f55d1e1dd18d16c4159b08cf247a8520a3b58` | `38901c16ae47aa4f63c579af8d5fed4a8953077d` | `docs(repo): establish versioned product and course structure` |
+| `2ba1aec12c345fca4d98fe74aaa5792c3c0d79d3` | `4c42d6fec4d55fee6fe2c56b8994709b18842d43` | `chore(release): prepare v0.1 metadata` |
+| `28a895ec04f096f6d90459663d0eca27f63f4a00` | `f63feef5a25b7ee232eb636fd3611654a6463550` | `test(repo): enforce repository and model contracts` |
+| `cccd1ada1f523760eb3831cb1fc2ecf112f67e53` | `e67dd93a717b000a7f49fbc7bb5222ab6d3325c6` | `ci(repo): add hosted quality gate and review templates` |
+
+The post-rewrite evidence commit
+`52193337f004ec320981bded32d070f072d78e80`
+(`docs(work-item): record verified history rewrite`) was created only after the
+transformation and therefore has no pre-rewrite counterpart.
+
+The rows through `a9ac21f` are intended to become exact public identities in
+the one-time baseline update. The VN-0007 feature commits from `38901c1`
+onward are local review identities: GitHub's rebase merge creates new public
+commit objects. After merge this Work Item records a second local-post-filter
+→ public-rebase mapping rather than claiming those local SHAs are stable
+public evidence.
+
 ## Remote and local baseline audit
 
 Read-only audit on 2026-07-30:
@@ -191,12 +230,13 @@ bc2264257aea246c61ec183f3736c663a86a65d1
 local branch:
 chore/0007-v01-foundation
 
-local HEAD before VN-0007 working-tree edits:
+local HEAD before VN-0007 working-tree edits (pre-rewrite identity):
 bd93dffcd8936182821daad89761a752a0dd0447
 ```
 
 `git ls-remote origin refs/heads/*` showed only remote `main`. The local
-foundation was six commits ahead of `origin/main`:
+foundation was six commits ahead of `origin/main`; these are the audited
+pre-rewrite identities preserved by the bundle:
 
 ```text
 c402fd0 chore(repo): establish clean workspace boundaries
@@ -209,16 +249,23 @@ bd93dff docs(work-item): close engineering baseline
 
 No remote write was performed.
 
+After the verified rewrite, the corresponding reviewed VN-0006 baseline is
+`a9ac21fa54de9ce69dd19d5cc6eaf65de7251ffb`. The one-time remote update targets
+that commit, not the rewritten root, so the already reviewed baseline becomes
+stable on `main` before the VN-0007 feature branch is pushed normally.
+
 ## Audit conclusions
 
 - The external bundle is valid, complete, and contains both the local
   engineering baseline and remote-main baseline.
 - Remote `main` alone could not recover the six local baseline commits at the
   audit time; the verified external bundle is the recovery point.
-- Package metadata is complete at `dbaefad`; statements that metadata or remote
-  selection remain undecided are stale.
-- Lesson/VN-0006 engineering-baseline work is complete at `bd93dff`; current
-  work is VN-0007, not an in-progress Lesson 0006.
+- Package metadata is complete at pre-rewrite `dbaefad` and public rewritten
+  `08fd6e3`; statements that metadata or remote selection remain undecided are
+  stale.
+- Lesson/VN-0006 engineering-baseline work is complete at pre-rewrite
+  `bd93dff` and public rewritten `a9ac21f`; current work is VN-0007, not an
+  in-progress Lesson 0006.
 - Native Gazebo DiffDrive remains valid historical lesson evidence but is
   superseded for the product by ADR-0002 and the v0.2 ros2_control migration.
 - The canonical behavior term is operational stop (运行停止); its exact ROS
@@ -288,6 +335,35 @@ Summary: 27 tests, 0 errors, 0 failures, 1 skipped
 VoiceNav Robot verification passed.
 ```
 
-`git diff --check` also passed. The Work Item remains In Progress until the
-final staged-diff review, history-rewrite proof, and every remote-gate item are
-recorded.
+`git diff --check` also passed.
+
+Independent review on 2026-07-30 initially found five history/course/interface
+P1 findings, four P2 findings, and then three deeper motion-safety P1 findings.
+The resulting corrections include:
+
+- exact force-with-lease and old→local-post-filter identity evidence;
+- historical Lesson 0003 plus a separate accepted-implementation erratum;
+- an explicitly non-replayable Lesson 0006 and real historical/current paths;
+- current-versus-target CI, ROS Interface, and TF language;
+- Runtime-only authority renewal, independent candidate freshness, per-lease
+  data-plane/writer binding, and full conditioner recreation;
+- a tokenized safe-pause performed only after observed controller/wheel zero,
+  with full restart instead of in-place resume for an unmanaged pause or
+  failed zero proof.
+
+Two focused re-reviews reported no remaining P0/P1. The Work Item remains In
+Progress until every remote-gate item is recorded.
+
+Post-review-fix local gate completed in the same environment on 2026-07-30:
+
+```text
+Repository contract passed.
+19 repository/SDF tests: OK
+All system dependencies have been satisfied
+robot name is: voice_nav_robot
+SDF contract passed.
+Build summary: 6 packages finished [14.1s]
+Test summary: 6 packages finished [21.1s]
+Summary: 27 tests, 0 errors, 0 failures, 1 skipped
+VoiceNav Robot verification passed.
+```

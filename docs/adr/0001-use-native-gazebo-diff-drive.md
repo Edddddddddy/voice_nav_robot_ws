@@ -22,9 +22,14 @@ remain valid.
 
 ## Consequences
 
-The original consequence was that Native DiffDrive has velocity and
-acceleration limits but no command timeout, so every manual test had to send
-zero velocity. The project later chose the standard-controller path even
-without adding hardware because independent gate supervision, consumer timeout,
-Nav2 integration, odometry/TF ownership, and a minimal bridge became product
-requirements; ADR-0002 records that superseding trade-off.
+Native DiffDrive has velocity and acceleration limits but no command timeout,
+so every manual test must send zero velocity and the ROS motion output must gain
+a configured watchdog before Nav2 or voice control is connected. Migration to
+`gz_ros2_control` is reconsidered if the project adds real hardware, multiple
+controllers, controller lifecycle requirements, or requires the base
+controller itself to own the timeout.
+
+**Superseded:** the last trigger became a product requirement even though the
+project remains simulation-only. [ADR-0002](0002-migrate-to-gz-ros2-control.md)
+records the later decision; this original consequence remains part of the
+historical decision record.
