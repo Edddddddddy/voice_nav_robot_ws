@@ -6,6 +6,12 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Added the tests-first Lesson 0007 contract, Work Item, and pending evidence
+  record for migrating the simulation drive path to `gz_ros2_control` and
+  Jazzy's native `TwistStamped` `diff_drive_controller` input.
+
 ## [0.1.0] - 2026-07-30
 
 ### Added
