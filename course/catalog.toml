@@ -45,6 +45,6 @@ record = "course/records/0006-establishing-engineering-baseline.md"
 [[lessons]]
 id = "0007"
 slug = "migrate-to-ros2-control-drive"
-status = "in_progress"
+status = "completed"
 lesson = "course/lessons/0007-migrate-to-ros2-control-drive.md"
 record = "course/records/0007-ros2-control-drive.md"

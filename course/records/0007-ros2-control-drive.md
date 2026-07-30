@@ -1,11 +1,10 @@
 # Lesson 0007 学习记录：迁移到 ros2_control 差速驱动
 
-状态：Pending
+状态：Completed
 
-本文件是未完成的验收证据模板，不是完成声明。只有真实实现通过本地完整
-门禁、PR review 和 required hosted CI，并合并到 `main` 后，才能把状态
-改为 `Completed`。不得预填测试成功、commit SHA、PR 链接或
-`course/0007-solution` 指向。
+参考 solution 已通过本地完整门禁、独立 review、required hosted CI，
+并由 PR #6 rebase 合并到 `main`。本记录只填写已经发生且可查询的证据；
+学习者仍从 start tag 创建自己的 `learn/0007` 分支并独立完成复盘。
 
 ## 变更身份
 
@@ -15,15 +14,17 @@
 - 开发分支：`feat/vn-0008-l0007-ros2-control-drive`
 - 学习分支：`learn/0007`
 - Start tag：`course/0007-start`
-- Solution tag：TBD（仅在 reviewed merge 后创建）
+- Solution tag：`course/0007-solution`
 - 红灯契约 commit：
   `a7feee41ee9330676a09ebc50c4461a9af76a90e`
 - 绿色实现 commit：
   `ed621353c6ab4c3544a29b5763106a63539833d9`
 - PR：
   [#6](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/6)
-- Required CI：TBD
-- Public merge commit：TBD
+- Required CI：
+  [`required / ubuntu-24.04 / ros-jazzy`](https://github.com/Edddddddddy/voice_nav_robot_ws/actions/runs/30565921460/job/90950343524)
+- Public merge commit：
+  `68bb49051680e1cd5cd138982b70bd4c89c5c920`
 
 ## Tests-first 证据
 
@@ -209,18 +210,27 @@ VoiceNav Robot verification passed.
 
 - [x] Work Item 已关联 GitHub Issue。
 - [x] PR diff 只包含 VN-0008 范围。
-- [ ] required hosted CI 通过。
-- [ ] review conversation 已解决。
-- [ ] PR 以 rebase 方式合并。
-- [ ] annotated `course/0007-solution` 指向 public reviewed solution。
+- [x] required hosted CI 通过。
+- [x] review conversation 已解决。
+- [x] PR 以 rebase 方式合并。
+- [x] annotated `course/0007-solution` 指向 public reviewed solution。
 
 ```text
 Issue: https://github.com/Edddddddddy/voice_nav_robot_ws/issues/5
 PR: https://github.com/Edddddddddy/voice_nav_robot_ws/pull/6
 Required CI:
+https://github.com/Edddddddddy/voice_nav_robot_ws/actions/runs/30565921460/job/90950343524
+Result: success in 5m06s on bfac7a98fcfe322bec24ecf25a7536eeb81c479a
 Review:
+https://github.com/Edddddddddy/voice_nav_robot_ws/pull/6#issuecomment-5134178763
+Independent review found no remaining P0/P1; no unresolved review conversation.
 Public merge identity:
-Solution tag target:
+68bb49051680e1cd5cd138982b70bd4c89c5c920
+Merge method/time: rebase; 2026-07-30T17:32:07Z
+Solution tag object:
+a4e75e8205f1e59c516e28d5ef8f7e02c30aaaad
+Solution tag peeled target:
+68bb49051680e1cd5cd138982b70bd4c89c5c920
 ```
 
 ## 复盘
