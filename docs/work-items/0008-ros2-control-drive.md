@@ -51,48 +51,48 @@ documentation wherever that stale parameter name appears.
   commit and is present on the remote without rewriting another tag.
 - [x] Contract tests fail before implementation when the native DiffDrive
   plugin is still the product drive path.
-- [ ] `voice_nav_sim` declares all runtime and test dependencies required by
+- [x] `voice_nav_sim` declares all runtime and test dependencies required by
   `gz_ros2_control`, controller manager, the joint-state broadcaster, the
   differential-drive controller, launch, and the clock bridge.
-- [ ] The expanded robot description contains a
+- [x] The expanded robot description contains a
   `gz_ros2_control/GazeboSimSystem` with velocity command interfaces and
   position/velocity state interfaces for exactly
   `left_wheel_joint` and `right_wheel_joint`.
-- [ ] The native `gz::sim::systems::DiffDrive` plugin is absent from the
+- [x] The native `gz::sim::systems::DiffDrive` plugin is absent from the
   product model.
-- [ ] The Gazebo ros2_control plugin receives its controller YAML through a
+- [x] The Gazebo ros2_control plugin receives its controller YAML through a
   launch-resolved package-share path; source and launch files contain no
   machine-specific absolute path.
-- [ ] Controller configuration contains one `joint_state_broadcaster` and one
+- [x] Controller configuration contains one `joint_state_broadcaster` and one
   `diff_drive_controller`, uses the existing 0.40 m separation and 0.035 m
   radius, and sets the consumer `cmd_vel_timeout` to 0.35 s.
-- [ ] The differential-drive controller receives
+- [x] The differential-drive controller receives
   `geometry_msgs/msg/TwistStamped`; no unsupported
   `enable_stamped_cmd_vel` parameter is present.
-- [ ] Launch startup is dependency-ordered rather than sleep-based: Gazebo and
+- [x] Launch startup is dependency-ordered rather than sleep-based: Gazebo and
   robot description are available before entity creation, then the
   joint-state broadcaster becomes active before the drive controller.
-- [ ] `ros2 control list_controllers` reports both controllers active and
+- [x] `ros2 control list_controllers` reports both controllers active and
   `ros2 control list_hardware_interfaces` reports the intended wheel command
   and state interfaces.
-- [ ] A bounded stamped forward command increases x, and a bounded positive
+- [x] A bounded stamped forward command increases x, and a bounded positive
   angular command produces a positive yaw change.
-- [ ] Motion changes wheel joint state and controller odometry on the
+- [x] Motion changes wheel joint state and controller odometry on the
   controller-native `/diff_drive_controller/odom` endpoint; the odometry
   message and a basic TF query report frames `odom` and `base_footprint`.
-- [ ] Documentation labels `/diff_drive_controller/odom` as an intentional
+- [x] Documentation labels `/diff_drive_controller/odom` as an intentional
   intermediate checkpoint. It does not claim that the target product-level
   `/odom` remap or cross-graph publisher uniqueness is already complete.
-- [ ] The manual fault-injection exercise terminates a non-zero command
+- [x] The deterministic fault-injection test destroys a non-zero command
   publisher and observes controller command output return to zero on the first
   control update after its age crosses 0.35 s while simulation time advances.
   The measured bound includes no more than one configured control period and
   the record distinguishes command zero from physical stationarity.
-- [ ] The ROS–Gazebo bridge configuration contains only `/clock` in this
+- [x] The ROS–Gazebo bridge configuration contains only `/clock` in this
   lesson; velocity, joint state, odometry, and TF remain in ROS 2.
-- [ ] Repository, Xacro/URDF/SDF, build, package-test, and full verification
+- [x] Repository, Xacro/URDF/SDF, build, package-test, and full verification
   gates pass in WSL2 with ROS 2 Jazzy and Gazebo Harmonic.
-- [ ] Lesson 0007 contains the tests-first workflow, failure injection,
+- [x] Lesson 0007 contains the tests-first workflow, failure injection,
   troubleshooting path, submission evidence, and reflection questions.
 - [ ] The learner record contains real commands, results, commit identities,
   PR/CI links, and review findings before its status changes from Pending.
@@ -113,6 +113,11 @@ documentation wherever that stale parameter name appears.
 - A stale parameter copied from another ROS distribution can be silently
   misleading or rejected at configure time. Tests and documentation pin the
   Jazzy `TwistStamped` contract and reject `enable_stamped_cmd_vel`.
+- Reapplying acceleration limits inside `diff_drive_controller` would delay
+  the consumer-deadman zero after the 0.35 s staleness decision. This
+  controller keeps hard velocity bounds but leaves acceleration shaping to the
+  target upstream `nav2_velocity_smoother`; a contract test rejects accidental
+  double limiting.
 - The 0.35 s timeout uses advancing controller/simulation time and does not
   prove immediate physical stationarity or safe arbitrary Gazebo pause.
   Evidence records command and pose/odometry observations separately.
@@ -215,5 +220,55 @@ controller_manager: 4.45.2
 These local apt versions are environment evidence, not a substitute for
 declaring package dependencies and verifying a clean CI resolution.
 
-Implementation, green-test, integration, PR, hosted-CI, public merge, and
+The green implementation evidence follows. The implementation commit is
+`ed621353c6ab4c3544a29b5763106a63539833d9`; PR, hosted-CI, public merge, and
 solution-tag evidence remain pending.
+
+### Local implementation and integration evidence
+
+Environment: WSL2 `Ubuntu-24.04`, ROS 2 Jazzy, Gazebo Sim 8.11.0,
+2026-07-31.
+
+```text
+Canonical full-workspace command:
+  bash scripts/verify.sh
+Repository contracts:
+  38 tests, all passed
+Build result:
+  6 packages finished
+Package result:
+  32 tests, 0 errors, 0 failures, 1 skipped
+Final marker:
+  VoiceNav Robot verification passed.
+
+Controllers:
+  diff_drive_controller active
+  joint_state_broadcaster active
+Claimed command Interfaces:
+  left_wheel_joint/velocity
+  right_wheel_joint/velocity
+Command type:
+  geometry_msgs/msg/TwistStamped
+
+Hard-limit output:
+  linear.x=0.400, angular.z=1.200
+Gazebo ground-truth forward x:
+  0.077 -> 0.222 m; delta=+0.145 m
+Gazebo ground-truth yaw:
+  0.249 -> 0.734 rad; delta=+0.485 rad
+Consumer deadman simulation stamps:
+  8.564 -> 8.919 s; delta=0.355 s
+Allowed upper bound:
+  0.35 + 0.010 control period + 0.002 simulation-step epsilon = 0.362 s
+Physical-stationarity observation:
+  |linear.x| < 0.02 m/s and |angular.z| < 0.02 rad/s
+```
+
+The test destroys the dedicated non-zero publisher endpoint before waiting for
+the timeout. It queries Gazebo model pose independently rather than treating
+controller-computed odometry as physical ground truth. All launch-owned
+processes exited cleanly, and a post-run process audit found no simulator or
+ROS graph residue.
+
+PR, hosted CI, public merge, and solution tag are recorded in the next evidence
+updates.

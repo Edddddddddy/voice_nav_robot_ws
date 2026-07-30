@@ -226,11 +226,14 @@ rg -n \
 - `odom_frame_id: odom`、`base_frame_id: base_footprint`；
 - `enable_odom_tf: true`；
 - `cmd_vel_timeout: 0.35`；
-- 可信线速度、角速度和加速度限制。
+- 可信线速度、角速度硬上限。
 
-这里的速度、加速度和 timeout 是受版本控制的可信策略，不由语音、LLM
-或 Mission payload 指定。不要为了通过测试加入未在 Jazzy 参数契约中的
-`enable_stamped_cmd_vel`。
+这里的速度和 timeout 是受版本控制的可信策略，不由语音、LLM 或 Mission
+payload 指定。不要为了通过测试加入未在 Jazzy 参数契约中的
+`enable_stamped_cmd_vel`。本控制器刻意不再设置 acceleration/deceleration
+limit：否则 0.35 s 超时后只会开始减速，而不是在下一 control update
+选择零。目标产品由上游 `nav2_velocity_smoother` 做正常加速度整形；命令归零
+与机器人受惯性影响的物理停稳仍分别验收。
 
 本课必须证明 controller 产生基本 odom 和 `odom → base_footprint` TF，
 并在仿真时间推进时执行 0.35 s consumer timeout。Lesson 0008 再通过

@@ -11,6 +11,22 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Added the tests-first Lesson 0007 contract, Work Item, and pending evidence
   record for migrating the simulation drive path to `gz_ros2_control` and
   Jazzy's native `TwistStamped` `diff_drive_controller` input.
+- Added a headless Gazebo integration gate that proves controller activation,
+  wheel Interface claims, forward/positive-yaw odometry, TF output, publisher
+  loss, and the 0.35 s consumer deadman.
+
+### Changed
+
+- Replaced the product model's native Gazebo DiffDrive plugin with
+  `gz_ros2_control`, a Jazzy `diff_drive_controller`, and an event-ordered
+  launch owned directly by ROS 2 launch.
+- Restricted the Lesson 0007 Gazebo bridge to `/clock` and documented normal
+  acceleration shaping as an upstream velocity-smoother responsibility.
+
+### Fixed
+
+- Prevented WSL launch tests from orphaning a shell-owned Gazebo process and
+  accidentally reusing an old controller graph.
 
 ## [0.1.0] - 2026-07-30
 
