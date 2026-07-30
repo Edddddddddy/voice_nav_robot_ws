@@ -1,95 +1,201 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="voice_nav_robot">
-
   <!-- 车体参数：X 前方，Y 左方，Z 上方 -->
-  <xacro:property name="base_radius" value="0.20"/>
-  <xacro:property name="base_height" value="0.18"/>
-  <xacro:property name="wheel_radius" value="0.035"/>
-  <xacro:property name="wheel_width" value="0.025"/>
-  <xacro:property name="wheel_y" value="0.20"/>
-  <xacro:property name="caster_radius" value="0.045"/>
-  <xacro:property name="laser_radius" value="0.04"/>
-  <xacro:property name="laser_height" value="0.05"/>
+  <xacro:property name="base_radius" value="0.20" />
+  <xacro:property name="base_height" value="0.18" />
+  <xacro:property name="wheel_radius" value="0.035" />
+  <xacro:property name="wheel_width" value="0.025" />
+  <xacro:property name="wheel_y" value="0.20" />
+  <xacro:property name="caster_radius" value="0.045" />
+  <xacro:property name="laser_radius" value="0.04" />
+  <xacro:property name="laser_height" value="0.05" />
 
-  <material name="blue"><color rgba="0 0 0.8 1"/></material>
-  <material name="black"><color rgba="0 0 0 1"/></material>
-  <material name="red"><color rgba="0.8 0.1 0.1 1"/></material>
+  <xacro:property name="base_mass" value="5.0" />
+  <xacro:property name="wheel_mass" value="0.25" />
+  <xacro:property name="caster_mass" value="0.20" />
+  <xacro:property name="laser_mass" value="0.10" />
+  <xacro:property name="base_com_x" value="-0.02" />
+
+  <material name="blue">
+    <color rgba="0 0 0.8 1" />
+  </material>
+  <material name="black">
+    <color rgba="0 0 0 1" />
+  </material>
+  <material name="red">
+    <color rgba="0.8 0.1 0.1 1" />
+  </material>
 
   <!-- TF 根：地面投影坐标系 -->
-  <link name="base_footprint"/>
+  <link name="base_footprint" />
   <joint name="base_footprint_to_base_link" type="fixed">
-    <parent link="base_footprint"/>
-    <child link="base_link"/>
-    <origin xyz="0 0 ${wheel_radius}"/>
+    <parent link="base_footprint" />
+    <child link="base_link" />
+    <origin xyz="0 0 ${wheel_radius}" />
   </joint>
 
   <!-- 主车身 -->
   <link name="base_link">
     <visual>
-      <origin xyz="0 0 ${base_height / 2}"/>
-      <geometry><cylinder radius="${base_radius}" length="${base_height}"/></geometry>
-      <material name="blue"/>
+      <origin xyz="0 0 ${base_height / 2}" />
+      <geometry>
+        <cylinder radius="${base_radius}" length="${base_height}" />
+      </geometry>
+      <material name="blue" />
     </visual>
     <collision>
-      <origin xyz="0 0 ${base_height / 2}"/>
-      <geometry><cylinder radius="${base_radius}" length="${base_height}"/></geometry>
+      <origin xyz="0 0 ${base_height / 2}" />
+      <geometry>
+        <cylinder radius="${base_radius}" length="${base_height}" />
+      </geometry>
     </collision>
+    <inertial>
+      <origin xyz="${base_com_x} 0 ${base_height / 2}" />
+      <mass value="${base_mass}" />
+      <inertia
+        ixx="${base_mass * (3 * base_radius**2 + base_height**2) / 12}"
+        ixy="0"
+        ixz="0"
+        iyy="${base_mass * (3 * base_radius**2 + base_height**2) / 12}"
+        iyz="0"
+        izz="${base_mass * base_radius**2 / 2}" />
+    </inertial>
   </link>
 
   <!-- 左右两个驱动轮；轮轴沿 Y，关节可连续旋转 -->
   <xacro:macro name="drive_wheel" params="side y">
     <link name="${side}_wheel">
       <visual>
-        <origin rpy="1.5708 0 0"/>
-        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
-        <material name="black"/>
+        <origin rpy="1.5708 0 0" />
+        <geometry>
+          <cylinder radius="${wheel_radius}" length="${wheel_width}" />
+        </geometry>
+        <material name="black" />
       </visual>
       <collision>
-        <origin rpy="1.5708 0 0"/>
-        <geometry><cylinder radius="${wheel_radius}" length="${wheel_width}"/></geometry>
+        <origin rpy="1.5708 0 0" />
+        <geometry>
+          <cylinder radius="${wheel_radius}" length="${wheel_width}" />
+        </geometry>
       </collision>
+      <inertial>
+        <origin xyz="0 0 0" />
+        <mass value="${wheel_mass}" />
+        <inertia
+          ixx="${wheel_mass * (3 * wheel_radius**2 + wheel_width**2) / 12}"
+          ixy="0"
+          ixz="0"
+          iyy="${wheel_mass * wheel_radius**2 / 2}"
+          iyz="0"
+          izz="${wheel_mass * (3 * wheel_radius**2 + wheel_width**2) / 12}" />
+      </inertial>
     </link>
     <joint name="${side}_wheel_joint" type="continuous">
-      <parent link="base_link"/>
-      <child link="${side}_wheel"/>
-      <origin xyz="0 ${y} 0"/>
-      <axis xyz="0 1 0"/>
+      <parent link="base_link" />
+      <child link="${side}_wheel" />
+      <origin xyz="0 ${y} 0" />
+      <axis xyz="0 1 0" />
+      <limit effort="5.0" velocity="20.0" />
+      <dynamics damping="0.1" friction="0.0" />
     </joint>
   </xacro:macro>
 
-  <xacro:drive_wheel side="left"  y="${wheel_y}"/>
-  <xacro:drive_wheel side="right" y="-${wheel_y}"/>
+  <xacro:drive_wheel side="left" y="${wheel_y}" />
+  <xacro:drive_wheel side="right" y="-${wheel_y}" />
 
   <!-- 后置万向支撑轮（caster 不参与驱动） -->
   <link name="caster_link">
     <visual>
-      <origin xyz="0 0 ${caster_radius}"/>
-      <geometry><sphere radius="${caster_radius}"/></geometry>
-      <material name="black"/>
+      <origin xyz="0 0 ${caster_radius}" />
+      <geometry>
+        <sphere radius="${caster_radius}" />
+      </geometry>
+      <material name="black" />
     </visual>
     <collision>
-      <origin xyz="0 0 ${caster_radius}"/>
-      <geometry><sphere radius="${caster_radius}"/></geometry>
+      <origin xyz="0 0 ${caster_radius}" />
+      <geometry>
+        <sphere radius="${caster_radius}" />
+      </geometry>
     </collision>
+    <inertial>
+      <origin xyz="0 0 ${caster_radius}" />
+      <mass value="${caster_mass}" />
+      <inertia
+        ixx="${caster_mass * (2 * caster_radius**2) / 5}"
+        ixy="0"
+        ixz="0"
+        iyy="${caster_mass * (2 * caster_radius**2) / 5}"
+        iyz="0"
+        izz="${caster_mass * (2 * caster_radius**2) / 5}" />
+    </inertial>
   </link>
   <joint name="caster_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="caster_link"/>
-    <origin xyz="-${base_radius * 0.65} 0 -${wheel_radius}"/>
+    <parent link="base_link" />
+    <child link="caster_link" />
+    <origin xyz="-${base_radius * 0.65} 0 -${wheel_radius}" />
   </joint>
+
+  <gazebo reference="caster_link">
+    <mu1>0.001</mu1>
+    <mu2>0.001</mu2>
+  </gazebo>
 
   <!-- 激光雷达 -->
   <link name="laser_link">
     <visual>
-      <origin xyz="0 0 ${laser_height / 2}"/>
-      <geometry><cylinder radius="${laser_radius}" length="${laser_height}"/></geometry>
-      <material name="red"/>
+      <origin xyz="0 0 ${laser_height / 2}" />
+      <geometry>
+        <cylinder radius="${laser_radius}" length="${laser_height}" />
+      </geometry>
+      <material name="red" />
     </visual>
+    <collision>
+      <origin xyz="0 0 ${laser_height / 2}" />
+      <geometry>
+        <cylinder radius="${laser_radius}" length="${laser_height}" />
+      </geometry>
+    </collision>
+    <inertial>
+      <origin xyz="0 0 ${laser_height / 2}" />
+      <mass value="${laser_mass}" />
+      <inertia
+        ixx="${laser_mass * (3 * laser_radius**2 + laser_height**2) / 12}"
+        ixy="0"
+        ixz="0"
+        iyy="${laser_mass * (3 * laser_radius**2 + laser_height**2) / 12}"
+        iyz="0"
+        izz="${laser_mass * laser_radius**2 / 2}" />
+    </inertial>
   </link>
   <joint name="laser_joint" type="fixed">
-    <parent link="base_link"/>
-    <child link="laser_link"/>
-    <origin xyz="0 0 ${base_height}"/>
+    <parent link="base_link" />
+    <child link="laser_link" />
+    <origin xyz="0.10 0 0.16" />
   </joint>
+  <gazebo>
+    <plugin
+      filename="gz-sim-diff-drive-system"
+      name="gz::sim::systems::DiffDrive">
+      <left_joint>left_wheel_joint</left_joint>
+      <right_joint>right_wheel_joint</right_joint>
+      <wheel_separation>${2 * wheel_y}</wheel_separation>
+      <wheel_radius>${wheel_radius}</wheel_radius>
+
+      <odom_publish_frequency>50</odom_publish_frequency>
+      <frame_id>odom</frame_id>
+      <child_frame_id>base_footprint</child_frame_id>
+
+      <min_linear_velocity>-0.20</min_linear_velocity>
+      <max_linear_velocity>0.40</max_linear_velocity>
+      <min_angular_velocity>-1.20</min_angular_velocity>
+      <max_angular_velocity>1.20</max_angular_velocity>
+
+      <min_linear_acceleration>-0.50</min_linear_acceleration>
+      <max_linear_acceleration>0.50</max_linear_acceleration>
+      <min_angular_acceleration>-1.50</min_angular_acceleration>
+      <max_angular_acceleration>1.50</max_angular_acceleration>
+    </plugin>
+  </gazebo>
 
 </robot>
