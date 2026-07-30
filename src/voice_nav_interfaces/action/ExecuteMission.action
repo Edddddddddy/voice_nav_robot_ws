@@ -29,7 +29,7 @@ uint16 INTERNAL_ERROR = 99
 
 # 结果字段
 uint16 code
-int32 failed_step 
+int32 failed_step
 string detail
 
 ---
