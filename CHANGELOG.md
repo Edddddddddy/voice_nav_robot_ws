@@ -6,6 +6,8 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-07-30
+
 ### Added
 
 - Strongly typed Mission step and execution Action interfaces.
@@ -34,8 +36,9 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- Corrected Lesson 0003 and TF reference geometry to match the implemented
-  cylinder robot, wheel links, dimensions, and measured LiDAR transform.
+- Preserved the original Lesson 0003 box-robot assignment and added a separate
+  erratum for the accepted cylinder implementation, wheel links, dimensions,
+  and measured LiDAR transform.
 - Closed the Lesson 0006 evidence gap using the learner's recorded commits and
   verification output.
 

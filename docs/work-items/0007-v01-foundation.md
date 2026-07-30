@@ -1,6 +1,6 @@
 # VN-0007: Establish the v0.1 foundation and v1.0 target contracts
 
-**Status:** In Progress
+**Status:** Done
 
 ## Goal
 
@@ -12,7 +12,9 @@ protect `main`, and record the approved v1.0 contracts without claiming target
 behavior is implemented.
 
 The user explicitly authorized this complete plan on 2026-07-30. The Work Item
-remains open until both its local and remote gates are completed.
+closed on 2026-07-30 after its local and remote gates completed. The immutable
+tag and GitHub Release are the following release operation, as required by the
+release policy.
 
 ## Non-goals
 
@@ -72,23 +74,23 @@ remains open until both its local and remote gates are completed.
 
 - [x] The user explicitly authorized the approved plan's remote write scope and
   `Edddddddddy/voice_nav_robot_ws` destination on 2026-07-30.
-- [ ] Immediately before writing, remote `main`, branch set, and collaborators
+- [x] Immediately before writing, remote `main`, branch set, and collaborators
   still match the audited baseline; otherwise work stops without overwriting.
-- [ ] Rewritten `main` is updated once from the audited remote SHA to the
+- [x] Rewritten `main` is updated once from the audited remote SHA to the
   rewritten VN-0006 baseline with this exact refspec and lease:
   `git push origin
   a9ac21fa54de9ce69dd19d5cc6eaf65de7251ffb:refs/heads/main
   --force-with-lease=refs/heads/main:bc2264257aea246c61ec183f3736c663a86a65d1`.
   No broad force is used.
-- [ ] The Work Item has a GitHub Issue and the feature branch has a reviewed PR.
-- [ ] The reviewed v0.1 foundation commit is present on the intended remote
+- [x] The Work Item has a GitHub Issue and the feature branch has a reviewed PR.
+- [x] The reviewed v0.1 foundation commit is present on the intended remote
   branch and is rebase-merged into remote `main`.
-- [ ] Hosted CI runs the declared repository verification and passes.
-- [ ] `main` requires PRs, the stable CI check, conversation resolution, and
+- [x] Hosted CI runs the declared repository verification and passes.
+- [x] `main` requires PRs, the stable CI check, conversation resolution, and
   linear history; force-push and deletion are disabled.
-- [ ] Remote review/merge evidence and the final remote commit ID are recorded
+- [x] Remote review/merge evidence and the final remote commit ID are recorded
   here, including the local-post-filter to public-rebase identity mapping.
-- [ ] Release eligibility and all v0.1 evidence are prepared so this Work Item
+- [x] Release eligibility and all v0.1 evidence are prepared so this Work Item
   can close before the separate annotated-tag and GitHub Release step.
 
 ## Recovery bundle
@@ -254,7 +256,7 @@ After the verified rewrite, the corresponding reviewed VN-0006 baseline is
 that commit, not the rewritten root, so the already reviewed baseline becomes
 stable on `main` before the VN-0007 feature branch is pushed normally.
 
-## Audit conclusions
+## Audit conclusions at the pre-write checkpoint
 
 - The external bundle is valid, complete, and contains both the local
   engineering baseline and remote-main baseline.
@@ -271,8 +273,10 @@ stable on `main` before the VN-0007 feature branch is pushed normally.
 - The canonical behavior term is operational stop (运行停止); its exact ROS
   type is `StopMission.srv`. It is not a functional-safety emergency stop.
 - Target documents and current implementation are explicitly separated.
-- The remote gate is open: the audit performed no push, merge, tag, hosted-CI,
-  visibility, or branch-protection change.
+- At that checkpoint the remote gate was open: the audit had performed no push,
+  merge, tag, hosted-CI, visibility, or branch-protection change. The later
+  operations and their identities are recorded below rather than being
+  retroactively presented as part of the read-only audit.
 
 ## Risks and rollback
 
@@ -351,8 +355,9 @@ The resulting corrections include:
   with full restart instead of in-place resume for an unmanaged pause or
   failed zero proof.
 
-Two focused re-reviews reported no remaining P0/P1. The Work Item remains In
-Progress until every remote-gate item is recorded.
+Two focused re-reviews reported no remaining P0/P1. At that review checkpoint,
+the Work Item remained In Progress until every remote-gate item could be
+recorded.
 
 Post-review-fix local gate completed in the same environment on 2026-07-30:
 
@@ -375,3 +380,99 @@ unsupported `--yes` spelling. A red regression test reproduced the workflow
 contract error; the invocation now uses rosdep's supported `-y`. The 20-test
 repository suite, pinned actionlint, and the full WSL gate above passed before
 the fix was pushed for a second hosted run.
+
+## Remote completion evidence
+
+Immediately before the only history write, a second read-only audit proved:
+
+```text
+remote heads:
+bc2264257aea246c61ec183f3736c663a86a65d1 refs/heads/main
+
+collaborators:
+Edddddddddy admin
+
+pull requests:
+[]
+```
+
+The repository was still public, `main` was still the default branch, and the
+authenticated user had Admin permission. The exact force-with-lease command in
+the acceptance criteria then updated only `main` from the audited old identity
+to `a9ac21fa54de9ce69dd19d5cc6eaf65de7251ffb`. Git reported:
+
+```text
++ bc22642...a9ac21f a9ac21fa54de9ce69dd19d5cc6eaf65de7251ffb
+  -> main (forced update)
+```
+
+No broad force, tag rewrite, collaborator change, or visibility change
+occurred. The recovery bundles remain outside Git.
+
+Hosted workflow evidence:
+
+- [Issue #1](https://github.com/Edddddddddy/voice_nav_robot_ws/issues/1)
+  tracks this Work Item.
+- [PR #2](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/2) contains
+  the reviewed foundation and independent agent-review evidence.
+- The required check
+  [`required / ubuntu-24.04 / ros-jazzy`](https://github.com/Edddddddddy/voice_nav_robot_ws/actions/runs/30558258742/job/90924258422)
+  passed in 2 minutes 56 seconds.
+- PR #2 was rebase-merged by `Edddddddddy` at
+  `2026-07-30T15:50:33Z`; its public implementation tip is
+  `d3797c66e13ed040003c8d231f93fcc2245be9aa`.
+- The remote feature branch was automatically deleted after merge.
+
+GitHub's rebase merge produced the following exact public identities:
+
+| Local post-filter identity | Public rebase identity | Subject |
+| --- | --- | --- |
+| `38901c16ae47aa4f63c579af8d5fed4a8953077d` | `8796b9463d9fcefdced41e866d4586db68c82392` | `docs(repo): establish versioned product and course structure` |
+| `4c42d6fec4d55fee6fe2c56b8994709b18842d43` | `624ecca7a34bfff5c2d5df81eaa285e277cd2804` | `chore(release): prepare v0.1 metadata` |
+| `f63feef5a25b7ee232eb636fd3611654a6463550` | `daec7fa093c8525ac2b7181aef2fd218afd99048` | `test(repo): enforce repository and model contracts` |
+| `e67dd93a717b000a7f49fbc7bb5222ab6d3325c6` | `21f77be5e76f0add5815c18c99df745f0b4ba366` | `ci(repo): add hosted quality gate and review templates` |
+| `52193337f004ec320981bded32d070f072d78e80` | `9a205d541303416cc0ba896b40b54c2e7f773b07` | `docs(work-item): record verified history rewrite` |
+| `a9e7d40a12508830385b94bb8dd863d561c50810` | `cc359902d9e407a048f7d46fd05db445fcf42b05` | `docs(review): resolve v0.1 architecture and history findings` |
+| `07ebc2709ca6bda882e9b49e7e3882bafb454cd0` | `d3797c66e13ed040003c8d231f93fcc2245be9aa` | `fix(ci): use supported rosdep noninteractive flag` |
+
+Repository settings were then verified as:
+
+```text
+merge methods: rebase=true, merge=false, squash=false
+delete head branch after merge: true
+required status check: required / ubuntu-24.04 / ros-jazzy (strict)
+pull request required: true; required approvals=0
+conversation resolution required: true
+linear history required: true
+enforce for administrators: true
+force pushes allowed: false
+branch deletion allowed: false
+```
+
+Approvals remain zero because the repository has one maintainer; independent
+agent review is recorded in the PR but is not represented as a human GitHub
+approval. PR-only flow and the required hosted check still apply to the
+administrator. Dependabot opened unrelated PR #3 only after PR #2 merged; it
+was left open and is not part of this release.
+
+The final closure diff, including this remote evidence and the dated changelog,
+then passed the full WSL gate:
+
+```text
+Repository contract passed.
+20 repository/SDF/CI-contract tests: OK
+All system dependencies have been satisfied
+robot name is: voice_nav_robot
+SDF contract passed.
+Build summary: 6 packages finished [15.1s]
+Test summary: 6 packages finished [21.7s]
+Summary: 27 tests, 0 errors, 0 failures, 1 skipped
+VoiceNav Robot verification passed.
+```
+
+Version `0.1.0`, synchronized package metadata, the dated changelog, recovery
+evidence, clean reachable history, passing local/hosted gates, reviewed
+architecture, and protected `main` satisfy the v0.1 release gate. The closure
+PR that places this record on `main` closes Issue #1. The annotated `v0.1.0`
+tag is created from that reviewed closure tip, so this document does not embed
+a self-referential commit identity.
