@@ -20,7 +20,8 @@
   `a7feee41ee9330676a09ebc50c4461a9af76a90e`
 - 绿色实现 commit：
   `ed621353c6ab4c3544a29b5763106a63539833d9`
-- PR：TBD
+- PR：
+  [#6](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/6)
 - Required CI：TBD
 - Public merge commit：TBD
 
@@ -207,15 +208,15 @@ VoiceNav Robot verification passed.
 ## 评审与远端证据
 
 - [x] Work Item 已关联 GitHub Issue。
-- [ ] PR diff 只包含 VN-0008 范围。
+- [x] PR diff 只包含 VN-0008 范围。
 - [ ] required hosted CI 通过。
 - [ ] review conversation 已解决。
 - [ ] PR 以 rebase 方式合并。
 - [ ] annotated `course/0007-solution` 指向 public reviewed solution。
 
 ```text
-Issue:
-PR:
+Issue: https://github.com/Edddddddddy/voice_nav_robot_ws/issues/5
+PR: https://github.com/Edddddddddy/voice_nav_robot_ws/pull/6
 Required CI:
 Review:
 Public merge identity:
