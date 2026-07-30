@@ -57,13 +57,13 @@ remains open until both its local and remote gates are completed.
 - [x] Repository-wide links and root/course navigation point to the new tree.
 - [x] Formatting/link checks and the unified repository gate pass after all
   parallel v0.1 migration work is integrated.
-- [ ] The final local diff is reviewed against the complete v0.1 Work Item,
+- [x] The final local diff is reviewed against the complete v0.1 Work Item,
   with generated files, private data, and target-as-current claims absent.
-- [ ] A second pre-rewrite external bundle captures the clean committed v0.1
+- [x] A second pre-rewrite external bundle captures the clean committed v0.1
   branch and all refs.
-- [ ] An isolated clone proves the narrow history rewrite removes every
+- [x] An isolated clone proves the narrow history rewrite removes every
   `build/`, `install/`, and `log/` path without changing the intended HEAD tree.
-- [ ] The same verified narrow rewrite is applied to the local refs.
+- [x] The same verified narrow rewrite is applied to the local refs.
 
 ### Remote gate
 
@@ -120,6 +120,59 @@ bd93dffcd8936182821daad89761a752a0dd0447
 
 The bundle is outside the repository, is not runtime input, and was not added
 to Git.
+
+## Pre-rewrite v0.1 bundle and rewrite proof
+
+After the four reviewed v0.1 commits and a clean worktree, a second complete
+bundle was created:
+
+```text
+Windows:
+C:\Users\lcy\code\ros2\voice_nav_robot_ws_backups\pre-rewrite-v01-20260730.bundle
+
+WSL:
+/mnt/c/Users/lcy/code/ros2/voice_nav_robot_ws_backups/pre-rewrite-v01-20260730.bundle
+
+size_bytes=1083754
+sha256=341FBF83EA6251B46D9F5E5A6BD0213572D5BE6D5D0115876D6B14C1D815FB9D
+```
+
+`git bundle verify` reported complete history with five refs, including
+pre-rewrite feature HEAD
+`cccd1ada1f523760eb3831cb1fc2ecf112f67e53`.
+
+The approved transformation was first run twice in disposable `/tmp` clones
+from that bundle using Ubuntu's `git-filter-repo 2.38.0`:
+
+```text
+git filter-repo \
+  --force \
+  --replace-refs delete-no-add \
+  --invert-paths \
+  --path build \
+  --path install \
+  --path log
+```
+
+The second isolated proof produced:
+
+```text
+before_head=cccd1ada1f523760eb3831cb1fc2ecf112f67e53
+after_head=e67dd93a717b000a7f49fbc7bb5222ab6d3325c6
+before_tree=28e722b28b742dd55d91cbe140a6eff83c971b3e
+after_tree=28e722b28b742dd55d91cbe140a6eff83c971b3e
+reachable_generated_paths=0
+replace_refs=0
+git_fsck=PASS
+```
+
+The isolated clean checkout then passed the full repository, model, build, and
+27-test WSL gate. Only after that proof was the identical transformation
+applied locally. Local HEAD and tree matched the isolated values, all three
+local branches were rewritten, `git fsck --full --strict` passed, and the
+reachable generated-path count remained zero. `filter-repo` removed the
+`origin` configuration as expected; it was restored to the audited SSH URL
+without fetching old objects.
 
 ## Remote and local baseline audit
 
