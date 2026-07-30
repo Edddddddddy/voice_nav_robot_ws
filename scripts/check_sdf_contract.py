@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the current native-DiffDrive teaching SDF structurally."""
+"""Validate the generated product SDF structurally."""
 
 from __future__ import annotations
 
@@ -12,45 +12,6 @@ from pathlib import Path
 
 class SdfContractError(ValueError):
     """The generated SDF does not match the current teaching checkpoint."""
-
-
-EXPECTED_PLUGIN_TEXT = {
-    "left_joint": "left_wheel_joint",
-    "right_joint": "right_wheel_joint",
-    "frame_id": "odom",
-    "child_frame_id": "base_footprint",
-}
-
-EXPECTED_PLUGIN_NUMBERS = {
-    "wheel_separation": 0.4,
-    "wheel_radius": 0.035,
-    "odom_publish_frequency": 50.0,
-    "min_linear_velocity": -0.20,
-    "max_linear_velocity": 0.40,
-    "min_angular_velocity": -1.20,
-    "max_angular_velocity": 1.20,
-    "min_linear_acceleration": -0.50,
-    "max_linear_acceleration": 0.50,
-    "min_angular_acceleration": -1.50,
-    "max_angular_acceleration": 1.50,
-}
-
-
-def required_text(parent: element_tree.Element, field: str) -> str:
-    value = parent.findtext(field)
-    if value is None or not value.strip():
-        raise SdfContractError(f"DiffDrive plugin is missing {field}")
-    return value.strip()
-
-
-def required_number(parent: element_tree.Element, field: str) -> float:
-    value = required_text(parent, field)
-    try:
-        return float(value)
-    except ValueError as error:
-        raise SdfContractError(
-            f"DiffDrive {field} must be numeric; found {value!r}"
-        ) from error
 
 
 def validate_sdf(sdf_path: Path) -> None:
@@ -69,31 +30,43 @@ def validate_sdf(sdf_path: Path) -> None:
         )
     model = matching_models[0]
 
-    plugins = [
+    native_plugins = [
         plugin
         for plugin in model.findall("./plugin")
         if plugin.get("filename") == "gz-sim-diff-drive-system"
+        or plugin.get("name") == "gz::sim::systems::DiffDrive"
     ]
-    if len(plugins) != 1:
+    if native_plugins:
         raise SdfContractError(
-            "expected exactly one model DiffDrive plugin with filename "
-            "gz-sim-diff-drive-system"
+            "native Gazebo DiffDrive plugin must not remain in product SDF"
         )
-    plugin = plugins[0]
 
-    for field, expected in EXPECTED_PLUGIN_TEXT.items():
-        actual = required_text(plugin, field)
-        if actual != expected:
-            raise SdfContractError(
-                f"{field} must be {expected!r}; found {actual!r}"
-            )
-
-    for field, expected in EXPECTED_PLUGIN_NUMBERS.items():
-        actual = required_number(plugin, field)
-        if not math.isclose(actual, expected, rel_tol=0.0, abs_tol=1e-9):
-            raise SdfContractError(
-                f"{field} must be {expected:g}; found {actual:g}"
-            )
+    control_plugins = [
+        plugin
+        for plugin in model.findall("./plugin")
+        if plugin.get("name")
+        == "gz_ros2_control::GazeboSimROS2ControlPlugin"
+    ]
+    if len(control_plugins) != 1:
+        raise SdfContractError(
+            "expected exactly one GazeboSimROS2ControlPlugin in product SDF"
+        )
+    control_plugin = control_plugins[0]
+    if control_plugin.get("filename") != "libgz_ros2_control-system.so":
+        raise SdfContractError(
+            "GazeboSimROS2ControlPlugin filename must be "
+            "libgz_ros2_control-system.so"
+        )
+    parameters = control_plugin.findtext("parameters")
+    if parameters is None or not parameters.strip():
+        raise SdfContractError(
+            "GazeboSimROS2ControlPlugin must receive a controller YAML path"
+        )
+    hold_joints = control_plugin.findtext("hold_joints")
+    if hold_joints is None or hold_joints.strip().lower() != "true":
+        raise SdfContractError(
+            "GazeboSimROS2ControlPlugin must hold unclaimed joints"
+        )
 
     caster_collisions = [
         collision

@@ -47,6 +47,7 @@ rosdep check --from-paths src --ignore-src
 
 echo "[3/5] Validating the robot model contract"
 robot_xacro="src/voice_nav_sim/urdf/voice_nav_robot.urdf.xacro"
+controllers_yaml="src/voice_nav_sim/config/controllers.yaml"
 robot_urdf="$(mktemp /tmp/voice-nav-model.XXXXXX.urdf)"
 robot_sdf="$(mktemp /tmp/voice-nav-model.XXXXXX.sdf)"
 
@@ -55,7 +56,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
-xacro "${robot_xacro}" > "${robot_urdf}"
+python3 scripts/check_control_contract.py \
+  --robot-description "${robot_xacro}" \
+  --controllers "${controllers_yaml}" \
+  --package src/voice_nav_sim/package.xml \
+  --cmake src/voice_nav_sim/CMakeLists.txt \
+  --launch src/voice_nav_sim/launch/simulation.launch.py
+
+xacro \
+  "${robot_xacro}" \
+  "controllers_file:=$(realpath "${controllers_yaml}")" \
+  > "${robot_urdf}"
 check_urdf "${robot_urdf}"
 gz sdf -p "${robot_urdf}" > "${robot_sdf}"
 python3 scripts/check_sdf_contract.py "${robot_sdf}"
