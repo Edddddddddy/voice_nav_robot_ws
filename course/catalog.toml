@@ -1,0 +1,43 @@
+schema_version = 1
+
+[[lessons]]
+id = "0001"
+slug = "bootstrap-workspace"
+status = "completed"
+lesson = "course/lessons/0001-bootstrap-workspace.md"
+record = "course/records/0001-selecting-ros-interfaces.md"
+
+[[lessons]]
+id = "0002"
+slug = "define-first-interfaces"
+status = "completed"
+lesson = "course/lessons/0002-define-first-interfaces.md"
+record = "course/records/0002-generating-custom-interfaces.md"
+
+[[lessons]]
+id = "0003"
+slug = "build-static-robot-model"
+status = "completed"
+lesson = "course/lessons/0003-build-static-robot-model.md"
+record = "course/records/0003-building-static-robot-tf.md"
+
+[[lessons]]
+id = "0004"
+slug = "spawn-physical-robot-in-gazebo"
+status = "completed"
+lesson = "course/lessons/0004-spawn-physical-robot-in-gazebo.md"
+record = "course/records/0004-simulating-a-stable-physical-robot.md"
+
+[[lessons]]
+id = "0005"
+slug = "drive-with-gazebo-diff-drive"
+status = "completed"
+lesson = "course/lessons/0005-drive-with-gazebo-diff-drive.md"
+record = "course/records/0005-driving-a-differential-robot-in-gazebo.md"
+
+[[lessons]]
+id = "0006"
+slug = "establish-engineering-baseline"
+status = "completed"
+lesson = "course/lessons/0006-establish-engineering-baseline.md"
+record = "course/records/0006-establishing-engineering-baseline.md"
