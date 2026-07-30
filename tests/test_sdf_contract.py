@@ -25,23 +25,10 @@ VALID_SDF = """\
         </surface>
       </collision>
     </link>
-    <plugin name="gz::sim::systems::DiffDrive"
-            filename="gz-sim-diff-drive-system">
-      <left_joint>left_wheel_joint</left_joint>
-      <right_joint>right_wheel_joint</right_joint>
-      <wheel_separation>0.4</wheel_separation>
-      <wheel_radius>0.035</wheel_radius>
-      <odom_publish_frequency>50</odom_publish_frequency>
-      <frame_id>odom</frame_id>
-      <child_frame_id>base_footprint</child_frame_id>
-      <min_linear_velocity>-0.20</min_linear_velocity>
-      <max_linear_velocity>0.40</max_linear_velocity>
-      <min_angular_velocity>-1.20</min_angular_velocity>
-      <max_angular_velocity>1.20</max_angular_velocity>
-      <min_linear_acceleration>-0.50</min_linear_acceleration>
-      <max_linear_acceleration>0.50</max_linear_acceleration>
-      <min_angular_acceleration>-1.50</min_angular_acceleration>
-      <max_angular_acceleration>1.50</max_angular_acceleration>
+    <plugin name="gz_ros2_control::GazeboSimROS2ControlPlugin"
+            filename="libgz_ros2_control-system.so">
+      <parameters>/tmp/controllers.yaml</parameters>
+      <hold_joints>true</hold_joints>
     </plugin>
   </model>
 </sdf>
@@ -66,34 +53,52 @@ class SdfContractTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("SDF contract passed", completed.stdout)
 
-    def test_matching_text_outside_diff_drive_plugin_does_not_pass(self) -> None:
+    def test_matching_text_outside_control_plugin_does_not_pass(self) -> None:
         invalid_sdf = VALID_SDF.replace(
-            '<plugin name="gz::sim::systems::DiffDrive"\n'
-            '            filename="gz-sim-diff-drive-system">',
+            '<plugin name="gz_ros2_control::GazeboSimROS2ControlPlugin"\n'
+            '            filename="libgz_ros2_control-system.so">',
             '<plugin name="other" filename="other-system">',
         ).replace(
             "</model>",
             "</model>\n"
             '  <world name="empty">\n'
-            '    <plugin name="decoy" filename="gz-sim-diff-drive-system"/>\n'
+            '    <plugin name="gz_ros2_control::'
+            'GazeboSimROS2ControlPlugin" '
+            'filename="libgz_ros2_control-system.so"/>\n'
             "  </world>",
         )
 
         completed = self.run_checker(invalid_sdf)
 
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("exactly one model DiffDrive plugin", completed.stderr)
+        self.assertIn(
+            "exactly one GazeboSimROS2ControlPlugin",
+            completed.stderr,
+        )
 
-    def test_wrong_controller_value_fails(self) -> None:
+    def test_wrong_control_plugin_filename_fails(self) -> None:
         completed = self.run_checker(
             VALID_SDF.replace(
-                "<wheel_radius>0.035</wheel_radius>",
-                "<wheel_radius>0.35</wheel_radius>",
+                'filename="libgz_ros2_control-system.so"',
+                'filename="wrong-control-system.so"',
             )
         )
 
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("wheel_radius must be 0.035", completed.stderr)
+        self.assertIn("filename must", completed.stderr)
+
+    def test_native_diff_drive_plugin_fails(self) -> None:
+        invalid_sdf = VALID_SDF.replace(
+            "</model>",
+            '<plugin name="gz::sim::systems::DiffDrive" '
+            'filename="gz-sim-diff-drive-system"/>\n'
+            "</model>",
+        )
+
+        completed = self.run_checker(invalid_sdf)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("native Gazebo DiffDrive", completed.stderr)
 
     def test_caster_friction_must_belong_to_caster_collision(self) -> None:
         completed = self.run_checker(

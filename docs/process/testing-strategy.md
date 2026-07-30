@@ -96,7 +96,10 @@ The quantitative acceptance criteria are:
   - maximum ≤ 300 ms.
 - From maximum configured speed, STOP causes odometry to enter the stationary tolerance within 1.2 seconds and remain there for 200 ms.
 - Killing MissionRuntime causes the independent MotionGate lease to expire and automatically select zero velocity.
-- Killing MotionGate causes `diff_drive_controller.cmd_vel_timeout` to stop the command within 0.35 seconds of simulation time.
+- Killing MotionGate causes `diff_drive_controller.cmd_vel_timeout` to select
+  zero on the first control update after 0.35 seconds of advancing simulation
+  time. The configured 100 Hz period gives the measurement one 10 ms
+  scheduling tolerance; physical stationarity is a separate assertion.
 - Candidate samples never renew Runtime authority; a test continues feeding
   valid-looking smoother output after killing Runtime and still observes Gate
   inhibition.

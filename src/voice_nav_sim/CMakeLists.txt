@@ -13,6 +13,7 @@ find_package(ament_cmake REQUIRED)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
+  find_package(launch_testing_ament_cmake REQUIRED)
   # the following line skips the linter which checks for copyrights
   # comment the line when a copyright and license is added to all source files
   set(ament_cmake_copyright_FOUND TRUE)
@@ -21,13 +22,21 @@ if(BUILD_TESTING)
   # a copyright and license is added to all source files
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+
+  add_launch_test(
+    test/test_simulation_control.py
+    TIMEOUT 120
+  )
 endif()
 
 install(
   DIRECTORY
+    config
     launch
     urdf
   DESTINATION share/${PROJECT_NAME}
+  PATTERN "__pycache__" EXCLUDE
+  PATTERN "*.pyc" EXCLUDE
 )
 
 ament_package()

@@ -72,18 +72,12 @@ diff_drive_controller:
     publish_rate: 50.0
     cmd_vel_timeout: 0.35
     publish_limited_velocity: true
+    linear.x.has_velocity_limits: true
     linear.x.max_velocity: 0.40
     linear.x.min_velocity: -0.20
-    linear.x.max_acceleration: 0.50
-    linear.x.max_deceleration: -0.50
-    linear.x.max_acceleration_reverse: -0.50
-    linear.x.max_deceleration_reverse: 0.50
+    angular.z.has_velocity_limits: true
     angular.z.max_velocity: 1.20
     angular.z.min_velocity: -1.20
-    angular.z.max_acceleration: 1.50
-    angular.z.max_deceleration: -1.50
-    angular.z.max_acceleration_reverse: -1.50
-    angular.z.max_deceleration_reverse: 1.50
 """
 
 VALID_PACKAGE = """\
@@ -94,14 +88,28 @@ VALID_PACKAGE = """\
   <buildtool_depend>ament_cmake</buildtool_depend>
   <exec_depend>controller_manager</exec_depend>
   <exec_depend>diff_drive_controller</exec_depend>
+  <exec_depend>gz_tools_vendor</exec_depend>
   <exec_depend>gz_ros2_control</exec_depend>
   <exec_depend>joint_state_broadcaster</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>ros2controlcli</exec_depend>
+  <exec_depend>rosgraph_msgs</exec_depend>
   <exec_depend>ros_gz_bridge</exec_depend>
   <exec_depend>ros_gz_sim</exec_depend>
+  <exec_depend>ruby</exec_depend>
   <exec_depend>xacro</exec_depend>
+  <test_depend>ament_index_python</test_depend>
+  <test_depend>controller_manager_msgs</test_depend>
+  <test_depend>geometry_msgs</test_depend>
+  <test_depend>launch_testing</test_depend>
+  <test_depend>launch_testing_ament_cmake</test_depend>
+  <test_depend>nav_msgs</test_depend>
+  <test_depend>python3-pytest</test_depend>
+  <test_depend>rclpy</test_depend>
+  <test_depend>sensor_msgs</test_depend>
+  <test_depend>tf2_msgs</test_depend>
 </package>
 """
 
@@ -112,7 +120,94 @@ install(
     launch
     urdf
   DESTINATION share/${PROJECT_NAME}
+  PATTERN "__pycache__" EXCLUDE
+  PATTERN "*.pyc" EXCLUDE
 )
+"""
+
+VALID_LAUNCH = """\
+from launch import LaunchDescription
+from launch.actions import ExecuteProcess, RegisterEventHandler, Shutdown
+from launch.event_handlers import OnProcessExit
+from launch.substitutions import FindExecutable, PathJoinSubstitution
+from launch_ros.actions import Node
+from launch_ros.substitutions import FindPackageShare
+
+
+def start_after_success(next_action, stage):
+    def handle_exit(event, _context):
+        if event.returncode == 0:
+            return [] if next_action is None else [next_action]
+        return [Shutdown(reason=f'{stage} failed')]
+    return handle_exit
+
+
+def generate_launch_description():
+    package_share = FindPackageShare('voice_nav_sim')
+    PathJoinSubstitution([package_share, 'config', 'controllers.yaml'])
+    gazebo = ExecuteProcess(
+        cmd=[
+            FindExecutable(name='ruby'),
+            FindExecutable(name='gz'),
+            'sim',
+        ],
+        on_exit=Shutdown(),
+    )
+    robot_state_publisher = Node(
+        package='robot_state_publisher',
+        executable='robot_state_publisher',
+        on_exit=Shutdown(),
+    )
+    clock_bridge = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        arguments=['/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock'],
+        on_exit=Shutdown(),
+    )
+    spawn_robot = Node(package='ros_gz_sim', executable='create')
+    joint_state_broadcaster_spawner = Node(
+        package='controller_manager',
+        executable='spawner',
+    )
+    diff_drive_controller_spawner = Node(
+        package='controller_manager',
+        executable='spawner',
+    )
+    first = RegisterEventHandler(
+        OnProcessExit(
+            target_action=spawn_robot,
+            on_exit=start_after_success(
+                joint_state_broadcaster_spawner,
+                'Robot spawn',
+            ),
+        )
+    )
+    second = RegisterEventHandler(
+        OnProcessExit(
+            target_action=joint_state_broadcaster_spawner,
+            on_exit=start_after_success(
+                diff_drive_controller_spawner,
+                'Joint-state broadcaster startup',
+            ),
+        )
+    )
+    third = RegisterEventHandler(
+        OnProcessExit(
+            target_action=diff_drive_controller_spawner,
+            on_exit=start_after_success(
+                None,
+                'Differential-drive controller startup',
+            ),
+        )
+    )
+    return LaunchDescription([
+        gazebo,
+        robot_state_publisher,
+        clock_bridge,
+        first,
+        second,
+        third,
+    ])
 """
 
 
@@ -123,6 +218,7 @@ class ControlContractTest(unittest.TestCase):
         controllers: str = VALID_CONTROLLERS,
         package: str = VALID_PACKAGE,
         cmake: str = VALID_CMAKE,
+        launch: str = VALID_LAUNCH,
     ) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -131,6 +227,7 @@ class ControlContractTest(unittest.TestCase):
                 "controllers.yaml": controllers,
                 "package.xml": package,
                 "CMakeLists.txt": cmake,
+                "simulation.launch.py": launch,
             }
             for filename, contents in files.items():
                 (root / filename).write_text(
@@ -149,6 +246,8 @@ class ControlContractTest(unittest.TestCase):
                     str(root / "package.xml"),
                     "--cmake",
                     str(root / "CMakeLists.txt"),
+                    "--launch",
+                    str(root / "simulation.launch.py"),
                 ],
                 check=False,
                 capture_output=True,
@@ -195,6 +294,14 @@ class ControlContractTest(unittest.TestCase):
                     / "src"
                     / "voice_nav_sim"
                     / "CMakeLists.txt"
+                ),
+                "--launch",
+                str(
+                    REPOSITORY_ROOT
+                    / "src"
+                    / "voice_nav_sim"
+                    / "launch"
+                    / "simulation.launch.py"
                 ),
             ],
             check=False,
@@ -271,6 +378,30 @@ class ControlContractTest(unittest.TestCase):
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("wheel_separation", completed.stderr)
 
+    def test_missing_direct_runtime_dependency_is_rejected(self) -> None:
+        package = VALID_PACKAGE.replace(
+            "  <exec_depend>gz_tools_vendor</exec_depend>\n",
+            "",
+        )
+
+        completed = self.run_checker(package=package)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("runtime dependencies", completed.stderr)
+        self.assertIn("gz_tools_vendor", completed.stderr)
+
+    def test_missing_direct_test_dependency_is_rejected(self) -> None:
+        package = VALID_PACKAGE.replace(
+            "  <test_depend>ament_index_python</test_depend>\n",
+            "",
+        )
+
+        completed = self.run_checker(package=package)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("test dependencies", completed.stderr)
+        self.assertIn("ament_index_python", completed.stderr)
+
     def test_fake_stamped_velocity_switch_is_rejected(self) -> None:
         controllers = VALID_CONTROLLERS + (
             "    enable_stamped_cmd_vel: true\n"
@@ -281,6 +412,91 @@ class ControlContractTest(unittest.TestCase):
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("Jazzy uses TwistStamped intrinsically", completed.stderr)
 
+    def test_controller_acceleration_limiter_is_rejected(self) -> None:
+        controllers = VALID_CONTROLLERS + (
+            "    linear.x.max_acceleration: 0.50\n"
+        )
+
+        completed = self.run_checker(controllers=controllers)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("would delay the consumer deadman zero", completed.stderr)
+
+    def test_velocity_limit_disable_switch_is_rejected(self) -> None:
+        controllers = VALID_CONTROLLERS.replace(
+            "linear.x.has_velocity_limits: true",
+            "linear.x.has_velocity_limits: false",
+        )
+
+        completed = self.run_checker(controllers=controllers)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("has_velocity_limits", completed.stderr)
+
+    def test_shell_owned_gazebo_is_rejected(self) -> None:
+        launch = VALID_LAUNCH.replace(
+            "on_exit=Shutdown(),",
+            "shell=True,\n        on_exit=Shutdown(),",
+        )
+
+        completed = self.run_checker(launch=launch)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("shell execution must stay disabled", completed.stderr)
+
+    def test_sleep_ordered_controller_startup_is_rejected(self) -> None:
+        launch = VALID_LAUNCH.replace(
+            "return LaunchDescription",
+            "TimerAction(period=5.0, actions=[])\n    return LaunchDescription",
+        )
+
+        completed = self.run_checker(launch=launch)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("process events, not TimerAction", completed.stderr)
+
+    def test_non_clock_bridge_is_rejected(self) -> None:
+        launch = VALID_LAUNCH.replace(
+            "arguments=['/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock'],",
+            (
+                "arguments=[\n"
+                "            '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',\n"
+                "            '/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist',\n"
+                "        ],"
+            ),
+        )
+
+        completed = self.run_checker(launch=launch)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("contain only /clock", completed.stderr)
+
+    def test_unconditional_controller_startup_is_rejected(self) -> None:
+        launch = VALID_LAUNCH.replace(
+            (
+                "on_exit=start_after_success(\n"
+                "                joint_state_broadcaster_spawner,\n"
+                "                'Robot spawn',\n"
+                "            ),"
+            ),
+            "on_exit=[joint_state_broadcaster_spawner],",
+        ).replace(
+            (
+                "on_exit=start_after_success(\n"
+                "                diff_drive_controller_spawner,\n"
+                "                'Joint-state broadcaster startup',\n"
+                "            ),"
+            ),
+            "on_exit=[diff_drive_controller_spawner],",
+        )
+
+        completed = self.run_checker(launch=launch)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "all three startup transitions must be return-code guarded",
+            completed.stderr,
+        )
 
 if __name__ == "__main__":
     unittest.main()

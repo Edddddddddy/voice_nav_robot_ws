@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import math
 import re
 import sys
@@ -15,17 +16,34 @@ class ControlContractError(ValueError):
     """The checked control-stack artifact violates the stable contract."""
 
 
-EXPECTED_DEPENDENCIES = {
+EXPECTED_RUNTIME_DEPENDENCIES = {
     "controller_manager",
     "diff_drive_controller",
+    "gz_tools_vendor",
     "gz_ros2_control",
     "joint_state_broadcaster",
     "launch",
     "launch_ros",
     "robot_state_publisher",
+    "ros2controlcli",
+    "rosgraph_msgs",
     "ros_gz_bridge",
     "ros_gz_sim",
+    "ruby",
     "xacro",
+}
+
+EXPECTED_TEST_DEPENDENCIES = {
+    "ament_index_python",
+    "controller_manager_msgs",
+    "geometry_msgs",
+    "launch_testing",
+    "launch_testing_ament_cmake",
+    "nav_msgs",
+    "python3-pytest",
+    "rclpy",
+    "sensor_msgs",
+    "tf2_msgs",
 }
 
 EXPECTED_PARAMETERS: dict[tuple[str, ...], object] = {
@@ -139,6 +157,11 @@ EXPECTED_PARAMETERS: dict[tuple[str, ...], object] = {
     (
         "diff_drive_controller",
         "ros__parameters",
+        "linear.x.has_velocity_limits",
+    ): True,
+    (
+        "diff_drive_controller",
+        "ros__parameters",
         "linear.x.max_velocity",
     ): 0.4,
     (
@@ -149,23 +172,8 @@ EXPECTED_PARAMETERS: dict[tuple[str, ...], object] = {
     (
         "diff_drive_controller",
         "ros__parameters",
-        "linear.x.max_acceleration",
-    ): 0.5,
-    (
-        "diff_drive_controller",
-        "ros__parameters",
-        "linear.x.max_deceleration",
-    ): -0.5,
-    (
-        "diff_drive_controller",
-        "ros__parameters",
-        "linear.x.max_acceleration_reverse",
-    ): -0.5,
-    (
-        "diff_drive_controller",
-        "ros__parameters",
-        "linear.x.max_deceleration_reverse",
-    ): 0.5,
+        "angular.z.has_velocity_limits",
+    ): True,
     (
         "diff_drive_controller",
         "ros__parameters",
@@ -176,31 +184,22 @@ EXPECTED_PARAMETERS: dict[tuple[str, ...], object] = {
         "ros__parameters",
         "angular.z.min_velocity",
     ): -1.2,
-    (
-        "diff_drive_controller",
-        "ros__parameters",
-        "angular.z.max_acceleration",
-    ): 1.5,
-    (
-        "diff_drive_controller",
-        "ros__parameters",
-        "angular.z.max_deceleration",
-    ): -1.5,
-    (
-        "diff_drive_controller",
-        "ros__parameters",
-        "angular.z.max_acceleration_reverse",
-    ): -1.5,
-    (
-        "diff_drive_controller",
-        "ros__parameters",
-        "angular.z.max_deceleration_reverse",
-    ): 1.5,
 }
 
-FORBIDDEN_PARAMETERS = {
+FORBIDDEN_STAMPED_PARAMETERS = {
     "enable_stamped_cmd_vel",
     "use_stamped_vel",
+}
+
+FORBIDDEN_CONTROLLER_ACCELERATION_PARAMETERS = {
+    "linear.x.max_acceleration",
+    "linear.x.max_deceleration",
+    "linear.x.max_acceleration_reverse",
+    "linear.x.max_deceleration_reverse",
+    "angular.z.max_acceleration",
+    "angular.z.max_deceleration",
+    "angular.z.max_acceleration_reverse",
+    "angular.z.max_deceleration_reverse",
 }
 
 
@@ -431,11 +430,22 @@ def values_equal(actual: object, expected: object) -> bool:
 def validate_controller_parameters(path: Path) -> None:
     values = parse_parameter_paths(path)
     leaf_names = {parameter_path[-1] for parameter_path in values}
-    forbidden = sorted(FORBIDDEN_PARAMETERS & leaf_names)
-    if forbidden:
+    forbidden_stamped = sorted(
+        FORBIDDEN_STAMPED_PARAMETERS & leaf_names
+    )
+    if forbidden_stamped:
         raise ControlContractError(
             "Jazzy uses TwistStamped intrinsically; remove unsupported "
-            f"parameter(s): {', '.join(forbidden)}"
+            f"parameter(s): {', '.join(forbidden_stamped)}"
+        )
+    forbidden_acceleration = sorted(
+        FORBIDDEN_CONTROLLER_ACCELERATION_PARAMETERS & leaf_names
+    )
+    if forbidden_acceleration:
+        raise ControlContractError(
+            "diff_drive_controller acceleration limiting would delay the "
+            "consumer deadman zero; velocity smoothing belongs upstream: "
+            + ", ".join(forbidden_acceleration)
         )
     for parameter_path, expected in EXPECTED_PARAMETERS.items():
         if parameter_path not in values:
@@ -454,7 +464,7 @@ def validate_controller_parameters(path: Path) -> None:
 
 def validate_package(path: Path) -> None:
     root = parse_xml(path)
-    dependencies = {
+    runtime_dependencies = {
         (element.text or "").strip()
         for element in root
         if local_name(element.tag) in {
@@ -464,11 +474,27 @@ def validate_package(path: Path) -> None:
             "buildtool_depend",
         }
     }
-    missing = sorted(EXPECTED_DEPENDENCIES - dependencies)
-    if missing:
+    missing_runtime = sorted(
+        EXPECTED_RUNTIME_DEPENDENCIES - runtime_dependencies
+    )
+    if missing_runtime:
         raise ControlContractError(
-            "voice_nav_sim is missing declared dependencies: "
-            + ", ".join(missing)
+            "voice_nav_sim is missing declared runtime dependencies: "
+            + ", ".join(missing_runtime)
+        )
+
+    test_dependencies = runtime_dependencies | {
+        (element.text or "").strip()
+        for element in root
+        if local_name(element.tag) == "test_depend"
+    }
+    missing_test = sorted(
+        EXPECTED_TEST_DEPENDENCIES - test_dependencies
+    )
+    if missing_test:
+        raise ControlContractError(
+            "voice_nav_sim is missing declared test dependencies: "
+            + ", ".join(missing_test)
         )
 
 
@@ -476,7 +502,7 @@ def validate_cmake(path: Path) -> None:
     cmake = read_text(path)
     install_match = re.search(
         r"install\s*\(\s*DIRECTORY(?P<body>.*?)"
-        r"DESTINATION\s+share/\$\{PROJECT_NAME\}\s*\)",
+        r"DESTINATION\s+share/\$\{PROJECT_NAME\}(?P<tail>.*?)\)",
         cmake,
         flags=re.DOTALL,
     )
@@ -493,6 +519,177 @@ def validate_cmake(path: Path) -> None:
         raise ControlContractError(
             "CMake install is missing directories: " + ", ".join(missing)
         )
+    install_tail = install_match.group("tail")
+    if (
+        'PATTERN "__pycache__" EXCLUDE' not in install_tail
+        or 'PATTERN "*.pyc" EXCLUDE' not in install_tail
+    ):
+        raise ControlContractError(
+            "CMake must exclude Python bytecode from installed package shares"
+        )
+
+
+def call_name(call: ast.Call) -> str:
+    function = call.func
+    if isinstance(function, ast.Name):
+        return function.id
+    if isinstance(function, ast.Attribute):
+        return function.attr
+    return ""
+
+
+def keyword_value(call: ast.Call, name: str) -> ast.expr | None:
+    for keyword in call.keywords:
+        if keyword.arg == name:
+            return keyword.value
+    return None
+
+
+def literal_string(node: ast.expr | None) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
+def node_package(call: ast.Call) -> str | None:
+    return literal_string(keyword_value(call, "package"))
+
+
+def validate_launch(path: Path) -> None:
+    source = read_text(path)
+    try:
+        tree = ast.parse(source, filename=str(path))
+    except SyntaxError as error:
+        raise ControlContractError(
+            f"cannot parse launch source {path}: {error}"
+        ) from error
+
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+    ]
+    execute_processes = [
+        call for call in calls if call_name(call) == "ExecuteProcess"
+    ]
+    if not execute_processes:
+        raise ControlContractError(
+            "launch must own Gazebo through ExecuteProcess"
+        )
+    for process in execute_processes:
+        shell = keyword_value(process, "shell")
+        if shell is not None and not (
+            isinstance(shell, ast.Constant) and shell.value is False
+        ):
+            raise ControlContractError(
+                "Gazebo shell execution must stay disabled because a shell "
+                "can exit without terminating its child process"
+            )
+        if keyword_value(process, "on_exit") is None:
+            raise ControlContractError(
+                "every Gazebo ExecuteProcess must shut down the launch on exit"
+            )
+
+    if any(call_name(call) == "TimerAction" for call in calls):
+        raise ControlContractError(
+            "controller startup must use process events, not TimerAction sleeps"
+        )
+
+    launch_nodes = [
+        call for call in calls if call_name(call) == "Node"
+    ]
+    forbidden_packages = {
+        "joint_state_publisher",
+        "rviz2",
+    }
+    present_forbidden = sorted(
+        {
+            package
+            for call in launch_nodes
+            if (package := node_package(call)) in forbidden_packages
+        }
+    )
+    if present_forbidden:
+        raise ControlContractError(
+            "simulation launch must not start: "
+            + ", ".join(present_forbidden)
+        )
+
+    bridge_nodes = [
+        call
+        for call in launch_nodes
+        if node_package(call) == "ros_gz_bridge"
+    ]
+    if len(bridge_nodes) != 1:
+        raise ControlContractError(
+            "launch must contain exactly one ros_gz_bridge node"
+        )
+    if keyword_value(bridge_nodes[0], "on_exit") is None:
+        raise ControlContractError(
+            "clock bridge exit must shut down the simulation"
+        )
+    bridge_arguments = keyword_value(bridge_nodes[0], "arguments")
+    if not isinstance(bridge_arguments, (ast.List, ast.Tuple)):
+        raise ControlContractError(
+            "bridge arguments must be a static allowlist"
+        )
+    bridge_entries = [
+        literal_string(entry) for entry in bridge_arguments.elts
+    ]
+    if len(bridge_entries) != 1 or not (
+        bridge_entries[0] or ""
+    ).startswith("/clock@"):
+        raise ControlContractError(
+            "Lesson 0007 bridge allowlist must contain only /clock"
+        )
+
+    state_publishers = [
+        call
+        for call in launch_nodes
+        if node_package(call) == "robot_state_publisher"
+    ]
+    if len(state_publishers) != 1 or keyword_value(
+        state_publishers[0],
+        "on_exit",
+    ) is None:
+        raise ControlContractError(
+            "robot_state_publisher exit must shut down the simulation"
+        )
+
+    source_requirements = {
+        "FindPackageShare": "launch paths must resolve from package share",
+        "FindExecutable(name='gz')": "launch must resolve the gz executable",
+        "FindExecutable(name='ruby')": (
+            "launch must invoke the gz Ruby wrapper without a shell"
+        ),
+        "target_action=spawn_robot": (
+            "joint-state broadcaster must wait for entity creation"
+        ),
+        "target_action=joint_state_broadcaster_spawner": (
+            "drive controller must wait for the joint-state broadcaster"
+        ),
+        "target_action=diff_drive_controller_spawner": (
+            "drive-controller startup failure must stop the launch"
+        ),
+        "event.returncode": (
+            "startup event handlers must inspect child return codes"
+        ),
+        "on_exit=start_after_success(": (
+            "controller stages must stop launch after a predecessor failure"
+        ),
+    }
+    for fragment, error_message in source_requirements.items():
+        if fragment not in source:
+            raise ControlContractError(error_message)
+    if source.count("on_exit=start_after_success(") != 3:
+        raise ControlContractError(
+            "all three startup transitions must be return-code guarded"
+        )
+
+    if re.search(r"(?i)(?:[a-z]:[\\/]|/home/|/mnt/[a-z]/)", source):
+        raise ControlContractError(
+            "launch source must not contain machine-specific absolute paths"
+        )
 
 
 def validate_contract(
@@ -500,11 +697,13 @@ def validate_contract(
     controllers: Path,
     package: Path,
     cmake: Path,
+    launch: Path,
 ) -> None:
     validate_robot_description(robot_description)
     validate_controller_parameters(controllers)
     validate_package(package)
     validate_cmake(cmake)
+    validate_launch(launch)
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -513,6 +712,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--controllers", required=True, type=Path)
     parser.add_argument("--package", required=True, type=Path)
     parser.add_argument("--cmake", required=True, type=Path)
+    parser.add_argument("--launch", required=True, type=Path)
     return parser.parse_args()
 
 
@@ -524,6 +724,7 @@ def main() -> int:
             arguments.controllers,
             arguments.package,
             arguments.cmake,
+            arguments.launch,
         )
     except ControlContractError as error:
         print(f"Control contract failed: {error}", file=sys.stderr)

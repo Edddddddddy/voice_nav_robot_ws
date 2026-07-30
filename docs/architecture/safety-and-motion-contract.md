@@ -44,14 +44,23 @@ Nav2 or relative-motion candidate
   -> gz_ros2_control / Gazebo wheel joints
 ```
 
-The complete chain uses `geometry_msgs/msg/TwistStamped`. Jazzy configuration
-sets `enable_stamped_cmd_vel=true` explicitly.
+The complete chain uses `geometry_msgs/msg/TwistStamped`. The pinned Jazzy
+`diff_drive_controller` Interface intrinsically subscribes to that type; it
+has no `enable_stamped_cmd_vel` switch. Configuration and contract tests reject
+that fictitious parameter and the obsolete demo-only `use_stamped_vel` key.
 
 There is no `twist_mux`. The single Mission execution slot already determines
 the active source, so a second priority and ownership model would be
 ambiguous. The velocity smoother only conditions acceleration and velocity.
 Collision Monitor is a protective collision-avoidance layer, not a certified
 emergency-stop system. Neither replaces MotionGate.
+
+`diff_drive_controller` enforces the final hard linear/angular velocity bounds,
+but its acceleration and deceleration limit parameters remain unset. Applying
+a second acceleration limiter there would make `cmd_vel_timeout` begin a ramp
+instead of selecting zero on the first controller update after expiry.
+`nav2_velocity_smoother` owns normal acceleration shaping upstream; command
+zero latency and physical stationarity remain separate measurements.
 
 `ros_gz_bridge` bridges only `/clock` and `/scan` in the target product path.
 Velocity commands, joint state, odometry, and TF remain in ROS 2 control.
