@@ -1,0 +1,87 @@
+name: Bug report
+description: Report reproducible incorrect or unsafe behavior.
+title: "[Bug] "
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the incorrect behavior and its user-visible impact.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include commit, WSL/Ubuntu version, ROS distribution, Gazebo version, and relevant model/configuration versions.
+      placeholder: |
+        Commit:
+        Host / WSL:
+        Ubuntu:
+        ROS:
+        Gazebo:
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest deterministic sequence that reproduces the problem.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: Paste the shortest relevant log excerpt, test failure, topic sample, or screenshot. Remove secrets and private audio.
+      render: shell
+
+  - type: dropdown
+    id: safety
+    attributes:
+      label: Safety impact
+      options:
+        - None observed
+        - Robot failed to stop or cancel
+        - Unexpected motion
+        - Motion limits or gate were bypassed
+        - Unknown
+    validations:
+      required: true
+
+  - type: textarea
+    id: regression
+    attributes:
+      label: Last known good version
+      description: If this is a regression, identify the last commit or release where it worked.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Reporter checks
+      options:
+        - label: I reproduced this from a clean workspace or documented why I could not.
+          required: true
+        - label: I removed credentials, private recordings, maps, bags, and model weights.
+          required: true
