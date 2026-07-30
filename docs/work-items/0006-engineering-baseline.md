@@ -1,6 +1,6 @@
 # VN-0006: Establish an auditable engineering baseline
 
-**Status:** In Progress
+**Status:** Done
 
 ## Goal
 
@@ -23,12 +23,12 @@ with explicit development, quality, testing, architecture, and release rules.
 - [x] Native Gazebo DiffDrive trade-off is recorded as an ADR.
 - [x] One local verification command covers dependency, model, build, and test
   checks.
-- [ ] `build/`, `install/`, and `log/` are no longer tracked by Git.
-- [ ] The three local generated directories still exist after index cleanup.
-- [ ] Meaningful source, course, and governance changes are committed
+- [x] `build/`, `install/`, and `log/` are no longer tracked by Git.
+- [x] The three local generated directories still exist after index cleanup.
+- [x] Meaningful source, course, and governance changes are committed
   separately.
-- [ ] The full verification command passes.
-- [ ] A remote host and visibility are selected before push or hosted CI setup.
+- [x] The full verification command passes.
+- [x] A remote host and visibility are selected before push or hosted CI setup.
 
 ## Risks and rollback
 
