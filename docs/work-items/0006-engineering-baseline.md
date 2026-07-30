@@ -62,19 +62,26 @@ with explicit development, quality, testing, architecture, and release rules.
 
 Completed and closed on 2026-07-30.
 
-- Closure commit:
-  `bd93dffcd8936182821daad89761a752a0dd0447`
+- Stable public closure commit after the approved v0.1 history cleanup:
+  `a9ac21fa54de9ce69dd19d5cc6eaf65de7251ffb`
   (`docs(work-item): close engineering baseline`).
+- Original pre-rewrite closure commit:
+  `bd93dffcd8936182821daad89761a752a0dd0447`. It remains recoverable from the
+  verified external bundles; VN-0007 records the complete old-to-new mapping.
 - The closure review recorded the full `bash scripts/verify.sh` criterion as
   passed. Generated colcon logs were intentionally not committed.
 - Read-only re-audit on 2026-07-30:
   - `git ls-files build install log` returned zero tracked files;
   - local `build/`, `install/`, and `log/` directories all still existed;
-  - `c402fd0` established clean workspace boundaries;
-  - `46b6d2f` recorded the physical simulation implementation;
-  - `a9747d4` recorded course and learning evidence;
-  - `14b82e1` established governance;
-  - `dbaefad` completed package maintainer and description metadata;
-  - `bd93dff` closed VN-0006.
+  - public `2855943` / pre-rewrite `c402fd0` established clean workspace
+    boundaries;
+  - public `e1dc36c` / pre-rewrite `46b6d2f` recorded the physical simulation
+    implementation;
+  - public `eef682f` / pre-rewrite `a9747d4` recorded course and learning
+    evidence;
+  - public `2cf50e7` / pre-rewrite `14b82e1` established governance;
+  - public `08fd6e3` / pre-rewrite `dbaefad` completed package maintainer and
+    description metadata;
+  - public `a9ac21f` / pre-rewrite `bd93dff` closed VN-0006.
 - The later addition of `origin` does not change the historical non-goal:
   hosted CI and branch protection were not part of VN-0006.

@@ -55,6 +55,11 @@ Every release is created only after all of the following are complete:
 - no unresolved critical motion, data-loss, privacy, or license issue remains;
 - the milestone-specific automated and bounded manual acceptance evidence is recorded.
 
+The milestone Work Item closes once those facts and release eligibility are
+recorded on reviewed `main`. Tagging and GitHub Release creation are the
+subsequent release operation, not an acceptance checkbox that would make Work
+Item closure depend on an artifact that policy forbids creating beforehand.
+
 The release is then created from reviewed `main` as:
 
 1. an immutable annotated Git tag using the full SemVer version;

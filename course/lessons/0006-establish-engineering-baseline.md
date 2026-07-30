@@ -6,7 +6,13 @@ Lesson 0006 · 目标时间 40–60 分钟
 
 本课暂不添加 ROS bridge。工程基线一旦建立，后续每一课都按 Work Item、短分支、测试、文档、评审和提交的同一流程推进。先阅读 [工程变更生命周期](../../docs/process/change-lifecycle.md) 和仓库的 [CONTRIBUTING.md](../../CONTRIBUTING.md)。
 
-> 历史课程说明：本课记录的是 `chore/0006-engineering-baseline` 分支上的净化过程。课程目录随后在 v0.1 中迁移到 `course/**`；这里保留原始命令，便于从 Lesson 0006 的 start checkpoint 复现。
+> 历史/复盘课程说明：本课记录的是
+> `chore/0006-engineering-baseline` 分支当时完成的净化过程，不再提供
+> 可重放的 start tag。v0.1 随后按批准方案清除了全部可达历史中的
+> `build/install/log`，因此包含 1139 个生成物的精确旧树只存在于仓库外
+> 的校验 bundle。不要在当前 checkout 重新执行本课的破坏性 index
+> 清理命令。Lesson 0001–0006 是明确的历史例外；从 Lesson 0007 开始才
+> 严格提供 `course/NNNN-start` 与 `course/NNNN-solution`。
 
 ## 1. 理解当前问题
 
@@ -39,6 +45,17 @@ sed -n '1,240p' docs/testing-strategy.md
 
 当前分支必须是 `chore/0006-engineering-baseline`。如果文档描述的实际状态、依赖方向或规则与你理解不一致，先问教师，不要为了完成清单而接受错误文档。
 
+上面是当时 checkout 中真实存在的路径。v0.1 迁移后的当前路径对照为：
+
+| Lesson 0006 历史路径 | 当前路径 |
+| --- | --- |
+| `docs/architecture.md` | `docs/architecture/overview.md` |
+| `docs/quality-policy.md` | `docs/process/quality-policy.md` |
+| `docs/testing-strategy.md` | `docs/process/testing-strategy.md` |
+
+复盘当前仓库时读右列；恢复 bundle 中的 Lesson 0006 checkpoint 时读左列，
+不要把两套路径拼成一个从未存在过的 checkout。
+
 ## 3. 只停止跟踪生成物，不删除本地文件
 
 操作前先取得基线：
@@ -51,14 +68,17 @@ test -d install && echo "install exists"
 test -d log     && echo "log exists"
 ```
 
-第一条预期为 `1139`。随后执行：
+在原始历史 checkpoint 中，第一条预期为 `1139`。以下命令只用于理解
+当时的操作，**不得在当前净化后的 checkout 重跑**：
 
 ```
 git rm -r -f --cached --ignore-unmatch -- \
   build install log
 ```
 
-**关键区别：** `--cached` 只从 Git index 移除，工作区文件仍保留。不要运行省略 `--cached` 的命令。
+**关键区别：** `--cached` 只从 Git index 移除，工作区文件仍保留。
+不要运行省略 `--cached` 的命令。当前仓库已经完成清理，学习者只需
+审计 `git ls-files build install log` 没有输出。
 
 立即验证：
 
@@ -167,7 +187,8 @@ bash scripts/verify.sh
 
 ## 7. 本课之后的外部操作
 
-Lesson 0006 当时不执行远程写和历史重写，因为它们会改变协作边界。学习者随后明确选择了 GitHub 公开仓库，配置 maintainer 为 `Edddddddddy <983166955@qq.com>`，并在后续 v0.1 Work Item 中单独完成 CI、分支保护与历史净化。不要把这些高影响操作塞进清理生成物的同一个提交。
+Lesson 0006 当时不执行远程写和历史重写，因为它们会改变协作边界。学习者随后明确选择了 GitHub 公开仓库，配置 maintainer 为 `Edddddddddy <983166955@qq.com>`，并在后续 v0.1 Work Item 中单独完成 CI、分支保护与历史净化。原始身份、重写身份和恢复 bundle 的映射记录在
+[VN-0007](../../docs/work-items/0007-v01-foundation.md)。不要把这些高影响操作塞进清理生成物的同一个提交，也不要把本课当成当前仓库的清理脚本执行。
 
 **验收：** 源码仓库不再跟踪 colcon 生成物；本地生成物未被删除；分支与四个提交职责清晰；统一门禁通过；能够解释 Work Item、Commit、Release 和 ADR 的不同职责。
 

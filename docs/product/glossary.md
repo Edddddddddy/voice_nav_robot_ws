@@ -37,7 +37,9 @@ _Avoid_: AMCL mode, online switch state
 
 **Motion Gate**:
 The independent final-velocity authority implemented by `motion_gate_node`; it
-enforces admission epoch, limits, the 250 ms lease, lock, and zero output.
+enforces the Runtime-bound 250 ms authority lease, current candidate data-plane
+binding, candidate freshness, limits, inhibition, and zero output. Raw velocity
+samples never renew authority.
 _Avoid_: Mission scheduler, LLM controller, Gazebo controller
 
 **Operational Stop (运行停止)**:

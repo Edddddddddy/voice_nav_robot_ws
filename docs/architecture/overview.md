@@ -85,8 +85,9 @@ velocity and does not import Nav2 or Gazebo types.
   `/mission/state`, public `StopMission.srv`, whole-plan Guard, single-slot
   admission, terminal-intent linearization, workflows, source selection, Nav2,
   relative motion, and map saving;
-- `motion_gate_node`: package-private control seam, final authorization, 250 ms
-  lease, lock, limits, zero output, and sole final velocity publication.
+- `motion_gate_node`: package-private control seam, Runtime-renewed 250 ms
+  authority lease, per-lease candidate binding/freshness, lock, limits, zero
+  output, and sole final velocity publication.
 
 The caller learns one execution operation, one stop operation, and one state
 snapshot. Internal complexity remains local to one package while separate

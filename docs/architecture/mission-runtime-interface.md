@@ -179,8 +179,13 @@ physically stopped; odometry proves stationarity separately.
 - Named Places, limits, mode, Gate health, and downstream readiness are one
   immutable admission snapshot.
 - Steps execute strictly in order; the first failure skips the remainder.
-- All downstream callbacks carry generation and epoch identity; late callbacks
-  cannot advance a new Mission or renew a Gate lease.
+- Typed dependency callbacks are bound to Runtime, epoch, Mission, and step
+  generation and cannot advance a newer Mission. Raw `TwistStamped` samples do
+  not carry those identities; their isolation uses a recreated per-lease data
+  plane and writer-GID binding.
+- Only Runtime's private control heartbeat renews MotionGate authority. No
+  dependency callback or velocity sample can renew, reopen, or resurrect a
+  lease.
 - Timeout, cancel, STOP, dependency loss, exception, and success all pass
   through one serial terminal-intent linearization point.
 - Every Goal produces exactly one Result.
