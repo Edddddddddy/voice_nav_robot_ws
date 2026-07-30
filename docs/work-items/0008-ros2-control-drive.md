@@ -1,9 +1,12 @@
 # VN-0008: Migrate the simulation drive path to ros2_control
 
-**Status:** In Progress
+**Status:** In Review
 
 **GitHub Issue:**
 [#5](https://github.com/Edddddddddy/voice_nav_robot_ws/issues/5)
+
+**GitHub PR:**
+[#6](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/6)
 
 **Branch:** `feat/vn-0008-l0007-ros2-control-drive`
 
@@ -221,8 +224,9 @@ These local apt versions are environment evidence, not a substitute for
 declaring package dependencies and verifying a clean CI resolution.
 
 The green implementation evidence follows. The implementation commit is
-`ed621353c6ab4c3544a29b5763106a63539833d9`; PR, hosted-CI, public merge, and
-solution-tag evidence remain pending.
+`ed621353c6ab4c3544a29b5763106a63539833d9`. PR
+[#6](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/6) is open;
+hosted-CI, public merge, and solution-tag evidence remain pending.
 
 ### Local implementation and integration evidence
 
@@ -270,5 +274,5 @@ controller-computed odometry as physical ground truth. All launch-owned
 processes exited cleanly, and a post-run process audit found no simulator or
 ROS graph residue.
 
-PR, hosted CI, public merge, and solution tag are recorded in the next evidence
+Hosted CI, public merge, and solution tag are recorded in the next evidence
 updates.
