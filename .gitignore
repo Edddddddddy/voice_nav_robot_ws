@@ -1,0 +1,41 @@
+# ROS 2 / colcon generated workspaces
+/build/
+/install/
+/log/
+/.colcon/
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# IDE and operating-system state
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Runtime evidence and private/local data
+/artifacts/
+/bags/
+/recordings/
+*.db3
+*.mcap
+
+# Large local model weights are obtained from a versioned manifest, not Git
+/models/weights/
+*.gguf
+*.onnx
