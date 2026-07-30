@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VoiceNav Robot：URDF 物理属性速查</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+    <style>
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        background: var(--panel);
+      }
+
+      th,
+      td {
+        padding: 12px;
+        border: 1px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+      }
+
+      th {
+        color: var(--accent);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>URDF 物理属性速查</h1>
+      <p class="subtitle">VoiceNav Robot reference</p>
+
+      <h2>一个 link 的三种描述</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>元素</th>
+            <th>回答的问题</th>
+            <th>常见错误</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>visual</code></td>
+            <td>人看见什么？</td>
+            <td>把好看的复杂网格同时拿去做碰撞。</td>
+          </tr>
+          <tr>
+            <td><code>collision</code></td>
+            <td>物体在哪里接触和阻挡？</td>
+            <td>漏写后模型会穿过地面或其他物体。</td>
+          </tr>
+          <tr>
+            <td><code>inertial</code></td>
+            <td>质量、质心和转动惯量是多少？</td>
+            <td>质量或惯量为零、数量级不合理、质心落在支撑面外。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>
+        三者的 <code>origin</code> 都相对当前 link frame，但可以不同。
+        例如底盘外形保持居中，内部电池却可让质心稍微后移。
+      </p>
+
+      <h2>本项目用到的惯量公式</h2>
+      <p>
+        下式都以物体质心为原点，<code>m</code> 为质量，
+        <code>r</code> 为半径，<code>h</code> 为 z 轴圆柱长度，
+        <code>w</code> 为 y 轴轮子的宽度。
+      </p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>形状与轴向</th>
+            <th>主惯量</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>实心圆柱，轴沿 z（底盘、雷达）</td>
+            <td>
+              <code>Ixx = Iyy = m(3r²+h²)/12</code><br />
+              <code>Izz = mr²/2</code>
+            </td>
+          </tr>
+          <tr>
+            <td>实心圆柱，轴沿 y（左右轮）</td>
+            <td>
+              <code>Iyy = mr²/2</code><br />
+              <code>Ixx = Izz = m(3r²+w²)/12</code>
+            </td>
+          </tr>
+          <tr>
+            <td>实心球（万向支撑轮）</td>
+            <td><code>Ixx = Iyy = Izz = 2mr²/5</code></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>稳定性检查</h2>
+      <ul>
+        <li>所有质量和对角惯量必须大于零，且不能用极小值糊弄解析器。</li>
+        <li>
+          主惯量还必须满足三角不等式：
+          <code>Ixx + Iyy ≥ Izz</code>、
+          <code>Ixx + Izz ≥ Iyy</code>、
+          <code>Iyy + Izz ≥ Ixx</code>。
+        </li>
+        <li>对称基本形状的 <code>ixy</code>、<code>ixz</code>、<code>iyz</code> 可取 0。</li>
+        <li>整车质心在地面的投影应位于轮子接触点围成的支撑多边形内。</li>
+        <li>本车驱动轮轴位于 x=0、caster 位于 x&lt;0，因此主车身质心应略偏向 x&lt;0。</li>
+        <li><code>base_footprint</code> 只是坐标 frame，不是实体，不为它伪造质量或碰撞体。</li>
+      </ul>
+
+      <p>启动 Gazebo 前可用下面的命令做快速物理解析检查：</p>
+      <pre><code>gz sdf -p /tmp/voice_nav_robot/model.urdf \
+  &gt; /tmp/voice_nav_robot/model.sdf</code></pre>
+      <p>命令应安静退出并返回 0；<code>check_urdf</code> 通过不代表惯量一定物理有效。</p>
+
+      <p>
+        依据：
+        <a href="https://docs.ros.org/en/humble/Tutorials/Intermediate/URDF/Adding-Physical-and-Collision-Properties-to-a-URDF-Model.html"
+          >ROS 2：Adding physical and collision properties to a URDF model</a
+        >。
+      </p>
+    </main>
+  </body>
+</html>

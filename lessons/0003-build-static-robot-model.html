@@ -108,6 +108,12 @@ colcon build --packages-select voice_nav_sim \
   --symlink-install --event-handlers console_direct+
 
 source install/setup.bash
+
+colcon test --packages-select voice_nav_sim \
+  --event-handlers console_direct+
+
+colcon test-result --verbose
+
 ros2 launch voice_nav_sim display.launch.py</code></pre>
 
       <p>新开 WSL 终端：</p>
@@ -129,7 +135,7 @@ rviz2</code></pre>
         <strong>验收：</strong>
         RViz 模型结构合理、轮子接地；TF 能从
         <code>base_footprint</code> 连到 <code>laser_link</code>；
-        该变换的期望平移约为 x=0.10、y=0、z=0.235。
+        该变换能由模型尺寸正确推导；全部 package 测试无失败。
       </div>
 
       <h2>提交给教师</h2>
@@ -137,6 +143,7 @@ rviz2</code></pre>
         <li>Xacro、display launch、CMakeLists 和 package.xml 的完整内容。</li>
         <li><code>check_urdf</code> 完整输出。</li>
         <li><code>rosdep check</code> 和构建摘要。</li>
+        <li><code>colcon test-result --verbose</code> 输出。</li>
         <li><code>tf2_echo base_footprint laser_link</code> 的一帧输出。</li>
         <li>一张 RViz 截图。</li>
         <li>回答：为什么 2D 导航仍要区分 <code>base_footprint</code> 和 <code>base_link</code>？</li>

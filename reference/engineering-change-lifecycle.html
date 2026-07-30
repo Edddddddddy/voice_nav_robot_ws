@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VoiceNav Robot：工程变更生命周期</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <h1>工程变更生命周期</h1>
+      <p class="subtitle">VoiceNav Robot reference</p>
+
+      <pre><code>Work Item
+   ↓
+短生命周期 Branch
+   ↓
+实现 + 自动测试 + 文档
+   ↓
+本地统一质量门禁
+   ↓
+Diff 自审 / PR / CI
+   ↓
+合并 main
+   ↓
+达到里程碑时才 Release</code></pre>
+
+      <h2>每层留下什么证据</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>阶段</th>
+            <th>最小产物</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Work Item</td>
+            <td>目标、非目标、验收条件、风险、测试计划</td>
+          </tr>
+          <tr>
+            <td>设计</td>
+            <td>Interface 文档；真正重大取舍才写 ADR</td>
+          </tr>
+          <tr>
+            <td>实现</td>
+            <td>源码、配置和最靠近稳定 Interface 的测试</td>
+          </tr>
+          <tr>
+            <td>验证</td>
+            <td>统一命令、退出状态、测试摘要、必要的人工证据</td>
+          </tr>
+          <tr>
+            <td>评审</td>
+            <td>完整 staged diff、Definition of Done</td>
+          </tr>
+          <tr>
+            <td>发布</td>
+            <td>版本、CHANGELOG、不可变 tag、发布验收</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2>三个不要混淆的粒度</h2>
+      <ul>
+        <li><strong>Work Item</strong>：一个可验收变化，例如接入 ROS bridge。</li>
+        <li><strong>Commit</strong>：一个连贯的修改理由，可作为评审单位。</li>
+        <li><strong>Release</strong>：一组可交付能力的不可变版本，不等于一课。</li>
+      </ul>
+
+      <h2>什么时候写 ADR</h2>
+      <p>以下三项必须同时成立：</p>
+      <ol>
+        <li>更换选择的成本明显；</li>
+        <li>没有上下文时，未来维护者会疑惑；</li>
+        <li>确实比较过有意义的替代方案。</li>
+      </ol>
+      <p>
+        普通参数、文件位置和易于替换的库选择不需要 ADR。
+        它们应留在代码、配置、测试或 Interface 文档中。
+      </p>
+
+      <h2>Git 安全边界</h2>
+      <ul>
+        <li><code>.gitignore</code> 只影响未跟踪文件，不会自动遗忘已跟踪文件。</li>
+        <li><code>git rm --cached</code> 只从索引移除；省略 <code>--cached</code> 会同时删除工作区文件。</li>
+        <li>混合工作区使用明确 pathspec 暂存，不盲目执行 <code>git add .</code>。</li>
+        <li>禁止使用 <code>reset --hard</code> 或 <code>clean -fdx</code> 处理不清楚的工作区。</li>
+        <li>发布后的 tag 与历史不重写。</li>
+      </ul>
+
+      <h2>提交前最小检查</h2>
+      <pre><code>git status --short
+git diff
+bash scripts/verify.sh
+git diff --cached</code></pre>
+
+      <p>
+        依据：
+        <a href="https://reps.openrobotics.org/rep-2004/">REP-2004</a>、
+        <a href="https://www.conventionalcommits.org/en/v1.0.0/"
+          >Conventional Commits</a
+        >
+        与
+        <a href="https://semver.org/spec/v2.0.0.html">Semantic Versioning</a>。
+      </p>
+    </main>
+  </body>
+</html>

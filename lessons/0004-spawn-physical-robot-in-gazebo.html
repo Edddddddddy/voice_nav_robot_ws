@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lesson 0004：让机器人稳定落地 Gazebo</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <h1>让机器人稳定落地 Gazebo</h1>
+      <p class="subtitle">Lesson 0004 · 目标时间 45–70 分钟</p>
+
+      <div class="goal">
+        <strong>本课唯一成果：</strong>
+        为现有 Xacro 补齐碰撞、质量与惯量，将它生成的 URDF
+        放入 Gazebo Harmonic，
+        并验证它落地后保持稳定。
+      </div>
+
+      <h2>本课不做什么</h2>
+      <p>
+        不加入 <code>ros2_control</code>、差速驱动、<code>cmd_vel</code>、
+        里程计、Gazebo/ROS bridge、LiDAR 传感器、SLAM 或 Nav2。
+        Gazebo 中的运动也暂时不会反馈到 ROS TF。
+      </p>
+
+      <h2>1. 先理解物理模型的三部分</h2>
+      <ul>
+        <li><code>visual</code> 决定外观。</li>
+        <li><code>collision</code> 决定接触边界。</li>
+        <li><code>inertial</code> 决定质量、质心与转动响应。</li>
+      </ul>
+
+      <p>
+        三者不能互相替代。先阅读
+        <a href="../reference/urdf-physical-properties.html">URDF 物理属性速查</a>，
+        再开始修改。
+      </p>
+
+      <h2>2. 给物理 link 补齐质量和惯量</h2>
+      <p>
+        修改
+        <code>src/voice_nav_sim/urdf/voice_nav_robot.urdf.xacro</code>。
+        先新增以下质量参数，不要把数字散落到每个 link：
+      </p>
+
+      <pre><code>base_mass   = 5.0
+wheel_mass  = 0.25
+caster_mass = 0.20
+laser_mass  = 0.10
+base_com_x  = -0.02</code></pre>
+
+      <p>
+        为 <code>base_link</code>、两个 wheel link、<code>caster_link</code>
+        和 <code>laser_link</code> 各写一个 <code>inertial</code>。
+        它与 <code>visual</code>、<code>collision</code> 同级，基本结构为：
+      </p>
+
+      <pre><code>&lt;inertial&gt;
+  &lt;origin xyz="质心位置"/&gt;
+  &lt;mass value="${质量属性}"/&gt;
+  &lt;inertia
+    ixx="${公式}"
+    ixy="0"
+    ixz="0"
+    iyy="${公式}"
+    iyz="0"
+    izz="${公式}"/&gt;
+&lt;/inertial&gt;</code></pre>
+
+      <p>按当前模型逐项完成：</p>
+      <ul>
+        <li>
+          <code>base_link</code>：z 轴圆柱公式；质心为
+          <code>${base_com_x} 0 ${base_height / 2}</code>。
+        </li>
+        <li>
+          左右轮：圆柱主轴沿 y，因此 <code>Iyy</code> 是轴向惯量；
+          把惯量写进现有 <code>drive_wheel</code> 宏，只写一次。
+        </li>
+        <li>
+          <code>caster_link</code>：实心球公式；质心与球体中心一致，
+          即本 link 的 z=<code>caster_radius</code>。
+        </li>
+        <li>
+          <code>laser_link</code>：z 轴圆柱公式；质心 z=<code>laser_height / 2</code>。
+        </li>
+        <li>
+          <code>base_footprint</code> 保持空 link。它只是导航 frame，不是物理实体。
+        </li>
+      </ul>
+
+      <p>
+        <code>base_com_x=-0.02</code> 是有意的：驱动轮接触线位于 x=0，
+        caster 位于后方。让主要质量略偏后，可使质心投影落在三点支撑区域内。
+      </p>
+
+      <h2>3. 补齐碰撞与关节约束</h2>
+      <ul>
+        <li>
+          为 <code>laser_link</code> 添加与 visual 同尺寸、同 origin 的
+          <code>collision</code>。其余实体已有 collision，保留即可。
+        </li>
+        <li>
+          在两个 continuous wheel joint 中加入
+          <code>limit</code>：effort=<code>5.0</code>、
+          velocity=<code>20.0</code>。
+        </li>
+        <li>
+          在两个 wheel joint 中加入
+          <code>dynamics</code>：damping=<code>0.1</code>、
+          friction=<code>0.0</code>。
+        </li>
+      </ul>
+
+      <p>
+        continuous joint 不写 lower/upper；它无限旋转，但仍需限制最大力矩和速度。
+      </p>
+
+      <h2>4. 声明仿真运行依赖</h2>
+      <p>
+        在 <code>src/voice_nav_sim/package.xml</code> 中新增：
+      </p>
+
+      <pre><code>&lt;exec_depend&gt;ros_gz_sim&lt;/exec_depend&gt;</code></pre>
+
+      <p>
+        本课不新写总 launch。仍以 Xacro 为唯一模型源，先显式生成临时 URDF，
+        再交给 Gazebo；这样解析失败和物理失败可以分开定位。
+      </p>
+
+      <p>
+        当前 Jazzy 环境中，<code>robot_state_publisher</code> 使用
+        <code>robot_description</code> 参数，但并不发布同名 topic。
+        实测 <code>ros2 topic info /robot_description --verbose</code>
+        的 publisher count 为 0，因此不要用 <code>create --topic</code>。
+        后续编写统一仿真 launch 时，再让同一次 Xacro 求值同时供给
+        state publisher 和 Gazebo spawn。
+      </p>
+
+      <h2>5. 离线校验、构建与测试</h2>
+      <pre><code>cd /mnt/c/Users/lcy/code/ros2/voice_nav_robot_ws
+source /opt/ros/jazzy/setup.bash
+
+mkdir -p /tmp/voice_nav_robot
+xacro src/voice_nav_sim/urdf/voice_nav_robot.urdf.xacro \
+  &gt; /tmp/voice_nav_robot/model.urdf
+check_urdf /tmp/voice_nav_robot/model.urdf
+gz sdf -p /tmp/voice_nav_robot/model.urdf \
+  &gt; /tmp/voice_nav_robot/model.sdf
+
+rosdep check --from-paths src/voice_nav_sim --ignore-src
+
+colcon build --packages-select voice_nav_sim \
+  --symlink-install --event-handlers console_direct+
+
+source install/setup.bash
+
+colcon test --packages-select voice_nav_sim \
+  --event-handlers console_direct+
+colcon test-result --verbose</code></pre>
+
+      <p>
+        <code>gz sdf -p</code> 应安静退出并返回 0。
+        任何质量或惯量出现 0、负数、<code>nan</code>，或者违反主惯量三角不等式时，
+        都不要继续启动 Gazebo。
+      </p>
+
+      <h2>6. 用两个终端运行最小仿真链</h2>
+      <p><strong>终端 1：启动带地面的 Gazebo 世界</strong></p>
+      <pre><code>source /opt/ros/jazzy/setup.bash
+
+ros2 launch ros_gz_sim gz_sim.launch.py \
+  gz_args:="-r empty.sdf"</code></pre>
+
+      <p>
+        本机 Gazebo Sim 8 的 <code>empty.sdf</code> 已核对：
+        world 名称为 <code>empty</code>，并且包含 <code>ground_plane</code>。
+      </p>
+
+      <p><strong>终端 2：重新生成 URDF，然后创建实体</strong></p>
+      <pre><code>cd /mnt/c/Users/lcy/code/ros2/voice_nav_robot_ws
+source /opt/ros/jazzy/setup.bash
+
+mkdir -p /tmp/voice_nav_robot
+xacro src/voice_nav_sim/urdf/voice_nav_robot.urdf.xacro \
+  &gt; /tmp/voice_nav_robot/model.urdf
+
+ros2 run ros_gz_sim create \
+  --world empty \
+  --file /tmp/voice_nav_robot/model.urdf \
+  --name voice_nav_robot \
+  --z 0.03</code></pre>
+
+      <p>
+        <code>--z 0.03</code> 让机器人从离地 3 cm 处落下，
+        用实际接触检验 collision 和 inertial，而不是让它刚好“贴”在地面上。
+      </p>
+
+      <p>
+        <code>Entity creation successful</code> 只表示创建请求被接收，
+        不代表模型一定通过了物理解析。紧接着运行：
+      </p>
+      <pre><code>gz model --list</code></pre>
+      <p>
+        列表中必须同时出现 <code>ground_plane</code> 和
+        <code>voice_nav_robot</code>；否则回到 Gazebo 启动终端阅读解析错误。
+      </p>
+
+      <h2>7. 验收稳定状态</h2>
+      <p>
+        等待至少 5 秒。机器人可以短暂下落和轻微晃动，但随后必须静止：
+        不翻倒、不持续弹跳、不穿地、不突然飞走。
+      </p>
+
+      <p>在终端 2 连续检查两次，中间间隔约 5 秒：</p>
+      <pre><code>gz model -m voice_nav_robot -p</code></pre>
+
+      <p>
+        两次输出的 z、roll、pitch 应基本不再变化，且不能出现
+        <code>nan</code>。不要求 model pose 的 z 精确等于 0。
+      </p>
+
+      <div class="checkpoint">
+        <strong>验收：</strong>
+        Xacro 与 URDF 解析成功；所有测试通过；实体能从生成的 URDF 创建；
+        落地 5 秒后姿态稳定；
+        visual、collision、inertial 的职责能够口头解释。
+      </div>
+
+      <h2>故障定位顺序</h2>
+      <ol>
+        <li>创建超时：先确认 Gazebo 已启动，world 名确实是 <code>empty</code>。</li>
+        <li>create 报成功但列表无模型：查看 Gazebo 终端；通常是物理 link 缺少有效 inertial。</li>
+        <li>提示重名：不要重复生成；关闭并重新启动 Gazebo 后再试。</li>
+        <li>穿过地面：检查接触实体是否有 collision，以及 collision origin。</li>
+        <li>飞走或疯狂抖动：检查质量、惯量、碰撞体重叠和数值数量级。</li>
+        <li>向前翻倒：先检查质心与支撑区域，不要靠盲目增大 damping 掩盖。</li>
+      </ol>
+
+      <h2>提交给教师</h2>
+      <ol>
+        <li>更新后的 Xacro 和 package.xml 完整内容。</li>
+        <li><code>check_urdf</code> 完整输出。</li>
+        <li><code>rosdep check</code>、构建摘要和 <code>colcon test-result --verbose</code>。</li>
+        <li><code>create</code> 命令的完整输出。</li>
+        <li>间隔约 5 秒的两份 <code>gz model -m voice_nav_robot -p</code> 输出。</li>
+        <li>一张能看见地面和完整机器人的 Gazebo 截图。</li>
+        <li>
+          回答三个问题：visual、collision、inertial 各负责什么；
+          为什么不给 <code>base_footprint</code> 加惯性；
+          为什么底盘质心要略微移到轮轴后方。
+        </li>
+      </ol>
+
+      <h2>主要资料</h2>
+      <p>
+        阅读
+        <a href="https://docs.ros.org/en/humble/Tutorials/Intermediate/URDF/Adding-Physical-and-Collision-Properties-to-a-URDF-Model.html"
+          >ROS 2：URDF physical and collision properties</a
+        >、
+        <a href="https://gazebosim.org/docs/harmonic/ros2_launch_gazebo/"
+          >Gazebo Harmonic：从 ROS 2 启动 Gazebo</a
+        >
+        和
+        <a href="https://gazebosim.org/docs/harmonic/ros2_spawn_model/"
+          >Gazebo Harmonic：从 ROS 2 生成模型</a
+        >。
+      </p>
+    </main>
+  </body>
+</html>

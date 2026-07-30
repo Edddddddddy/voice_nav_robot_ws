@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VoiceNav Robot：差速驱动与里程计契约</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <h1>差速驱动与里程计契约</h1>
+      <p class="subtitle">VoiceNav Robot reference</p>
+
+      <h2>坐标与符号</h2>
+      <ul>
+        <li>x 向前，y 向左，z 向上。</li>
+        <li>线速度 <code>v &gt; 0</code> 表示前进。</li>
+        <li>角速度 <code>ω &gt; 0</code> 表示从上方看逆时针，即左转。</li>
+        <li><code>r</code> 是轮半径，<code>L</code> 是左右轮中心线的完整距离。</li>
+      </ul>
+
+      <h2>从底盘速度得到轮速</h2>
+      <pre><code>左轮线速度：v_left  = v - ωL/2
+右轮线速度：v_right = v + ωL/2
+
+左轮角速度：ω_left  = v_left  / r
+右轮角速度：ω_right = v_right / r</code></pre>
+
+      <p>
+        直行时两轮同向同速；正角速度原地旋转时，左轮向后、右轮向前。
+        对当前机器人，<code>r=0.035 m</code>，<code>L=0.40 m</code>。
+      </p>
+
+      <h2>从轮速得到里程计速度</h2>
+      <pre><code>v = (v_right + v_left) / 2
+ω = (v_right - v_left) / L</code></pre>
+
+      <p>
+        DiffDrive 对这些速度积分，得到连续的
+        <code>odom → base_footprint</code> 位姿。
+        轮径误差会影响直线距离与转角；轮距误差主要影响转角。
+        里程计可连续但会积累漂移，它不是全局地图定位。
+      </p>
+
+      <h2>分层 Interface</h2>
+      <pre><code>未来的上层控制
+  │  ROS velocity command
+  ▼
+ROS–Gazebo adapter
+  │  gz.msgs.Twist
+  ▼
+Gazebo DiffDrive
+  ├─► wheel joints / physics
+  ├─► Gazebo odometry
+  └─► Gazebo pose transform</code></pre>
+
+      <p>
+        Gazebo topic 保持 model-scoped；下一层 adapter 再把它映射为稳定的
+        ROS topic。Mission、Agent 和语音模块不应知道 Gazebo topic，
+        也不应直接控制轮关节。
+      </p>
+
+      <h2>Topic 与 frame 所有权</h2>
+      <ul>
+        <li>
+          Gazebo 输入：
+          <code>/model/voice_nav_robot/cmd_vel</code>，
+          类型 <code>gz.msgs.Twist</code>。
+        </li>
+        <li>
+          Gazebo 输出：
+          <code>/model/voice_nav_robot/odometry</code>，
+          类型 <code>gz.msgs.Odometry</code>。
+        </li>
+        <li>
+          动态 frame：<code>odom → base_footprint</code>，只允许一个发布者。
+        </li>
+        <li>
+          机器人内部 frame 仍由 URDF 与
+          <code>robot_state_publisher</code> 负责。
+        </li>
+        <li>
+          未来若 EKF 接管 <code>odom → base_footprint</code>，
+          必须停止桥接 DiffDrive 的同一条 TF，避免双发布者。
+        </li>
+      </ul>
+
+      <h2>停止与限速契约</h2>
+      <ul>
+        <li>所有速度都必须经过配置上限，拒绝非有限数值。</li>
+        <li>运动测试必须在正常路径和异常清理路径都发送零速度。</li>
+        <li>Gazebo DiffDrive 没有 command timeout，最后一条命令会继续生效。</li>
+        <li>
+          进入语音与 Nav2 前，ROS 运动出口必须加入可配置 watchdog；
+          上层任务超时不能代替底层速度租约。
+        </li>
+        <li>停止确认必须意味着安全出口已锁定并已请求零速度。</li>
+      </ul>
+
+      <p>
+        依据：
+        <a href="https://gazebosim.org/api/sim/8/classgz_1_1sim_1_1systems_1_1DiffDrive.html"
+          >Gazebo Sim 8 DiffDrive API</a
+        >
+        与
+        <a href="https://docs.nav2.org/setup_guides/odom/setup_odom_gz.html"
+          >Nav2 Gazebo odometry setup</a
+        >。
+      </p>
+    </main>
+  </body>
+</html>

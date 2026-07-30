@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lesson 0006：建立可审查的工程基线</title>
+    <link rel="stylesheet" href="../assets/lesson.css" />
+  </head>
+  <body>
+    <main>
+      <h1>建立可审查的工程基线</h1>
+      <p class="subtitle">Lesson 0006 · 目标时间 40–60 分钟</p>
+
+      <div class="goal">
+        <strong>本课唯一成果：</strong>
+        把当前工作区整理成一个只跟踪源码、文档和配置，
+        能用统一命令验证，并具有清晰提交历史的 Git 仓库。
+      </div>
+
+      <p>
+        本课暂不添加 ROS bridge。工程基线一旦建立，后续每一课都按
+        Work Item、短分支、测试、文档、评审和提交的同一流程推进。
+        先阅读
+        <a href="../reference/engineering-change-lifecycle.html"
+          >工程变更生命周期</a
+        >
+        和仓库的
+        <a href="../CONTRIBUTING.md">CONTRIBUTING.md</a>。
+      </p>
+
+      <h2>1. 理解当前问题</h2>
+      <p>审计时仓库共有 1178 个已跟踪文件，其中：</p>
+      <table>
+        <thead>
+          <tr>
+            <th>目录</th>
+            <th>已跟踪文件</th>
+            <th>性质</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td><code>build/</code></td><td>780</td><td>本机构建中间产物</td></tr>
+          <tr><td><code>install/</code></td><td>255</td><td>本机安装空间</td></tr>
+          <tr><td><code>log/</code></td><td>104</td><td>本机运行与测试日志</td></tr>
+        </tbody>
+      </table>
+
+      <p>
+        这 1139 个文件约占全部已跟踪文件的 96.7%，包含本机绝对路径和
+        WSL 符号链接。它们会淹没源码 diff，而且让 Windows Git 无法稳定处理状态。
+      </p>
+
+      <h2>2. 确认本课分支与治理文件</h2>
+      <p>教师已经创建分支和治理基线。先检查，不要直接提交：</p>
+      <pre><code>cd /mnt/c/Users/lcy/code/ros2/voice_nav_robot_ws
+
+git branch --show-current
+git status --short -- . ':!build' ':!install' ':!log'
+
+sed -n '1,240p' README.md
+sed -n '1,280p' CONTRIBUTING.md
+sed -n '1,260p' docs/architecture.md
+sed -n '1,260p' docs/quality-policy.md
+sed -n '1,240p' docs/testing-strategy.md</code></pre>
+
+      <p>
+        当前分支必须是 <code>chore/0006-engineering-baseline</code>。
+        如果文档描述的实际状态、依赖方向或规则与你理解不一致，先问教师，
+        不要为了完成清单而接受错误文档。
+      </p>
+
+      <h2>3. 只停止跟踪生成物，不删除本地文件</h2>
+      <p>操作前先取得基线：</p>
+      <pre><code>git ls-files build install log | wc -l
+
+test -d build   &amp;&amp; echo "build exists"
+test -d install &amp;&amp; echo "install exists"
+test -d log     &amp;&amp; echo "log exists"</code></pre>
+
+      <p>第一条预期为 <code>1139</code>。随后执行：</p>
+      <pre><code>git rm -r -f --cached --ignore-unmatch -- \
+  build install log</code></pre>
+
+      <div class="checkpoint">
+        <strong>关键区别：</strong>
+        <code>--cached</code> 只从 Git index 移除，工作区文件仍保留。
+        不要运行省略 <code>--cached</code> 的命令。
+      </div>
+
+      <p>立即验证：</p>
+      <pre><code>git ls-files build install log | wc -l
+
+test -d build   &amp;&amp; echo "build still exists"
+test -d install &amp;&amp; echo "install still exists"
+test -d log     &amp;&amp; echo "log still exists"
+
+git check-ignore -v build install log</code></pre>
+
+      <p>
+        已跟踪数量必须变为 <code>0</code>，三个目录仍须存在，
+        <code>git check-ignore</code> 应指出根目录 <code>.gitignore</code> 的规则。
+      </p>
+
+      <h2>4. 运行统一质量门禁</h2>
+      <p>
+        仓库新增的 <code>scripts/verify.sh</code> 是唯一完整入口：
+        它检查 rosdep、Xacro、URDF、SDF 语义契约、全量构建和全部测试。
+      </p>
+      <pre><code>bash scripts/verify.sh</code></pre>
+
+      <p>
+        最后必须出现 <code>VoiceNav Robot verification passed.</code>，
+        且 <code>colcon test-result</code> 为零错误、零失败。
+        后续开发中的快速循环可以只传改变的 package：
+      </p>
+      <pre><code>bash scripts/verify.sh voice_nav_sim</code></pre>
+
+      <h2>5. 按修改理由拆分提交</h2>
+      <p>
+        不使用 <code>git add .</code>。每次暂存后都先阅读总体
+        <code>git diff --cached --stat</code>。对于大量生成物，只核对删除状态与数量；
+        对源码、配置和文档则阅读完整 staged diff。
+      </p>
+
+      <p><strong>提交 1：仓库边界与统一门禁</strong></p>
+      <pre><code>git add \
+  .gitignore \
+  .gitattributes \
+        .editorconfig \
+        scripts/verify.sh \
+        tools/schema
+
+git diff --cached --stat
+git diff --cached --name-status -- build install log \
+  | awk '{count[$1]++} END {for (status in count) print status, count[status]}'
+git diff --cached -- . ':!build' ':!install' ':!log'
+
+git commit -m "chore(repo): establish clean workspace boundaries"</code></pre>
+
+      <p>
+        这一提交也包含前面由 <code>git rm --cached</code> 暂存的生成物删除。
+        <code>awk</code> 汇总应只有 <code>D 1139</code>；随后一条命令完整审阅
+        非生成物变更。生成物从历史的当前快照中消失，但本地目录没有被删。
+      </p>
+
+      <p><strong>提交 2：机器人仿真实现</strong></p>
+      <pre><code>git add src/voice_nav_sim
+git diff --cached --stat
+git diff --cached
+git commit -m "feat(sim): add physical differential-drive robot"</code></pre>
+
+      <p><strong>提交 3：课程与验证记录</strong></p>
+      <pre><code>git add \
+  assets \
+  learning-records \
+  lessons \
+  reference \
+  NOTES.md \
+  RESOURCES.md
+
+git diff --cached --stat
+git diff --cached
+git commit -m "docs(course): record robot modeling and motion lessons"</code></pre>
+
+      <p><strong>提交 4：治理、架构与质量策略</strong></p>
+      <pre><code>git add \
+  README.md \
+  CONTRIBUTING.md \
+  CHANGELOG.md \
+  CONTEXT.md \
+  LICENSE \
+  THIRD_PARTY_NOTICES.md \
+  docs
+
+git diff --cached --stat
+git diff --cached
+git commit -m "docs(repo): establish engineering governance baseline"</code></pre>
+
+      <h2>6. 验收仓库状态</h2>
+      <pre><code>git status --short
+git ls-files build install log | wc -l
+git log --oneline --decorate -6
+bash scripts/verify.sh</code></pre>
+
+      <p>
+        预期：工作区干净；生成物已跟踪数量为 0；日志能够看出四个不同修改理由；
+        完整质量门禁通过。若 <code>git status</code> 仍有文件，
+        先判断它属于遗漏的源码、文档还是不应提交的本地数据，不要直接全部暂存。
+      </p>
+
+      <h2>7. 尚不执行的外部操作</h2>
+      <p>
+        当前没有 remote。创建远程仓库、首次 push、CI 和分支保护都会改变外部状态，
+        必须先决定托管平台以及公开或私有。本课不自行猜测，也不重写现有 Git 历史。
+        各 package 中的临时 maintainer 身份和 TODO 描述也要在首次对外发布前清理，
+        但教师不会替你猜姓名或邮箱。
+      </p>
+
+      <div class="checkpoint">
+        <strong>验收：</strong>
+        源码仓库不再跟踪 colcon 生成物；本地生成物未被删除；
+        分支与四个提交职责清晰；统一门禁通过；能够解释
+        Work Item、Commit、Release 和 ADR 的不同职责。
+      </div>
+
+      <h2>提交给教师</h2>
+      <ol>
+        <li>清理前后的两份 <code>git ls-files build install log | wc -l</code>。</li>
+        <li>证明三个本地目录仍存在的输出。</li>
+        <li><code>git status --short</code>。</li>
+        <li><code>git log --oneline --decorate -6</code>。</li>
+        <li><code>bash scripts/verify.sh</code> 的最终摘要。</li>
+        <li>
+          回答三个问题：为什么只添加 <code>.gitignore</code> 还不够；
+          为什么这次必须使用 <code>--cached</code>；
+          Work Item、Commit 和 Release 分别解决什么问题。
+        </li>
+        <li>选择远程仓库：GitHub 私有、GitHub 公开、Gitee 私有或暂不创建。</li>
+        <li>
+          给出准备写入 <code>package.xml</code> 的 maintainer 名称与邮箱，
+          或明确暂时保留为待办；邮箱可使用专门的开发地址。
+        </li>
+      </ol>
+
+      <h2>主要资料</h2>
+      <p>
+        阅读
+        <a href="https://reps.openrobotics.org/rep-2004/"
+          >ROS REP-2004 Package Quality Categories</a
+        >、
+        <a href="https://git-scm.com/docs/gitignore">gitignore 文档</a>、
+        <a href="https://git-scm.com/docs/git-rm">git rm 文档</a>、
+        <a href="https://www.conventionalcommits.org/en/v1.0.0/"
+          >Conventional Commits 1.0.0</a
+        >
+        和
+        <a href="https://semver.org/spec/v2.0.0.html">Semantic Versioning 2.0.0</a>。
+      </p>
+
+      <p class="note">
+        任一步对 Git index、staged diff 或命令效果不清楚时，先问教师再继续。
+      </p>
+    </main>
+  </body>
+</html>
