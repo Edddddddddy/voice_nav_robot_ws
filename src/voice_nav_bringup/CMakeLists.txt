@@ -4,10 +4,17 @@ project(voice_nav_bringup)
 find_package(ament_cmake REQUIRED)
 
 if(BUILD_TESTING)
+  find_package(ament_cmake_pytest REQUIRED)
   find_package(ament_lint_auto REQUIRED)
   find_package(launch_testing_ament_cmake REQUIRED)
 
   ament_lint_auto_find_test_dependencies()
+
+  ament_add_pytest_test(
+    motion_gate_open_convergence_test
+    test/test_motion_gate_open_convergence.py
+    TIMEOUT 5
+  )
 
   add_launch_test(
     test/test_motion_gate_product.py
