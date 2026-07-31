@@ -39,18 +39,33 @@ def start_after_success(next_action, stage):
 
 def generate_launch_description():
     headless = LaunchConfiguration('headless')
+    package_share = FindPackageShare('voice_nav_sim')
     xacro_file = PathJoinSubstitution(
         [
-            FindPackageShare('voice_nav_sim'),
+            package_share,
             'urdf',
             'voice_nav_robot.urdf.xacro',
         ]
     )
     controllers_file = PathJoinSubstitution(
         [
-            FindPackageShare('voice_nav_sim'),
+            package_share,
             'config',
             'controllers.yaml',
+        ]
+    )
+    bridge_file = PathJoinSubstitution(
+        [
+            package_share,
+            'config',
+            'bridge.yaml',
+        ]
+    )
+    world_file = PathJoinSubstitution(
+        [
+            package_share,
+            'worlds',
+            'voice_nav_test_world.sdf',
         ]
     )
     robot_description = ParameterValue(
@@ -102,13 +117,13 @@ def generate_launch_description():
         '-r',
         '-v',
         '2',
-        'empty.sdf',
+        world_file,
         '--force-version',
         '8',
     ]
     gazebo_server = ExecuteProcess(
         cmd=gazebo_common_arguments[:4]
-        + ['-s']
+        + ['-s', '--headless-rendering']
         + gazebo_common_arguments[4:],
         name='gazebo',
         output='screen',
@@ -129,15 +144,13 @@ def generate_launch_description():
         sigkill_timeout='5',
     )
 
-    clock_bridge = Node(
+    simulation_bridge = Node(
         package='ros_gz_bridge',
         executable='parameter_bridge',
-        name='clock_bridge',
+        name='simulation_bridge',
         output='screen',
-        arguments=[
-            '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',
-        ],
-        on_exit=Shutdown(reason='Clock bridge exited.'),
+        parameters=[{'config_file': bridge_file}],
+        on_exit=Shutdown(reason='Simulation bridge exited.'),
     )
 
     spawn_robot = Node(
@@ -147,7 +160,7 @@ def generate_launch_description():
         output='screen',
         arguments=[
             '--world',
-            'empty',
+            'voice_nav_test_world',
             '--topic',
             'robot_description',
             '--name',
@@ -190,6 +203,8 @@ def generate_launch_description():
             '10',
             '--service-call-timeout',
             '10',
+            '--controller-ros-args',
+            '--ros-args --remap ~/odom:=/odom',
         ],
     )
 
@@ -232,7 +247,7 @@ def generate_launch_description():
             robot_state_publisher,
             gazebo_server,
             gazebo_with_gui,
-            clock_bridge,
+            simulation_bridge,
             spawn_robot,
             start_joint_state_broadcaster,
             start_diff_drive_controller,

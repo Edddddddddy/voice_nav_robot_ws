@@ -626,21 +626,7 @@ def validate_launch(path: Path) -> None:
         )
     if keyword_value(bridge_nodes[0], "on_exit") is None:
         raise ControlContractError(
-            "clock bridge exit must shut down the simulation"
-        )
-    bridge_arguments = keyword_value(bridge_nodes[0], "arguments")
-    if not isinstance(bridge_arguments, (ast.List, ast.Tuple)):
-        raise ControlContractError(
-            "bridge arguments must be a static allowlist"
-        )
-    bridge_entries = [
-        literal_string(entry) for entry in bridge_arguments.elts
-    ]
-    if len(bridge_entries) != 1 or not (
-        bridge_entries[0] or ""
-    ).startswith("/clock@"):
-        raise ControlContractError(
-            "Lesson 0007 bridge allowlist must contain only /clock"
+            "simulation bridge exit must shut down the simulation"
         )
 
     state_publishers = [

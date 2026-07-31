@@ -272,6 +272,15 @@ bool node_matches(
   return expected_node == fully_qualified_node_name(endpoint);
 }
 
+bool node_identity_is_known(const rclcpp::TopicEndpointInfo & endpoint)
+{
+  return
+    !endpoint.node_name().empty() &&
+    !endpoint.node_namespace().empty() &&
+    endpoint.node_name() != "_NODE_NAME_UNKNOWN_" &&
+    endpoint.node_namespace() != "_NODE_NAMESPACE_UNKNOWN_";
+}
+
 class TfOwnershipAuditor : public rclcpp::Node
 {
 public:
@@ -392,13 +401,32 @@ public:
           gid_endpoints->second.cbegin(),
           gid_endpoints->second.cend(),
           [&expectation](const rclcpp::TopicEndpointInfo & endpoint) {
-            return node_matches(expectation.expected_node, endpoint);
+            return
+              node_identity_is_known(endpoint) &&
+              node_matches(expectation.expected_node, endpoint);
           });
         if (!expected_endpoint_found) {
+          const bool unresolved_endpoint_found = std::any_of(
+            gid_endpoints->second.cbegin(),
+            gid_endpoints->second.cend(),
+            [](const rclcpp::TopicEndpointInfo & endpoint) {
+              return !node_identity_is_known(endpoint);
+            });
+          if (unresolved_endpoint_found) {
+            return {
+              EvaluationState::PENDING,
+              "graph has not resolved the node identity for GID " +
+              gid_string(owner.first) + " on " + expectation.topic};
+          }
+          std::set<std::string> actual_nodes;
+          for (const auto & endpoint : gid_endpoints->second) {
+            actual_nodes.insert(fully_qualified_node_name(endpoint));
+          }
           return {
             EvaluationState::VIOLATION,
             "GID " + gid_string(owner.first) + " on " +
-            expectation.topic + " does not map to expected node " +
+            expectation.topic + " maps to {" +
+            topic_set_string(actual_nodes) + "}; expected " +
             expectation.expected_node};
         }
       }

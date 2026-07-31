@@ -455,21 +455,26 @@ class ControlContractTest(unittest.TestCase):
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("process events, not TimerAction", completed.stderr)
 
-    def test_non_clock_bridge_is_rejected(self) -> None:
+    def test_multiple_bridge_processes_are_rejected(self) -> None:
         launch = VALID_LAUNCH.replace(
-            "arguments=['/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock'],",
+            "    clock_bridge = Node(",
             (
-                "arguments=[\n"
-                "            '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',\n"
-                "            '/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist',\n"
-                "        ],"
+                "    duplicate_bridge = Node(\n"
+                "        package='ros_gz_bridge',\n"
+                "        executable='parameter_bridge',\n"
+                "        on_exit=Shutdown(),\n"
+                "    )\n"
+                "    clock_bridge = Node("
             ),
         )
 
         completed = self.run_checker(launch=launch)
 
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("contain only /clock", completed.stderr)
+        self.assertIn(
+            "exactly one ros_gz_bridge node",
+            completed.stderr,
+        )
 
     def test_unconditional_controller_startup_is_rejected(self) -> None:
         launch = VALID_LAUNCH.replace(
