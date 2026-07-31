@@ -493,6 +493,26 @@ class ScopedTestResultsTest(unittest.TestCase):
         self.assertLess(ros_install, contract_tests)
         self.assertLess(contract_tests, canonical_verify)
 
+        contract_step = workflow[contract_tests:canonical_verify]
+        self.assertIn("set +u", contract_step)
+        self.assertIn(
+            'source "/opt/ros/${ROS_DISTRO}/setup.bash"',
+            contract_step,
+        )
+        self.assertIn("set -u", contract_step)
+        self.assertLess(
+            contract_step.index("set +u"),
+            contract_step.index(
+                'source "/opt/ros/${ROS_DISTRO}/setup.bash"'
+            ),
+        )
+        self.assertLess(
+            contract_step.index(
+                'source "/opt/ros/${ROS_DISTRO}/setup.bash"'
+            ),
+            contract_step.index("set -u"),
+        )
+
     def test_verify_fails_closed_when_package_discovery_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             workspace = Path(temporary_directory) / "workspace"
