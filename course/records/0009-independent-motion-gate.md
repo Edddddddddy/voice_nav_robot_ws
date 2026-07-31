@@ -1,15 +1,14 @@
 # Lesson 0009 学习记录：独立 MotionGate
 
-状态：Historical full gate GREEN / current-head focused checks GREEN /
-exact-head full gate and final review pending
+状态：Current local full gate GREEN / exact-head hosted CI and final review pending
 （教师参考实现）
 
 学习者复现状态：Pending
 
 本记录只填写已经发生且可查询的事实。PR 和 pre-remediation head 的 hosted CI
-已经发生；`8e022580` 的完整本地门禁已经通过，当前 `517339a` 的 focused checks
-已经通过。当前 head 的完整门禁、final reviewed head 的 exact-head hosted CI、
-merge 与 solution tag 尚未发生，因此仍保持 Pending。
+已经发生；`8e022580` 的历史完整本地门禁和包含 `517339a` code head 的
+`ff06e6b` 当前本地完整门禁均已通过。final reviewed head 的 exact-head hosted
+CI、merge 与 solution tag 尚未发生，因此仍保持 Pending。
 
 ## 变更身份
 
@@ -55,6 +54,8 @@ merge 与 solution tag 尚未发生，因此仍保持 Pending。
   `8e022580a7add59a9c5d5a95973182322a0641c0`
 - Scoped-evidence hardening head under review：
   `517339a3d313910a937fef973a9bdd635b457fc8`
+- Exact local full-gate verification head：
+  `ff06e6b393f2c8d974afbcc6ebd1c6766f8de2d7`
 - GitHub PR：
   [#12](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/12)（Ready）
 - Remote PR head（remediation push 前）：
@@ -617,7 +618,7 @@ repository static suite: 168 passed
 read-only scoped package report: 148 tests, 0 errors, 0 failures, 8 skipped
 Python compile check: passed
 git diff --check: passed
-scripts/verify.sh on this head: Pending
+scripts/verify.sh with this code head at ff06e6b documentation head: passed
 ```
 
 Evidence mutation threat model：
@@ -634,6 +635,51 @@ Evidence mutation threat model：
 - 工具不宣称抵御恶意同 UID 进程在最终 identity check 与按名称 unlink 之间的竞态，
   也不宣称识别 hardlink 或 bind mount 对 lexical ownership 的伪造。
 - 这是显式接受的企业 CI 剩余风险，不应把该工具表述为对抗性文件系统安全边界。
+
+### Current remediation full-gate verification
+
+```text
+Verified exact Git head:
+ff06e6b393f2c8d974afbcc6ebd1c6766f8de2d7
+
+Command:
+bash scripts/verify.sh
+
+Exit status / wall time:
+0 / 346.5 s
+
+Repository static:
+168 tests passed
+
+Build:
+6 packages; colcon log elapsed 25.7 s
+
+ROS/package tests:
+6 packages; sequential colcon log elapsed 169.7 s
+148 scoped result records, 0 errors, 0 failures, 8 skipped
+
+Clean install:
+Core CTest passed; Core remained private; motion_gate_node installed
+
+Final marker:
+VoiceNav Robot verification passed.
+
+Selected product metrics (milliseconds unless stated):
+bounded motion distance=0.100500 m
+clamp linear=0.400, angular=1.200 at Gate and controller
+authority expiry: Gate zero=256.784; controller after=9.145;
+  stationary=100.079; hold=219.535
+candidate expiry: Gate zero=156.780; controller after=7.798;
+  stationary=98.020; hold=220.307
+INHIBIT: ack=10.190; Gate zero=1.187; controller zero=4.009;
+  stationary=112.879; hold=200.124
+final command owner remained /motion_gate_node with a stable writer GID
+
+Non-blocking diagnostics retained:
+gz sdf preserved the gz_frame_id extension with a warning;
+the clean-prefix audit reported the existing workspace underlay override warning.
+Neither warning weakened an assertion or exit-code requirement.
+```
 
 ### Scoped clean-count canonical verification
 

@@ -9,8 +9,9 @@
 
 **Implementation state:** the product baseline and historical clean-count head
 `8e022580` passed the full local gate and clean-prefix install audit. The
-current scoped-evidence hardening head `517339a` has passed focused checks;
-its exact-head full gate and final remediation review are pending.
+current scoped-evidence hardening code head `517339a` and documentation head
+`ff06e6b` passed the exact-head full local gate; final documentation review is
+pending.
 PR #12 exists, but its visible hosted result is still for the pre-remediation
 head. Required hosted CI on the final reviewed head, rebase merge, and
 `course/0009-solution` do not yet exist.
@@ -449,17 +450,27 @@ Focused checks on current hardening head
 `517339a3d313910a937fef973a9bdd635b457fc8` passed 41 scoped-evidence tests,
 all 168 repository-static tests,
 a read-only `148/0/0/8` scoped package report,
-Python compilation, and `git diff --check`. A full `scripts/verify.sh` run on
-that exact head has not yet occurred and must not be inferred from the
-historical `8e022580` result.
+Python compilation, and `git diff --check`. Documentation head
+`ff06e6b393f2c8d974afbcc6ebd1c6766f8de2d7`, containing that unchanged code
+head, then passed the full `scripts/verify.sh` gate in 346.5 seconds: 168
+repository tests, six-package build in 25.7 seconds, six-package sequential
+tests in 169.7 seconds, scoped `148/0/0/8`, clean Core/node install audit, and
+the final `VoiceNav Robot verification passed.` marker.
+
+The exact product evidence at `ff06e6b` recorded 0.100500 m bounded motion;
+0.400 m/s and 1.200 rad/s matching Gate/controller clamps; authority and
+candidate Gate-zero latencies of 256.784 ms and 156.780 ms; explicit INHIBIT
+ack/Gate-zero/controller-zero latencies of 10.190/1.187/4.009 ms; and a stable
+sole final command owner. The SDF extension and existing workspace-underlay
+messages remained non-blocking diagnostics; no assertion or exit-code rule was
+relaxed.
 
 The evidence tool assumes the selected build tree and locked source-package
 layout are quiescent during clear/report. `src` and `src/<package>` must be
 direct, non-symlinked directories; the two ament exceptions are exact
 path/strictly-resolved-target pairs, and the source manifest root/name must
-match. Anchored
-directory descriptors contain ordinary path replacement to the selected
-package and reject symlink/path-traversal escape, but the tool
+match. Anchored directory descriptors contain ordinary path replacement to the
+selected package and reject symlink/path-traversal escape, but the tool
 does not claim to defeat a hostile same-UID process racing the final identity
 check against name-based unlink, or hardlink/bind-mount provenance forgery.
 That residual risk is explicitly accepted for the controlled enterprise CI
