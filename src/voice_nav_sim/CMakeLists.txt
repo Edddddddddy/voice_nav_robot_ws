@@ -14,6 +14,27 @@ find_package(ament_cmake REQUIRED)
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
   find_package(launch_testing_ament_cmake REQUIRED)
+  find_package(rclcpp REQUIRED)
+  find_package(rmw REQUIRED)
+  find_package(tf2_msgs REQUIRED)
+
+  add_executable(
+    tf_ownership_auditor
+    test/tf_ownership_auditor.cpp
+  )
+  target_compile_features(tf_ownership_auditor PUBLIC cxx_std_17)
+  ament_target_dependencies(
+    tf_ownership_auditor
+    rclcpp
+    rmw
+    tf2_msgs
+  )
+
+  install(
+    TARGETS tf_ownership_auditor
+    DESTINATION lib/${PROJECT_NAME}
+  )
+
   # the following line skips the linter which checks for copyrights
   # comment the line when a copyright and license is added to all source files
   set(ament_cmake_copyright_FOUND TRUE)
@@ -26,6 +47,10 @@ if(BUILD_TESTING)
   add_launch_test(
     test/test_simulation_control.py
     TIMEOUT 120
+  )
+  add_launch_test(
+    test/test_tf_ownership_conflict.py
+    TIMEOUT 30
   )
 endif()
 

@@ -8,6 +8,9 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Added the in-progress Lesson 0008 Work Item, course contract, and pending
+  evidence template for a packaged LiDAR world, direct product `/odom`, and
+  per-edge TF publisher-GID ownership verification.
 - Added the tests-first Lesson 0007 contract, Work Item, and pending evidence
   record for migrating the simulation drive path to `gz_ros2_control` and
   Jazzy's native `TwistStamped` `diff_drive_controller` input.
