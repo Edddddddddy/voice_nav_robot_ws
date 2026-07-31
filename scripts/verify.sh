@@ -43,6 +43,20 @@ fi
 git diff --check
 git diff --cached --check
 
+mapfile -t workspace_packages < <(
+  colcon list --base-paths src --names-only
+)
+if (( ${#workspace_packages[@]} == 0 )); then
+  echo "No ROS packages discovered under src" >&2
+  exit 5
+fi
+
+build_boundary_args=("--build-base" "build")
+for package_name in "${workspace_packages[@]}"; do
+  build_boundary_args+=("--package" "${package_name}")
+done
+python3 scripts/check_colcon_build_boundary.py "${build_boundary_args[@]}"
+
 echo "[2/6] Checking declared dependencies"
 rosdep check --from-paths src --ignore-src
 
@@ -87,7 +101,7 @@ package_args=("$@")
 if (( ${#package_args[@]} > 0 )); then
   test_packages=("${package_args[@]}")
 else
-  mapfile -t test_packages < <(colcon list --names-only)
+  test_packages=("${workspace_packages[@]}")
 fi
 
 if (( ${#test_packages[@]} == 0 )); then
@@ -117,6 +131,7 @@ source install/setup.bash
 set -u
 
 echo "[5/6] Testing"
+python3 scripts/check_colcon_build_boundary.py "${build_boundary_args[@]}"
 python3 scripts/report_test_results.py "${test_result_args[@]}" --clear
 if (( ${#package_args[@]} > 0 )); then
   colcon test \
