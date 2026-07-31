@@ -207,14 +207,18 @@ repository product。静态/纯函数契约至少覆盖：
 - world 没有任何固定 obstacle；
 - obstacle 只有 visual，没有 collision；
 - obstacle pose 或 size 错误；
-- world 使用 Fuel、HTTP(S) 或不受控远端 URI；
+- world 出现任何 `<uri>`，包括 Fuel、HTTP(S)、绝对本机路径或相对路径；
 - 缺少 Physics、UserCommands、SceneBroadcaster 或 Sensors system；
 - `worlds/` 没有被安装。
 
 ### LiDAR 负向 fixtures
 
-- LiDAR 缺失或重复；
+- LiDAR 缺失、重复，或第二个 sensor 藏在另一个 root-level
+  `<gazebo>` block；
 - parent 或 `gz_frame_id` 不是 `laser_link`；
+- Xacro macro 展开后产生第二个 sensor 或第二个 pose；
+- 展开后 sensor 不属于 fixed-joint lump 的 `base_footprint`，或 canonical
+  pose 缺失、重复、非有限、维度错误、带相对坐标属性或数值错误；
 - topic 不是绝对 `/scan`；
 - samples、角度、update rate、range 或 vertical layer 不匹配；
 - 添加了 noise；
@@ -304,6 +308,11 @@ ground 和 box 都直接定义 primitive visual/collision，不依赖远端 incl
 box 必须是 static，collision 与 visual 可共享几何，但 contract 只把
 collision 当传感器/物理事实。
 
+本课为了把 clean-run 行为做成确定性基线，world 中不允许任何 `<uri>`：
+远端 URI 会引入网络依赖，本机绝对 URI 会引入开发机依赖，相对 URI 也会把
+成功与当前工作目录或资源搜索路径绑定。以后确实需要 packaged mesh 时，应在
+新的 Work Item 中定义安装、解析与校验规则，而不是悄悄放宽本课边界。
+
 在 `CMakeLists.txt` 安装 `worlds/`。launch 用
 `FindPackageShare('voice_nav_sim')` 与 `PathJoinSubstitution` 获取安装空间
 路径，把 world 文件直接传给 Gazebo。同步把 spawn 命令的 world 名从
@@ -339,6 +348,7 @@ plane；网络断开后的 CI 不会继承你的 cache。
 ```xml
 <gazebo reference="laser_link">
   <sensor name="lidar" type="gpu_lidar">
+    <pose>0 0 0 0 0 0</pose>
     <always_on>true</always_on>
     <visualize>false</visualize>
     <update_rate>10</update_rate>
@@ -390,13 +400,30 @@ check_urdf /tmp/voice_nav_robot.urdf
 gz sdf -p /tmp/voice_nav_robot.urdf \
   > /tmp/voice_nav_robot.sdf
 
-rg -n \
-  "gpu_lidar|gz_frame_id|<topic>/scan|<samples>360" \
-  /tmp/voice_nav_robot.sdf
+python3 scripts/check_sdf_contract.py /tmp/voice_nav_robot.sdf
 ```
 
 若 Xacro 中存在、转换后的 SDF 中消失，说明 tag 层级或 SDF 版本不被接受；
 不要只放宽静态测试。
+
+这里必须有两层不同职责的检查：
+
+1. source checker 约束 Xacro 中直接可见的设计意图：恰好一个 root-level
+   sensor binding、`reference="laser_link"`、link-local zero pose；
+1. generated-product checker 约束 Xacro 和 URDF→SDF 真正产生的结果，防止
+   已调用 macro 在静态文本检查之后注入第二个 sensor/pose。
+
+URDF 生成物的 document boundary 也必须封闭：根是 `<sdf>`，根下恰好只有
+一个直接 `voice_nav_robot` model。若 checker 只“挑出一个同名 model”而
+忽略 sibling world/model，额外 sensor 或 plugin 仍能藏在未审根对象中。
+
+Gazebo Harmonic 会合并 fixed joint，所以最终 SDF 中 sensor 的直接 owner
+是外层 `voice_nav_robot` model 唯一的直接 `base_footprint` link 元素，
+canonical pose 是约 `0.1 0 0.195 0 0 0`。生成物契约要同时绑定 owner
+元素身份和 pose：只检查数值而不检查父 link，会把同样的局部坐标错误地
+允许挂到旋转 wheel link；只比较 link 名称，又会让 nested model 中的同名
+`base_footprint` 冒充机器人基座。只检查 source 的零 pose，则看不到
+fixed-joint lump 后真正交给 Gazebo 的几何。
 
 ## 6. 用 bridge.yaml 明确方向、类型和 QoS
 
@@ -720,6 +747,25 @@ GID_B publishes base_link -> laser_link
 它应通过唯一性聚合。若测试因为 `/tf` 有两个 publisher 而失败，说明算法
 错误地按 topic 计数。
 
+### 宏展开后的 sensor/pose 注入
+
+再建立两个只用于 checker 的 Xacro fixtures：
+
+- 已调用 macro 在另一个 root-level `<gazebo>` block 生成第二个 sensor；
+- 已调用 macro 给原 sensor 注入第二个 `<pose>`。
+
+source checker 不承诺执行 Xacro，因此可能接受这两种 source；但
+`xacro -> gz sdf -p -> check_sdf_contract.py` 必须拒绝展开后的产品。
+再把唯一 sensor 从 `base_footprint` 移到 `left_wheel`，即使 pose 数字没有
+变化也必须拒绝；把它移入一个位于其他 world pose、但内部 link 也叫
+`base_footprint` 的 nested model 同样必须拒绝。这个故障注入证明生成物
+校验同时覆盖数量、外层 parent 元素身份和位姿，而不是用字符串搜索制造
+绿灯。
+
+最后在 `<sdf>` 根下并列一个带 camera 的 `<world>`，以及一个第二
+`<model>`。两者都可能是语法有效 SDF，但都不属于本课的 URDF-derived
+robot product，必须在进入 chosen-model 检查前失败。
+
 ### 运行中 owner 稳定性
 
 在 headless integration 中记录初始 edge/GID owner set，向
@@ -844,6 +890,9 @@ tests-first commit 应已在实现前产生。每次 commit 前都完整阅读 s
 - matched `/odom` 与 TF pose 一致；
 - 每条 observed TF edge 只有一个 GID，并关联到预期 owner；
 - 同名双 writer fixture 被拒绝，合法 disjoint writers 被接受；
+- source 与 generated-SDF 两层契约拒绝 macro 注入的重复 sensor/pose，
+  封闭 document root，并把 canonical pose 绑定到外层
+  `base_footprint` 元素；
 - 不存在 `map -> odom`；
 - bounded motion + zero 前后 owner set 不变；
 - 聚焦、完整和 clean-process gates 全部通过；
@@ -881,6 +930,9 @@ tests-first commit 应已在实现前产生。每次 commit 前都完整阅读 s
 1. 为什么 360 samples 的 `[-pi,+pi]` 不能硬编码 index 180 就是零角？
 1. 如果 Gazebo 有 `/scan` 而 ROS 没有，你会按什么顺序定位故障层？
 1. 本课如何证明 world 不依赖开发机网络或 Fuel cache？
+1. 为什么检查 Xacro source 后仍必须检查展开后的 SDF？为什么 canonical
+   pose 必须与 parent link 一起校验？为什么 chosen model 之外的 root
+   sibling 也属于契约范围？
 
 ## 主要资料
 

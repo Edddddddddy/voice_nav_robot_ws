@@ -3,9 +3,9 @@
 状态：Pending
 
 本记录只填写已经发生且可复查的证据。教师侧 reference implementation
-已经完成 tests-first、本地实现与完整本地门禁；学习者复现、PR、CI、review、
-merge 与 solution tag 仍保持 Pending。下列数值来自 2026-07-31 的最终本地
-运行，不是课程中的期望输出。
+已经完成 tests-first、本地实现与完整本地门禁；draft PR 已建立，学习者复现、
+当前提交的 hosted CI、merge 与 solution tag 仍保持 Pending。下列数值来自
+2026-07-31 的真实本地运行，不是课程中的期望输出。
 
 ## 变更身份
 
@@ -22,10 +22,17 @@ merge 与 solution tag 仍保持 Pending。下列数值来自 2026-07-31 的最�
 - Tests-first contract commit：`40608da`
 - Green implementation commit：`b246340`
 - Review-fix commit：`0f5fdfa`
+- Static-boundary review RED/GREEN：`c463d1f` / `7dc889e`
+- Expanded-sensor review RED/GREEN：`9e0be95` / `e23330c`
+- Expanded-pose review tests/GREEN：`7b58d0e`, `bd3f322` / `cb388cb`
+- Expanded-owner review RED/GREEN：`d50739f` / `a4afab1`
+- Outer-owner identity review RED/GREEN：`d0a3bf2` / `13c2a7e`
+- Generated-document review RED/GREEN：`71d3551` / `68818f3`
 - Documentation/evidence commit：`bc9e636`
 - GitHub PR：
   [#9](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/9)
-- Required CI：TBD
+- Required CI：当前 review-hardening 提交仍为 TBD；较早的远端
+  `fd5b8c7` 已通过，但不作为当前提交证据
 - Public merge identity：TBD
 - Solution tag：TBD，且只能在 reviewed public merge 后创建
 
@@ -99,7 +106,8 @@ fixture defect. No Lesson 0008 production source had been changed.
 
 - [x] `voice_nav_test_world.sdf` 从 package share 加载。
 - [x] installed world 与 source contract 一致。
-- [x] world 不含 Fuel、HTTP(S) 或依赖本机 cache 的 URI。
+- [x] world 不含任何 `<uri>`；Fuel、HTTP(S)、本机绝对路径与相对路径均
+  被拒绝。
 - [x] Physics、UserCommands、SceneBroadcaster、Sensors systems 全部存在。
 - [x] headless path 使用 `--headless-rendering`。
 - [x] ground 与固定 obstacle 都有 collision。
@@ -129,8 +137,8 @@ Physics, UserCommands, SceneBroadcaster, Sensors(render_engine=ogre2)
 Obstacle collision pose/size:
 center=(2.0, 0.0, 0.5) m; size=(0.5, 1.0, 1.0) m
 
-Network-dependency audit:
-PASS: no Fuel, HTTP(S), or machine-cache resource URI
+Resource-dependency audit:
+PASS: no URI; all ground and obstacle resources are authored inline
 ```
 
 ## LiDAR 与 bridge 证据
@@ -147,6 +155,13 @@ PASS: no Fuel, HTTP(S), or machine-cache resource URI
 - [x] 两项 direction 均为 `GZ_TO_ROS`。
 - [x] bridge 没有 wall-time timestamp override。
 - [x] bridge 不承载 cmd、joint state、odom、`/tf` 或 `/tf_static`。
+- [x] source checker 与 generated-SDF checker 分层执行。
+- [x] generated SDF root 为 `<sdf>`，唯一直接对象是
+  `voice_nav_robot`；不存在未审 sibling world/model。
+- [x] 展开后恰好一个 sensor，直接 owner 是外层 `voice_nav_robot`
+  唯一直接 `base_footprint` 元素，而不是同名 nested link。
+- [x] 展开后 canonical pose 为 `0.1 0 0.195 0 0 0`，恰好六个有限数且
+  不含 `relative_to` 或其他属性。
 
 ```text
 Gazebo /scan topic/type:
@@ -170,6 +185,59 @@ Complete bridge.yaml:
 /scan: gz.msgs.LaserScan -> sensor_msgs/msg/LaserScan,
        GZ_TO_ROS, SENSOR_DATA
 ```
+
+### Source 与 generated-product 复审证据
+
+独立复审先后重放了多层静态盲点：
+
+```text
+Direct-source fault:
+local absolute URI, relative URI, or a second root-level sensor
+old checker: 0
+new checker: 1
+
+Invoked-macro duplicate sensor:
+source checker: 0
+xacro: 0
+gz sdf -p: 0
+expanded sensor count: 2
+generated-product checker: 1
+
+Invoked-macro duplicate pose:
+source checker: 0
+xacro: 0
+gz sdf -p: 0
+expanded pose count: 2
+generated-product checker: 1
+
+Wrong generated owner:
+sensor moved from base_footprint to left_wheel with pose unchanged
+gz sdf -k: 0
+generated-product checker: 1
+
+Nested same-name owner:
+sensor moved under rogue nested model/link named base_footprint
+gz sdf -k: 0
+generated-product checker: 1
+
+Duplicate outer base:
+two direct links named base_footprint
+generated-product checker: 1
+
+Generated-document sibling:
+wrong root, sibling world with a camera, or sibling model
+old checker: 0
+generated-product checker: 1
+```
+
+这不是要求 source checker 执行 Xacro。source checker 负责直接可见的设计
+意图；真实产品链在 Xacro 与 URDF→SDF 转换后再检查全局 sensor count、
+direct owner、canonical pose、identity、geometry 与 noise。最终真实产品
+owner 为 `base_footprint`，pose 为约
+`0.10000000000000001 0 0.19500000000000001 0 0 0`，无 attributes；
+focused generated-SDF tests 为 `11/11`。checker 先约束 document root 与
+唯一 model，再使用外层 model 的直接 link 元素身份；nested model 中的同名
+字符串不能被视为同一坐标系。
 
 ## 解析 beam 证据
 
@@ -408,7 +476,7 @@ Exit status:
 0
 
 Repository test summary:
-80 tests; 80 passed
+88 tests; 88 passed
 
 Build summary:
 Summary: 6 packages finished
@@ -429,7 +497,7 @@ VoiceNav Robot verification passed.
 - [x] Work Item 已关联 GitHub Issue。
 - [ ] PR diff 只包含 VN-0009 范围。
 - [ ] required hosted CI 通过。
-- [ ] independent review 已完成。
+- [x] independent local review 已完成，发现项均有 RED/GREEN 与重放证据。
 - [ ] review conversations 全部解决。
 - [ ] PR 以 rebase 方式合并。
 - [ ] record 写入 local-to-public rebase identity map。
@@ -444,10 +512,20 @@ PR:
 https://github.com/Edddddddddy/voice_nav_robot_ws/pull/9
 
 Required CI:
-TBD
+Earlier draft-head evidence only:
+remote head fd5b8c7f2622a6eb3f0ae637ea1ab4e059f7bf99
+SUCCESS:
+https://github.com/Edddddddddy/voice_nav_robot_ws/actions/runs/30608156898/job/91084868188
+
+This run predates the review-hardening commits through 68818f3 and this
+documentation update. Current-head hosted CI remains TBD and must be captured
+after those commits are pushed; the earlier success is not completion
+evidence for the current diff.
 
 Independent review:
-TBD
+No remaining P0/P1/P2 after graph, runtime, documentation, source-contract,
+expanded-sensor, expanded-pose, expanded-owner, and generated-document review
+passes.
 
 Merge method/time:
 TBD
@@ -473,6 +551,8 @@ TBD
 1. 360 samples 覆盖 `[-pi,+pi]` 时，如何找离零角最近的真实 beam？
 1. 哪个负向 fixture 最早暴露了真实设计错误？为什么？
 1. 如果把 obstacle collision 删除但保留 visual，哪些证据会失败？
+1. 为什么 source Xacro 和 generated SDF 必须分别校验？为什么 pose 数值
+   必须与外层 model 的直接 parent link 元素身份一起解释？
 
 ```text
 Learner reflection:
