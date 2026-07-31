@@ -275,6 +275,38 @@ class ScopedTestResultsTest(unittest.TestCase):
             self.assertTrue(sibling_result.is_file())
             self.assertTrue(borrowed_link.is_symlink())
 
+    def test_anchored_clear_rejects_replaced_parent_directory(self) -> None:
+        from scripts.colcon_evidence import open_result_deletion_plan
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory) / "workspace"
+            package_directory = workspace / "build" / "voice_nav_mission"
+            result_file = package_directory / "results" / "current.xml"
+            write_xunit(result_file, tests=1)
+            external_directory = workspace / "external"
+            external_result = external_directory / "current.xml"
+            write_xunit(external_result, tests=9)
+            moved_directory = workspace / "moved-results"
+
+            with open_result_deletion_plan(
+                package_directory,
+                (result_file,),
+            ) as deletion_plan:
+                result_file.parent.rename(moved_directory)
+                result_file.parent.symlink_to(
+                    external_directory,
+                    target_is_directory=True,
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "changed after evidence collection",
+                ):
+                    deletion_plan.unlink_all()
+
+            self.assertTrue(external_result.is_file())
+            self.assertTrue((moved_directory / "current.xml").is_file())
+
     def test_safe_ctest_tag_is_scoped_and_reported(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             build_base = Path(temporary_directory) / "build"
