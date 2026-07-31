@@ -559,13 +559,12 @@ class ResultSnapshotPlan(ResultDeletionPlan):
 
                 destination_path = sandbox_package / identity.relative_path
                 destination_path.parent.mkdir(parents=True, exist_ok=True)
-                with (
-                    os.fdopen(source_fd, "rb", closefd=True) as source,
-                    destination_path.open("xb") as destination,
-                ):
-                    source_fd = -1
-                    shutil.copyfileobj(source, destination)
-                    after_status = os.fstat(source.fileno())
+                source = os.fdopen(source_fd, "rb", closefd=True)
+                source_fd = -1
+                with source:
+                    with destination_path.open("xb") as destination:
+                        shutil.copyfileobj(source, destination)
+                        after_status = os.fstat(source.fileno())
                 if not self._same_snapshot(identity, after_status):
                     raise ValueError(
                         "result path changed after evidence discovery: "
