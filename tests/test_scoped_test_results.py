@@ -378,6 +378,39 @@ class ScopedTestResultsTest(unittest.TestCase):
             self.assertTrue(external_result.is_file())
             self.assertTrue((moved_directory / "current.xml").is_file())
 
+    def test_clear_rejects_file_replaced_after_snapshot(self) -> None:
+        from scripts.colcon_evidence import open_result_deletion_plan
+        from scripts.colcon_evidence import open_result_snapshot
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory) / "workspace"
+            package_directory = workspace / "build" / "voice_nav_mission"
+            result_file = package_directory / "current.xunit.xml"
+            write_xunit(result_file, tests=1)
+            sandbox_package = workspace / "sandbox" / "voice_nav_mission"
+
+            with open_result_snapshot(package_directory) as snapshot:
+                snapshot.stage(sandbox_package)
+                result_identity = snapshot.identity_for(
+                    Path("current.xunit.xml")
+                )
+
+            result_file.unlink()
+            write_xunit(result_file, tests=9)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "changed after evidence collection",
+            ):
+                with open_result_deletion_plan(
+                    package_directory,
+                    (result_file,),
+                    expected_identities=(result_identity,),
+                ):
+                    pass
+
+            self.assertTrue(result_file.is_file())
+
     def test_safe_ctest_tag_is_scoped_and_reported(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             build_base = Path(temporary_directory) / "build"
