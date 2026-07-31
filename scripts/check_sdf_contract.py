@@ -137,6 +137,12 @@ def validate_lidar(model: element_tree.Element) -> None:
         raise SdfContractError(
             "generated product sensor must be a direct child of one link"
         )
+    sensor_owner = sensor_bindings[0][0]
+    if sensor_owner.get("name") != "base_footprint":
+        raise SdfContractError(
+            "generated product LiDAR must be owned by base_footprint "
+            "after fixed-joint lumping"
+        )
 
     require_numeric_vector(
         sensor,
