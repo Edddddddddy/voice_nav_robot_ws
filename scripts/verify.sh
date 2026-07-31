@@ -43,9 +43,18 @@ fi
 git diff --check
 git diff --cached --check
 
-mapfile -t workspace_packages < <(
+workspace_package_output=""
+if ! workspace_package_output="$(
   colcon list --base-paths src --names-only
-)
+)"; then
+  echo "Failed to discover ROS packages under src" >&2
+  exit 5
+fi
+
+workspace_packages=()
+if [[ -n "${workspace_package_output}" ]]; then
+  mapfile -t workspace_packages <<< "${workspace_package_output}"
+fi
 if (( ${#workspace_packages[@]} == 0 )); then
   echo "No ROS packages discovered under src" >&2
   exit 5
