@@ -23,6 +23,17 @@ def write_xunit(path: Path, *, tests: int, skipped: int = 0) -> None:
     )
 
 
+def write_ctest(path: Path, *, status: str = "passed") -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        (
+            '<Site><Testing><Test Status="'
+            f'{status}"><Name>fixture</Name></Test></Testing></Site>\n'
+        ),
+        encoding="utf-8",
+    )
+
+
 class ScopedTestResultsTest(unittest.TestCase):
     def run_boundary_check(
         self,
@@ -165,6 +176,126 @@ class ScopedTestResultsTest(unittest.TestCase):
 
             self.assertEqual(completed.returncode, 2)
             self.assertIn("non-symlinked child", completed.stderr)
+
+    def test_report_rejects_ctest_tag_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            selected_testing = build_base / "voice_nav_mission" / "Testing"
+            selected_testing.mkdir(parents=True)
+            (selected_testing / "TAG").write_text(
+                "../../voice_nav_sim/Testing/20260731-0000\n",
+                encoding="utf-8",
+            )
+            write_ctest(
+                build_base
+                / "voice_nav_sim"
+                / "Testing"
+                / "20260731-0000"
+                / "Test.xml"
+            )
+
+            completed = self.run_reporter(
+                build_base,
+                "voice_nav_mission",
+            )
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("unsafe CTest TAG entry", completed.stderr)
+
+    def test_report_rejects_xml_symlink_to_sibling_package(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            sibling_result = (
+                build_base / "voice_nav_sim" / "external.xunit.xml"
+            )
+            write_xunit(sibling_result, tests=9)
+            selected_package = build_base / "voice_nav_mission"
+            selected_package.mkdir()
+            (selected_package / "borrowed.xunit.xml").symlink_to(
+                sibling_result,
+            )
+
+            completed = self.run_reporter(
+                build_base,
+                "voice_nav_mission",
+            )
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("result path contains symbolic link", completed.stderr)
+            self.assertNotIn("Summary: 9 tests", completed.stdout)
+
+    def test_clear_prevalidates_every_result_before_unlinking(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            selected_package = build_base / "voice_nav_mission"
+            safe_result = selected_package / "a_safe.xunit.xml"
+            target_result = selected_package / "b_target.xunit.xml"
+            unsafe_link = selected_package / "z_unsafe.xunit.xml"
+            write_xunit(safe_result, tests=1)
+            write_xunit(target_result, tests=1)
+            unsafe_link.symlink_to(target_result)
+
+            completed = self.run_reporter(
+                build_base,
+                "voice_nav_mission",
+                clear=True,
+            )
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("result path contains symbolic link", completed.stderr)
+            self.assertTrue(safe_result.is_file())
+            self.assertTrue(target_result.is_file())
+            self.assertTrue(unsafe_link.is_symlink())
+
+    def test_clear_preserves_per_package_ownership(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            selected_package = build_base / "voice_nav_mission"
+            selected_package.mkdir(parents=True)
+            sibling_result = (
+                build_base / "voice_nav_sim" / "owned.xunit.xml"
+            )
+            write_xunit(sibling_result, tests=1)
+            borrowed_link = selected_package / "borrowed.xunit.xml"
+            borrowed_link.symlink_to(sibling_result)
+
+            completed = self.run_reporter(
+                build_base,
+                "voice_nav_mission",
+                "voice_nav_sim",
+                clear=True,
+            )
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("result path contains symbolic link", completed.stderr)
+            self.assertTrue(sibling_result.is_file())
+            self.assertTrue(borrowed_link.is_symlink())
+
+    def test_safe_ctest_tag_is_scoped_and_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            testing_directory = (
+                build_base / "voice_nav_mission" / "Testing"
+            )
+            testing_directory.mkdir(parents=True)
+            (testing_directory / "TAG").write_text(
+                "20260731-0000\nExperimental\n",
+                encoding="utf-8",
+            )
+            write_ctest(
+                testing_directory / "20260731-0000" / "Test.xml"
+            )
+
+            completed = self.run_reporter(
+                build_base,
+                "voice_nav_mission",
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn(
+                "Summary: 1 test, 0 errors, 0 failures, 0 skipped",
+                completed.stdout,
+            )
 
     def test_boundary_allows_missing_build_base(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
