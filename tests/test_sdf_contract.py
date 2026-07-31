@@ -162,11 +162,37 @@ class SdfContractTest(unittest.TestCase):
             "    </link>",
             1,
         )
+        sensor_in_nested_model = VALID_SDF.replace(
+            VALID_SENSOR,
+            "",
+        ).replace(
+            "  </model>",
+            '    <model name="rogue_mount">\n'
+            "      <pose>5 0 0 0 0 0</pose>\n"
+            '      <link name="base_footprint">\n'
+            f"{VALID_SENSOR}"
+            "      </link>\n"
+            "    </model>\n"
+            "  </model>",
+            1,
+        )
+        duplicate_outer_base = VALID_SDF.replace(
+            "    </link>",
+            "    </link>\n"
+            '    <link name="base_footprint"/>',
+            1,
+        )
+        mutations = (
+            ("wheel", sensor_on_wheel, "base_footprint"),
+            ("nested_model", sensor_in_nested_model, "top-level link"),
+            ("duplicate_outer_base", duplicate_outer_base, "exactly one"),
+        )
+        for case, invalid_sdf, diagnostic in mutations:
+            with self.subTest(case=case):
+                completed = self.run_checker(invalid_sdf)
 
-        completed = self.run_checker(sensor_on_wheel)
-
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("base_footprint", completed.stderr)
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(diagnostic, completed.stderr)
 
     def test_generated_sdf_lidar_identity_is_enforced(self) -> None:
         mutations = (
