@@ -279,6 +279,26 @@ class ScopedTestResultsTest(unittest.TestCase):
             self.assertEqual(descriptors_after, descriptors_before)
             self.assertTrue(staged_result.is_file())
 
+    def test_snapshot_rejects_result_added_after_discovery(self) -> None:
+        from scripts.colcon_evidence import open_result_snapshot
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory) / "workspace"
+            package_directory = workspace / "build" / "voice_nav_mission"
+            write_xunit(package_directory / "current.xunit.xml", tests=1)
+            sandbox_package = workspace / "sandbox" / "voice_nav_mission"
+
+            with open_result_snapshot(package_directory) as snapshot:
+                write_xunit(package_directory / "late.xunit.xml", tests=9)
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "changed after evidence discovery",
+                ):
+                    snapshot.stage(sandbox_package)
+
+            self.assertFalse((sandbox_package / "late.xunit.xml").exists())
+
     def test_clear_prevalidates_every_result_before_unlinking(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             build_base = Path(temporary_directory) / "build"
