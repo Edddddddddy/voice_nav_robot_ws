@@ -72,6 +72,51 @@ def require_number(
         )
 
 
+def require_numeric_vector(
+    parent: element_tree.Element,
+    path: str,
+    expected: tuple[float, ...],
+    context: str,
+) -> None:
+    """Require one attribute-free finite vector equal to the contract."""
+    element = require_single(parent, path, context)
+    if element.attrib:
+        raise SdfContractError(
+            f"{context} {path} must not use relative frames or attributes"
+        )
+    raw_value = (element.text or "").strip()
+    tokens = raw_value.split()
+    if len(tokens) != len(expected):
+        raise SdfContractError(
+            f"{context} {path} must contain exactly "
+            f"{len(expected)} numbers"
+        )
+    try:
+        actual = tuple(float(token) for token in tokens)
+    except ValueError as error:
+        raise SdfContractError(
+            f"{context} {path} must contain only finite numbers"
+        ) from error
+    if not all(math.isfinite(value) for value in actual):
+        raise SdfContractError(
+            f"{context} {path} must contain only finite numbers"
+        )
+    if not all(
+        math.isclose(
+            actual_value,
+            expected_value,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        for actual_value, expected_value in zip(actual, expected)
+    ):
+        raise SdfContractError(
+            f"{context} {path} must be "
+            f"{' '.join(str(value) for value in expected)}; "
+            f"found {' '.join(str(value) for value in actual)}"
+        )
+
+
 def validate_lidar(model: element_tree.Element) -> None:
     """Validate the actual post-Xacro, post-URDF-conversion sensor graph."""
     sensors = model.findall(".//sensor")
@@ -93,6 +138,12 @@ def validate_lidar(model: element_tree.Element) -> None:
             "generated product sensor must be a direct child of one link"
         )
 
+    require_numeric_vector(
+        sensor,
+        "./pose",
+        (0.1, 0.0, 0.195, 0.0, 0.0, 0.0),
+        "generated product LiDAR pose",
+    )
     if sensor.get("type") != "gpu_lidar":
         raise SdfContractError(
             "generated product LiDAR type must be gpu_lidar"
