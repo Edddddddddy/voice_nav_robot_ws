@@ -3,15 +3,13 @@
 """Report or clear test results for an explicit set of colcon packages."""
 
 import argparse
-import re
 import sys
 from pathlib import Path
 
 from colcon_test_result.test_result import get_test_results
 from colcon_test_result.test_result import Result
 
-
-PACKAGE_NAME_PATTERN = re.compile(r"[A-Za-z0-9_]+")
+from colcon_evidence import selected_package_directories
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -42,53 +40,26 @@ def parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def selected_package_directories(
-    build_base: Path,
-    package_names: list[str],
-) -> list[Path]:
-    try:
-        resolved_base = build_base.resolve(strict=True)
-    except FileNotFoundError as error:
-        raise ValueError(f"build base does not exist: {build_base}") from error
-    if not resolved_base.is_dir():
-        raise ValueError(f"build base is not a directory: {resolved_base}")
-
-    if len(set(package_names)) != len(package_names):
-        raise ValueError("duplicate package name")
-
-    directories = []
-    for package_name in package_names:
-        if PACKAGE_NAME_PATTERN.fullmatch(package_name) is None:
-            raise ValueError(f"invalid package name: {package_name}")
-        package_directory = resolved_base / package_name
-        try:
-            resolved_package = package_directory.resolve(strict=True)
-        except FileNotFoundError as error:
-            raise ValueError(
-                f"package build directory does not exist: {package_directory}"
-            ) from error
-        if not resolved_package.is_dir() or resolved_package.parent != resolved_base:
-            raise ValueError(
-                "package build directory must be a direct, non-symlinked child "
-                f"of the build base: {package_directory}"
-            )
-        directories.append(resolved_package)
-    return directories
-
-
 def collect_results(
     package_directories: list[Path],
     *,
     collect_details: bool,
     files: set[str] | None = None,
+    require_each_package: bool = False,
 ) -> list[Result]:
     results = set()
     for package_directory in package_directories:
-        results |= get_test_results(
+        package_results = get_test_results(
             package_directory,
             collect_details=collect_details,
             files=files,
         )
+        if require_each_package and not package_results:
+            raise ValueError(
+                f"no test results found for selected package: "
+                f"{package_directory.name}"
+            )
+        results |= package_results
     return sorted(results, key=lambda result: result.path)
 
 
@@ -121,6 +92,7 @@ def report_results(package_directories: list[Path]) -> int:
     all_results = collect_results(
         package_directories,
         collect_details=True,
+        require_each_package=True,
     )
     failed_results = [
         result
