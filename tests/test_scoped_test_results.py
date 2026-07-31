@@ -1,4 +1,5 @@
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,6 +11,7 @@ BOUNDARY_CHECKER = (
 )
 REPORTER = REPOSITORY_ROOT / "scripts" / "report_test_results.py"
 VERIFY_SCRIPT = REPOSITORY_ROOT / "scripts" / "verify.sh"
+CI_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml"
 
 
 def write_xunit(path: Path, *, tests: int, skipped: int = 0) -> None:
@@ -41,7 +43,7 @@ class ScopedTestResultsTest(unittest.TestCase):
         *packages: str,
     ) -> subprocess.CompletedProcess[str]:
         command = [
-            "python3",
+            sys.executable,
             str(BOUNDARY_CHECKER),
             "--build-base",
             str(build_base),
@@ -63,7 +65,7 @@ class ScopedTestResultsTest(unittest.TestCase):
         clear: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         command = [
-            "python3",
+            sys.executable,
             str(REPORTER),
             "--build-base",
             str(build_base),
@@ -434,6 +436,22 @@ class ScopedTestResultsTest(unittest.TestCase):
             verify,
         )
         self.assertNotIn("colcon test-result --verbose", verify)
+
+    def test_ci_runs_repository_contract_tests_after_ros_install(self) -> None:
+        workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+
+        ros_install = workflow.index(
+            "- name: Install ROS 2 Jazzy development environment"
+        )
+        contract_tests = workflow.index(
+            "- name: Run repository contract tests"
+        )
+        canonical_verify = workflow.index(
+            "- name: Run canonical workspace verification"
+        )
+
+        self.assertLess(ros_install, contract_tests)
+        self.assertLess(contract_tests, canonical_verify)
 
 
 if __name__ == "__main__":
