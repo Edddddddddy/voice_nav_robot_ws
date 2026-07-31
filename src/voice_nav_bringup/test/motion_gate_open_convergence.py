@@ -22,7 +22,6 @@ from typing import Any, TypeVar
 ResponseT = TypeVar('ResponseT')
 
 DEFAULT_BACKOFF_SECONDS = (0.01, 0.02, 0.04, 0.08, 0.10)
-DEFAULT_MAXIMUM_ATTEMPTS = 12
 PENDING_DETAIL = 'candidate topic has no writer'
 
 
@@ -113,7 +112,6 @@ def converge_open(
     now: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
     backoff_seconds: Sequence[float] = DEFAULT_BACKOFF_SECONDS,
-    maximum_attempts: int = DEFAULT_MAXIMUM_ATTEMPTS,
 ) -> ResponseT:
     """
     Converge only the typed, fail-closed writer-discovery rejection.
@@ -124,8 +122,6 @@ def converge_open(
     """
     if not math.isfinite(deadline):
         raise ValueError('deadline must be finite')
-    if maximum_attempts <= 0:
-        raise ValueError('maximum_attempts must be positive')
     if not backoff_seconds or any(
         not math.isfinite(delay) or delay <= 0.0
         for delay in backoff_seconds
@@ -136,7 +132,7 @@ def converge_open(
     last_response = None
     attempts = 0
 
-    for attempt_index in range(maximum_attempts):
+    while True:
         remaining = deadline - now()
         if remaining <= 0.0:
             raise OpenConvergenceTimeout(last_response, attempts)
@@ -155,15 +151,10 @@ def converge_open(
             return response
 
         _validate_pending_snapshot(response, expected, protocol)
-        if attempt_index + 1 >= maximum_attempts:
-            raise OpenConvergenceTimeout(last_response, attempts)
-
         remaining = deadline - now()
         if remaining <= 0.0:
             raise OpenConvergenceTimeout(last_response, attempts)
         backoff = backoff_seconds[
-            min(attempt_index, len(backoff_seconds) - 1)
+            min(attempts - 1, len(backoff_seconds) - 1)
         ]
         sleep(min(backoff, remaining))
-
-    raise OpenConvergenceTimeout(last_response, attempts)
