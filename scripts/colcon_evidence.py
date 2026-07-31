@@ -46,6 +46,39 @@ class ResultDirectoryIdentity:
     changed_ns: int
 
 
+@dataclass(frozen=True)
+class PackageSnapshotIdentity:
+    """Build/package directory identities held while evidence is parsed."""
+
+    build_device: int
+    build_inode: int
+    package_device: int
+    package_inode: int
+
+
+def _result_file_matches(
+    identity: ResultFileIdentity,
+    file_status: os.stat_result,
+) -> bool:
+    return (
+        stat.S_ISREG(file_status.st_mode)
+        and (
+            file_status.st_dev,
+            file_status.st_ino,
+            file_status.st_size,
+            file_status.st_mtime_ns,
+            file_status.st_ctime_ns,
+        )
+        == (
+            identity.device,
+            identity.inode,
+            identity.size,
+            identity.modified_ns,
+            identity.changed_ns,
+        )
+    )
+
+
 def validate_package_names(package_names: list[str]) -> tuple[str, ...]:
     if not package_names:
         raise ValueError("at least one --package is required")
@@ -181,6 +214,9 @@ class ResultDeletionPlan:
         self,
         package_directory: Path,
         result_files: tuple[Path, ...],
+        *,
+        expected_identities: tuple[ResultFileIdentity, ...] | None = None,
+        expected_package_identity: PackageSnapshotIdentity | None = None,
     ) -> None:
         self.package_directory = package_directory
         self._workspace_fd = -1
@@ -192,12 +228,33 @@ class ResultDeletionPlan:
 
         try:
             self._open_anchor()
+            if (
+                expected_package_identity is not None
+                and self.package_identity() != expected_package_identity
+            ):
+                raise ValueError(
+                    "selected package changed after evidence collection: "
+                    f"{self.package_directory}"
+                )
+            expected_by_path = (
+                {
+                    identity.relative_path: identity
+                    for identity in expected_identities
+                }
+                if expected_identities is not None
+                else None
+            )
+            if (
+                expected_identities is not None
+                and len(expected_by_path) != len(expected_identities)
+            ):
+                raise ValueError("duplicate expected result identity")
             identities = []
             for result_file in result_files:
                 relative_path = self._relative_result_path(result_file)
                 file_status = self._stat_result(relative_path)
-                identities.append(
-                    ResultFileIdentity(
+                if expected_by_path is None:
+                    identity = ResultFileIdentity(
                         relative_path=relative_path,
                         device=file_status.st_dev,
                         inode=file_status.st_ino,
@@ -205,7 +262,22 @@ class ResultDeletionPlan:
                         modified_ns=file_status.st_mtime_ns,
                         changed_ns=file_status.st_ctime_ns,
                     )
-                )
+                else:
+                    try:
+                        identity = expected_by_path.pop(relative_path)
+                    except KeyError as error:
+                        raise ValueError(
+                            "missing expected result identity: "
+                            f"{self.package_directory / relative_path}"
+                        ) from error
+                    if not _result_file_matches(identity, file_status):
+                        raise ValueError(
+                            "result path changed after evidence collection: "
+                            f"{self.package_directory / relative_path}"
+                        )
+                identities.append(identity)
+            if expected_by_path:
+                raise ValueError("unused expected result identity")
             self._identities = tuple(identities)
         except Exception:
             self.close()
@@ -275,6 +347,18 @@ class ResultDeletionPlan:
                 f"{self.package_directory}"
             )
 
+    def package_identity(self) -> PackageSnapshotIdentity:
+        """Return the identities of the anchored build and package dirs."""
+
+        if self._build_identity is None or self._package_identity is None:
+            raise ValueError("result evidence anchor is closed")
+        return PackageSnapshotIdentity(
+            build_device=self._build_identity[0],
+            build_inode=self._build_identity[1],
+            package_device=self._package_identity[0],
+            package_inode=self._package_identity[1],
+        )
+
     def _relative_result_path(self, result_file: Path) -> Path:
         try:
             relative_path = result_file.relative_to(self.package_directory)
@@ -338,10 +422,7 @@ class ResultDeletionPlan:
 
         for identity in self._identities:
             file_status = self._stat_result(identity.relative_path)
-            if (file_status.st_dev, file_status.st_ino) != (
-                identity.device,
-                identity.inode,
-            ):
+            if not _result_file_matches(identity, file_status):
                 raise ValueError(
                     "result path changed after evidence collection: "
                     f"{self.package_directory / identity.relative_path}"
@@ -360,11 +441,7 @@ class ResultDeletionPlan:
                     dir_fd=parent_fd,
                     follow_symlinks=False,
                 )
-                if (
-                    not stat.S_ISREG(file_status.st_mode)
-                    or (file_status.st_dev, file_status.st_ino)
-                    != (identity.device, identity.inode)
-                ):
+                if not _result_file_matches(identity, file_status):
                     raise ValueError(
                         "result path changed after evidence collection: "
                         f"{self.package_directory / identity.relative_path}"
@@ -396,10 +473,18 @@ class ResultDeletionPlan:
 def open_result_deletion_plan(
     package_directory: Path,
     result_files: tuple[Path, ...],
+    *,
+    expected_identities: tuple[ResultFileIdentity, ...] | None = None,
+    expected_package_identity: PackageSnapshotIdentity | None = None,
 ) -> Iterator[ResultDeletionPlan]:
     """Hold an anchored result-deletion plan for one selected package."""
 
-    plan = ResultDeletionPlan(package_directory, result_files)
+    plan = ResultDeletionPlan(
+        package_directory,
+        result_files,
+        expected_identities=expected_identities,
+        expected_package_identity=expected_package_identity,
+    )
     try:
         yield plan
     finally:
@@ -432,29 +517,6 @@ class ResultSnapshotPlan(ResultDeletionPlan):
             size=file_status.st_size,
             modified_ns=file_status.st_mtime_ns,
             changed_ns=file_status.st_ctime_ns,
-        )
-
-    @staticmethod
-    def _same_snapshot(
-        identity: ResultFileIdentity,
-        file_status: os.stat_result,
-    ) -> bool:
-        return (
-            stat.S_ISREG(file_status.st_mode)
-            and (
-                file_status.st_dev,
-                file_status.st_ino,
-                file_status.st_size,
-                file_status.st_mtime_ns,
-                file_status.st_ctime_ns,
-            )
-            == (
-                identity.device,
-                identity.inode,
-                identity.size,
-                identity.modified_ns,
-                identity.changed_ns,
-            )
         )
 
     def _discover_snapshot_inputs(
@@ -603,7 +665,7 @@ class ResultSnapshotPlan(ResultDeletionPlan):
                     dir_fd=parent_fd,
                     follow_symlinks=False,
                 )
-                if not self._same_snapshot(identity, before_status):
+                if not _result_file_matches(identity, before_status):
                     raise ValueError(
                         "result path changed after evidence discovery: "
                         f"{self.package_directory / identity.relative_path}"
@@ -614,7 +676,7 @@ class ResultSnapshotPlan(ResultDeletionPlan):
                     dir_fd=parent_fd,
                 )
                 opened_status = os.fstat(source_fd)
-                if not self._same_snapshot(identity, opened_status):
+                if not _result_file_matches(identity, opened_status):
                     raise ValueError(
                         "result path changed after evidence discovery: "
                         f"{self.package_directory / identity.relative_path}"
@@ -628,7 +690,7 @@ class ResultSnapshotPlan(ResultDeletionPlan):
                     with destination_path.open("xb") as destination:
                         shutil.copyfileobj(source, destination)
                         after_status = os.fstat(source.fileno())
-                if not self._same_snapshot(identity, after_status):
+                if not _result_file_matches(identity, after_status):
                     raise ValueError(
                         "result path changed after evidence discovery: "
                         f"{self.package_directory / identity.relative_path}"
@@ -656,6 +718,14 @@ class ResultSnapshotPlan(ResultDeletionPlan):
         for tag_file in sorted(sandbox_package.glob("**/Testing/TAG")):
             ctest_result_path(tag_file, sandbox_package)
         return source_by_relative_path
+
+    def identity_for(self, relative_path: Path) -> ResultFileIdentity:
+        """Return the discovered identity for one staged source path."""
+
+        for identity in self._snapshot_inputs:
+            if identity.relative_path == relative_path:
+                return identity
+        raise ValueError(f"result path was not in snapshot: {relative_path}")
 
 
 @contextmanager
