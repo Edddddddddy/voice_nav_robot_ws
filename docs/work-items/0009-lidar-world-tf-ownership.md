@@ -5,7 +5,8 @@
 **GitHub Issue:**
 [#8](https://github.com/Edddddddddy/voice_nav_robot_ws/issues/8)
 
-**GitHub PR:** TBD
+**GitHub PR:**
+[#9](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/9)
 
 **Branch:** `feat/vn-0009-l0008-lidar-tf-ownership`
 
