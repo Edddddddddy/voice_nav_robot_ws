@@ -397,12 +397,12 @@ class ScopedTestResultsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             build_base = Path(temporary_directory) / "build"
             (build_base / "voice-nav-tools").mkdir(parents=True)
-            (build_base / "_private").mkdir()
 
             compatible = self.run_boundary_check(
                 build_base,
                 "voice-nav-tools",
             )
+            (build_base / "_private").mkdir()
             leading_underscore = self.run_boundary_check(
                 build_base,
                 "_private",
