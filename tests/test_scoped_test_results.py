@@ -256,6 +256,29 @@ class ScopedTestResultsTest(unittest.TestCase):
             self.assertTrue(external_result.is_file())
             self.assertTrue(moved_result.is_file())
 
+    def test_snapshot_stage_failure_does_not_leak_file_descriptors(self) -> None:
+        from scripts.colcon_evidence import open_result_snapshot
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory) / "workspace"
+            package_directory = workspace / "build" / "voice_nav_mission"
+            source_result = package_directory / "current.xunit.xml"
+            write_xunit(source_result, tests=1)
+            sandbox_package = workspace / "sandbox" / "voice_nav_mission"
+            staged_result = sandbox_package / source_result.name
+            write_xunit(staged_result, tests=9)
+
+            with open_result_snapshot(package_directory) as snapshot:
+                descriptors_before = len(list(Path("/proc/self/fd").iterdir()))
+
+                with self.assertRaises(ValueError):
+                    snapshot.stage(sandbox_package)
+
+                descriptors_after = len(list(Path("/proc/self/fd").iterdir()))
+
+            self.assertEqual(descriptors_after, descriptors_before)
+            self.assertTrue(staged_result.is_file())
+
     def test_clear_prevalidates_every_result_before_unlinking(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             build_base = Path(temporary_directory) / "build"
