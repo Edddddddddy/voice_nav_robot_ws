@@ -385,6 +385,107 @@ class ScopedTestResultsTest(unittest.TestCase):
             self.assertIn("unexpected symbolic-link target", completed.stderr)
             self.assertNotIn("Summary: 1 test", completed.stdout)
 
+    def test_report_rejects_pivoted_ament_python_targets(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            build_base = workspace / "build"
+            package_name = "voice_nav_agent"
+            selected_package = build_base / package_name
+            write_xunit(selected_package / "good.xunit.xml", tests=1)
+
+            expected_source = workspace / "src" / package_name
+            write_package_manifest(
+                expected_source / "package.xml",
+                package_name=package_name,
+            )
+            (expected_source / package_name).mkdir()
+
+            external_source = (
+                workspace / "external" / "src" / package_name
+            )
+            write_package_manifest(
+                external_source / "package.xml",
+                package_name=package_name,
+            )
+            write_xunit(
+                external_source
+                / package_name
+                / "test_results"
+                / "hidden.xunit.xml",
+                tests=9,
+            )
+            pivot_target = workspace / "external" / "level"
+            pivot_target.mkdir(parents=True)
+            pivot = workspace / "pivot"
+            pivot.symlink_to(pivot_target, target_is_directory=True)
+            raw_source = pivot / ".." / "src" / package_name
+            (selected_package / "package.xml").symlink_to(
+                raw_source / "package.xml"
+            )
+            (selected_package / package_name).symlink_to(
+                raw_source / package_name,
+                target_is_directory=True,
+            )
+
+            completed = self.run_reporter(build_base, package_name)
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("unexpected symbolic-link target", completed.stderr)
+            self.assertNotIn("Summary: 1 test", completed.stdout)
+
+    def test_report_rejects_pivoted_ament_cmake_python_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            build_base = workspace / "build"
+            package_name = "voice_nav_mission"
+            selected_package = build_base / package_name
+            write_xunit(selected_package / "good.xunit.xml", tests=1)
+            expected_target = (
+                selected_package / "rosidl_generator_py" / package_name
+            )
+            expected_target.mkdir(parents=True)
+            external_target = (
+                workspace
+                / "external"
+                / "build"
+                / package_name
+                / "rosidl_generator_py"
+                / package_name
+            )
+            write_xunit(
+                external_target / "hidden.gtest.xml",
+                tests=9,
+            )
+            pivot_target = workspace / "external" / "level"
+            pivot_target.mkdir(parents=True)
+            pivot = workspace / "pivot"
+            pivot.symlink_to(pivot_target, target_is_directory=True)
+            raw_target = (
+                pivot
+                / ".."
+                / "build"
+                / package_name
+                / "rosidl_generator_py"
+                / package_name
+            )
+            generated_link = (
+                selected_package
+                / "ament_cmake_python"
+                / package_name
+                / package_name
+            )
+            generated_link.parent.mkdir(parents=True)
+            generated_link.symlink_to(
+                raw_target,
+                target_is_directory=True,
+            )
+
+            completed = self.run_reporter(build_base, package_name)
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("unexpected symbolic-link target", completed.stderr)
+            self.assertNotIn("Summary: 1 test", completed.stdout)
+
     def test_report_rejects_spoofed_root_package_manifest_target(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             workspace = Path(temporary_directory)
