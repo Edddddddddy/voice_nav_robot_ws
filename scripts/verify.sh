@@ -84,6 +84,21 @@ python3 scripts/check_sdf_contract.py "${robot_sdf}"
 gz sdf -k "${simulation_world}"
 
 package_args=("$@")
+if (( ${#package_args[@]} > 0 )); then
+  test_packages=("${package_args[@]}")
+else
+  mapfile -t test_packages < <(colcon list --names-only)
+fi
+
+if (( ${#test_packages[@]} == 0 )); then
+  echo "No ROS packages selected for verification" >&2
+  exit 5
+fi
+
+test_result_args=("--build-base" "build")
+for package_name in "${test_packages[@]}"; do
+  test_result_args+=("--package" "${package_name}")
+done
 
 echo "[4/6] Building"
 if (( ${#package_args[@]} > 0 )); then
@@ -102,6 +117,7 @@ source install/setup.bash
 set -u
 
 echo "[5/6] Testing"
+python3 scripts/report_test_results.py "${test_result_args[@]}" --clear
 if (( ${#package_args[@]} > 0 )); then
   colcon test \
     --packages-select "${package_args[@]}" \
@@ -113,7 +129,7 @@ else
     --event-handlers console_direct+
 fi
 
-colcon test-result --verbose
+python3 scripts/report_test_results.py "${test_result_args[@]}"
 echo "[6/6] Auditing the clean MotionGate install boundary"
 bash scripts/check_clean_motion_gate_install.sh
 echo "VoiceNav Robot verification passed."
