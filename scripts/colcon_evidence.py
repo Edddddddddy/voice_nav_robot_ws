@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import stat
+import xml.etree.ElementTree as ElementTree
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,15 +31,89 @@ FILE_OPEN_FLAGS = (
 )
 
 
-def _is_known_non_evidence_directory_symlink(
-    relative_path: Path,
-    package_name: str,
-) -> bool:
-    """Allow only the directory links emitted by the locked ament layouts."""
+def _absolute_symlink_target(link_path: Path, raw_target: str) -> Path:
+    target = Path(raw_target)
+    if not target.is_absolute():
+        target = link_path.parent / target
+    return Path(os.path.abspath(target))
 
-    return relative_path in (
-        Path(package_name),
-        Path("ament_cmake_python") / package_name / package_name,
+
+def _expected_source_package(package_directory: Path) -> Path:
+    return package_directory.parent.parent / "src" / package_directory.name
+
+
+def _expected_non_evidence_directory_target(
+    relative_path: Path,
+    package_directory: Path,
+) -> Path | None:
+    """Return the locked target for an ament non-evidence directory link."""
+
+    package_name = package_directory.name
+    if relative_path == Path(package_name):
+        return _expected_source_package(package_directory) / package_name
+    if relative_path == (
+        Path("ament_cmake_python") / package_name / package_name
+    ):
+        return package_directory / "rosidl_generator_py" / package_name
+    return None
+
+
+def _is_regular_nonsymlink(path: Path, *, directory: bool) -> bool:
+    try:
+        path_status = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return False
+    expected_type = stat.S_ISDIR if directory else stat.S_ISREG
+    return expected_type(path_status.st_mode)
+
+
+def _validate_source_package_manifest(
+    package_directory: Path,
+    link_path: Path,
+    raw_target: str,
+) -> None:
+    expected_manifest = _expected_source_package(package_directory) / "package.xml"
+    if _absolute_symlink_target(link_path, raw_target) != expected_manifest:
+        raise ValueError(
+            "result path has unexpected symbolic-link target: "
+            f"{link_path}"
+        )
+    if not _is_regular_nonsymlink(expected_manifest, directory=False):
+        raise ValueError(
+            f"invalid source package manifest: {expected_manifest}"
+        )
+    try:
+        root = ElementTree.parse(expected_manifest).getroot()
+    except (ElementTree.ParseError, OSError) as error:
+        raise ValueError(
+            f"invalid source package manifest: {expected_manifest}"
+        ) from error
+    if (
+        root.tag != "package"
+        or root.findtext("name") != package_directory.name
+    ):
+        raise ValueError(
+            f"invalid source package manifest: {expected_manifest}"
+        )
+
+
+def _validate_ament_python_source_layout(package_directory: Path) -> None:
+    manifest_link = package_directory / "package.xml"
+    try:
+        manifest_status = os.stat(manifest_link, follow_symlinks=False)
+        raw_target = os.readlink(manifest_link)
+    except OSError as error:
+        raise ValueError(
+            f"invalid source package manifest: {manifest_link}"
+        ) from error
+    if not stat.S_ISLNK(manifest_status.st_mode):
+        raise ValueError(
+            f"invalid source package manifest: {manifest_link}"
+        )
+    _validate_source_package_manifest(
+        package_directory,
+        manifest_link,
+        raw_target,
     )
 
 
@@ -582,15 +657,40 @@ class ResultSnapshotPlan(ResultDeletionPlan):
                         follow_symlinks=False,
                     )
                     if stat.S_ISLNK(child_status.st_mode):
-                        if _is_known_non_evidence_directory_symlink(
-                            relative_child,
-                            self.package_directory.name,
-                        ):
-                            continue
-                        raise ValueError(
-                            "result path contains symbolic link: "
-                            f"{child_path}"
+                        expected_target = (
+                            _expected_non_evidence_directory_target(
+                                relative_child,
+                                self.package_directory,
+                            )
                         )
+                        if expected_target is None:
+                            raise ValueError(
+                                "result path contains symbolic link: "
+                                f"{child_path}"
+                            )
+                        raw_target = os.readlink(
+                            directory_name,
+                            dir_fd=directory_fd,
+                        )
+                        if (
+                            _absolute_symlink_target(child_path, raw_target)
+                            != expected_target
+                            or not _is_regular_nonsymlink(
+                                expected_target,
+                                directory=True,
+                            )
+                        ):
+                            raise ValueError(
+                                "result path has unexpected symbolic-link "
+                                f"target: {child_path}"
+                            )
+                        if relative_child == Path(
+                            self.package_directory.name
+                        ):
+                            _validate_ament_python_source_layout(
+                                self.package_directory
+                            )
+                        continue
                     if not stat.S_ISDIR(child_status.st_mode):
                         raise ValueError(
                             "result directory is not a directory: "
@@ -619,6 +719,14 @@ class ResultSnapshotPlan(ResultDeletionPlan):
                             and relative_directory == Path()
                             and file_name == "package.xml"
                         ):
+                            _validate_source_package_manifest(
+                                self.package_directory,
+                                self.package_directory / file_name,
+                                os.readlink(
+                                    file_name,
+                                    dir_fd=directory_fd,
+                                ),
+                            )
                             continue
                         raise ValueError(
                             "result path contains symbolic link: "
