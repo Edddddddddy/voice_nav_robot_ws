@@ -172,6 +172,15 @@ def endpoint_node_fqn(endpoint) -> str:
     return f'{namespace}/{endpoint.node_name}'
 
 
+def endpoint_node_identity_is_known(endpoint) -> bool:
+    return (
+        bool(endpoint.node_name)
+        and bool(endpoint.node_namespace)
+        and endpoint.node_name != '_NODE_NAME_UNKNOWN_'
+        and endpoint.node_namespace != '_NODE_NAMESPACE_UNKNOWN_'
+    )
+
+
 def endpoint_identity(endpoint):
     return (
         endpoint_node_fqn(endpoint),
@@ -315,8 +324,10 @@ class SimulationInterfacesTest(unittest.TestCase):
             return None
         return selected, transforms
 
-    def odometry_with_exact_tf(self):
+    def odometry_with_exact_tf(self, minimum_stamp: int = -1):
         for message in reversed(self.sample_snapshot(self.odometry)):
+            if stamp_nanoseconds(message) < minimum_stamp:
+                continue
             transform = self.transform_for_message(
                 'odom',
                 'base_footprint',
@@ -331,7 +342,12 @@ class SimulationInterfacesTest(unittest.TestCase):
 
     def single_scan_endpoint(self):
         endpoints = self.publisher_endpoints('/scan')
-        return endpoints[0] if len(endpoints) == 1 else None
+        if (
+            len(endpoints) != 1
+            or not endpoint_node_identity_is_known(endpoints[0])
+        ):
+            return None
+        return endpoints[0]
 
     def odometry_endpoint_set(self):
         return frozenset(
@@ -339,20 +355,50 @@ class SimulationInterfacesTest(unittest.TestCase):
             for endpoint in self.publisher_endpoints(ODOMETRY_TOPIC)
         )
 
+    def stable_product_endpoint_snapshot(
+        self,
+        expected_odometry,
+        expected_scan,
+    ):
+        current_odometry = self.odometry_endpoint_set()
+        legacy_odometry = self.publisher_endpoints(
+            LEGACY_ODOMETRY_TOPIC
+        )
+        scan_endpoints = self.publisher_endpoints('/scan')
+        if (
+            current_odometry != expected_odometry
+            or legacy_odometry
+            or len(scan_endpoints) != 1
+            or not endpoint_node_identity_is_known(scan_endpoints[0])
+            or endpoint_identity(scan_endpoints[0]) != expected_scan
+        ):
+            return None
+        return current_odometry, endpoint_identity(scan_endpoints[0])
+
     def expected_odometry_endpoints(self):
         endpoints = self.publisher_endpoints(ODOMETRY_TOPIC)
+        if any(
+            not endpoint_node_identity_is_known(endpoint)
+            for endpoint in endpoints
+        ):
+            return None
         owners = {
             endpoint_node_fqn(endpoint)
             for endpoint in endpoints
         }
         if len(endpoints) != 1 or owners != {'/diff_drive_controller'}:
             return None
+        if endpoints[0].topic_type != 'nav_msgs/msg/Odometry':
+            return None
         if self.publisher_endpoints(LEGACY_ODOMETRY_TOPIC):
             return None
-        return frozenset(
+        identities = frozenset(
             endpoint_identity(endpoint)
             for endpoint in endpoints
         )
+        if any(not any(gid) for _owner, gid in identities):
+            return None
+        return identities
 
     def publish_command_for(
         self,
@@ -500,6 +546,8 @@ class SimulationInterfacesTest(unittest.TestCase):
             scan_endpoint.qos_profile.durability,
             DurabilityPolicy.VOLATILE,
         )
+        initial_scan_identity = endpoint_identity(scan_endpoint)
+        self.assertTrue(any(initial_scan_identity[1]))
         self.node.get_logger().info(
             'scan_endpoint='
             f'owner:{endpoint_node_fqn(scan_endpoint)},'
@@ -595,7 +643,9 @@ class SimulationInterfacesTest(unittest.TestCase):
         )
 
         final_odom_with_tf = self.wait_until(
-            self.odometry_with_exact_tf,
+            lambda: self.odometry_with_exact_tf(
+                stamp_nanoseconds(final_odom)
+            ),
             10.0,
             'post-motion timestamp-matched odometry and TF',
         )
@@ -620,16 +670,12 @@ class SimulationInterfacesTest(unittest.TestCase):
         )
 
         self.wait_until(
-            lambda: (
-                self.odometry_endpoint_set()
-                if self.odometry_endpoint_set() == initial_owner_set
-                and not self.publisher_endpoints(
-                    LEGACY_ODOMETRY_TOPIC
-                )
-                else None
+            lambda: self.stable_product_endpoint_snapshot(
+                initial_owner_set,
+                initial_scan_identity,
             ),
             5.0,
-            'unchanged direct odometry publisher endpoint',
+            'unchanged direct odometry and scan publisher endpoints',
         )
 
         proc_output.assertWaitFor(
