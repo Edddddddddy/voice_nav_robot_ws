@@ -88,7 +88,66 @@ The test suite also proves that a rejected plan starts no downstream Adapter and
 
 Every automated motion test uses configured limits, a steady-clock deadline, zero output in success and cleanup paths, odometry-based stationarity checks, and bounded process cleanup. `Ctrl+C`, publisher exit, Action Result, or a single zero publication is not proof of stopping.
 
-The quantitative acceptance criteria are:
+### Lesson 0009 normal-running Gate slice
+
+VN-0010 / Lesson 0009 proves the independent Gate without claiming process
+death or pause recovery:
+
+- Manual-clock Core tables cover the exact 250 ms authority and 150 ms
+  candidate-freshness boundaries; a 20 ms wall output tick continuously
+  selects zero while inhibited.
+- Every `PREPARE`/`OPEN`/`RENEW`/`INHIBIT` request uses the Gate instance and
+  one global compare-and-swap `control_seq`; operations after `PREPARE` also
+  match the Gate-generated current lease. A late old-lease `INHIBIT` cannot
+  stop a newer lease, while a matching current `INHIBIT` publishes zero before
+  acknowledgement.
+- Finite `linear.x`/`angular.z` values are clamped to trusted YAML limits.
+  NaN, Inf, or a non-zero unsupported axis retires the current lease and
+  selects zero.
+- `/motion_gate_node` serves `/motion_gate/internal/control` and
+  `/motion_gate/internal/state`. PREPARE returns a Gate-generated per-lease
+  topic below `/voice_nav_internal/motion_gate/candidate/lease_`. OPEN requires
+  exactly one publisher in the Gate-local graph, destroys the provisional
+  reader and its queue, recreates a `VOLATILE + KEEP_LAST(1)` reader, and binds
+  the complete 16-byte Gate-observed endpoint GID.
+- Contract tests require trusted YAML root `motion_gate_node` and prove all
+  node/control/state/candidate-prefix/final-command names are code constants,
+  absent from YAML parameters and product remaps.
+- A locked `rmw_fastrtps_cpp` self-test correlates the Gate-local graph GID
+  with Gate-local `MessageInfo.publisher_gid`; the control request never
+  carries caller `Publisher::get_gid()`.
+- Candidate QoS is `BEST_EFFORT + VOLATILE + KEEP_LAST(1)`. The sole final
+  publisher uses `rclcpp::SystemDefaultsQoS()` and a runtime checker proves
+  actual compatibility with the controller subscriber; policies introspected
+  as `UNKNOWN` are not asserted as fixed reliability/history/depth.
+- A serial publication barrier proves that no earlier queued non-zero command
+  can publish after current-lease INHIBIT, expiry, or invalid-input zero.
+- Headless Gazebo evidence separately records Gate zero, controller output
+  zero, and odometry stationarity after bounded motion and after each normal
+  deadline expiry.
+
+Package-private IDL is an encapsulation boundary, not DDS security. Lesson 0009
+uses a test authority/candidate harness. It does not count an authority,
+candidate, or MotionGate process kill, managed pause token, first-resume zero,
+or unmanaged-pause recovery as completed.
+
+### Lesson 0010 crash-stop and pause slice
+
+Lesson 0010 / VN-0011 supplies the process-death and Gazebo-time evidence:
+
+- killing the authority while valid-looking candidates continue still expires
+  the independent Gate lease;
+- killing the candidate producer still expires candidate freshness;
+- killing MotionGate causes `diff_drive_controller.cmd_vel_timeout` to select
+  zero on the first control update after 0.35 seconds of advancing simulation
+  time;
+- managed pause proves Gate, controller, and wheel zero before minting a token,
+  then proves the first resumed wheel command is zero;
+- unmanaged GUI/Transport pause has no token and requires a full
+  simulation/control restart rather than in-place resume.
+
+The later Mission and voice milestones inherit these v1.0 quantitative
+acceptance criteria:
 
 - From a `StopMission` request to the final zero-velocity output:
   - P95 ≤ 100 ms;
@@ -104,8 +163,8 @@ The quantitative acceptance criteria are:
   valid-looking smoother output after killing Runtime and still observes Gate
   inhibition.
 - Every step handover recreates the candidate data plane. Tests inject samples
-  from the old topic generation and writer GID after the new lease opens and
-  prove they are rejected.
+  from the old topic generation and an unbound Gate-local writer after the new
+  lease opens and prove they are rejected.
 - Managed Gazebo safe-pause first proves Gate output, controller output, and
   wheel command are zero while simulation still advances, then pauses and
   records a token. After MotionGate dies during that pause, the first resumed
