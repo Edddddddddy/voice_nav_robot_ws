@@ -13,7 +13,9 @@
 # limitations under the License.
 
 from collections import deque
+import importlib.util
 import math
+from pathlib import Path
 import threading
 import time
 import unittest
@@ -55,6 +57,33 @@ STATIONARY_LINEAR_TOLERANCE = 0.02
 STATIONARY_ANGULAR_TOLERANCE = 0.02
 MOVING_LINEAR_TOLERANCE = 0.03
 MOVING_ANGULAR_TOLERANCE = 0.08
+OPEN_CONVERGENCE_BUDGET_SECONDS = 1.0
+
+
+def load_open_convergence_support():
+    support_path = Path(__file__).with_name(
+        'motion_gate_open_convergence.py'
+    )
+    specification = importlib.util.spec_from_file_location(
+        'motion_gate_open_convergence',
+        support_path,
+    )
+    if specification is None or specification.loader is None:
+        raise RuntimeError('could not load MotionGate OPEN convergence support')
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
+open_convergence = load_open_convergence_support()
+OPEN_PROTOCOL = open_convergence.ProtocolValues(
+    applied=InternalMotionGateControl.Response.APPLIED,
+    rejected=InternalMotionGateControl.Response.REJECTED,
+    writer_unavailable=(
+        InternalMotionGateControl.Response.WRITER_UNAVAILABLE
+    ),
+    prepared=InternalMotionGateState.PREPARED,
+)
 
 
 @pytest.mark.launch_test
@@ -162,8 +191,10 @@ class MotionGateProductTest(unittest.TestCase):
         self.candidate_publishers = []
         self.request_counter = 0
         self.current_lease_id = ''
+        self.current_candidate_topic = ''
         self.current_control_seq = 0
         self.current_gate_instance_id = ''
+        self.open_convergence_deadline = 0.0
         self.spin_thread.start()
 
     def tearDown(self):
@@ -216,10 +247,16 @@ class MotionGateProductTest(unittest.TestCase):
         self.request_counter += 1
         return f'{self.request_counter:032x}'
 
-    def make_request(self, operation: int, prefix: str):
+    def make_request(
+        self,
+        operation: int,
+        prefix: str,
+        *,
+        request_id: str | None = None,
+    ):
         request = InternalMotionGateControl.Request()
         request.operation = operation
-        request.request_id = self.next_request_id(prefix)
+        request.request_id = request_id or self.next_request_id(prefix)
         request.gate_instance_id = self.current_gate_instance_id
         request.expected_control_seq = self.current_control_seq
         request.lease_id = self.current_lease_id
@@ -229,6 +266,7 @@ class MotionGateProductTest(unittest.TestCase):
         self.current_gate_instance_id = response.gate_instance_id
         self.current_control_seq = response.control_seq
         self.current_lease_id = response.lease_id
+        self.current_candidate_topic = response.candidate_topic
 
     def prepare(self):
         state = self.wait_until(
@@ -247,6 +285,7 @@ class MotionGateProductTest(unittest.TestCase):
         self.current_gate_instance_id = state.gate_instance_id
         self.current_control_seq = state.control_seq
         self.current_lease_id = ''
+        prepare_started_at = time.monotonic()
         request = self.make_request(
             InternalMotionGateControl.Request.PREPARE,
             'prepare',
@@ -270,21 +309,50 @@ class MotionGateProductTest(unittest.TestCase):
             )
         )
         self.update_authority(response)
+        self.open_convergence_deadline = (
+            prepare_started_at + OPEN_CONVERGENCE_BUDGET_SECONDS
+        )
         return response
 
     def open_gate(self):
-        request = self.make_request(
-            InternalMotionGateControl.Request.OPEN,
-            'open',
+        expected = open_convergence.PreparedIdentity(
+            gate_instance_id=self.current_gate_instance_id,
+            control_seq=self.current_control_seq,
+            lease_id=self.current_lease_id,
+            candidate_topic=self.current_candidate_topic,
         )
-        response = self.call_control(request)
+
+        def attempt_open(request_id, remaining_seconds):
+            request = self.make_request(
+                InternalMotionGateControl.Request.OPEN,
+                'open',
+                request_id=request_id,
+            )
+            return self.call_control(request, timeout=remaining_seconds)
+
+        response = open_convergence.converge_open(
+            expected=expected,
+            protocol=OPEN_PROTOCOL,
+            attempt=attempt_open,
+            new_request_id=lambda: self.next_request_id('open'),
+            deadline=self.open_convergence_deadline,
+        )
         self.assertEqual(
             response.code,
             InternalMotionGateControl.Response.APPLIED,
             response.detail,
         )
         self.assertEqual(response.state, InternalMotionGateState.ARMED)
+        self.assertEqual(response.gate_instance_id, expected.gate_instance_id)
+        self.assertEqual(response.control_seq, expected.control_seq + 1)
+        self.assertEqual(response.lease_id, expected.lease_id)
+        self.assertEqual(response.candidate_topic, expected.candidate_topic)
+        self.assertFalse(response.motion_inhibited)
+        self.assertTrue(response.authority_live)
+        self.assertFalse(response.candidate_fresh)
         self.assertTrue(response.writer_bound)
+        self.assertTrue(response.zero_selected)
+        self.assertTrue(response.zero_published)
         self.assertTrue(any(response.bound_writer_gid))
         self.update_authority(response)
         return response

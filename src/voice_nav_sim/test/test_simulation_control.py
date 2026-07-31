@@ -33,6 +33,7 @@ ODOMETRY_TOPIC = '/odom'
 CONTROLLER_TIMEOUT_SECONDS = 0.35
 CONTROL_PERIOD_SECONDS = 0.01
 SIMULATION_STEP_EPSILON_SECONDS = 0.002
+CONTROLLER_STARTUP_SERVICE_RESPONSE_TIMEOUT_SECONDS = 15.0
 
 
 @pytest.mark.launch_test
@@ -294,10 +295,11 @@ class SimulationControlTest(unittest.TestCase):
             time.sleep(0.04)
         return last_stamp
 
-    def controller_states(self):
+    def controller_states(self, *, timeout: float):
         response = self.call_service(
             self.list_controllers,
             ListControllers.Request(),
+            timeout=timeout,
         )
         return {
             controller.name: controller.state
@@ -322,7 +324,11 @@ class SimulationControlTest(unittest.TestCase):
             lambda: (
                 current
                 if (
-                    current := self.controller_states()
+                    current := self.controller_states(
+                        timeout=(
+                            CONTROLLER_STARTUP_SERVICE_RESPONSE_TIMEOUT_SECONDS
+                        )
+                    )
                 ).get('joint_state_broadcaster')
                 == 'active'
                 and current.get('diff_drive_controller') == 'active'
