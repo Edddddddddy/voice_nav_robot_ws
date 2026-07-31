@@ -29,7 +29,7 @@ from tf2_msgs.msg import TFMessage
 
 COMMAND_TOPIC = '/diff_drive_controller/cmd_vel'
 LIMITED_COMMAND_TOPIC = '/diff_drive_controller/cmd_vel_out'
-ODOMETRY_TOPIC = '/diff_drive_controller/odom'
+ODOMETRY_TOPIC = '/odom'
 CONTROLLER_TIMEOUT_SECONDS = 0.35
 CONTROL_PERIOD_SECONDS = 0.01
 SIMULATION_STEP_EPSILON_SECONDS = 0.002

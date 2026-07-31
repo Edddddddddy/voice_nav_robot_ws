@@ -49,8 +49,20 @@ if(BUILD_TESTING)
     TIMEOUT 120
   )
   add_launch_test(
+    test/test_simulation_interfaces.py
+    TIMEOUT 120
+  )
+  add_launch_test(
     test/test_tf_ownership_conflict.py
     TIMEOUT 30
+  )
+
+  set_tests_properties(
+    test_test_simulation_control.py
+    test_test_simulation_interfaces.py
+    test_test_tf_ownership_conflict.py
+    PROPERTIES
+      RUN_SERIAL TRUE
   )
 endif()
 
@@ -59,6 +71,7 @@ install(
     config
     launch
     urdf
+    worlds
   DESTINATION share/${PROJECT_NAME}
   PATTERN "__pycache__" EXCLUDE
   PATTERN "*.pyc" EXCLUDE

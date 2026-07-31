@@ -311,19 +311,11 @@ class TfOwnershipConflictTest(unittest.TestCase):
 
         proc_output.assertWaitFor(
             expected_output=(
-                'does not map to expected node '
-                f'{WRONG_DYNAMIC_OWNER_FQN}'
+                f'on /tf maps to {{{node_fqn(DYNAMIC_OWNER)}}}; '
+                f'expected {WRONG_DYNAMIC_OWNER_FQN}'
             ),
             process=wrong_owner_auditor,
             timeout=10.0,
-            stream='stderr',
-        )
-        proc_output.assertWaitFor(
-            expected_output=(
-                f'topic=/tf endpoints={{{node_fqn(DYNAMIC_OWNER)}}}'
-            ),
-            process=wrong_owner_auditor,
-            timeout=5.0,
             stream='stderr',
         )
         proc_info.assertWaitForShutdown(
