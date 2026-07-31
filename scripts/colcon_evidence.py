@@ -1,4 +1,11 @@
-"""Path-safety primitives for deterministic colcon verification evidence."""
+"""Path-safety primitives for deterministic colcon verification evidence.
+
+Selected build trees must be quiescent while evidence is reported or cleared.
+Anchored descriptors contain path replacement to the selected package and
+detect ordinary concurrent changes, but this module does not claim protection
+against an actively hostile same-UID process racing the final name-based
+``unlinkat`` or forging lexical ownership with hardlinks / bind mounts.
+"""
 
 import os
 import re
