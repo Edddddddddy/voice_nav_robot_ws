@@ -79,6 +79,11 @@ Velocity commands, joint state, odometry, and TF remain in ROS 2 control.
   Runtime opens and renews that lease through the private control seam. The
   authority lease is **250 ms on MotionGate's steady clock**; velocity
   candidates never renew it.
+- IDL bounds `request_id`, `gate_instance_id`, and `lease_id` at 36 characters
+  for transport. The Core requires request and Gate identities to be exactly
+  32 lowercase hexadecimal characters; PREPARE must carry an empty lease field,
+  while OPEN/RENEW/INHIBIT require an exact 32-lowercase-hex lease. Uppercase,
+  hyphenated UUID text, short values, and non-hexadecimal text are invalid.
 - Every control operation uses one Gate-wide compare-and-swap `control_seq`.
   `OPEN`, `RENEW`, and `INHIBIT` also match the current Gate instance and
   lease. A stale request has no state effect, including a late old-lease
@@ -122,6 +127,17 @@ voice_nav_mission/srv/InternalMotionGateControl
 voice_nav_mission/msg/InternalMotionGateState
 ```
 
+`motion_gate_core` is a package-internal static build target. Its header and
+library are neither installed nor exported; only `motion_gate_node` is an
+installed runtime target. The Core Interface is the typed
+`prepare`/`open`/`renew`/`inhibit`/`accept_candidate`/`tick`/`snapshot`
+surface plus the read-only `selected_command`. Adapter-only `force_fault`
+latches graph, reader, clock, or publication failures into fail-closed state;
+it is not a fifth control operation.
+`PrepareAdmissionProvider` and `OpenBindingProvider` are internal seams that
+let the ROS Adapter supply bounded graph facts without moving ROS graph access
+into the Core.
+
 The node FQN is `/motion_gate_node`; the private absolute endpoints are
 `/motion_gate/internal/control` and `/motion_gate/internal/state`. PREPARE
 returns a bounded topic below
@@ -138,14 +154,31 @@ instance, lease, or sequence returns a bounded typed mismatch without changing
 Gate state. Public `StopMission` remains unconditionally safety-effective at
 the Mission boundary because Runtime first linearizes STOP and then inhibits
 the **current** Gate tuple; an arbitrary private stale `INHIBIT` is not STOP.
+Request and Gate-instance identities, plus every non-PREPARE lease identity,
+have the exact 32-character lowercase hexadecimal semantic described above
+even though their IDL fields have a 36-character transport bound. PREPARE must
+not carry a lease ID.
 
 `InternalMotionGateControl` contains no writer GID. At `OPEN`, MotionGate uses
 its own graph context to require exactly one publisher endpoint and records
 that endpoint's complete 16-byte GID. Candidate callbacks compare it only with
 the `MessageInfo.publisher_gid` observed in the same Gate context. A
 locked-Fast-DDS self-test proves that those two Gate-local representations
-correlate; failure or mismatch keeps the Gate inhibited. A caller's
-`Publisher::get_gid()` is neither transported nor compared across processes.
+correlate; failure or mismatch keeps the Gate inhibited. This is a strict
+supported-runtime constraint: canonical product bringup sets
+`RMW_IMPLEMENTATION=rmw_fastrtps_cpp`, `motion_gate_node` rejects every other
+RMW at startup, and both runtime packages declare `rmw_fastrtps_cpp` as an
+execution dependency. A caller's `Publisher::get_gid()` is neither transported
+nor compared across processes.
+
+The same fail-closed rule applies to the command clock. Product startup
+requires `use_sim_time=true`; the Node rejects any runtime attempt to change
+that parameter. Immediately before every final publication, the serialized
+barrier independently requires both the parameter to remain true and
+`get_clock()->ros_time_is_active()`. Losing either invariant latches
+`ConfigurationInvalid`, replaces the selected command with zero, and emits a
+zero ROS stamp, so a system-time-stamped non-zero command cannot defeat the
+controller's simulation-time consumer timeout.
 
 The state snapshot uses
 `RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1)` and reports the Gate instance,
@@ -166,6 +199,10 @@ Control, candidate, expiry, state, and output decisions cross one publication
 serial barrier. Callbacks never publish directly. Once current-lease
 `INHIBIT`, expiry, or invalid-input retirement publishes zero through that
 barrier, an earlier queued non-zero decision cannot publish afterward.
+The Core owns the selected command and state decision, not publication
+acknowledgement. The Node Adapter owns actual final/state publication,
+`output_publish_seq`, `zero_publish_seq`, and the response's `zero_published`
+fact.
 
 ### Authority and candidate handover barrier
 
@@ -184,23 +221,32 @@ revoke old authority, inhibit Gate, and select/publish zero
   -> fully unload/destroy the old smoother and Collision Monitor instances
   -> destroy Gate's old candidate subscription
   -> confirm the old output writer GID has disappeared from the ROS graph
-  -> PREPARE; Gate generates a new lease ID and per-lease candidate topic
-  -> Gate may create a provisional reader that discards every sample
+  -> PREPARE admission confirms the retired writer is absent
+  -> Core PREPARE generates a new lease ID and per-lease candidate topic
+  -> create discard-only reader A
   -> create/configure new Collision Monitor and smoother downstream-to-upstream
-  -> require exactly one writer in the Gate-local graph snapshot
-  -> OPEN serial point destroys the provisional reader and its queued samples
-  -> recreate the VOLATILE KEEP_LAST(1) reader and bind the Gate-observed GID
-  -> activate Collision Monitor, then smoother, while Gate remains inhibited
-  -> complete OPEN and enter ARMED with a 250 ms Runtime authority lease
+  -> OPEN first performs pure Core request/state/CAS/lease/deadline validation;
+     a rejected request performs no graph query or reader mutation
+  -> graph snapshot #1 requires one writer and healthy final controller
+  -> destroy reader A and its queue; create discard-only reader B
+  -> graph snapshot #2 requires the same unique writer GID
+  -> Core atomically enters ARMED with selected output still zero
+  -> destroy reader B and its queue; create accepting reader C
+  -> graph snapshot #3 requires the same writer GID and healthy controller;
+     mismatch faults the Gate and selects zero
+  -> only now complete OPEN with a 250 ms Runtime authority lease
+  -> activate Collision Monitor, then smoother under the admitted generation
   -> start the new producer last
 ```
 
-At the OPEN serial point, destroying and recreating the reader is a queue
-barrier: samples received or queued by the provisional reader can never become
-valid after the state reaches `ARMED`. Gate callbacks accept only the writer
-bound during this handover on the new per-lease channel. An old sample retains
-its old channel or Gate-local writer identity and remains invalid even if DDS
-delivers it after the new lease opens.
+Readers A and B are always discard-only. Reader C is the first accepting
+reader and is created only after Core has atomically entered `ARMED` with zero
+selected. The two discard-reader destructions are queue barriers; the three
+graph snapshots prove that the unique writer did not change across them. A
+pre-OPEN sample can therefore never become a valid post-OPEN non-zero command.
+Gate callbacks accept only the writer bound during this handover on the new
+per-lease channel. An old sample retains its old channel or Gate-local writer
+identity and remains invalid even if DDS delivers it after the new lease opens.
 
 A lifecycle deactivate/cleanup/configure cycle is not sufficient: the pinned
 Nav2 1.3.12
@@ -219,11 +265,13 @@ The barrier is required between consecutive Mission steps too, even when both
 steps use the same producer. Limits, timeouts, and queue bounds come from
 trusted configuration and are verified with deliberately delayed old commands.
 
-Lesson 0009 implements and verifies the normal-running Core, private seam,
-Gate-local binding, barriers, final ownership, and deadline expiry with a test
-authority/candidate harness. It does not claim the complete Runtime/smoother/
-Collision Monitor integration. Process-kill crash-stop and managed/unmanaged
-Gazebo pause behavior are reserved for Lesson 0010 / VN-0011.
+Lesson 0009 has a local-GREEN implementation of the normal-running Core,
+private seam, Gate-local binding, barriers, final ownership, and deadline
+expiry with a test authority/candidate harness. Its complete local gate and
+independent evidence review pass; PR, required CI, merge, and solution tag
+remain open. It does not claim the complete Runtime/smoother/Collision Monitor
+integration. Process-kill crash-stop, consumer-deadman proof, and
+managed/unmanaged Gazebo pause behavior are reserved for Lesson 0010 / VN-0011.
 
 ### Gazebo managed safe-pause and resume
 
@@ -329,7 +377,11 @@ above. Every Goal receives exactly one terminal result.
   and a policy-computed deadline.
 - Both slow down near the target and publish zero before completing.
 - Step deadlines, stall windows, lease expiry, and cancel grace use a steady
-  clock. ROS time remains for odometry and TF timestamps only.
+  clock. ROS time is used only to stamp simulation-time data, including the
+  final `TwistStamped`, odometry, TF, and sensor messages; it never drives a
+  deadline. MotionGate locks `use_sim_time=true` for the process lifetime. If
+  that invariant or the active ROS clock is lost, it faults closed and emits
+  only zero commands with a zero stamp.
 
 ## Failure behavior
 
@@ -351,8 +403,18 @@ above. Every Goal receives exactly one terminal result.
 
 ## Verification obligations
 
+- Lesson 0009 acceptance has three executable layers: pure-Core manual-clock
+  GTest; a Fast-DDS-locked Node launch test with neither Gazebo nor `/clock`;
+  and a Fast-DDS-locked headless Gazebo product launch test. Repository-static
+  contract checks are a prerequisite, not a substitute for any layer.
+- The Node layer is isolated in ROS domain 91, localhost discovery, a 60-second
+  timeout, and serial execution. The product layer uses ROS domain 92,
+  localhost discovery, a unique Gazebo partition, a 180-second timeout, and
+  serial execution.
 - Manual-clock tests prove lease, cancel-grace, timeout, and callback-fencing
   behavior without sleeping.
+- OPEN tests prove pure validation precedes graph access and that readers A/B/C
+  cross exactly three same-writer graph snapshots before success.
 - Runtime-death tests keep injecting valid-looking candidates and prove they
   cannot renew the independent authority lease.
 - Stop tests assert `EPOCH -> INHIBIT/ZERO -> CANCEL -> RESPONSE`, plus

@@ -106,10 +106,11 @@ death or pause recovery:
   selects zero.
 - `/motion_gate_node` serves `/motion_gate/internal/control` and
   `/motion_gate/internal/state`. PREPARE returns a Gate-generated per-lease
-  topic below `/voice_nav_internal/motion_gate/candidate/lease_`. OPEN requires
-  exactly one publisher in the Gate-local graph, destroys the provisional
-  reader and its queue, recreates a `VOLATILE + KEEP_LAST(1)` reader, and binds
-  the complete 16-byte Gate-observed endpoint GID.
+  topic below `/voice_nav_internal/motion_gate/candidate/lease_`. OPEN first
+  validates in Core without graph access, then requires the same unique
+  publisher GID across graph snapshot #1 with discard reader A, snapshot #2
+  after recreating discard reader B, and snapshot #3 after creating the first
+  accepting `VOLATILE + KEEP_LAST(1)` reader C. Any change faults closed.
 - Contract tests require trusted YAML root `motion_gate_node` and prove all
   node/control/state/candidate-prefix/final-command names are code constants,
   absent from YAML parameters and product remaps.
@@ -122,6 +123,10 @@ death or pause recovery:
   as `UNKNOWN` are not asserted as fixed reliability/history/depth.
 - A serial publication barrier proves that no earlier queued non-zero command
   can publish after current-lease INHIBIT, expiry, or invalid-input zero.
+- A runtime parameter test rejects changing `use_sim_time` while moving.
+  Publication also requires both the parameter value and
+  `ros_time_is_active()`; loss of either invariant faults closed, publishes
+  zero, and never emits a system-time-stamped non-zero command.
 - Headless Gazebo evidence separately records Gate zero, controller output
   zero, and odometry stationarity after bounded motion and after each normal
   deadline expiry.

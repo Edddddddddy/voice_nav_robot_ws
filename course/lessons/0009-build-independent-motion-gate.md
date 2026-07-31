@@ -20,6 +20,10 @@ Collision Monitor 或进程崩溃验收。Lesson 0010 才 kill authority/Gate
 进程并完成 controller crash-stop 与 managed pause。正常 lease 过期不是
 Runtime crash；YAML 中已有 `cmd_vel_timeout` 也不是 Gate-death 证据。
 
+教师分支当前是 local-GREEN implementation，完整本地门禁与独立证据评审已经
+通过。required CI、rebase merge 与 `course/0009-solution` 未闭环前，本课
+不得标记 completed。
+
 先阅读：
 
 - [VN-0010 Work Item](../../docs/work-items/0010-independent-motion-gate.md)
@@ -111,6 +115,16 @@ Candidate 自带 stamp 不能证明 steady freshness。Gate 在通过 state、to
 OPEN barrier 和 GID 检查后，记录本机 steady receipt time；最终输出由 Gate
 重写 ROS stamp。
 
+`use_sim_time` 是产品安全不变量，不是可热切换的普通参数。Gate 启动时必须
+看到 `true`，随后用 on-set parameter callback 拒绝任何运行期修改；被拒的
+`false` 不能改变当前值，也不能在运动中制造 zero pulse。每次最终发布还要在
+同一 serial barrier 内再次确认参数仍为 `true` 且 ROS clock 已激活。任一
+检查失败都通过 Adapter-only `force_fault()` 锁存
+`ConfigurationInvalid`，把 command 替换为 zero，并把 stamp 置零；绝不能
+把 system-time-stamped non-zero 送给 simulation-time controller。没有
+`/clock` publisher 时 ROS time 可以冻结在零，但 steady deadline 和 20 ms
+输出仍要前进，输出 stamp 也保持零。
+
 最终 publisher 不把 RELIABLE、history 或 depth 写死成课程事实。Jazzy
 `diff_drive_controller` 使用 `rclcpp::SystemDefaultsQoS()`；Gate 跟随同一
 profile，并用 actual endpoint compatibility checker 验证连通。若 DDS
@@ -145,6 +159,8 @@ RED 必须证明“产品还没有实现”，不能来自 import、XML、CMake 
 - Gate limit 比 controller 更宽；
 - authority/freshness/output period 不是 `250/150/20 ms`；
 - 使用 ROS time 计算 lease/freshness；
+- 启动允许 `use_sim_time=false`、运行期可修改它，或最终 publication 不再
+  检查 active ROS clock；
 - bringup 启动 test harness、`twist_mux` 或第五个 resident process；
 - Gate exit 立即关闭/respawn simulator，从而掩盖 Lesson 0010 consumer
   timeout。
@@ -165,43 +181,49 @@ git commit -m "test(mission): define MotionGate authority contract"
 ## 4. 用 manual clock 写一个深的 MotionGateCore
 
 Core 不创建 ROS Node，不读取 YAML，不调用 `now()`，也不 sleep。构造时接收
-已经验证的 policy；每个 typed event 显式携带 steady time，返回下一状态与
-需要执行的 effects。
-
-建议把 Core 的测试面压缩成一个事件入口：
+已经验证的 policy；每个会改变时间语义的方法显式接收 steady time。真实
+Interface 不是另写一套通用 `handle(Event)` 状态机，而是以下 typed surface：
 
 ```text
-Decision handle(Event event, SteadyTime now)
+prepare(request, now, PrepareAdmissionProvider)
+open(request, now, OpenBindingProvider)
+renew(request, now)
+inhibit(request, now)
+accept_candidate(candidate, now)
+tick(now)
+snapshot()
+selected_command()
+force_fault(reason, detail)  # Adapter-only fault ingress
 ```
 
-`Event` 可以是 C++ variant，但不要把 variant 暴露成公共 ROS Interface。
-事件至少表达：
+`selected_command()` 是只读诊断/测试视图；`force_fault()` 只供 Node Adapter
+把 graph、reader、clock 或 publication failure 锁存为 fail-closed fault，
+不是第五种 control operation。`PrepareAdmissionProvider` 与
+`OpenBindingProvider` 是 Core implementation
+内部使用的两个 seam：production Adapter 提供 bounded graph fact，测试提供
+确定性 fake。它们不进入 ROS Interface，也不允许 Core 自己访问 graph。
 
-```text
-Prepare(expected_control_seq)
-Open(expected_control_seq, lease_id)
-Renew(expected_control_seq, lease_id)
-Inhibit(expected_control_seq, lease_id)
-Candidate(lease_id, writer_gid, Twist)
-Tick
-```
+在 CMake 中把 Core 建成 package-internal `STATIC` target
+`motion_gate_core`。不要安装或 export 该 library/header；唯一安装的运行目标是
+`motion_gate_node`。这让 Core 保持同 package 内的深 Module，而不是制造新的
+公共 package 或外部 Interface。
 
 Gate 才生成 lease ID 与 topic；测试 fixture 不能把任意路径塞进 Core。
 这里的 candidate `writer_gid` 只代表 Node 在 **Gate 本进程** 从
 graph/MessageInfo 观察后交给 Core 的 opaque identity，绝不是 control
 request 从 caller 进程传来的 `Publisher::get_gid()`。
 
-Core 不直接 publish。`Decision` 至少能告诉 Node Adapter：
+Core 拥有 state、global CAS、lease/topic 生成、两个 deadline、GID binding
+decision、clamp/retirement 和 selected command。它返回 typed
+`ControlResult`、`CandidateResult`、`Command` 与 `Snapshot`，但不直接 publish，
+也不拥有 reader lifecycle 或“zero 已发布”事实。
 
-- control response code 与新 `control_seq`；
-- 是否创建/销毁 candidate reader；
-- 是否等待/绑定 writer；
-- 当前 selected command；
-- 是否必须先 publish zero；
-- 是否更新 state snapshot；
-- lease 是否已永久 retired。
+Node Adapter 拥有 graph discovery、reader A/B/C、ROS endpoints、实际
+final/state publication、`output_publish_seq`、`zero_publish_seq` 和 response
+里的 `zero_published`。Adapter 根据 Core 前后 snapshot 协调 side effect；
+不要把 ROS side effect 伪装成第二套 Core event/effect 状态机。
 
-这条 Interface 必须让以下行为只在一个地方实现一次：
+Core Interface 必须让以下行为只在一个地方实现一次：
 
 - 初始 inhibited；
 - global CAS；
@@ -209,8 +231,10 @@ Core 不直接 publish。`Decision` 至少能告诉 Node Adapter：
 - 250/150 ms deadline；
 - finite supported-axis CLAMP；
 - invalid candidate retirement；
-- old lease 不可复活；
-- publication serial ordering。
+- old lease 不可复活。
+
+publication serial ordering 属于 Node Adapter 的单一发布路径，但所有选择
+依据仍来自 Core；回调不得绕过二者直接向 final endpoint publish。
 
 ### 精确的 manual-clock 边界
 
@@ -244,8 +268,13 @@ srv/InternalMotionGateControl.srv
 msg/InternalMotionGateState.msg
 ```
 
-它们不进入 `voice_nav_interfaces`。所有字符串与 sequence 有界；Gate/lease
-ID 使用固定长度表示；bound writer GID 恰好 16 bytes。
+它们不进入 `voice_nav_interfaces`。所有字符串与 sequence 有界；
+`request_id`、`gate_instance_id` 与 `lease_id` 的 IDL transport bound 是
+`string<=36`，但 Core 的语义校验更窄：request/Gate ID 必须恰好是 **32 个
+lowercase hexadecimal characters**；PREPARE 的 lease 必须为空，
+OPEN/RENEW/INHIBIT 的 lease 必须 exact-32。`uuid.uuid4().hex` 是合法 fixture；
+大写、带连字符 UUID、31/33 字符和非 hex 字符必须被拒绝。bound writer GID
+恰好 16 bytes。
 
 Control request 只允许以下 operation：
 
@@ -265,10 +294,11 @@ State 是最后一个 snapshot，不是 event log。至少记录：
 
 - Gate instance、当前 global `control_seq`；
 - state：INHIBITED、PREPARED、ARMED 或 FAULTED；
-- Gate 生成的 lease/topic；
+- 当前存在时的 Gate-generated lease/topic；retire 后二者与 bound GID 清空，
+  原因保留在 bounded `reason`/`detail`；
 - 16-byte bound GID 是否存在；
 - authority/freshness/writer validity；
-- output sequence、`output_zero` 与 typed reason。
+- `zero_selected`、`output_publish_seq`、`zero_publish_seq` 与 typed reason。
 
 Package-private 表示不承诺外部兼容，不表示其他 DDS participant 无法调用。
 本项目当前信任本机仿真组合，不把 topic name 当成安全凭据。
@@ -289,26 +319,43 @@ INHIBIT and publish zero
   -> retire old lease
   -> destroy old candidate reader
   -> confirm old writer GID disappeared
-  -> PREPARE generates new lease/topic and a provisional discarding reader
+  -> PREPARE admission provider confirms retired writer is absent
+  -> Core PREPARE generates new lease/topic
+  -> create discard-only reader A
   -> create exactly one test candidate writer
-  -> Gate-local OPEN graph snapshot finds exactly one endpoint
-  -> destroy the provisional reader and its queue
-  -> recreate a VOLATILE depth-1 reader
-  -> bind the Gate-observed endpoint's 16-byte GID
-  -> cross the serialized OPEN barrier
-  -> compare only Gate-local MessageInfo GIDs with that exact GID
+  -> Core OPEN first validates request/idempotence/state/CAS/lease/deadline;
+     rejection must not query graph or mutate a reader
+  -> graph snapshot #1 finds one endpoint and checks controller health
+  -> destroy reader A and its queue; create discard-only reader B
+  -> graph snapshot #2 must find the same complete 16-byte GID
+  -> Core atomically enters ARMED with selected output still zero
+  -> destroy reader B and its queue; create accepting reader C
+  -> graph snapshot #3 must find the same GID and healthy controller
+  -> only then complete OPEN; mismatch faults and selects zero
+  -> reader C compares Gate-local MessageInfo GIDs with that exact GID
 ```
 
-PREPARED 状态收到的样本全部 discard。OPEN 不能只把一个 bool 改成 true：
-reader queue 中可能已经有旧样本。Node 必须在 OPEN 串行点销毁并重建
-volatile depth-1 reader，再完成 Core OPEN decision 与 publication；
-OPEN 之前旧 reader 观察或排队的 sample 永远不能在 OPEN 后变成 non-zero。
+PREPARED 状态收到的样本全部 discard。A 与 B 永远不接受 command；C 是第一
+个 accepting `VOLATILE + KEEP_LAST(1)` reader，并且只能在 Core 已经以 zero
+进入 ARMED 后创建。两次 discard-reader destruction 清空旧 queue，三次 graph
+snapshot 则证明 barrier 前后仍是同一个唯一 writer。OPEN 之前观察或排队的
+sample 永远不能在 OPEN 后变成 non-zero。
 
 锁定 Fast DDS/RMW 的 self-test 要证明：Gate 自己
 `get_publishers_info_by_topic()` 观察的唯一 endpoint GID，与 Gate 自己收到
 的 `MessageInfo.publisher_gid` 对同一 writer 能关联。若不一致或无法建立，
 fail closed。State 可暴露固定 `uint8[16] bound_writer_gid` 作为 run-local
 诊断；caller 的 GID 不参与协议。
+
+这里的“锁定”是可执行约束，不只是测试备注：
+
+- `product_sim.launch.py` 必须在任何 ROS process 前设置
+  `RMW_IMPLEMENTATION=rmw_fastrtps_cpp`；
+- `motion_gate_node` 在构造时读取 active RMW，非
+  `rmw_fastrtps_cpp` 必须拒绝启动；
+- `voice_nav_mission` 与 `voice_nav_bringup` 的 manifest 必须声明
+  `rmw_fastrtps_cpp` runtime dependency；
+- Node/product launch tests 必须断言 active RMW。
 
 故障注入：
 
@@ -318,7 +365,10 @@ fail closed。State 可暴露固定 `uint8[16] bound_writer_gid` 作为 run-loca
 - INHIBIT 后继续向旧 topic 发 non-zero；
 - old writer 不退出就 PREPARE 新 lease；
 - OPEN 后第二个未绑定 writer 在相同 topic 发 sample；
-- OPEN 之前排队 non-zero，OPEN 后不再发任何新样本。
+- snapshot #1/#2 之间 writer 改变；
+- accepting reader C 创建后、snapshot #3 前 writer 改变；
+- OPEN 之前排队 non-zero，OPEN 后不再发任何新样本；
+- invalid/stale/collision OPEN 尝试诱发 graph access。
 
 所有情况都必须保持最终 zero，而不是“挑一个看起来正确的 writer”。
 
@@ -410,7 +460,9 @@ src/voice_nav_bringup/launch/product_sim.launch.py
 `voice_nav_sim/launch/simulation.launch.py`，再启动 `motion_gate_node`；Gate
 直接发布到固定 `/diff_drive_controller/cmd_vel`，launch 不 remap 这个
 endpoint。普通产品启动不包含 authority/candidate fixture，因此机器人默认
-静止。
+静止。launch 的第一个 action 设置
+`RMW_IMPLEMENTATION=rmw_fastrtps_cpp`；Gate 本身也检查 active RMW，不能只
+依赖调用者碰巧设置了正确环境。两个相关 package 都声明该 runtime dependency。
 
 运行：
 
@@ -443,8 +495,10 @@ authority/candidate harness 只能是 test fixture。它执行：
 
 1. 读取 transient-local Gate state，取得 instance 与 `control_seq`；
 2. PREPARE，取得 Gate 生成的 lease/topic；
-3. 在返回 topic 创建唯一 writer；
-4. OPEN，让 Gate 在自身 graph snapshot 绑定唯一 endpoint 的完整 GID；
+3. 确认 discard reader A 已建立，再在返回 topic 创建唯一 writer；
+4. OPEN 先通过 Core 纯校验，再让 Gate 依次完成 snapshot #1、A→B、
+   snapshot #2、Core ARMED-zero、B→C、snapshot #3；三次都必须绑定同一个
+   唯一 endpoint 的完整 GID；
 5. 定期 RENEW，并发布有限或可 clamp 的 candidate；
 6. 观察 Gate final output、controller limited output、odom；
 7. INHIBIT；
@@ -570,23 +624,74 @@ composition。
 ```bash
 cd /mnt/c/Users/lcy/code/ros2/voice_nav_robot_lesson_0009
 
+# 在任何本课验收启动前记录 baseline。已有的用户 Gazebo 进程属于
+# baseline，不得为了制造“无输出”而终止。
+residue_before="$(mktemp)"
+residue_after="$(mktemp)"
+pattern='[g]z sim|[g]z-sim|[g]zserver|[r]os2 launch .*voice_nav|[m]otion_gate_node|[c]ontroller_manager|[p]arameter_bridge|[r]obot_state_publisher'
+pgrep -f "${pattern}" | sort -n > "${residue_before}" || true
+
 git diff --check
+python3 scripts/check_motion_gate_contract.py --root .
+python3 -m unittest discover -s tests -p "test_motion_gate_contract.py" -v
 bash scripts/verify.sh
+
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+
+# Layer 1: pure Core + manual clock
+ctest --test-dir build/voice_nav_mission \
+  --output-on-failure -R '^motion_gate_core_test$'
+
+# Layer 2: FastDDS, no Gazebo, no /clock
+ctest --test-dir build/voice_nav_mission \
+  --output-on-failure -R '^test_test_motion_gate_node.py$'
+
+# Layer 3: FastDDS + headless Gazebo product composition
+ctest --test-dir build/voice_nav_bringup \
+  --output-on-failure -R '^test_test_motion_gate_product.py$'
+
+colcon test-result --verbose
 git status --short
 git diff
-```
 
-用避免自匹配的完整命令检查残留：
-
-```bash
-if pgrep -af \
-  '[g]z sim|[g]z-sim|[g]zserver|[r]os2 launch .*voice_nav|[m]otion_gate_node|[c]ontroller_manager|[p]arameter_bridge|[r]obot_state_publisher'
-then
-  printf 'FAIL: launch-owned process residue detected\n'
+# 三层测试和完整门禁完成后，只检查本课新引入并残留的 PID。
+# product launch 的 assertExitCodes 仍负责证明所有 launch-managed
+# process 正常退出。
+pgrep -f "${pattern}" | sort -n > "${residue_after}" || true
+if comm -13 "${residue_before}" "${residue_after}" | grep -q .; then
+  printf 'FAIL: newly introduced process residue detected\n'
+  comm -13 "${residue_before}" "${residue_after}"
+  rm -f -- "${residue_before}" "${residue_after}"
   exit 1
 fi
-printf 'PASS: no matching launch-owned process remains\n'
+printf 'PASS: no newly introduced process remains; baseline preserved\n'
+rm -f -- "${residue_before}" "${residue_after}"
 ```
+
+三层验收不能合并成一条模糊的“integration passed”：
+
+1. Core GTest 只跨 Core Interface，用 manual clock，不启动 ROS；
+2. Node launch test 无 Gazebo、无 `/clock`，用 FastDDS、ROS domain 91、
+   localhost discovery、60 秒 timeout 与 serial execution；
+3. product launch test 用 FastDDS、ROS domain 92、localhost discovery、独立
+   Gazebo partition、180 秒 timeout 与 serial execution。
+
+repository-static checker 是三层之前的 prerequisite，不是第四个 runtime
+layer。每条命令都分别记录 command、environment/active RMW、exit status、
+test/skip count、elapsed time 与 decisive assertion；未执行时保持 `TBD`，不得
+把 tests-first RED 的旧计数改写成后续 local-GREEN。
+
+接口和手动产品检查使用真实命令，输出同样只在执行后粘贴：
+
+```bash
+ros2 interface show voice_nav_mission/srv/InternalMotionGateControl
+ros2 interface show voice_nav_mission/msg/InternalMotionGateState
+ros2 launch voice_nav_bringup product_sim.launch.py headless:=true
+```
+
+上面的 baseline/delta 命令必须真正包住本课验收，不能在测试结束后连续
+采样两次并把“无差异”误记为 PASS。
 
 按变更原因显式 staging，不使用 `git add .`：
 
@@ -613,19 +718,29 @@ GID 配置、截图、`__pycache__` 或 `*.pyc`。
 
 ## 验收
 
-- `MotionGateCore` 通过 manual-clock 与 event-table tests；
+- `motion_gate_core` 是不安装、不 export 的内部 STATIC target，唯一安装的
+  runtime target 是 `motion_gate_node`；
+- `MotionGateCore` 通过 manual-clock tests，使用真实 typed methods 与
+  `PrepareAdmissionProvider`/`OpenBindingProvider`，没有第二套
+  `handle(Event)` 状态机；
 - private operation 精确为 PREPARE/OPEN/RENEW/INHIBIT；
+- request/Gate ID 以及非 PREPARE lease 在 `string<=36` 内仍必须恰好为 32
+  lowercase hex；PREPARE lease 必须为空；
 - Gate 生成 lease/topic，global CAS `control_seq` 防 stale control；
 - control request 不携 GID；Gate-local graph/MessageInfo 自测后绑定
   16-byte GID；
-- candidate reader 通过 OPEN destroy/recreate queue barrier；
+- OPEN 先纯 Core 校验，再跨 reader A/B/C 与三个 same-writer graph snapshot；
+- product launch 选择 FastDDS，Gate 对其他 RMW 拒绝启动；
+- `use_sim_time=true` 在启动和每次 publication 都受检查；运行期修改被拒，
+  clock invariant 丢失只允许 zero + zero stamp；
 - finite supported-axis over-limit 被 clamp；
 - NaN/Inf/unsupported non-zero axis retire；
 - authority/freshness 分别按 250/150 ms steady deadline 失效；
 - publication serial barrier 保证 zero 后无旧 non-zero；
 - product bringup 默认 inhibited，Gate 是唯一 final publisher；
 - headless 有 bounded motion、两种 expiry、command/controller/physical zero；
-- full gate 与 process residue audit 通过；
+- Core、无 Gazebo/`/clock` Node、headless product 三层验收以及 full gate、
+  process residue audit 通过；
 - 文档没有声称 Lesson 0010 crash-stop/pause 已完成。
 
 ## 提交给教师
@@ -635,15 +750,18 @@ GID 配置、截图、`__pycache__` 或 `*.pyc`。
 1. `git status --short` 与 `git log --oneline --decorate -12`；
 2. start tag object/peeled target；
 3. tests-first RED 与 GREEN commit；
-4. `ros2 interface show` 两个 private type；
+4. 两条真实 `ros2 interface show` 命令及两个 private type 输出；
 5. trusted YAML、private topic QoS 与 final SystemDefaults compatibility；
 6. PREPARE/OPEN/RENEW/INHIBIT state/`control_seq` 表；
-7. per-lease topic、Gate-local 16-byte bound GID 与 graph owner；
+7. exact-32 identity 正反例，以及 per-lease topic、Gate-local 16-byte bound
+   GID 与 graph owner；
 8. unique final publisher evidence；
-9. clamp、invalid retirement、pre-OPEN/old-writer injection；
+9. reader A/B/C、snapshot #1/#2/#3、clamp、invalid retirement、
+   pre-OPEN/old-writer injection；
 10. authority/freshness last-event→Gate-zero steady latency；
 11. Gate zero、controller zero、odom stationary 三个时间；
-12. complete verify/test/build summary、final marker、residue audit；
+12. static prerequisite 与三层 acceptance 的逐条命令/exit/count/elapsed/
+    decisive assertion，以及 complete verify/build marker、residue audit；
 13. Issue/PR/CI/review/rebase/tag 只在真实发生后填写。
 
 ## 复盘问题
@@ -652,7 +770,11 @@ GID 配置、截图、`__pycache__` 或 `*.pyc`。
 1. 为什么 Gate 生成 topic 比接受 caller 任意 topic 更容易封闭 Interface？
 1. global CAS `control_seq` 防住了什么晚到 control request？
 1. 为什么换 topic 后仍需要 OPEN reader-queue barrier？
+1. 为什么 OPEN 需要 discard reader A/B、accepting reader C 和三个 graph
+   snapshot，而不是一次 discover 后直接 ARMED？
 1. 为什么 GID 必须比较完整 16 bytes，而不能只看 node name？
+1. 为什么 IDL `string<=36` 不等于运行时可以接受任意 36 字符 ID？
+1. 为什么当前 GID 关联实现必须锁定 FastDDS，并在错误 RMW 下拒绝启动？
 1. CLAMP 与 retire 分别适合哪些输入？为什么有限超限不属于 NaN/Inf？
 1. publication serial barrier 如何阻止 zero 后的晚到 non-zero？
 1. 为什么 Gate zero、controller zero、physical stationarity 是三种证据？

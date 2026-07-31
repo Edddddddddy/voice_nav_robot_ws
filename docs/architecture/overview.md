@@ -41,27 +41,36 @@ Verified by the Lesson 0007 and Lesson 0008 static and headless-Gazebo gates:
   publisher GID, and fully qualified owner are exercised over a bounded
   observation window.
 
-SLAM, Nav2, MotionGate, Mission Runtime, Agent, and voice remain target claims.
-No `map → odom` owner exists yet. Controller timeout is not presented as
-MotionGate or physical-stop completion.
+SLAM, Nav2, Mission Runtime, Agent, and voice remain target claims. MotionGate
+is local GREEN but not yet merged public behavior. No `map → odom` owner exists
+yet. Controller timeout is not presented as Gate-death or physical-stop
+completion.
 
 ## In-progress v0.2 slice: Lesson 0009
 
-VN-0010 / Lesson 0009 is implementing the first independent MotionGate
-vertical slice. Until its Work Item, local gates, review, CI, merge, and
-solution tag close, the following remain **in-progress design**, not verified
-current behavior:
+VN-0010 / Lesson 0009 now has a local-GREEN implementation of the first
+independent MotionGate vertical slice. Its full local gate and independent
+evidence review pass. It remains unmerged product behavior until the PR,
+required CI, rebase merge, and solution tag close:
 
-- a pure `MotionGateCore` behind one typed event Interface and a
-  `motion_gate_node` ROS Adapter;
+- a pure, package-internal static `MotionGateCore` behind typed
+  `prepare`/`open`/`renew`/`inhibit`/`accept_candidate`/`tick`/`snapshot`/
+  `selected_command` methods, an Adapter-only `force_fault` ingress, and
+  `PrepareAdmissionProvider`/`OpenBindingProvider` seams, plus a
+  `motion_gate_node` ROS Adapter; the Core library and header are not installed
+  or exported;
 - package-private `InternalMotionGateControl` and
   `InternalMotionGateState` types with only
   `PREPARE`/`OPEN`/`RENEW`/`INHIBIT`, exposed only on
-  `/motion_gate/internal/control` and `/motion_gate/internal/state`;
+  `/motion_gate/internal/control` and `/motion_gate/internal/state`; IDL allows
+  at most 36 characters, while request and Gate identities plus every
+  non-PREPARE lease identity are semantically exactly 32 lowercase
+  hexadecimal characters; PREPARE carries an empty lease field;
 - Gate-generated lease IDs and candidate topics, one global compare-and-swap
   `control_seq`, and `INHIBITED`/`PREPARED`/`ARMED`/`FAULTED` states;
-- a Gate-local 16-byte publisher-GID binding plus OPEN reader-queue and final
-  publication barriers;
+- a Gate-local 16-byte publisher-GID binding plus an OPEN barrier with discard
+  readers A/B, the first accepting reader C, and three same-writer graph
+  snapshots, followed by the final publication barrier;
 - 250 ms authority, 150 ms candidate freshness, and a 20 ms output period on
   steady/wall time;
 - finite supported-axis clamping, fail-closed retirement for non-finite or
@@ -69,7 +78,12 @@ current behavior:
 - a final publisher using `rclcpp::SystemDefaultsQoS()` with runtime proof of
   compatibility against the controller subscriber. Its node FQN is
   `/motion_gate_node`; candidate topics use the
-  `/voice_nav_internal/motion_gate/candidate/lease_` prefix.
+  `/voice_nav_internal/motion_gate/candidate/lease_` prefix;
+- a strict `rmw_fastrtps_cpp` runtime lock selected by product bringup and
+  enforced by Gate startup; `use_sim_time` is immutable after startup and the
+  publication barrier additionally requires an active ROS-time override,
+  failing closed to zero/stamp-zero otherwise; plus pure-Core,
+  no-Gazebo/no-`/clock` Node, and headless-Gazebo product acceptance layers.
 
 The private seam reduces product surface but is not DDS access control.
 Lesson 0009 uses a test authority/candidate harness and does not claim
@@ -144,6 +158,13 @@ velocity and does not import Nav2 or Gazebo types.
   output, and sole final velocity publication. The Gate generates lease IDs
   and topics; Runtime drives the four locked operations using the Gate instance,
   current lease, and global compare-and-swap sequence.
+
+The package-internal `motion_gate_core` static target is the deep Module behind
+the Adapter. It owns state, identity validation, deadlines, binding decisions,
+clamping, retirement, and the selected command. The Node Adapter owns ROS graph
+queries, reader A/B/C lifecycle, actual final/state publication, publication
+sequence counters, and the `zero_published` acknowledgement. Only
+`motion_gate_node` is installed.
 
 The caller learns one execution operation, one stop operation, and one state
 snapshot. Internal complexity remains local to one package while separate
