@@ -228,6 +228,34 @@ class ScopedTestResultsTest(unittest.TestCase):
             self.assertIn("result path contains symbolic link", completed.stderr)
             self.assertNotIn("Summary: 9 tests", completed.stdout)
 
+    def test_anchored_snapshot_rejects_source_replaced_by_symlink(self) -> None:
+        from scripts.colcon_evidence import open_result_snapshot
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory) / "workspace"
+            package_directory = workspace / "build" / "voice_nav_mission"
+            source_result = package_directory / "current.xunit.xml"
+            write_xunit(source_result, tests=1)
+            moved_result = package_directory / "original.xunit.xml"
+            external_result = workspace / "external.xunit.xml"
+            write_xunit(external_result, tests=9)
+            sandbox_package = workspace / "sandbox" / "voice_nav_mission"
+
+            with open_result_snapshot(package_directory) as snapshot:
+                source_result.rename(moved_result)
+                source_result.symlink_to(external_result)
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "changed after evidence discovery",
+                ):
+                    snapshot.stage(sandbox_package)
+
+            staged_result = sandbox_package / "current.xunit.xml"
+            self.assertFalse(staged_result.is_symlink())
+            self.assertTrue(external_result.is_file())
+            self.assertTrue(moved_result.is_file())
+
     def test_clear_prevalidates_every_result_before_unlinking(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             build_base = Path(temporary_directory) / "build"
