@@ -21,8 +21,8 @@ Collision Monitor 或进程崩溃验收。Lesson 0010 才 kill authority/Gate
 Runtime crash；YAML 中已有 `cmd_vel_timeout` 也不是 Gate-death 证据。
 
 教师分支当前是 local-GREEN implementation，完整本地门禁与独立证据评审已经
-通过。required CI、rebase merge 与 `course/0009-solution` 未闭环前，本课
-不得标记 completed。
+通过，draft PR #12 已创建。required CI、rebase merge 与
+`course/0009-solution` 未闭环前，本课不得标记 completed。
 
 先阅读：
 

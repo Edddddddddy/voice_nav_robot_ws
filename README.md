@@ -17,8 +17,9 @@ rebase 合并，并发布不可变 `course/0008-solution` tag。Lesson 0009 /
 上实现独立 MotionGate。当前 local-GREEN 分支已包含内部静态
 `MotionGateCore`、独立 `motion_gate_node`、per-lease writer binding、正常运行
 lease/freshness deadline 与唯一最终速度 owner；本地完整门禁与独立证据评审
-已通过，PR、required CI、rebase merge 和 solution tag 尚未闭环。当前已在
-本地验证的 `v0.2` 切片包括：
+已通过，[draft PR #12](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/12)
+已创建；required CI、rebase merge 和 solution tag 尚未闭环。当前已在本地
+验证的 `v0.2` 切片包括：
 
 - 六个职责明确的 ROS package；
 - 第一版 `MissionStep` 和 `ExecuteMission` 教学接口；
