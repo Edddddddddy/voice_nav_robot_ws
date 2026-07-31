@@ -3,11 +3,29 @@
 import os
 import re
 import stat
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterator
 
 
 PACKAGE_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 CTEST_TAG_ENTRY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
+DIRECTORY_OPEN_FLAGS = (
+    os.O_RDONLY
+    | os.O_DIRECTORY
+    | os.O_NOFOLLOW
+    | getattr(os, "O_CLOEXEC", 0)
+)
+
+
+@dataclass(frozen=True)
+class ResultFileIdentity:
+    """Package-relative identity captured before any clear mutation."""
+
+    relative_path: Path
+    device: int
+    inode: int
 
 
 def validate_package_names(package_names: list[str]) -> tuple[str, ...]:
@@ -189,6 +207,232 @@ def ctest_result_path(tag_file: Path, package_directory: Path) -> Path:
     if not latest_xml.exists() and not latest_xml.is_symlink():
         raise ValueError(f"CTest TAG result does not exist: {latest_xml}")
     return validate_result_input(latest_xml, package_directory)
+
+
+class ResultDeletionPlan:
+    """Delete recognized results through an anchored package directory."""
+
+    def __init__(
+        self,
+        package_directory: Path,
+        result_files: tuple[Path, ...],
+    ) -> None:
+        self.package_directory = package_directory
+        self._workspace_fd = -1
+        self._build_fd = -1
+        self._package_fd = -1
+        self._build_identity: tuple[int, int] | None = None
+        self._package_identity: tuple[int, int] | None = None
+        self._identities: tuple[ResultFileIdentity, ...] = ()
+
+        try:
+            self._open_anchor()
+            identities = []
+            for result_file in result_files:
+                relative_path = self._relative_result_path(result_file)
+                file_status = self._stat_result(relative_path)
+                identities.append(
+                    ResultFileIdentity(
+                        relative_path=relative_path,
+                        device=file_status.st_dev,
+                        inode=file_status.st_ino,
+                    )
+                )
+            self._identities = tuple(identities)
+        except Exception:
+            self.close()
+            raise
+
+    def _open_anchor(self) -> None:
+        build_directory = self.package_directory.parent
+        workspace_directory = build_directory.parent
+        try:
+            self._workspace_fd = os.open(
+                workspace_directory,
+                DIRECTORY_OPEN_FLAGS,
+            )
+            self._build_fd = os.open(
+                build_directory.name,
+                DIRECTORY_OPEN_FLAGS,
+                dir_fd=self._workspace_fd,
+            )
+            self._package_fd = os.open(
+                self.package_directory.name,
+                DIRECTORY_OPEN_FLAGS,
+                dir_fd=self._build_fd,
+            )
+        except OSError as error:
+            raise ValueError(
+                "selected package changed after evidence collection: "
+                f"{self.package_directory}"
+            ) from error
+
+        build_status = os.fstat(self._build_fd)
+        package_status = os.fstat(self._package_fd)
+        self._build_identity = (build_status.st_dev, build_status.st_ino)
+        self._package_identity = (
+            package_status.st_dev,
+            package_status.st_ino,
+        )
+
+    def _assert_anchor_attached(self) -> None:
+        if self._build_identity is None or self._package_identity is None:
+            raise ValueError("result deletion plan is closed")
+        try:
+            build_status = os.stat(
+                self.package_directory.parent.name,
+                dir_fd=self._workspace_fd,
+                follow_symlinks=False,
+            )
+            package_status = os.stat(
+                self.package_directory.name,
+                dir_fd=self._build_fd,
+                follow_symlinks=False,
+            )
+        except OSError as error:
+            raise ValueError(
+                "selected package changed after evidence collection: "
+                f"{self.package_directory}"
+            ) from error
+        if (
+            not stat.S_ISDIR(build_status.st_mode)
+            or not stat.S_ISDIR(package_status.st_mode)
+            or (build_status.st_dev, build_status.st_ino)
+            != self._build_identity
+            or (package_status.st_dev, package_status.st_ino)
+            != self._package_identity
+        ):
+            raise ValueError(
+                "selected package changed after evidence collection: "
+                f"{self.package_directory}"
+            )
+
+    def _relative_result_path(self, result_file: Path) -> Path:
+        try:
+            relative_path = result_file.relative_to(self.package_directory)
+        except ValueError as error:
+            raise ValueError(
+                f"result path is outside its selected package: {result_file}"
+            ) from error
+        if not relative_path.parts or any(
+            part in (".", "..") for part in relative_path.parts
+        ):
+            raise ValueError(f"unsafe result path: {result_file}")
+        return relative_path
+
+    def _open_parent(self, relative_path: Path) -> int:
+        current_fd = os.dup(self._package_fd)
+        try:
+            for part in relative_path.parent.parts:
+                next_fd = os.open(
+                    part,
+                    DIRECTORY_OPEN_FLAGS,
+                    dir_fd=current_fd,
+                )
+                os.close(current_fd)
+                current_fd = next_fd
+            return current_fd
+        except OSError as error:
+            os.close(current_fd)
+            raise ValueError(
+                "result path changed after evidence collection: "
+                f"{self.package_directory / relative_path}"
+            ) from error
+
+    def _stat_result(self, relative_path: Path) -> os.stat_result:
+        self._assert_anchor_attached()
+        parent_fd = self._open_parent(relative_path)
+        try:
+            file_status = os.stat(
+                relative_path.name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+        except OSError as error:
+            raise ValueError(
+                "result path changed after evidence collection: "
+                f"{self.package_directory / relative_path}"
+            ) from error
+        finally:
+            os.close(parent_fd)
+        if not stat.S_ISREG(file_status.st_mode):
+            raise ValueError(
+                "result path changed after evidence collection: "
+                f"{self.package_directory / relative_path}"
+            )
+        return file_status
+
+    def validate_all(self) -> None:
+        """Recheck every identity without mutating the filesystem."""
+
+        for identity in self._identities:
+            file_status = self._stat_result(identity.relative_path)
+            if (file_status.st_dev, file_status.st_ino) != (
+                identity.device,
+                identity.inode,
+            ):
+                raise ValueError(
+                    "result path changed after evidence collection: "
+                    f"{self.package_directory / identity.relative_path}"
+                )
+
+    def unlink_all(self) -> None:
+        """Revalidate and unlink names relative to no-follow directory FDs."""
+
+        self.validate_all()
+        for identity in self._identities:
+            self._assert_anchor_attached()
+            parent_fd = self._open_parent(identity.relative_path)
+            try:
+                file_status = os.stat(
+                    identity.relative_path.name,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+                if (
+                    not stat.S_ISREG(file_status.st_mode)
+                    or (file_status.st_dev, file_status.st_ino)
+                    != (identity.device, identity.inode)
+                ):
+                    raise ValueError(
+                        "result path changed after evidence collection: "
+                        f"{self.package_directory / identity.relative_path}"
+                    )
+                os.unlink(identity.relative_path.name, dir_fd=parent_fd)
+            except OSError as error:
+                raise ValueError(
+                    "result path changed after evidence collection: "
+                    f"{self.package_directory / identity.relative_path}"
+                ) from error
+            finally:
+                os.close(parent_fd)
+
+    def close(self) -> None:
+        for descriptor_name in (
+            "_package_fd",
+            "_build_fd",
+            "_workspace_fd",
+        ):
+            descriptor = getattr(self, descriptor_name)
+            if descriptor >= 0:
+                os.close(descriptor)
+                setattr(self, descriptor_name, -1)
+        self._build_identity = None
+        self._package_identity = None
+
+
+@contextmanager
+def open_result_deletion_plan(
+    package_directory: Path,
+    result_files: tuple[Path, ...],
+) -> Iterator[ResultDeletionPlan]:
+    """Hold an anchored result-deletion plan for one selected package."""
+
+    plan = ResultDeletionPlan(package_directory, result_files)
+    try:
+        yield plan
+    finally:
+        plan.close()
 
 
 def unexpected_build_entries(

@@ -7,6 +7,7 @@ import inspect
 import shutil
 import sys
 import tempfile
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,8 +16,8 @@ from colcon_test_result.test_result import Result
 
 from colcon_evidence import ctest_result_path
 from colcon_evidence import discover_result_inputs
+from colcon_evidence import open_result_deletion_plan
 from colcon_evidence import selected_package_directories
-from colcon_evidence import validate_result_input
 
 
 @dataclass(frozen=True)
@@ -239,22 +240,31 @@ def clear_results(package_directories: list[Path]) -> int:
         require_results=False,
     )
 
-    # Revalidate every original file before making the first mutation.  Keep
-    # the source package paired with each path so selected roots never form a
-    # cross-package ownership union.
-    files_to_clear = tuple(
-        (package_evidence.package_directory, result_file)
-        for package_evidence in evidence
-        for result_file in package_evidence.files
+    files_to_clear = sum(
+        (len(package_evidence.files) for package_evidence in evidence),
+        start=0,
     )
-    for package_directory, result_file in files_to_clear:
-        validate_result_input(result_file, package_directory)
-    for _, result_file in files_to_clear:
-        result_file.unlink()
+    with ExitStack() as stack:
+        deletion_plans = tuple(
+            stack.enter_context(
+                open_result_deletion_plan(
+                    package_evidence.package_directory,
+                    package_evidence.files,
+                )
+            )
+            for package_evidence in evidence
+        )
+        # Every selected package completes its anchored preflight before the
+        # first mutation.  unlink_all() then rechecks each identity and uses
+        # unlinkat-style dir_fd deletion without following intermediate links.
+        for deletion_plan in deletion_plans:
+            deletion_plan.validate_all()
+        for deletion_plan in deletion_plans:
+            deletion_plan.unlink_all()
 
-    suffix = "file" if len(files_to_clear) == 1 else "files"
+    suffix = "file" if files_to_clear == 1 else "files"
     print(
-        f"Cleared {len(files_to_clear)} selected package test-result "
+        f"Cleared {files_to_clear} selected package test-result "
         f"{suffix}."
     )
     return 0
