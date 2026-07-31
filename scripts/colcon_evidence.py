@@ -6,7 +6,7 @@ import stat
 from pathlib import Path
 
 
-PACKAGE_NAME_PATTERN = re.compile(r"[A-Za-z0-9_]+")
+PACKAGE_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 CTEST_TAG_ENTRY_PATTERN = re.compile(r"[A-Za-z0-9_.-]+")
 
 
