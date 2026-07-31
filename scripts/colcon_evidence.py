@@ -1,10 +1,12 @@
 """Path-safety primitives for deterministic colcon verification evidence.
 
-Selected build trees must be quiescent while evidence is reported or cleared.
-Anchored descriptors contain path replacement to the selected package and
-detect ordinary concurrent changes, but this module does not claim protection
-against an actively hostile same-UID process racing the final name-based
-``unlinkat`` or forging lexical ownership with hardlinks / bind mounts.
+Selected build trees and locked source-package layouts must be quiescent while
+evidence is reported or cleared.  Source roots and package directories are
+required to be direct, non-symlinked workspace children.  Anchored descriptors
+contain path replacement to the selected build package and detect ordinary
+concurrent changes, but this module does not claim protection against an
+actively hostile same-UID process racing the final name-based ``unlinkat`` or
+forging lexical ownership with hardlinks / bind mounts.
 """
 
 import os
@@ -38,8 +40,18 @@ def _absolute_symlink_target(link_path: Path, raw_target: str) -> Path:
     return Path(os.path.abspath(target))
 
 
-def _expected_source_package(package_directory: Path) -> Path:
+def _source_package_path(package_directory: Path) -> Path:
     return package_directory.parent.parent / "src" / package_directory.name
+
+
+def _validate_source_package_layout(package_directory: Path) -> Path:
+    source_root = package_directory.parent.parent / "src"
+    source_package = _source_package_path(package_directory)
+    if not _is_regular_nonsymlink(source_root, directory=True):
+        raise ValueError(f"invalid source package layout: {source_root}")
+    if not _is_regular_nonsymlink(source_package, directory=True):
+        raise ValueError(f"invalid source package layout: {source_package}")
+    return source_package
 
 
 def _expected_non_evidence_directory_target(
@@ -50,7 +62,7 @@ def _expected_non_evidence_directory_target(
 
     package_name = package_directory.name
     if relative_path == Path(package_name):
-        return _expected_source_package(package_directory) / package_name
+        return _source_package_path(package_directory) / package_name
     if relative_path == (
         Path("ament_cmake_python") / package_name / package_name
     ):
@@ -72,19 +84,20 @@ def _validate_source_package_manifest(
     link_path: Path,
     raw_target: str,
 ) -> None:
-    expected_manifest = _expected_source_package(package_directory) / "package.xml"
+    expected_manifest = _source_package_path(package_directory) / "package.xml"
     if _absolute_symlink_target(link_path, raw_target) != expected_manifest:
         raise ValueError(
             "result path has unexpected symbolic-link target: "
             f"{link_path}"
         )
+    _validate_source_package_layout(package_directory)
     if not _is_regular_nonsymlink(expected_manifest, directory=False):
         raise ValueError(
             f"invalid source package manifest: {expected_manifest}"
         )
     try:
         root = ElementTree.parse(expected_manifest).getroot()
-    except (ElementTree.ParseError, OSError) as error:
+    except (ElementTree.ParseError, LookupError, OSError) as error:
         raise ValueError(
             f"invalid source package manifest: {expected_manifest}"
         ) from error
