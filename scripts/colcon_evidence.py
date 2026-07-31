@@ -2,6 +2,7 @@
 
 import os
 import re
+import shutil
 import stat
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -17,6 +18,9 @@ DIRECTORY_OPEN_FLAGS = (
     | os.O_NOFOLLOW
     | getattr(os, "O_CLOEXEC", 0)
 )
+FILE_OPEN_FLAGS = (
+    os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+)
 
 
 @dataclass(frozen=True)
@@ -26,6 +30,9 @@ class ResultFileIdentity:
     relative_path: Path
     device: int
     inode: int
+    size: int
+    modified_ns: int
+    changed_ns: int
 
 
 def validate_package_names(package_names: list[str]) -> tuple[str, ...]:
@@ -87,13 +94,14 @@ def selected_package_directories(
     return directories
 
 
-def validate_result_input(path: Path, package_directory: Path) -> Path:
-    """Return a regular result input owned lexically by one package.
+def _validate_staged_result_input(
+    path: Path,
+    package_directory: Path,
+) -> Path:
+    """Return a regular input owned by the private staging directory.
 
-    The caller passes an already resolved package directory.  Result inputs
-    must not use symbolic links at any component of their package-relative
-    path.  Keeping this check package-local prevents one selected package
-    from borrowing another selected package's evidence.
+    Original build inputs use anchored file descriptors instead.  This helper
+    is intentionally limited to the private, immutable sandbox snapshot.
     """
 
     try:
@@ -133,64 +141,10 @@ def validate_result_input(path: Path, package_directory: Path) -> Path:
     return path
 
 
-def discover_result_inputs(package_directory: Path) -> tuple[Path, ...]:
-    """Discover safe XML and CTest inputs without following symlinks."""
-
-    result_inputs: set[Path] = set()
-    tag_files: list[Path] = []
-
-    for directory, directory_names, file_names in os.walk(
-        package_directory,
-        topdown=True,
-        followlinks=False,
-    ):
-        directory_path = Path(directory)
-
-        traversable_directories = []
-        for directory_name in sorted(directory_names):
-            child_directory = directory_path / directory_name
-            if child_directory.is_symlink():
-                if directory_name == "Testing":
-                    raise ValueError(
-                        "result path contains symbolic link: "
-                        f"{child_directory}"
-                    )
-                continue
-            traversable_directories.append(directory_name)
-        directory_names[:] = traversable_directories
-
-        for file_name in sorted(file_names):
-            path = directory_path / file_name
-            is_ctest_tag = (
-                file_name == "TAG" and directory_path.name == "Testing"
-            )
-            is_xml = file_name.endswith(".xml")
-            if not is_ctest_tag and not is_xml:
-                continue
-
-            # Python packages built with --symlink-install contain this source
-            # metadata link.  It can never contribute test evidence, so ignore
-            # it without following it while rejecting all result-like links.
-            if is_xml and file_name == "package.xml" and path.is_symlink():
-                continue
-
-            validate_result_input(path, package_directory)
-            result_inputs.add(path)
-            if is_ctest_tag:
-                tag_files.append(path)
-
-    for tag_file in tag_files:
-        result_inputs.add(
-            ctest_result_path(tag_file, package_directory)
-        )
-
-    return tuple(sorted(result_inputs))
-
-
 def ctest_result_path(tag_file: Path, package_directory: Path) -> Path:
     """Resolve one validated CTest TAG to its mandatory local result."""
 
-    validate_result_input(tag_file, package_directory)
+    _validate_staged_result_input(tag_file, package_directory)
     lines = tag_file.read_text(encoding="utf-8").splitlines()
     if not lines:
         raise ValueError(f"malformed CTest TAG file: {tag_file}")
@@ -206,7 +160,7 @@ def ctest_result_path(tag_file: Path, package_directory: Path) -> Path:
     latest_xml = tag_file.parent / tag_entry / "Test.xml"
     if not latest_xml.exists() and not latest_xml.is_symlink():
         raise ValueError(f"CTest TAG result does not exist: {latest_xml}")
-    return validate_result_input(latest_xml, package_directory)
+    return _validate_staged_result_input(latest_xml, package_directory)
 
 
 class ResultDeletionPlan:
@@ -236,6 +190,9 @@ class ResultDeletionPlan:
                         relative_path=relative_path,
                         device=file_status.st_dev,
                         inode=file_status.st_ino,
+                        size=file_status.st_size,
+                        modified_ns=file_status.st_mtime_ns,
+                        changed_ns=file_status.st_ctime_ns,
                     )
                 )
             self._identities = tuple(identities)
@@ -429,6 +386,222 @@ def open_result_deletion_plan(
     """Hold an anchored result-deletion plan for one selected package."""
 
     plan = ResultDeletionPlan(package_directory, result_files)
+    try:
+        yield plan
+    finally:
+        plan.close()
+
+
+class ResultSnapshotPlan(ResultDeletionPlan):
+    """Stage a stable, no-follow snapshot of one package's result inputs."""
+
+    def __init__(self, package_directory: Path) -> None:
+        super().__init__(package_directory, ())
+        try:
+            self._snapshot_inputs = self._discover_snapshot_inputs()
+        except Exception:
+            self.close()
+            raise
+
+    @staticmethod
+    def _snapshot_identity(
+        relative_path: Path,
+        file_status: os.stat_result,
+    ) -> ResultFileIdentity:
+        return ResultFileIdentity(
+            relative_path=relative_path,
+            device=file_status.st_dev,
+            inode=file_status.st_ino,
+            size=file_status.st_size,
+            modified_ns=file_status.st_mtime_ns,
+            changed_ns=file_status.st_ctime_ns,
+        )
+
+    @staticmethod
+    def _same_snapshot(
+        identity: ResultFileIdentity,
+        file_status: os.stat_result,
+    ) -> bool:
+        return (
+            stat.S_ISREG(file_status.st_mode)
+            and (
+                file_status.st_dev,
+                file_status.st_ino,
+                file_status.st_size,
+                file_status.st_mtime_ns,
+                file_status.st_ctime_ns,
+            )
+            == (
+                identity.device,
+                identity.inode,
+                identity.size,
+                identity.modified_ns,
+                identity.changed_ns,
+            )
+        )
+
+    def _discover_snapshot_inputs(self) -> tuple[ResultFileIdentity, ...]:
+        self._assert_anchor_attached()
+        identities = []
+        try:
+            walker = os.fwalk(
+                ".",
+                topdown=True,
+                follow_symlinks=False,
+                dir_fd=self._package_fd,
+            )
+            for directory, directory_names, file_names, directory_fd in walker:
+                relative_directory = (
+                    Path() if directory == "." else Path(directory)
+                )
+
+                traversable_directories = []
+                for directory_name in sorted(directory_names):
+                    child_path = (
+                        self.package_directory
+                        / relative_directory
+                        / directory_name
+                    )
+                    child_status = os.stat(
+                        directory_name,
+                        dir_fd=directory_fd,
+                        follow_symlinks=False,
+                    )
+                    if stat.S_ISLNK(child_status.st_mode):
+                        if (
+                            directory_name == "Testing"
+                            or relative_directory.name == "Testing"
+                        ):
+                            raise ValueError(
+                                "result path contains symbolic link: "
+                                f"{child_path}"
+                            )
+                        continue
+                    if not stat.S_ISDIR(child_status.st_mode):
+                        raise ValueError(
+                            "result directory is not a directory: "
+                            f"{child_path}"
+                        )
+                    traversable_directories.append(directory_name)
+                directory_names[:] = traversable_directories
+
+                for file_name in sorted(file_names):
+                    is_ctest_tag = (
+                        file_name == "TAG"
+                        and relative_directory.name == "Testing"
+                    )
+                    is_xml = file_name.endswith(".xml")
+                    if not is_ctest_tag and not is_xml:
+                        continue
+
+                    file_status = os.stat(
+                        file_name,
+                        dir_fd=directory_fd,
+                        follow_symlinks=False,
+                    )
+                    if stat.S_ISLNK(file_status.st_mode):
+                        if is_xml and file_name == "package.xml":
+                            continue
+                        raise ValueError(
+                            "result path contains symbolic link: "
+                            f"{self.package_directory / relative_directory / file_name}"
+                        )
+                    if not stat.S_ISREG(file_status.st_mode):
+                        raise ValueError(
+                            "result path is not a regular file: "
+                            f"{self.package_directory / relative_directory / file_name}"
+                        )
+                    identities.append(
+                        self._snapshot_identity(
+                            relative_directory / file_name,
+                            file_status,
+                        )
+                    )
+        except OSError as error:
+            raise ValueError(
+                "selected package changed after evidence discovery: "
+                f"{self.package_directory}"
+            ) from error
+
+        self._assert_anchor_attached()
+        return tuple(identities)
+
+    def stage(self, sandbox_package: Path) -> dict[Path, Path]:
+        """Copy the discovered manifest through anchored no-follow FDs."""
+
+        source_by_relative_path: dict[Path, Path] = {}
+        for identity in self._snapshot_inputs:
+            self._assert_anchor_attached()
+            parent_fd = self._open_parent(identity.relative_path)
+            source_fd = -1
+            try:
+                before_status = os.stat(
+                    identity.relative_path.name,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+                if not self._same_snapshot(identity, before_status):
+                    raise ValueError(
+                        "result path changed after evidence discovery: "
+                        f"{self.package_directory / identity.relative_path}"
+                    )
+                source_fd = os.open(
+                    identity.relative_path.name,
+                    FILE_OPEN_FLAGS,
+                    dir_fd=parent_fd,
+                )
+                opened_status = os.fstat(source_fd)
+                if not self._same_snapshot(identity, opened_status):
+                    raise ValueError(
+                        "result path changed after evidence discovery: "
+                        f"{self.package_directory / identity.relative_path}"
+                    )
+
+                destination_path = sandbox_package / identity.relative_path
+                destination_path.parent.mkdir(parents=True, exist_ok=True)
+                with (
+                    os.fdopen(source_fd, "rb", closefd=True) as source,
+                    destination_path.open("xb") as destination,
+                ):
+                    source_fd = -1
+                    shutil.copyfileobj(source, destination)
+                    after_status = os.fstat(source.fileno())
+                if not self._same_snapshot(identity, after_status):
+                    raise ValueError(
+                        "result path changed after evidence discovery: "
+                        f"{self.package_directory / identity.relative_path}"
+                    )
+                destination_status = destination_path.lstat()
+                if not stat.S_ISREG(destination_status.st_mode):
+                    raise ValueError(
+                        f"sandbox result is not a regular file: {destination_path}"
+                    )
+                source_by_relative_path[identity.relative_path] = (
+                    self.package_directory / identity.relative_path
+                )
+            except OSError as error:
+                raise ValueError(
+                    "result path changed after evidence discovery: "
+                    f"{self.package_directory / identity.relative_path}"
+                ) from error
+            finally:
+                if source_fd >= 0:
+                    os.close(source_fd)
+                os.close(parent_fd)
+
+        self._assert_anchor_attached()
+        for tag_file in sorted(sandbox_package.glob("**/Testing/TAG")):
+            ctest_result_path(tag_file, sandbox_package)
+        return source_by_relative_path
+
+
+@contextmanager
+def open_result_snapshot(
+    package_directory: Path,
+) -> Iterator[ResultSnapshotPlan]:
+    """Open one package evidence snapshot anchored below its build base."""
+
+    plan = ResultSnapshotPlan(package_directory)
     try:
         yield plan
     finally:
