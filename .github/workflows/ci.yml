@@ -33,9 +33,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Run repository contract tests
-        run: python3 -m unittest discover --start-directory tests --pattern 'test_*.py' --verbose
-
       - name: Install CI lint tools
         run: |
           set -euo pipefail
@@ -106,6 +103,16 @@ jobs:
             --ignore-src \
             --rosdistro "${ROS_DISTRO}" \
             -y
+
+      - name: Run repository contract tests
+        run: |
+          set -euo pipefail
+          # Some repository tests exercise the scoped colcon result reporter.
+          source "/opt/ros/${ROS_DISTRO}/setup.bash"
+          python3 -m unittest discover \
+            --start-directory tests \
+            --pattern 'test_*.py' \
+            --verbose
 
       - name: Run canonical workspace verification
         run: bash scripts/verify.sh
