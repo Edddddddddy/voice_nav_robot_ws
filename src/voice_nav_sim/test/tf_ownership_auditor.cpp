@@ -37,11 +37,17 @@
 #include <rclcpp/rclcpp.hpp>
 #include <tf2_msgs/msg/tf_message.hpp>
 
+#include "tf_ownership_evaluator.hpp"
+
 namespace
 {
 
 using Gid = std::array<std::uint8_t, RMW_GID_STORAGE_SIZE>;
 using SteadyClock = std::chrono::steady_clock;
+using voice_nav_sim::tf_audit::evaluate_node_identities;
+using voice_nav_sim::tf_audit::fully_qualified_node_name;
+using voice_nav_sim::tf_audit::NodeIdentity;
+using voice_nav_sim::tf_audit::NodeIdentityState;
 
 struct Edge
 {
@@ -250,35 +256,11 @@ std::string topic_set_string(const std::set<std::string> & topics)
   return stream.str();
 }
 
-std::string fully_qualified_node_name(const rclcpp::TopicEndpointInfo & endpoint)
+NodeIdentity node_identity(const rclcpp::TopicEndpointInfo & endpoint)
 {
-  std::string node_namespace = endpoint.node_namespace();
-  if (node_namespace.empty() || node_namespace == "/") {
-    return "/" + endpoint.node_name();
-  }
-  if (node_namespace.front() != '/') {
-    node_namespace.insert(node_namespace.begin(), '/');
-  }
-  if (node_namespace.back() == '/') {
-    node_namespace.pop_back();
-  }
-  return node_namespace + "/" + endpoint.node_name();
-}
-
-bool node_matches(
-  const std::string & expected_node,
-  const rclcpp::TopicEndpointInfo & endpoint)
-{
-  return expected_node == fully_qualified_node_name(endpoint);
-}
-
-bool node_identity_is_known(const rclcpp::TopicEndpointInfo & endpoint)
-{
-  return
-    !endpoint.node_name().empty() &&
-    !endpoint.node_namespace().empty() &&
-    endpoint.node_name() != "_NODE_NAME_UNKNOWN_" &&
-    endpoint.node_namespace() != "_NODE_NAMESPACE_UNKNOWN_";
+  return {
+    endpoint.node_name(),
+    endpoint.node_namespace()};
 }
 
 class TfOwnershipAuditor : public rclcpp::Node
@@ -397,36 +379,27 @@ public:
             "observed GID " + gid_string(owner.first) +
             " is not present in the graph for " + expectation.topic};
         }
-        const bool expected_endpoint_found = std::any_of(
-          gid_endpoints->second.cbegin(),
-          gid_endpoints->second.cend(),
-          [&expectation](const rclcpp::TopicEndpointInfo & endpoint) {
-            return
-              node_identity_is_known(endpoint) &&
-              node_matches(expectation.expected_node, endpoint);
-          });
-        if (!expected_endpoint_found) {
-          const bool unresolved_endpoint_found = std::any_of(
-            gid_endpoints->second.cbegin(),
-            gid_endpoints->second.cend(),
-            [](const rclcpp::TopicEndpointInfo & endpoint) {
-              return !node_identity_is_known(endpoint);
-            });
-          if (unresolved_endpoint_found) {
-            return {
-              EvaluationState::PENDING,
-              "graph has not resolved the node identity for GID " +
-              gid_string(owner.first) + " on " + expectation.topic};
-          }
-          std::set<std::string> actual_nodes;
-          for (const auto & endpoint : gid_endpoints->second) {
-            actual_nodes.insert(fully_qualified_node_name(endpoint));
-          }
+        std::vector<NodeIdentity> identities;
+        identities.reserve(gid_endpoints->second.size());
+        for (const auto & endpoint : gid_endpoints->second) {
+          identities.push_back(node_identity(endpoint));
+        }
+        const auto identity_evaluation = evaluate_node_identities(
+          expectation.expected_node,
+          identities);
+        if (identity_evaluation.state == NodeIdentityState::UNRESOLVED) {
+          return {
+            EvaluationState::PENDING,
+            "graph has not resolved the node identity for GID " +
+            gid_string(owner.first) + " on " + expectation.topic};
+        }
+        if (identity_evaluation.state == NodeIdentityState::MISMATCH) {
           return {
             EvaluationState::VIOLATION,
             "GID " + gid_string(owner.first) + " on " +
             expectation.topic + " maps to {" +
-            topic_set_string(actual_nodes) + "}; expected " +
+            topic_set_string(identity_evaluation.actual_nodes) +
+            "}; expected " +
             expectation.expected_node};
         }
       }
@@ -473,7 +446,7 @@ public:
               if (gid_endpoints != topic_endpoints->second.cend()) {
                 for (const auto & endpoint : gid_endpoints->second) {
                   endpoint_names.insert(
-                    fully_qualified_node_name(endpoint));
+                    fully_qualified_node_name(node_identity(endpoint)));
                 }
               }
             }
