@@ -55,10 +55,11 @@ Nav2 / 相对运动候选速度
 Mission、Agent 和 Voice 不知道 Gazebo topic，也不能直接控制轮关节。`nav2_velocity_smoother` 只调速，Collision Monitor 只做防碰撞保护，独立 MotionGate 是最终速度裁决者，`diff_drive_controller.cmd_vel_timeout` 是消费端第二道 deadman。
 
 Lesson 0008 已验证到 LiDAR、controller、odom 与 TF 所有权。Lesson 0009 /
-VN-0010 正在用 test authority/candidate harness 实现独立 MotionGate 的正常
-lease 与 deadline；它尚不是已完成能力。进程 kill、consumer crash-stop 和
-Gazebo pause/resume 留给 Lesson 0010。MissionRuntime、smoother、Collision
-Monitor 的完整串接属于后续纵向切片。
+VN-0010 已有 test authority/candidate harness 与独立 MotionGate 的
+local-GREEN implementation；本地门禁已通过，但在 PR/CI/merge 前不是已公开
+交付能力。进程 kill、consumer crash-stop 和 Gazebo pause/resume 留给
+Lesson 0010。
+MissionRuntime、smoother、Collision Monitor 的完整串接属于后续纵向切片。
 
 ## Topic 与 frame 所有权
 
@@ -82,19 +83,32 @@ Monitor 的完整串接属于后续纵向切片。
   topic；topic 位于 `/voice_nav_internal/motion_gate/candidate/lease_` 前缀。
   OPEN、RENEW、INHIBIT 引用当前 lease。四种操作共享 Gate-wide CAS
   `control_seq`，旧 instance/lease/sequence 的 INHIBIT 不能关闭新 lease。
+  IDL 对 request/Gate/lease ID 的 transport bound 是 36 字符，但运行时只
+  接受 exact-32 lowercase-hex request/Gate ID；PREPARE lease 为空，其余操作
+  的 lease 必须 exact-32。
 - authority lease 为 250 ms steady time；candidate freshness 为独立的
   150 ms steady deadline，candidate 使用
   `BEST_EFFORT + VOLATILE + KEEP_LAST(1)`，不能续 authority。任一 deadline
   失效后 Gate 每 20 ms wall time 持续发布零。
-- OPEN 在 Gate 本进程 graph 中要求恰好一个 writer，销毁 provisional
-  reader/queue 后重建 `VOLATILE + KEEP_LAST(1)` reader，并绑定 Gate 本地
-  观察到的完整 16-byte endpoint GID。control request 不传 caller
-  `Publisher::get_gid()`；locked RMW 自检不能关联 graph GID 与
-  `MessageInfo.publisher_gid` 时 fail closed。
+- canonical Gate 启动要求 `use_sim_time=true`，并拒绝运行期修改。每次最终
+  publication 都重新检查该参数和 active ROS clock；任一不变量丢失都会锁存
+  fault，只发布 zero + zero stamp。ROS time 只用于最终 `TwistStamped`、
+  odom、TF 和传感器时间戳，不驱动 authority、freshness 或其他 deadline。
+- OPEN 先完成纯 Core request/state/CAS/lease/deadline 校验；拒绝路径不能
+  访问 graph。随后使用 discard reader A、discard reader B 与第一个
+  accepting reader C，在三次 graph snapshot 中要求同一个唯一 writer，
+  并绑定 Gate 本地观察到的完整 16-byte endpoint GID。任一 snapshot 的
+  writer 改变都 fail closed；control request 不传 caller
+  `Publisher::get_gid()`。
+- 当前 GID 关联严格锁定 `rmw_fastrtps_cpp`：product launch 显式选择它，
+  Gate 在其他 RMW 下拒绝启动，manifest 声明 runtime dependency。FastDDS
+  self-test 不能关联 graph GID 与 `MessageInfo.publisher_gid` 时 fail closed。
 - control、candidate、timer 和 publication 经过同一 serial barrier；
   current tuple 的 INHIBIT、expiry 或 invalid retirement 发布零后，旧的
   queued non-zero 不得再越过 barrier。
-- `diff_drive_controller.cmd_vel_timeout` 覆盖 MotionGate 进程崩溃后最后一条命令被保持的风险。
+- `diff_drive_controller.cmd_vel_timeout` 被配置为 MotionGate 进程崩溃后的
+  消费端第二道 deadman；其 process-kill 实测属于 Lesson 0010，不能用配置
+  存在代替证据。
 - 上层任务超时不能代替底层速度 lease。
 - Stop 确认只表示 Gate 已禁止运动并发布零速度，不表示机器人已经物理停稳。
 - 本项目的“停止”是高优先级 operational stop，不宣称为经过功能安全认证的急停系统。
@@ -107,5 +121,11 @@ Monitor 的完整串接属于后续纵向切片。
 `/motion_gate/internal/control` 与 `/motion_gate/internal/state`。这些名称、
 candidate prefix 与 `/diff_drive_controller/cmd_vel` 都是代码常量，不是
 YAML 参数或 product launch remap；参数 YAML 根固定为 `motion_gate_node`。
+`motion_gate_core` 是 package-internal STATIC target，不安装或 export；唯一
+安装的运行目标是 `motion_gate_node`。Core 拥有状态与 selected command，
+其 typed surface 还包含只读 `selected_command()`；Adapter-only
+`force_fault()` 只把 graph/reader/clock/publication failure 锁存到 Core。
+Node Adapter 拥有 reader lifecycle、实际 publication 与 zero-published
+acknowledgement。
 
 资料：[Gazebo Sim 8 DiffDrive API](https://gazebosim.org/api/sim/8/classgz_1_1sim_1_1systems_1_1DiffDrive.html)、[gz_ros2_control](https://control.ros.org/jazzy/doc/gz_ros2_control/doc/index.html)、[diff_drive_controller](https://control.ros.org/jazzy/doc/ros2_controllers/diff_drive_controller/doc/userdoc.html)。

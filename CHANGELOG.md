@@ -8,10 +8,14 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- Added the in-progress VN-0010 Work Item, Lesson 0009 contract, and pending
-  evidence record for an independent, fail-closed MotionGate. This entry
-  records course and design artifacts; it does not claim implementation
-  completion.
+- Added the VN-0010 local-GREEN implementation for an independent,
+  fail-closed MotionGate: package-private bounded ROS types, an internal
+  non-installed static `MotionGateCore`, the installed `motion_gate_node`,
+  trusted configuration, canonical product bringup, and Core/node/headless
+  product test layers, plus a fresh-prefix install audit proving that the
+  internal Core header/library are not exported. The full local gate and
+  independent local evidence review pass; this does not claim hosted CI,
+  merge, release, or solution-tag closure.
 - Added a packaged, self-contained Gazebo world with an analytic obstacle and
   a 360-degree single-layer GPU LiDAR on `laser_link`.
 - Added a headless perception integration gate that verifies `/scan` type,
@@ -34,11 +38,17 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Locked the Lesson 0009 private Gate seam to
   `InternalMotionGateControl`/`InternalMotionGateState`, the operations
   `PREPARE`/`OPEN`/`RENEW`/`INHIBIT`, Gate-generated lease topics, global
-  compare-and-swap sequencing, Gate-local 16-byte writer identity, reader and
-  publication barriers, finite-value clamping, and fail-closed invalid-input
-  retirement. The node FQN is `/motion_gate_node`, private endpoints are
+  compare-and-swap sequencing, exact 32-character lowercase hexadecimal
+  request/Gate/lease identities, Gate-local 16-byte writer identity, reader
+  and publication barriers, finite-value clamping, and fail-closed
+  invalid-input retirement. OPEN now validates in the pure Core before graph
+  access, crosses three writer snapshots with discard readers A/B and the
+  first accepting reader C, and faults if the unique writer changes. The node
+  FQN is `/motion_gate_node`, private endpoints are
   `/motion_gate/internal/control` and `/motion_gate/internal/state`, and
   candidate topics use `/voice_nav_internal/motion_gate/candidate/lease_`.
+  The product launch selects `rmw_fastrtps_cpp`, the Gate rejects any other
+  RMW at startup, and both runtime packages declare the Fast DDS dependency.
   The final controller publisher follows
   `rclcpp::SystemDefaultsQoS()` and must prove actual endpoint compatibility;
   crash-stop and pause/resume acceptance remain Lesson 0010 scope.
@@ -54,6 +64,11 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Prevented a runtime `use_sim_time=false` change or a disabled ROS-time
+  override from emitting future system-time-stamped motion that could defeat
+  the controller consumer timeout. The Gate rejects parameter mutation and
+  independently faults closed to zero/stamp-zero at the publication barrier
+  unless both clock invariants hold.
 - Prevented WSL launch tests from orphaning a shell-owned Gazebo process and
   accidentally reusing an old controller graph.
 - Prevented a transient RMW `_NODE_*_UNKNOWN_` graph identity from being

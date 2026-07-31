@@ -14,8 +14,11 @@ Lesson 0001–0008 的 reference solution 已完成。Lesson 0008 已通过本�
 [PR #9](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/9)
 rebase 合并，并发布不可变 `course/0008-solution` tag。Lesson 0009 /
 `VN-0010` 正在 [Issue #11](https://github.com/Edddddddddy/voice_nav_robot_ws/issues/11)
-上实现独立 MotionGate 的正常运行 lease、candidate freshness、per-lease
-writer binding 与唯一最终速度 owner。当前已验证的 `v0.2` 切片包括：
+上实现独立 MotionGate。当前 local-GREEN 分支已包含内部静态
+`MotionGateCore`、独立 `motion_gate_node`、per-lease writer binding、正常运行
+lease/freshness deadline 与唯一最终速度 owner；本地完整门禁与独立证据评审
+已通过，PR、required CI、rebase merge 和 solution tag 尚未闭环。当前已在
+本地验证的 `v0.2` 切片包括：
 
 - 六个职责明确的 ROS package；
 - 第一版 `MissionStep` 和 `ExecuteMission` 教学接口；
@@ -26,10 +29,10 @@ writer binding 与唯一最终速度 owner。当前已验证的 `v0.2` 切片包
   node FQN 验证的 TF 唯一所有权；
 - Work Item、质量门禁、变更记录和课程记录。
 
-原生 Gazebo DiffDrive 仅保留为历史教学 checkpoint。Lesson 0009 尚在开发，
-因此独立 MotionGate 仍不是已完成的产品能力；进程 kill、消费端 crash-stop
-以及 Gazebo pause/resume 则明确留给 Lesson 0010。当前 controller timeout
-不能被误称为已经验收的完整安全链。
+原生 Gazebo DiffDrive 仅保留为历史教学 checkpoint。Lesson 0009 的
+local-GREEN implementation 仍不能写成已经公开交付的产品能力；进程 kill、
+消费端 crash-stop 以及 Gazebo pause/resume 明确留给 Lesson 0010。当前
+controller timeout 不能被误称为已经验收的完整安全链。
 
 实现状态与目标设计必须区分阅读：
 
@@ -87,15 +90,22 @@ cd /mnt/c/Users/lcy/code/ros2/voice_nav_robot_ws
 bash scripts/verify.sh
 ```
 
-只验证某个 package 及其依赖：
+只收窄主 build/test 到某个 package 及其依赖：
 
 ```bash
 bash scripts/verify.sh voice_nav_sim
 ```
 
-门禁会检查仓库与课程契约、Markdown 本地链接、ROS package 版本一致性、
-声明依赖、Xacro/URDF/SDF 契约、构建以及全部测试。`build/`、`install/`、
-`log/`、模型权重、地图、录音和运行证据不得提交。
+package 参数不跳过仓库级静态门禁或 clean-prefix install 边界审计；因此
+Lesson 0009 起即使选择别的 package，审计仍会临时构建
+`voice_nav_mission`。完整门禁会检查仓库与课程契约、Markdown 本地链接、
+ROS package 版本一致性、声明依赖、Xacro/URDF/SDF 契约、构建以及全部测试。
+`build/`、`install/`、`log/`、模型权重、地图、录音和运行证据不得提交。
+
+Lesson 0009 的 Gate-local writer identity 当前严格锁定
+`rmw_fastrtps_cpp`。canonical product launch 会显式选择该 RMW；
+`motion_gate_node` 在其他 RMW 下拒绝启动。这是当前受支持实现约束，不是
+对任意 DDS 实现的可移植性承诺。
 
 ## 开发与学习
 

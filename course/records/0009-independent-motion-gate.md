@@ -1,12 +1,11 @@
 # Lesson 0009 学习记录：独立 MotionGate
 
-状态：Pending（教师参考实现）
+状态：Local GREEN / local evidence closed（教师参考实现）
 
 学习者复现状态：Pending
 
-本记录只填写已经发生且可查询的事实。当前只有 Work Item、GitHub Issue 和
-immutable start tag 已建立；tests-first、实现、运行结果、PR、CI、review、
-merge 与 solution tag 均保持 Pending。不要把课件中的期望值复制成输出。
+本记录只填写已经发生且可查询的事实。本地实现和门禁已完成；PR、hosted CI、
+merge 与 solution tag 尚未发生，因此仍保持 Pending。
 
 ## 变更身份
 
@@ -20,13 +19,17 @@ merge 与 solution tag 均保持 Pending。不要把课件中的期望值复制�
   `79150d9cac31b2ff28b75a9893afdd99b0870642`
 - Start tag peeled target：
   `53c0a937ecc8c1d842c72f8542f19af661d620cf`
-- Tests-first commit：TBD
-- Green implementation commit：TBD
-- Documentation/evidence commit：TBD
-- GitHub PR：TBD
-- Required exact-head CI：TBD
-- Public merge identity：TBD
-- Solution tag object/peeled target：TBD
+- Work Item/course contract commit：
+  `1d5abfbcb454bc41c22de7e9ec98b4b64f2b6323`
+- Tests-first commit：
+  `4e1318b1f4ba5e3a0e176bc051ce3890eb55035e`
+- GREEN implementation commit：
+  `8e80dcc`
+- Documentation/evidence commit：Pending
+- GitHub PR：Pending
+- Required exact-head CI：Pending
+- Public merge identity：Pending
+- Solution tag object/peeled target：Pending
 
 ## Immutable start checkpoint
 
@@ -34,155 +37,178 @@ merge 与 solution tag 均保持 Pending。不要把课件中的期望值复制�
 - [x] remote tag object 与本地一致。
 - [x] local/remote peeled target 都是 reviewed Lesson 0008 closure。
 - [ ] 学习者从 start tag 创建独立 `learn/0009` worktree。
-- [ ] 开始修改前 `git status --short` 无输出。
+- [ ] 学习者开始修改前 `git status --short` 无输出。
 
 ```text
-Commands and output:
+Learner commands/output:
 TBD by learner
 ```
 
 ## Tests-first RED 证据
 
-- [ ] valid Core/IDL/config/launch fixture 先通过。
-- [ ] repository product assertion 单独失败。
-- [ ] 失败原因是缺少 MotionGate product behavior，不是
+- [x] valid Core/IDL/config/launch fixture 先通过。
+- [x] repository product assertion 单独失败。
+- [x] 失败原因是缺少 MotionGate product behavior，不是
   syntax/import/CMake/fixture/discovery 错误。
-- [ ] global CAS、250/150/20 ms、CLAMP/retire、OPEN queue barrier、
+- [x] global CAS、250/150/20 ms、CLAMP/retire、OPEN queue barrier、
   publication serial barrier 与 16-byte GID 均有负向 fixture。
-- [ ] 实现修改发生在 tests-first commit 之后。
+- [x] 实现修改发生在 tests-first commit 之后。
 
 ```text
 Command:
-TBD
+python3 -m unittest discover -s tests -p "test_motion_gate_contract.py" -v
 
 Exit status:
-TBD
+1 (expected RED)
 
 Test count:
-TBD
+20 run; 19 passed; 1 expected repository-product failure
 
 Decisive RED:
-TBD
+MotionGate contract failed: missing Lesson 0009 MotionGate artifact:
+src/voice_nav_mission/srv/InternalMotionGateControl.srv
 ```
+
+GitHub evidence：
+
+- Gate-local GID architecture correction：
+  https://github.com/Edddddddddy/voice_nav_robot_ws/issues/11#issuecomment-5140686616
+- immutable tag/commit/RED evidence：
+  https://github.com/Edddddddddy/voice_nav_robot_ws/issues/11#issuecomment-5140897655
 
 ## Private Interface 证据
 
-- [ ] `InternalMotionGateControl.srv` 位于 `voice_nav_mission`。
-- [ ] `InternalMotionGateState.msg` 位于 `voice_nav_mission`。
-- [ ] `voice_nav_interfaces` 没有新增 Gate private type。
-- [ ] node FQN 精确为 `/motion_gate_node`。
-- [ ] private endpoint 精确为 `/motion_gate/internal/control` 与
+- [x] `InternalMotionGateControl.srv` 与 `InternalMotionGateState.msg` 位于
+  `voice_nav_mission`。
+- [x] `voice_nav_interfaces` 没有新增 Gate private type。
+- [x] node FQN 精确为 `/motion_gate_node`。
+- [x] private endpoint 精确为 `/motion_gate/internal/control` 与
   `/motion_gate/internal/state`。
-- [ ] operation 精确为 PREPARE、OPEN、RENEW、INHIBIT。
-- [ ] control request 使用 Gate instance 与 expected global
-  `control_seq`。
-- [ ] Gate 生成 lease ID 与 candidate topic；caller 不能传任意 topic。
-- [ ] control request 不包含 caller `writer_gid`。
-- [ ] State 的 `bound_writer_gid` 恰好 16 bytes，且只作为本次运行诊断。
-- [ ] 字符串、数组与诊断字段有界。
+- [x] operation 精确为 PREPARE、OPEN、RENEW、INHIBIT。
+- [x] request 使用 Gate instance 与 expected global `control_seq`，不携带
+  caller `writer_gid` 或任意 candidate topic。
+- [x] Gate 生成 lease ID 与 candidate topic。
+- [x] request/Gate ID 语义为 exact-32 lowercase hex；PREPARE lease 为空，
+  其余操作 lease 为 exact-32 lowercase hex。
+- [x] State 的 `bound_writer_gid` 恰好 16 bytes；字符串和诊断字段有界。
 
 ```text
 ros2 interface show voice_nav_mission/srv/InternalMotionGateControl:
-TBD
+request = operation + string<=36 request_id/gate_instance_id
+          + expected_control_seq + string<=36 lease_id
+response = bounded status/snapshot, string<=128 candidate_topic,
+           uint8[16] bound_writer_gid, string<=160 detail
 
 ros2 interface show voice_nav_mission/msg/InternalMotionGateState:
-TBD
+bounded state snapshot with string<=36 IDs, string<=128 topic,
+uint8[16] bound_writer_gid, typed reason, publication sequences,
+and string<=160 detail
 ```
 
 ## MotionGateCore manual-clock 证据
 
-- [ ] Core 无 ROS I/O、ROS time、sleep 或 graph access。
-- [ ] 初始状态 inhibited 且 selected output zero。
-- [ ] PREPARE/OPEN/RENEW/INHIBIT 只通过 typed event Interface。
-- [ ] 状态名称精确为 INHIBITED、PREPARED、ARMED、FAULTED。
-- [ ] global CAS mismatch 不会打开、续期或关闭 authority。
-- [ ] stale instance/lease/control_seq 的旧 INHIBIT 不会关闭新 lease。
-- [ ] current tuple 的 INHIBIT 先发布零，再返回 acknowledgement。
-- [ ] Gate restart 使旧 instance/lease/control_seq 失效。
-- [ ] retired/expired lease 永不复活。
+- [x] Core 是 package-internal `STATIC` target，无 ROS I/O、ROS time、
+  sleep、filesystem 或 graph access。
+- [x] header/library 不安装、不导出；唯一新增安装目标是
+  `motion_gate_node`。
+- [x] 初始状态是 INHIBITED，`selected_command()` 为 zero。
+- [x] 真实 typed surface 为 `prepare/open/renew/inhibit`、
+  `accept_candidate/tick/snapshot/selected_command`；`force_fault` 仅是
+  Node Adapter 的 fail-closed ingress。
+- [x] global CAS mismatch 不会打开、续期或关闭 authority。
+- [x] stale instance/lease/control_seq 的旧 INHIBIT 不会关闭新 lease。
+- [x] retired/expired lease 永不复活，Gate restart 使旧 tuple 失效。
+- [x] 41 个 Core 用例覆盖 exact boundary、idempotence/collision、
+  identity、clamp、invalid retirement 和 selected-zero。
 
 ```text
-Manual-clock transition table:
+Manual-clock boundary:
+authority: T+249 ms remains live; T+250 ms retires and selects zero
+candidate: U+149 ms remains fresh; U+150 ms retires and selects zero
 
-event | steady time | expected seq | resulting seq | state | selected output
-TBD
-
-Authority boundary:
-T + 249 ms:
-T + 250 ms:
-
-Candidate boundary:
-U + 149 ms:
-U + 150 ms:
+Current-tuple INHIBIT:
+Core selects zero and retires the lease; Node publication barrier publishes
+that zero before returning the acknowledgement.
 ```
 
-## Trusted YAML 与限速证据
+## Trusted YAML、时间与限速证据
 
-- [ ] YAML 顶层参数根精确为 `motion_gate_node`。
-- [ ] node/control/state/candidate-prefix/final-command 名称不是 YAML 参数。
-- [ ] authority lease 精确为 `250 ms`。
-- [ ] candidate freshness 精确为 `150 ms`。
-- [ ] output period 精确为 `20 ms`。
-- [ ] writer graph deadline 有界且初值为 `1 s`。
-- [ ] Gate linear clamp 为 `[-0.20, 0.40] m/s`。
-- [ ] Gate angular clamp 为 `[-1.20, 1.20] rad/s`。
-- [ ] Gate clamp 不宽于 controller limit。
-- [ ] controller `cmd_vel_timeout` 仍为 `0.35 s`，且 acceleration/deceleration
-  limiter 未启用。
+- [x] YAML 顶层参数根精确为 `motion_gate_node`。
+- [x] endpoint/name constants 不可由 YAML 或 launch remap 改写。
+- [x] authority/freshness/output 精确为 `250/150/20 ms`。
+- [x] prepare 与 writer graph timeout 初值均为 `1000 ms`。
+- [x] Gate linear clamp 为 `[-0.20, 0.40] m/s`。
+- [x] Gate angular clamp 为 `[-1.20, 1.20] rad/s`。
+- [x] Gate clamp 不宽于 controller limit。
+- [x] controller `cmd_vel_timeout=0.35 s`，未启用 acceleration/deceleration
+  limiter。
+- [x] steady clock 驱动 lease/freshness/output；ROS time 只写最终 stamp。
+- [x] `use_sim_time` 启动必须为 true，运行时修改被拒绝；发布时若参数或
+  active ROS clock 不满足，Gate 锁存 `CONFIGURATION_INVALID`，选择 zero，
+  stamp 置零。
 
 ```text
 Resolved trusted configuration:
-TBD
+authority_lease_ms=250
+candidate_freshness_ms=150
+output_frequency_hz=50.0
+prepare_timeout_ms=1000
+writer_graph_timeout_ms=1000
+linear_x=[-0.20, 0.40]
+angular_z=[-1.20, 1.20]
+controller_cmd_vel_timeout=0.35
 
 Cross-config checker:
-TBD
+MotionGate contract passed
 ```
 
 ## CLAMP 与 invalid retirement 证据
 
-- [ ] 有限 `linear.x > 0.40` 输出 `0.40`。
-- [ ] 有限 `linear.x < -0.20` 输出 `-0.20`。
-- [ ] 有限 `angular.z > 1.20` 输出 `1.20`。
-- [ ] 有限 `angular.z < -1.20` 输出 `-1.20`。
-- [ ] NaN/Inf retire 当前 lease 并选择零。
-- [ ] `linear.y`、`linear.z`、`angular.x`、`angular.y` 任一非零 retire。
-- [ ] retirement 后同一 lease 的合法 sample/RENEW 不能恢复 motion。
+- [x] 有限 `linear.x` 正/负超限分别 clamp 为 `0.40/-0.20`。
+- [x] 有限 `angular.z` 正/负超限分别 clamp 为 `1.20/-1.20`。
+- [x] NaN、Inf 或任一 unsupported axis 非零会 retire 当前 lease 并选择
+  zero。
+- [x] retirement 后同一 lease 的合法 sample/RENEW 不能恢复 motion。
 
 ```text
-case | input | output/state | result
-TBD
+case                               | output/state
+finite supported-axis over-limit   | exact trusted clamp / ARMED
+NaN or Inf                         | zero / retired
+linear.y/z or angular.x/y non-zero | zero / retired
+sample or RENEW after retirement   | rejected / zero
 ```
 
 ## Per-lease topic、OPEN barrier 与 GID 证据
 
-- [ ] PREPARE 返回 Gate 生成且每个 lease 不同、位于
-  `/voice_nav_internal/motion_gate/candidate/lease_` 前缀下的 bounded topic。
-- [ ] PREPARE 可创建 provisional reader 发现 graph，但所有 candidate 均
-  discard。
-- [ ] OPEN 前 queued sample 不会在 OPEN 后产生 non-zero。
-- [ ] OPEN 前销毁 provisional reader/queue，再创建
-  `VOLATILE + KEEP_LAST(1)` reader。
-- [ ] OPEN 只在 Gate 本进程 graph 快照恰好发现一个 publisher endpoint
-  时成功。
-- [ ] zero/two writers 均保持 inhibited。
-- [ ] Gate-local graph endpoint GID 与 Gate-local
-  `MessageInfo.publisher_gid` 比较完整 16 bytes。
-- [ ] request 没有 caller `Publisher::get_gid()`；没有跨进程 GID 断言。
-- [ ] unbound second writer、Gate-local GID mismatch、old topic 与
-  post-INHIBIT sample 被拒绝。
-- [ ] old writer 未从 graph 消失时不能打开下一 lease。
-- [ ] locked `rmw_fastrtps_cpp` 自检证明 Gate-local graph endpoint GID 与
-  Gate-local `MessageInfo` GID 可关联；不能关联时 fail closed。
+- [x] PREPARE 返回 Gate-generated unique lease/topic：
+  `/voice_nav_internal/motion_gate/candidate/lease_<32-lowercase-hex>`。
+- [x] PREPARE admission 先确认 retired writer 已退出，再创建 discard-only
+  reader A。
+- [x] OPEN 在访问 graph 前完成纯 Core 校验；拒绝路径不改 reader。
+- [x] snapshot #1 后销毁 A；discard-only reader B 的 snapshot #2 必须保持
+  同一完整 GID。
+- [x] Core 以 zero 进入 ARMED 后销毁 B；accepting reader C 的 snapshot #3
+  仍须保持同一 GID 和 healthy controller。
+- [x] zero/two/changing writers 均 fail closed。
+- [x] Gate-local graph GID 与 Gate-local `MessageInfo.publisher_gid` 比较完整
+  16 bytes。
+- [x] pre-OPEN、old-topic、post-INHIBIT、unbound-second-writer 与 mismatched
+  GID sample 均不能产生 non-zero。
+- [x] canonical launch 和 Gate 都锁定 `rmw_fastrtps_cpp`；不能证明 GID 关联
+  时拒绝启动或 fail closed。
 
 ```text
-lease | candidate topic | bound 16-byte GID | graph owner | result
-TBD
+Successful product observation:
+gate_instance = b81a3caca08247de959ba5ca78f25e5d
+lease         = b81a3caca08247de959ba5ca78f25e5c
+topic         = /voice_nav_internal/motion_gate/candidate/
+                lease_b81a3caca08247de959ba5ca78f25e5c
+writer_gid    = 010f0c2655f4d6fa0000000000001a03
+result        = one unique bound writer; OPEN applied
 
-OPEN reader-queue fault injection:
-TBD
-
-Old writer/topic fault injection:
-TBD
+Fault injection:
+queued pre-OPEN data, snapshot writer replacement, zero/two writers,
+old topic, post-INHIBIT data and mismatched MessageInfo GID all remain zero.
 ```
 
 GID 是一次运行内、同一 Gate context 的 endpoint identity，不是稳定配置值，
@@ -191,115 +217,191 @@ GID 是一次运行内、同一 Gate context 的 endpoint identity，不是稳�
 
 ## Publication serial barrier 证据
 
-- [ ] service、candidate 与 timer callback 不直接 publish。
-- [ ] Core decision 与 final/state publication 通过一个 serial path。
-- [ ] INHIBIT/expiry/invalid 的 zero 在 acknowledgement 前 publish。
-- [ ] barrier 后没有更早的 queued non-zero 再次发布。
-- [ ] inhibited 时每 20 ms 持续发布零。
+- [x] service、candidate 与 timer callback 不直接向最终 endpoint publish。
+- [x] Core decision、final/state publication 通过单线程 executor、
+  mutually-exclusive callback group 与一个统一 serial path。
+- [x] INHIBIT/expiry/invalid 的 zero 在 acknowledgement 前 publish。
+- [x] barrier 后没有更早 queued non-zero 再次发布。
+- [x] inhibited 时每 20 ms 持续发布 zero。
 
 ```text
 Injected ordering:
-TBD
+moving command -> current INHIBIT/expiry/invalid -> queued old candidate
 
-Observed publication sequence:
-TBD
+Observed invariant:
+first safety decision selects and publishes zero; acknowledgement follows;
+old queued callback cannot publish non-zero through the serial barrier.
 ```
 
 ## Product bringup 与最终 owner 证据
 
-- [ ] canonical launch 来自 `voice_nav_bringup`。
-- [ ] lower-level simulator、controller 与 Gate 由同一 launch composition
-  管理。
-- [ ] product launch 不启动 test authority/candidate fixture。
-- [ ] product launch 不包含 direct controller command bypass 或
-  `twist_mux`。
-- [ ] product launch 不 remap Gate 的固定 control/state/candidate/final
-  endpoint。
-- [ ] Gate 默认 inhibited/zero。
-- [ ] `/diff_drive_controller/cmd_vel` 只有一个 publisher endpoint。
-- [ ] publisher GID 映射到精确 FQN `/motion_gate_node`，并在观察窗口
-  保持稳定。
-- [ ] Gate final publisher 使用 `rclcpp::SystemDefaultsQoS()`。
-- [ ] runtime checker 证明 Gate final publisher 与 controller subscriber
-  实际兼容；introspection 为 `UNKNOWN` 的 reliability/history/depth 不被
-  硬断言成固定值。
-- [ ] bridge 仍只承载 `/clock` 与 `/scan`。
+- [x] canonical launch 来自 `voice_nav_bringup/product_sim.launch.py`。
+- [x] lower-level simulator、controller 与 Gate 由同一 composition 管理。
+- [x] product launch 不启动 test authority/candidate fixture，不含
+  `twist_mux` 或 final-command bypass，不 remap Gate 固定 endpoint。
+- [x] Gate 默认 inhibited/zero。
+- [x] `/diff_drive_controller/cmd_vel` 只有一个 publisher endpoint。
+- [x] publisher FQN 为 `/motion_gate_node`，GID 在观察窗口保持稳定。
+- [x] Gate final publisher 使用 `rclcpp::SystemDefaultsQoS()`，并验证与
+  controller subscriber 的实际兼容性。
+- [x] bridge 仍只承载 `/clock` 与 `/scan`。
 
 ```text
-Canonical launch command:
-TBD
+Canonical launch:
+ros2 launch voice_nav_bringup product_sim.launch.py headless:=true
 
-Final endpoint evidence:
-topic | type | QoS | publisher GID | owner FQN | count
-TBD
-
-Initial Gate state:
-TBD
+Final endpoint:
+topic=/diff_drive_controller/cmd_vel
+type=geometry_msgs/msg/TwistStamped
+publisher_count=1
+owner=/motion_gate_node
+publisher_gid=010f0c2691f43e800000000000001503
+active_rmw=rmw_fastrtps_cpp
+initial_state=INHIBITED/zero
 ```
 
-## Headless bounded motion 证据
+## 四层本地证据
 
-- [ ] test harness 读取 Gate instance/control_seq。
-- [ ] PREPARE 取得 Gate 生成 lease/topic。
-- [ ] 单 writer OPEN 成功，并由 Gate 记录本地观察到的 bound GID。
-- [ ] RENEW 与 fresh candidate 产生受限 forward motion。
-- [ ] `INHIBIT` acknowledgement 只在 Gate zero publication 后返回。
-- [ ] controller limited output 随后归零。
-- [ ] `/odom` 进入 stationarity tolerance 并保持至少 `200 ms`。
-- [ ] Gate zero、controller zero 与 physical stationarity 分别计时。
+### Static prerequisite
 
 ```text
-Bounded command:
-TBD
+Commands:
+python3 scripts/check_motion_gate_contract.py --root .
+python3 -m unittest discover -s tests -p "test_motion_gate_contract.py" -v
 
-Odometry before/after:
-TBD
+Environment:
+WSL2 Ubuntu 24.04; repository source only
 
-Gate zero time:
-TBD
+Exit status:
+0
 
-Controller zero time:
-TBD
+Count/skips/elapsed:
+contract checker passed; 33 unittest cases, 0 skipped, 8.382 s
 
-Physical stationarity window:
-TBD
+Decisive assertion:
+private bounded IDL, internal STATIC/non-installed Core, exact endpoints,
+trusted config, three-snapshot source binding, FastDDS lock and sole final
+publisher all satisfy the repository contract.
 ```
 
-## Authority 与 freshness expiry 证据
-
-- [ ] candidate 持续发布时停止 RENEW，Gate 仍 retire。
-- [ ] last accepted renewal 到 first Gate zero 不超过 `300 ms` steady time。
-- [ ] RENEW 持续时停止 candidate，Gate 仍 retire。
-- [ ] last accepted candidate 到 first Gate zero 不超过 `200 ms` steady
-  time。
-- [ ] 两项测试使用不同的新 lease，未复用已 retired lease。
+### Layer 1 — Core
 
 ```text
-Authority-expiry run:
-last accepted renewal:
-first Gate zero:
-steady delta:
-result:
-TBD
+Command:
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+ctest --test-dir build/voice_nav_mission \
+  --output-on-failure -R '^motion_gate_core_test$'
 
-Candidate-expiry run:
-last accepted candidate:
-first Gate zero:
-steady delta:
-result:
-TBD
+Environment:
+ROS 2 Jazzy; pure manual-steady-clock GTest; no ROS graph or Gazebo
+
+Exit status:
+0
+
+Count/skips/elapsed:
+1 CTest target; 41 inner GTest cases; 0 skipped; 0.24 s CTest wall time
+
+Decisive assertion:
+exact 249/250 ms and 149/150 ms boundaries, global CAS, restart,
+idempotence/collision, exact-32 identities, clamp/retirement and permanent
+selected-zero behavior all pass.
 ```
 
-这些证据只证明正常运行 Gate 的独立 deadline，不写成 Runtime/candidate
-process crash。
+### Layer 2 — Node without Gazebo
+
+```text
+Command:
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+ctest --test-dir build/voice_nav_mission \
+  --output-on-failure -R '^test_test_motion_gate_node.py$'
+
+Environment:
+rmw_fastrtps_cpp; ROS_DOMAIN_ID=91;
+ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST; no Gazebo; no /clock
+
+Exit status:
+0
+
+Count/skips/elapsed:
+1 CTest target; 2 inner launch testcases; 0 skipped; 7.46 s CTest wall time
+
+Decisive assertion:
+private service/state, frozen ROS time with steady deadlines, A/B/C readers,
+three same-GID snapshots, use_sim_time mutation rejection, stale requests,
+zero-before-ack and clean node shutdown all pass.
+```
+
+### Layer 3 — headless product
+
+```text
+Command:
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+ctest --test-dir build/voice_nav_bringup \
+  --output-on-failure -R '^test_test_motion_gate_product.py$'
+
+Environment:
+rmw_fastrtps_cpp; ROS_DOMAIN_ID=92;
+ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;
+GZ_PARTITION=voice_nav_l0009_product_test; headless Gazebo Harmonic
+
+Exit status:
+0
+
+Count/skips/elapsed:
+1 CTest target; 2 inner launch testcases; 0 skipped; 18.09 s CTest wall time
+
+Decisive metrics:
+bounded distance=0.097500 m
+Gate/controller clamp=(0.400 m/s, 1.200 rad/s)
+authority-expiry conservative measurement-start->Gate-zero upper bound
+  =254.560 ms; controller after Gate=7.338 ms;
+  stationarity after Gate=97.453 ms; hold=200.248 ms
+candidate-expiry conservative measurement-start->Gate-zero upper bound
+  =162.782 ms; controller after Gate=7.808 ms;
+  stationarity after Gate=98.059 ms; hold=200.073 ms
+INHIBIT acknowledgement=10.185 ms; Gate zero=0.920 ms;
+  controller zero=9.048 ms; stationarity after Gate=118.259 ms;
+  hold=219.798 ms
+final owner/GID remained stable and all launch-managed processes exited cleanly
+```
+
+这里的两个 expiry `gate_zero_ms` 从测试测量窗口开始前计时，是保守上界，
+不是精确的“last accepted event → first zero”采样。它们分别满足本课
+`<=300 ms` 与 `<=200 ms` 的门限。
+
+### Clean-prefix install boundary
+
+```text
+Command:
+bash scripts/check_clean_motion_gate_install.sh
+
+Environment:
+fresh /tmp build/install/log bases; source /opt/ros/jazzy/setup.bash
+
+Exit status:
+0
+
+Count/skips/elapsed:
+1 package built; 1 Core CTest target passed; 0 skipped
+
+Decisive marker:
+Clean MotionGate install audit passed: Core private, node installed.
+
+Install result:
+motion_gate_core header/library/CMake export absent;
+lib/voice_nav_mission/motion_gate_node present.
+```
 
 ## Lesson 0010 deferred crash-stop audit
 
-- [ ] 本记录没有声称 authority process kill 已完成。
-- [ ] 本记录没有声称 candidate process kill 已完成。
-- [ ] 本记录没有声称 MotionGate kill/0.35 s consumer timeout 已完成。
-- [ ] 本记录没有声称 managed pause/token/first-resume zero 已完成。
-- [ ] 本记录没有声称 unmanaged pause 原地恢复安全。
+- [x] 本记录没有声称 authority process kill 已完成。
+- [x] 本记录没有声称 candidate process kill 已完成。
+- [x] 本记录没有声称 MotionGate kill/0.35 s consumer timeout 已完成。
+- [x] 本记录没有声称 managed pause/token/first-resume zero 已完成。
+- [x] 本记录没有声称 unmanaged pause 原地恢复安全。
 
 ```text
 Deferred Work Item:
@@ -308,52 +410,70 @@ Lesson 0010 / VN-0011
 
 ## 本地完整门禁
 
-- [ ] `git diff --check` 通过。
-- [ ] repository tests 与新断言通过。
-- [ ] private IDL 生成通过。
-- [ ] MotionGate Core/node/config/launch contracts 通过。
-- [ ] 六个 package build 通过。
-- [ ] package tests 零 error/failure。
-- [ ] headless MotionGate integration 没有被 skip。
-- [ ] `bash scripts/verify.sh` 输出最终成功 marker。
-- [ ] guarded process-residue audit 无匹配进程。
-- [ ] 提交前逐项阅读完整 staged diff。
+- [x] `git diff --check` 与 repository static tests 通过。
+- [x] private IDL、Core/node/config/launch contracts 通过。
+- [x] 六个 package build 通过。
+- [x] package tests 零 error/failure。
+- [x] headless MotionGate integration 没有被 skip。
+- [x] clean-prefix install boundary 通过。
+- [x] `bash scripts/verify.sh` 输出最终成功 marker。
+- [x] guarded residue audit 相对 baseline 无新增匹配进程。
+- [x] 文档提交前逐项阅读完整 staged diff。
 
 ```text
 Verification date/environment:
-TBD
+2026-07-31; WSL2 Ubuntu 24.04; ROS 2 Jazzy; Gazebo Harmonic;
+rmw_fastrtps_cpp
 
 Command:
 bash scripts/verify.sh
 
 Exit status:
-TBD
+0
 
-Repository test summary:
-TBD
+Repository static:
+121 tests passed
 
 Build summary:
-TBD
+6 packages finished [27.6 s]
 
 ROS/package test summary:
-TBD
+6 packages finished [3 min 8 s]
+210 tests, 0 errors, 0 failures, 12 skipped
 
-Headless metrics:
-TBD
+Clean install:
+1 package built; Core test passed; private Core absent; node present
 
 Final marker:
-TBD
+VoiceNav Robot verification passed.
 
-Process residue audit:
-TBD
+Process baseline before full verification:
+3631225 gz sim server
+3631226 gz sim gui
+
+Process audit after full verification:
+3631225 gz sim server
+3631226 gz sim gui
+
+Delta:
+no new matching process; user-owned PIDs were not signaled or modified
 ```
+
+第一次全量运行的产品行为断言和指标全部通过，但一个 launch-managed Gazebo
+进程在 teardown 的 SIGINT/SIGTERM 后没有按期退出，严格 exit-code 断言将其
+SIGKILL 并令该次门禁失败。诊断没有发现 OOM、segfault 或残留；随后同一产品
+测试连续 `--repeat until-fail:10` 全部通过，两个 `voice_nav_sim` Gazebo 测试
+后紧接产品测试也通过，第二次完整门禁通过。没有放宽 exit-code 或清理断言；
+该低频 WSL/Gazebo teardown flake 被保留为透明证据。
 
 ## 评审与远端证据
 
 - [x] Work Item 已关联 GitHub Issue。
+- [x] 三次独立只读审查完成；P0/P1 均为零。
+- [x] P2 clean-install 残留问题已以 fresh-prefix audit、规范 overlay 重建和
+  regression contract 关闭。
 - [ ] PR diff 只包含 VN-0010 范围。
 - [ ] required hosted CI 在 exact head 通过。
-- [ ] independent review 完成且发现项均有 tests-first 修复证据。
 - [ ] review conversations 全部解决。
 - [ ] PR 以 rebase 方式合并。
 - [ ] record 写入 local-to-public identity map。
@@ -364,23 +484,25 @@ TBD
 Issue:
 https://github.com/Edddddddddy/voice_nav_robot_ws/issues/11
 
+Independent review:
+code review: P0=0, P1=0; stale incremental install P2 closed by clean audit
+safety review: P0=0, P1=0, P2=0; one fail-closed availability-only P3 noted
+evidence review: P0=0, P1=0, P2=0; final re-review passed; local closure YES
+
 PR:
-TBD
+Pending
 
 Required exact-head CI:
-TBD
-
-Independent review:
-TBD
+Pending
 
 Merge method/time:
-TBD
+Pending
 
 Public identity map:
-TBD
+Pending
 
 Solution tag object and peeled target:
-TBD
+Pending
 ```
 
 ## 复盘
