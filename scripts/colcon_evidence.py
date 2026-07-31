@@ -35,6 +35,17 @@ class ResultFileIdentity:
     changed_ns: int
 
 
+@dataclass(frozen=True)
+class ResultDirectoryIdentity:
+    """Directory membership identity for a closed result snapshot."""
+
+    relative_path: Path
+    device: int
+    inode: int
+    modified_ns: int
+    changed_ns: int
+
+
 def validate_package_names(package_names: list[str]) -> tuple[str, ...]:
     if not package_names:
         raise ValueError("at least one --package is required")
@@ -278,9 +289,12 @@ class ResultDeletionPlan:
         return relative_path
 
     def _open_parent(self, relative_path: Path) -> int:
+        return self._open_relative_directory(relative_path.parent)
+
+    def _open_relative_directory(self, relative_directory: Path) -> int:
         current_fd = os.dup(self._package_fd)
         try:
-            for part in relative_path.parent.parts:
+            for part in relative_directory.parts:
                 next_fd = os.open(
                     part,
                     DIRECTORY_OPEN_FLAGS,
@@ -293,7 +307,7 @@ class ResultDeletionPlan:
             os.close(current_fd)
             raise ValueError(
                 "result path changed after evidence collection: "
-                f"{self.package_directory / relative_path}"
+                f"{self.package_directory / relative_directory}"
             ) from error
 
     def _stat_result(self, relative_path: Path) -> os.stat_result:
@@ -398,7 +412,10 @@ class ResultSnapshotPlan(ResultDeletionPlan):
     def __init__(self, package_directory: Path) -> None:
         super().__init__(package_directory, ())
         try:
-            self._snapshot_inputs = self._discover_snapshot_inputs()
+            (
+                self._snapshot_inputs,
+                self._snapshot_directories,
+            ) = self._discover_snapshot_inputs()
         except Exception:
             self.close()
             raise
@@ -440,9 +457,15 @@ class ResultSnapshotPlan(ResultDeletionPlan):
             )
         )
 
-    def _discover_snapshot_inputs(self) -> tuple[ResultFileIdentity, ...]:
+    def _discover_snapshot_inputs(
+        self,
+    ) -> tuple[
+        tuple[ResultFileIdentity, ...],
+        tuple[ResultDirectoryIdentity, ...],
+    ]:
         self._assert_anchor_attached()
         identities = []
+        directory_identities = []
         try:
             walker = os.fwalk(
                 ".",
@@ -453,6 +476,16 @@ class ResultSnapshotPlan(ResultDeletionPlan):
             for directory, directory_names, file_names, directory_fd in walker:
                 relative_directory = (
                     Path() if directory == "." else Path(directory)
+                )
+                directory_status = os.fstat(directory_fd)
+                directory_identities.append(
+                    ResultDirectoryIdentity(
+                        relative_path=relative_directory,
+                        device=directory_status.st_dev,
+                        inode=directory_status.st_ino,
+                        modified_ns=directory_status.st_mtime_ns,
+                        changed_ns=directory_status.st_ctime_ns,
+                    )
                 )
 
                 traversable_directories = []
@@ -524,11 +557,41 @@ class ResultSnapshotPlan(ResultDeletionPlan):
             ) from error
 
         self._assert_anchor_attached()
-        return tuple(identities)
+        return tuple(identities), tuple(directory_identities)
+
+    def _validate_snapshot_directories(self) -> None:
+        for identity in self._snapshot_directories:
+            directory_fd = self._open_relative_directory(
+                identity.relative_path
+            )
+            try:
+                directory_status = os.fstat(directory_fd)
+            finally:
+                os.close(directory_fd)
+            if (
+                not stat.S_ISDIR(directory_status.st_mode)
+                or (
+                    directory_status.st_dev,
+                    directory_status.st_ino,
+                    directory_status.st_mtime_ns,
+                    directory_status.st_ctime_ns,
+                )
+                != (
+                    identity.device,
+                    identity.inode,
+                    identity.modified_ns,
+                    identity.changed_ns,
+                )
+            ):
+                raise ValueError(
+                    "result directory changed after evidence discovery: "
+                    f"{self.package_directory / identity.relative_path}"
+                )
 
     def stage(self, sandbox_package: Path) -> dict[Path, Path]:
         """Copy the discovered manifest through anchored no-follow FDs."""
 
+        self._validate_snapshot_directories()
         source_by_relative_path: dict[Path, Path] = {}
         for identity in self._snapshot_inputs:
             self._assert_anchor_attached()
@@ -588,6 +651,7 @@ class ResultSnapshotPlan(ResultDeletionPlan):
                     os.close(source_fd)
                 os.close(parent_fd)
 
+        self._validate_snapshot_directories()
         self._assert_anchor_attached()
         for tag_file in sorted(sandbox_package.glob("**/Testing/TAG")):
             ctest_result_path(tag_file, sandbox_package)
