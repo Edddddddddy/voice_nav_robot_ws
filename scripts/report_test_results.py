@@ -40,6 +40,8 @@ class ParsedSandbox:
     files: tuple[str, ...]
     ctest_results: tuple[Result, ...]
     ctest_files: tuple[str, ...]
+    xunit_results: tuple[Result, ...]
+    xunit_files: tuple[str, ...]
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -105,6 +107,8 @@ def _parse_sandbox(
     all_files: set[str] = set()
     ctest_results: set[Result] = set()
     ctest_files: set[str] = set()
+    xunit_results: set[Result] = set()
+    xunit_files: set[str] = set()
 
     for extension_name, extension in get_test_result_extensions().items():
         extension_files: set[str] = set()
@@ -130,12 +134,17 @@ def _parse_sandbox(
         if extension_name == "ctest":
             ctest_results = extension_results
             ctest_files = extension_files
+        elif extension_name == "xunit":
+            xunit_results = extension_results
+            xunit_files = extension_files
 
     return ParsedSandbox(
         results=tuple(all_results),
         files=tuple(all_files),
         ctest_results=tuple(ctest_results),
         ctest_files=tuple(ctest_files),
+        xunit_results=tuple(xunit_results),
+        xunit_files=tuple(xunit_files),
     )
 
 
@@ -154,6 +163,29 @@ def _require_complete_ctest_evidence(
         ):
             raise ValueError(
                 f"CTest TAG did not produce a result: {tag_file}"
+            )
+
+
+def _require_complete_xunit_evidence(
+    sandbox_package: Path,
+    parsed: ParsedSandbox,
+) -> None:
+    xunit_files = {Path(path) for path in parsed.xunit_files}
+    xunit_result_paths = {Path(result.path) for result in parsed.xunit_results}
+    for xml_file in sorted(sandbox_package.rglob("*.xml")):
+        relative_path = xml_file.relative_to(sandbox_package)
+        mandatory = (
+            "test_results" in relative_path.parts
+            or relative_path.parts == ("pytest.xml",)
+            or xml_file.name.endswith(".xunit.xml")
+            or xml_file.name.endswith(".gtest.xml")
+        )
+        if not mandatory:
+            continue
+        if xml_file not in xunit_files or xml_file not in xunit_result_paths:
+            raise ValueError(
+                "mandatory xUnit result was not consumed: "
+                f"{xml_file}"
             )
 
 
@@ -179,6 +211,7 @@ def collect_package_evidence(
             collect_details=collect_details,
         )
         _require_complete_ctest_evidence(sandbox_package, parsed)
+        _require_complete_xunit_evidence(sandbox_package, parsed)
         package_results = set(parsed.results)
         if require_results and not package_results:
             raise ValueError(
