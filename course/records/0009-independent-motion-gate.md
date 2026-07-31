@@ -25,7 +25,8 @@ merge 与 solution tag 尚未发生，因此仍保持 Pending。
   `4e1318b1f4ba5e3a0e176bc051ce3890eb55035e`
 - GREEN implementation commit：
   `8e80dcc`
-- Documentation/evidence commit：Pending
+- Documentation/evidence commit：
+  `3cdd815433c15ff91043827c568c185bc39fff51`
 - GitHub PR：Pending
 - Required exact-head CI：Pending
 - Public merge identity：Pending
