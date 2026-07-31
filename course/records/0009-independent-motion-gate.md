@@ -1,10 +1,14 @@
 # Lesson 0009 学习记录：独立 MotionGate
 
-状态：Local GREEN / local evidence closed（教师参考实现）
+状态：Historical full gate GREEN / current-head focused checks GREEN /
+exact-head full gate and final review pending
+（教师参考实现）
 
 学习者复现状态：Pending
 
-本记录只填写已经发生且可查询的事实。本地实现和门禁已完成；PR、hosted CI、
+本记录只填写已经发生且可查询的事实。PR 和 pre-remediation head 的 hosted CI
+已经发生；`8e022580` 的完整本地门禁已经通过，当前 `517339a` 的 focused checks
+已经通过。当前 head 的完整门禁、final reviewed head 的 exact-head hosted CI、
 merge 与 solution tag 尚未发生，因此仍保持 Pending。
 
 ## 变更身份
@@ -27,9 +31,35 @@ merge 与 solution tag 尚未发生，因此仍保持 Pending。
   `8e80dcc`
 - Documentation/evidence commit：
   `3cdd815433c15ff91043827c568c185bc39fff51`
+- Baseline PR-ready head：
+  `c8b9eefed5729a9a2ab2a60a9d8302e697beeb70`
+- CI-readiness tests-first commits：
+  `b82cb736d358f1ce6374373efabc692a3426bd83`、
+  `3ce547f90b6bed000512cda81c99db3233d145f1`、
+  `e86a07ddae17f65c0cd040fbdda3e05420346bbc`
+- CI-readiness implementation commit：
+  `e984433c80d9f9a2afa81011c8d606ccf8a3c79e`
+- Harness-teardown contract commit：
+  `bf1f6ac9650222cecbdbd2e5777caf9f00748cca`
+- Cross-package/review RED commit：
+  `a5fb71e92560a0d9e7f5f5bd5ceb3794a8b1e5fd`
+- Reviewed readiness-convergence code head：
+  `d5392d30efcc975cd280f8af6e1d7a433184d0ff`
+- Scoped-result tests-first/implementation commits：
+  `caf5cd923cdd27f06e7ac7b7f8c1fbdfe25495f0`、
+  `c5d88c24b8e2361bf1403e314fb04e7fd604629f`
+- Build-boundary tests-first/implementation commits：
+  `9d968ae236325a19deb0236749ea715f4c05c42f`、
+  `8e022580a7add59a9c5d5a95973182322a0641c0`
+- Clean-count verification code head：
+  `8e022580a7add59a9c5d5a95973182322a0641c0`
+- Scoped-evidence hardening head under review：
+  `517339a3d313910a937fef973a9bdd635b457fc8`
 - GitHub PR：
   [#12](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/12)（Ready）
-- Required exact-head CI：Pending
+- Remote PR head（remediation push 前）：
+  `c8b9eefed5729a9a2ab2a60a9d8302e697beeb70`
+- Required exact-head CI on final reviewed head：Pending
 - Public merge identity：Pending
 - Solution tag object/peeled target：Pending
 
@@ -468,12 +498,217 @@ SIGKILL 并令该次门禁失败。诊断没有发现 OOM、segfault 或残留�
 后紧接产品测试也通过，第二次完整门禁通过。没有放宽 exit-code 或清理断言；
 该低频 WSL/Gazebo teardown flake 被保留为透明证据。
 
+## CI readiness remediation 证据
+
+### Hosted pre-remediation history
+
+- [x] attempt 1 与 attempt 2 的 SHA 相同。
+- [x] attempt 2 只是 rerun，没有代码修改。
+- [x] 记录把 rerun GREEN 解释为 flake evidence，而不是 remediation evidence。
+
+```text
+Run:
+https://github.com/Edddddddddy/voice_nav_robot_ws/actions/runs/30625857309
+
+Head SHA:
+c8b9eefed5729a9a2ab2a60a9d8302e697beeb70
+
+Attempt 1:
+2026-07-31T11:06:25Z; conclusion=failure
+simulation: /controller_manager/list_controllers response timeout
+product: candidate topic has no writer
+aggregate: 136 tests, 0 errors, 4 failed records, 8 skipped
+(4 records represented 2 failing launch cases)
+
+Attempt 2:
+2026-07-31T11:17:16Z; conclusion=success
+same workflow + same SHA + no code change
+aggregate: 136 tests, 0 errors, 0 failures, 8 skipped
+
+Interpretation:
+same-head rerun demonstrated readiness flakiness only
+```
+
+### Tests-first、修复与复审
+
+- [x] 初始 readiness contract RED：7 failed、1 passed。
+- [x] deep convergence helper 在实现前产生 6 errors。
+- [x] simulation runtime isolation contract 在实现前失败。
+- [x] 只重试精确的
+  `REJECTED/WRITER_UNAVAILABLE/candidate topic has no writer`。
+- [x] PREPARE 之前启动 1 秒 absolute steady deadline；重试期间 Gate 始终
+  inhibited，request ID 每次更新。
+- [x] `/controller_manager/list_controllers` response 单独使用 15 秒预算；
+  通用 service 等待仍为 5 秒。
+- [x] 第一次实现后的全量运行保留为失败证据：内部 6/6 在 0.33 秒通过，
+  但外层 CTest teardown wrapper 在 5.01 秒 timeout；raw workspace
+  aggregate 为 221 result records、0 errors、1 failure、12 skipped。后续
+  审查证明其中混入 74 条 stale records，因此不把 221 当作本轮干净计数。
+- [x] wrapper 预算改为 30 秒后 focused convergence 7/7 通过；未修改产品
+  authority/candidate/controller deadline。
+- [x] 复审先以测试暴露 mission/sim ROS domain 都为 91，以及固定 12 次尝试
+  可能先于 absolute deadline 终止；随后分别改为 91/92/93，并删除正常路径
+  的 attempt cap。
+- [x] `d5392d30` readiness-convergence code head 的独立 code review 与
+  safety review 均无剩余 finding。
+- [x] evidence review 发现 `build/voice_nav_mission.stale-l0009` 使
+  `d5392d30` 的 raw `222/0/0/12` 多计 74 records/4 skips；当时真实六包
+  结果是 `148/0/0/8`。
+- [x] 新契约先证明 scoped reporter、empty-result、path traversal、symlink、
+  stale/renamed build directory、空 allowlist、排序诊断和三阶段边界均会失败。
+- [x] 修复后 verify 从 `src` 获取完整包集合，并在 build 前、build 后且
+  clear/test 前、test 后且最终 report 前共三次 fail closed；只清除和聚合
+  本次精确包集合，不自动删除污染目录。
+
+```text
+Commit responsibility:
+b82cb736  initial readiness RED and pure convergence fixture
+3ce547f9  package-owned convergence policy tests
+e86a07dd  isolated simulation runtime RED
+e984433c  bounded fail-closed readiness implementation
+bf1f6ac9  CTest teardown wrapper budget and regression guard
+a5fb71e9  cross-package domain/deadline review RED
+d5392d30  domain isolation and absolute-deadline correction
+caf5cd92  scoped result aggregation RED
+c5d88c24  exact-package clear/report implementation
+9d968ae2  fail-closed build-boundary RED
+8e022580  build-boundary and path-safety implementation
+
+Production timing/configuration unchanged:
+publish_rate_hz=50; authority_timeout_ms=250; candidate_timeout_ms=150;
+prepare_timeout_ms=1000; diff_drive_controller cmd_vel_timeout=0.35 s
+```
+
+### `8e022580..517339a` scoped-evidence hardening
+
+除 `f50aa3a` 只补充已实现边界的威胁模型外，每一项行为变化均先有失败契约，
+再有最小实现：
+
+```text
+72abf22 / 27ff84a  path-escape rejection and private evidence sandbox
+74a05b8 / 4958b7c run repository contracts only after ROS is available
+ec13bb3 / 527a0b5 third build-boundary check after package tests
+a1bd5b5 / bf0c1fe preserve colcon package-discovery failure
+10ede88 + 5a16670 / 516c846 accept only colcon-compatible package names
+afce577 / 19de986 source ROS setup with nounset disabled locally
+f8c5a88 / 73fd263 reject missing CTest TAG/XML evidence
+9abd0c7 / 4bbd92d reject malformed or unconsumed CTest evidence
+108ddfa / ff44a87 anchor scoped result deletion to directory descriptors
+34d9005 / 953a14a anchor result snapshots to opened source descriptors
+761730a / c2954ca make snapshot descriptor ownership leak-free
+5286b36 / b1bd863 close the complete directory manifest during staging
+0b385e1 / fe7b844 carry package/file identities from parse into clear
+4f1cab0 / cc908fb require every mandatory xUnit file to be consumed
+f50aa3a             document the quiescent-build-tree threat model
+7c2f9f3 / 93d968e  reject hidden symlink evidence with an explicit allowlist
+e4c10c0 / 061d88c  bind allowed ament paths to exact targets and manifests
+3dc4fa3 / 0b77d4a  reject symlinked source roots and normalize XML errors
+6e04af2 / 517339a  resolve pivoted targets with strict kernel semantics
+```
+
+Current-head focused evidence recorded before the exact-head full gate:
+
+```text
+Head:
+517339a3d313910a937fef973a9bdd635b457fc8
+
+tests.test_scoped_test_results: 41 passed
+repository static suite: 168 passed
+read-only scoped package report: 148 tests, 0 errors, 0 failures, 8 skipped
+Python compile check: passed
+git diff --check: passed
+scripts/verify.sh on this head: Pending
+```
+
+Evidence mutation threat model：
+
+- 选定的 build tree 与锁定 source-package layout 在 clear/report 期间必须保持静止。
+- 锚定目录 descriptor 将普通路径替换限制在已选 package 内，并检测常规并发变化；
+  symlink 和 path traversal 逃逸继续被拒绝。
+- `src` 与 `src/<package>` 必须是直接、非 symlink 目录。目录 symlink 默认
+  fail closed；只放行锁定 ament 布局中两个明确的 path/expected-target 对。
+  ament_python 源 manifest 还必须具有 `package` 根节点和匹配的 package name；
+  根 `package.xml` 是唯一允许跳过的 XML symlink。
+- 允许目标使用 `resolve(strict=True)` 的真实解析结果比较，避免中间 symlink 与
+  `..` 的内核语义被词法 `abspath` 错误折叠。
+- 工具不宣称抵御恶意同 UID 进程在最终 identity check 与按名称 unlink 之间的竞态，
+  也不宣称识别 hardlink 或 bind mount 对 lexical ownership 的伪造。
+- 这是显式接受的企业 CI 剩余风险，不应把该工具表述为对抗性文件系统安全边界。
+
+### Scoped clean-count canonical verification
+
+```text
+Verified code head:
+8e022580a7add59a9c5d5a95973182322a0641c0
+
+Command:
+bash scripts/verify.sh
+
+Exit status:
+0
+
+Repository static:
+140 tests passed
+
+Build summary:
+6 packages finished [32.8 s]
+
+ROS/package test summary:
+6 packages finished [3 min 39 s]
+148 scoped result records, 0 errors, 0 failures, 8 skipped
+
+Clean install:
+1 package built; Core CTest passed
+Clean MotionGate install audit passed: Core private, node installed.
+
+Final marker:
+VoiceNav Robot verification passed.
+
+Selected product metrics (milliseconds unless stated):
+bounded motion distance=0.097500 m; clamp linear=0.400, angular=1.200
+authority expiry: Gate zero=259.730; controller after=3.830;
+  stationary=104.071; hold=219.930
+candidate expiry: Gate zero=163.004; controller after=5.814;
+  stationary=95.828; hold=200.005
+INHIBIT: ack=10.199; Gate zero=1.152; controller zero=3.896;
+  stationary=112.921; hold=219.899
+final command owner remained stable
+```
+
+Evidence contamination handling:
+
+```text
+Detected stale directory:
+build/voice_nav_mission.stale-l0009
+
+Raw d5392d30 aggregate:
+222 records, 0 errors, 0 failures, 12 skipped
+
+Decomposition:
+148 current-package records / 8 skipped
++ 74 stale records / 4 skipped
+
+Action:
+directory was not deleted; after absolute-path validation it was moved to
+C:\Users\lcy\AppData\Local\Temp\voice_nav_mission.stale-l0009-20260731
+
+Regression behavior:
+verify rejects any unexpected top-level build directory or direct symlink;
+the scoped reporter rejects missing results and cannot traverse package paths
+```
+
 ## 评审与远端证据
 
 - [x] Work Item 已关联 GitHub Issue。
-- [x] 三次独立只读审查完成；P0/P1 均为零。
+- [x] baseline 三次独立只读审查完成；P0/P1 均为零。
 - [x] P2 clean-install 残留问题已以 fresh-prefix audit、规范 overlay 重建和
   regression contract 关闭。
+- [x] readiness-convergence code head 的 code/safety re-review 完成且无
+  finding。
+- [x] evidence-review P2 已由 scoped reporting、三阶段 build-boundary guard 与
+  干净 148-result 全量门禁关闭。
+- [x] scoped-evidence implementation head `517339a` 的 code/safety re-review 完成。
+- [ ] final documentation head 的 evidence re-review 完成。
 - [x] PR diff 只包含 VN-0010 范围。
 - [ ] required hosted CI 在 exact head 通过。
 - [ ] review conversations 全部解决。
@@ -487,17 +722,34 @@ Issue:
 https://github.com/Edddddddddy/voice_nav_robot_ws/issues/11
 
 Independent review:
-code review: P0=0, P1=0; stale incremental install P2 closed by clean audit
-safety review: P0=0, P1=0, P2=0; one fail-closed availability-only P3 noted
-evidence review: P0=0, P1=0, P2=0; final re-review passed; local closure YES
+baseline code review: P0=0, P1=0; stale incremental install P2 closed
+baseline safety review: P0=0, P1=0, P2=0; availability-only P3 recorded
+baseline evidence review: P0=0, P1=0, P2=0; local closure YES
+remediation code review on d5392d30: no findings; prior domain-collision P2
+  and early-attempt-cap P3 closed
+remediation safety review on d5392d30: P0=0, P1=0, P2=0, P3=0
+evidence review: P2 stale result aggregation found; historical full-gate
+  evidence on 8e022580 closes the original contamination finding
+scoped-evidence code review on 517339a: no P0-P3 findings
+scoped-evidence safety review on 517339a: no P0-P3 findings
+remediation evidence review on final documentation head: Pending
 
 PR:
 https://github.com/Edddddddddy/voice_nav_robot_ws/pull/12
 state=OPEN; draft=false; base=main; head=feat/vn-0010-l0009-motion-gate
 creation head=fcf9af874df93438519e3d7472e5b3237fdd21f0
+remote head before remediation push=c8b9eefed5729a9a2ab2a60a9d8302e697beeb70
+local readiness-reviewed head=d5392d30efcc975cd280f8af6e1d7a433184d0ff
+local clean-count verified head=8e022580a7add59a9c5d5a95973182322a0641c0
+local scoped-evidence hardening head=517339a3d313910a937fef973a9bdd635b457fc8
+remediation pushed=false
+
+Hosted CI history on pre-remediation head:
+run 30625857309 attempt 1: failure, head=c8b9eefed5729a9a2ab2a60a9d8302e697beeb70
+run 30625857309 attempt 2: success rerun, same head, no code change
 
 Required exact-head CI:
-Pending
+Pending on the final documentation/review head
 
 Merge method/time:
 Pending

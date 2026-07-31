@@ -7,9 +7,12 @@
 
 **Branch:** `feat/vn-0010-l0009-motion-gate`
 
-**Implementation state:** local GREEN with local evidence closure. The full
-local gate, clean-prefix install audit, and independent evidence review pass.
-PR #12 is ready for review; required hosted CI, rebase merge, and
+**Implementation state:** the product baseline and historical clean-count head
+`8e022580` passed the full local gate and clean-prefix install audit. The
+current scoped-evidence hardening head `517339a` has passed focused checks;
+its exact-head full gate and final remediation review are pending.
+PR #12 exists, but its visible hosted result is still for the pre-remediation
+head. Required hosted CI on the final reviewed head, rebase merge, and
 `course/0009-solution` do not yet exist.
 
 ## Goal
@@ -339,6 +342,129 @@ Gate-death evidence.
 - [ ] A reviewed PR passes required hosted CI and is rebase-merged before
   annotated `course/0009-solution` is created.
 
+## CI-readiness remediation
+
+The first hosted run exposed two eventually-consistent readiness assumptions
+in the test harnesses; it did not expose a product MotionGate safety failure.
+The history is intentionally preserved rather than replacing the failed run
+with its rerun:
+
+- CI run
+  [30625857309, attempt 1](https://github.com/Edddddddddy/voice_nav_robot_ws/actions/runs/30625857309/attempts/1)
+  tested pre-remediation head
+  `c8b9eefed5729a9a2ab2a60a9d8302e697beeb70` and failed. The simulation
+  harness timed out waiting for the `/controller_manager/list_controllers`
+  response, and the product harness observed `candidate topic has no writer`.
+  The aggregate was 136 tests, 0 errors, 4 failed records, and 8 skipped; the
+  four records represented those two failing launch cases.
+- [Attempt 2](https://github.com/Edddddddddy/voice_nav_robot_ws/actions/runs/30625857309/attempts/2)
+  reran the same workflow and same SHA without a code change and passed with
+  136 tests, 0 errors, 0 failures, and 8 skipped. This demonstrated a flake;
+  it is not evidence that the later remediation worked.
+- `b82cb736d358f1ce6374373efabc692a3426bd83`,
+  `3ce547f90b6bed000512cda81c99db3233d145f1`, and
+  `e86a07ddae17f65c0cd040fbdda3e05420346bbc` added tests-first contracts for
+  bounded fail-closed OPEN convergence, exact retry classification, and
+  isolated simulation runtime.
+- `e984433c80d9f9a2afa81011c8d606ccf8a3c79e` implemented the harness-only
+  readiness remediation: PREPARE starts a one-second absolute steady deadline;
+  OPEN retries only the exact `REJECTED/WRITER_UNAVAILABLE/candidate topic has
+  no writer` state while every intermediate snapshot remains inhibited; the
+  simulation controller-list response gets its own 15-second budget.
+- The first full local run after that implementation proved all six pure
+  convergence cases in 0.33 seconds, but the outer five-second CTest wrapper
+  expired during Python teardown at 5.01 seconds. Its raw workspace aggregate
+  was 221 result records, 0 errors, 1 failure, and 12 skipped; later review
+  proved that aggregate also included 74 records from a stale build directory.
+  Commit
+  `bf1f6ac9650222cecbdbd2e5777caf9f00748cca` raised only that wrapper budget
+  to 30 seconds and added a regression guard; it did not widen product timing.
+- Independent review then found a cross-package ROS-domain collision and an
+  attempt-count cap that could stop before the promised absolute deadline.
+  `a5fb71e92560a0d9e7f5f5bd5ceb3794a8b1e5fd` first exposed both gaps, and
+  `d5392d30efcc975cd280f8af6e1d7a433184d0ff` assigned mission/product/sim
+  domains 91/92/93 and made the positive-sleep absolute deadline the sole
+  convergence terminator. Code and safety re-review reported no remaining
+  finding on that code head.
+- Evidence review then found that the otherwise successful `d5392d30` run's
+  raw `222/0/0/12` aggregate was not a clean six-package count: default
+  `colcon test-result` had recursively added 74 records and 4 skips from
+  `build/voice_nav_mission.stale-l0009` to the current 148/0/0/8 results.
+  The successful build, runtime assertions, product metrics, clean-install
+  audit, and final marker remained valid; the 222 count did not.
+- `caf5cd923cdd27f06e7ac7b7f8c1fbdfe25495f0` and
+  `9d968ae236325a19deb0236749ea715f4c05c42f` first specified scoped reporting
+  and fail-closed build-boundary behavior. `c5d88c24b8e2361bf1403e314fb04e7fd604629f`
+  added exact-package result clearing/reporting, and
+  `8e022580a7add59a9c5d5a95973182322a0641c0` completed the boundary: current
+  package names come from `src`, unexpected top-level build directories and
+  direct symlinks fail before build and before result collection, and no
+  generated directory is silently deleted.
+
+Review of the evidence boundary then drove a second tests-first hardening pass:
+
+- `72abf22` / `27ff84a` reject path escape and stage each selected package in
+  a private sandbox; `74a05b8` / `4958b7c` run repository contracts only
+  after ROS is available in hosted CI.
+- `ec13bb3` / `527a0b5` add the third build-boundary check after package tests;
+  the three checks are now before build, after build and before clear/test,
+  and after tests and before the final report.
+- `a1bd5b5` / `bf0c1fe` propagate `colcon list` failure;
+  `10ede88` + `5a16670` / `516c846` constrain evidence package names to the
+  colcon-compatible grammar; `afce577` / `19de986` make ROS setup nounset-safe.
+- `f8c5a88` / `73fd263` and `9abd0c7` / `4bbd92d` require every CTest TAG to
+  reference an existing local XML document that the CTest adapter consumes.
+- `108ddfa` / `ff44a87`, `34d9005` / `953a14a`, and
+  `761730a` / `c2954ca` anchor deletion and snapshot reads to opened directory
+  descriptors while preserving precise, leak-free descriptor ownership.
+- `5286b36` / `b1bd863` close the complete result-directory manifest;
+  `0b385e1` / `fe7b844` carry package/file identities from parsing into clear;
+  `4f1cab0` / `cc908fb` require every mandatory xUnit file to be consumed.
+- `f50aa3a4d78aa63fe6f0ff46133a0111aa7d804d` records the explicit mutation
+  threat model rather than claiming a stronger security boundary.
+- `7c2f9f3` first reproduces hidden failures behind a symlinked result
+  directory and an over-broad nested `package.xml` exception. `93d968e` then
+  rejects every directory symlink except the two explicit non-evidence paths
+  emitted by the locked ament layouts, and limits the XML exception to the
+  package-build-root `package.xml`.
+- `e4c10c0` / `061d88c` bind those ament paths to their exact source-module or
+  in-package rosidl target and validate the source manifest root and name.
+  `3dc4fa3` / `0b77d4a` additionally require direct, non-symlinked `src` and
+  source-package directories and normalize unknown XML encodings into the
+  reporter's controlled failure boundary.
+- `6e04af2` / `517339a` reproduce and close absolute and relative
+  `pivot-symlink/../expected` bypasses by comparing strict, actually resolved
+  targets instead of lexically normalized paths.
+
+The canonical local verification of code head
+`8e022580a7add59a9c5d5a95973182322a0641c0` passed 140 repository tests,
+built all six packages in 32.8 seconds, passed 148 scoped ROS/package results
+with 0 errors, 0 failures, and 8 skips in 3 minutes 39 seconds, passed the
+fresh-prefix Core/node install audit, and printed
+`VoiceNav Robot verification passed.` Exact-head hosted CI remains pending
+until the evidence update is committed and the resulting reviewed head is
+pushed.
+
+Focused checks on current hardening head
+`517339a3d313910a937fef973a9bdd635b457fc8` passed 41 scoped-evidence tests,
+all 168 repository-static tests,
+a read-only `148/0/0/8` scoped package report,
+Python compilation, and `git diff --check`. A full `scripts/verify.sh` run on
+that exact head has not yet occurred and must not be inferred from the
+historical `8e022580` result.
+
+The evidence tool assumes the selected build tree and locked source-package
+layout are quiescent during clear/report. `src` and `src/<package>` must be
+direct, non-symlinked directories; the two ament exceptions are exact
+path/strictly-resolved-target pairs, and the source manifest root/name must
+match. Anchored
+directory descriptors contain ordinary path replacement to the selected
+package and reject symlink/path-traversal escape, but the tool
+does not claim to defeat a hostile same-UID process racing the final identity
+check against name-based unlink, or hardlink/bind-mount provenance forgery.
+That residual risk is explicitly accepted for the controlled enterprise CI
+workspace; this is not an adversarial filesystem security boundary.
+
 ## Risks and rollback
 
 - A shallow ROS callback implementation could duplicate lease rules and make
@@ -425,7 +551,14 @@ ctest --test-dir build/voice_nav_mission \
 ctest --test-dir build/voice_nav_bringup \
   --output-on-failure -R '^test_test_motion_gate_product.py$'
 
-colcon test-result --verbose
+python3 scripts/report_test_results.py \
+  --build-base build \
+  --package voice_nav_agent \
+  --package voice_nav_audio \
+  --package voice_nav_bringup \
+  --package voice_nav_interfaces \
+  --package voice_nav_mission \
+  --package voice_nav_sim
 ```
 
 1. **Layer 1 — pure Core GTest**: manual-clock tables cover every state, CAS,
