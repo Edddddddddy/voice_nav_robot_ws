@@ -147,6 +147,19 @@ class MotionGateOpenConvergenceTest(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertEqual(clock.sleeps, [0.01])
 
+    def test_late_convergence_before_deadline_is_not_cut_off_by_attempt_cap(
+        self,
+    ):
+        applied = self.terminal()
+        result, calls, clock = self.converge(
+            [self.pending() for _ in range(12)] + [applied],
+            [f'request-{index}' for index in range(1, 14)],
+        )
+
+        self.assertIs(result, applied)
+        self.assertEqual(len(calls), 13)
+        self.assertAlmostEqual(clock.value, 0.95)
+
     def test_writer_mismatch_is_not_retried(self):
         mismatch = self.terminal(code=2, reason=12, state=1)
         result, calls, clock = self.converge(

@@ -18,6 +18,9 @@ SIMULATION_CMAKE = (
 BRINGUP_CMAKE = (
     REPOSITORY_ROOT / "src" / "voice_nav_bringup" / "CMakeLists.txt"
 )
+MISSION_CMAKE = (
+    REPOSITORY_ROOT / "src" / "voice_nav_mission" / "CMakeLists.txt"
+)
 STARTUP_TIMEOUT_NAME = (
     "CONTROLLER_STARTUP_SERVICE_RESPONSE_TIMEOUT_SECONDS"
 )
@@ -42,6 +45,28 @@ def calls_to_method(tree: ast.AST, method_name: str) -> list[ast.Call]:
         and isinstance(node.func, ast.Attribute)
         and node.func.attr == method_name
     ]
+
+
+def launch_test_runtime(cmake_path: Path) -> tuple[set[str], dict[str, str]]:
+    cmake = cmake_path.read_text(encoding="utf-8")
+    matches = re.findall(
+        r"set_tests_properties\(\s*(.*?)\s+PROPERTIES\s+"
+        r"ENVIRONMENT\s+\"([^\"]+)\"\s+"
+        r"RUN_SERIAL\s+TRUE\s*\)",
+        cmake,
+        flags=re.DOTALL,
+    )
+    if len(matches) != 1:
+        raise AssertionError(
+            f"expected one isolated launch-test block in {cmake_path}"
+        )
+    target_text, environment_text = matches[0]
+    targets = set(re.findall(r"\btest_[A-Za-z0-9_]+\.py\b", target_text))
+    environment = dict(
+        entry.split("=", maxsplit=1)
+        for entry in environment_text.split(";")
+    )
+    return targets, environment
 
 
 class CiReadinessContractTest(unittest.TestCase):
@@ -118,12 +143,66 @@ class CiReadinessContractTest(unittest.TestCase):
         self.assertIsInstance(timeout_keywords[0], ast.Name)
         self.assertEqual(timeout_keywords[0].id, STARTUP_TIMEOUT_NAME)
 
-    def test_simulation_launch_tests_use_an_isolated_runtime(self):
-        cmake = SIMULATION_CMAKE.read_text(encoding="utf-8")
-        self.assertIn("RMW_IMPLEMENTATION=rmw_fastrtps_cpp", cmake)
-        self.assertIn("ROS_DOMAIN_ID=91", cmake)
-        self.assertIn("ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST", cmake)
-        self.assertIn("GZ_PARTITION=voice_nav_l0008_sim_test", cmake)
+    def test_launch_tests_use_cross_package_isolated_runtimes(self):
+        sim_targets, sim_environment = launch_test_runtime(SIMULATION_CMAKE)
+        mission_targets, mission_environment = launch_test_runtime(
+            MISSION_CMAKE
+        )
+        bringup_targets, bringup_environment = launch_test_runtime(
+            BRINGUP_CMAKE
+        )
+
+        self.assertEqual(sim_targets, {
+            "test_test_simulation_control.py",
+            "test_test_simulation_interfaces.py",
+            "test_test_tf_ownership_conflict.py",
+        })
+        self.assertEqual(
+            mission_targets,
+            {"test_test_motion_gate_node.py"},
+        )
+        self.assertEqual(
+            bringup_targets,
+            {"test_test_motion_gate_product.py"},
+        )
+
+        environments = {
+            "sim": sim_environment,
+            "mission": mission_environment,
+            "bringup": bringup_environment,
+        }
+        for environment in environments.values():
+            self.assertEqual(
+                environment["RMW_IMPLEMENTATION"],
+                "rmw_fastrtps_cpp",
+            )
+            self.assertEqual(
+                environment["ROS_AUTOMATIC_DISCOVERY_RANGE"],
+                "LOCALHOST",
+            )
+
+        domains = {
+            name: environment["ROS_DOMAIN_ID"]
+            for name, environment in environments.items()
+        }
+        self.assertEqual(domains, {
+            "sim": "93",
+            "mission": "91",
+            "bringup": "92",
+        })
+        self.assertEqual(len(set(domains.values())), len(domains))
+        self.assertEqual(
+            sim_environment["GZ_PARTITION"],
+            "voice_nav_l0008_sim_test",
+        )
+        self.assertEqual(
+            bringup_environment["GZ_PARTITION"],
+            "voice_nav_l0009_product_test",
+        )
+        self.assertNotEqual(
+            sim_environment["GZ_PARTITION"],
+            bringup_environment["GZ_PARTITION"],
+        )
 
     def test_convergence_unit_test_allows_runner_teardown_headroom(self):
         cmake = BRINGUP_CMAKE.read_text(encoding="utf-8")
