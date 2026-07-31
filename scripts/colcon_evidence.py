@@ -178,6 +178,10 @@ def discover_result_inputs(package_directory: Path) -> tuple[Path, ...]:
         if latest_xml.exists() or latest_xml.is_symlink():
             validate_result_input(latest_xml, package_directory)
             result_inputs.add(latest_xml)
+        else:
+            raise ValueError(
+                f"CTest TAG result does not exist: {latest_xml}"
+            )
 
     return tuple(sorted(result_inputs))
 
