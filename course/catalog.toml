@@ -52,6 +52,6 @@ record = "course/records/0007-ros2-control-drive.md"
 [[lessons]]
 id = "0008"
 slug = "lidar-world-tf-ownership"
-status = "in_progress"
+status = "completed"
 lesson = "course/lessons/0008-lidar-world-tf-ownership.md"
 record = "course/records/0008-lidar-world-tf-ownership.md"

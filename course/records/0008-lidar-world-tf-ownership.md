@@ -1,11 +1,14 @@
 # Lesson 0008 学习记录：LiDAR、world 与 TF 唯一所有权
 
-状态：Pending
+状态：Completed（教师参考实现）
 
-本记录只填写已经发生且可复查的证据。教师侧 reference implementation
-已经完成 tests-first、本地实现与完整本地门禁；draft PR 已建立，学习者复现、
-当前提交的 hosted CI、merge 与 solution tag 仍保持 Pending。下列数值来自
-2026-07-31 的真实本地运行，不是课程中的期望输出。
+学习者复现状态：Pending
+
+教师侧 reference solution 已通过 tests-first、本地完整门禁、独立 review
+与 required hosted CI，并由 PR #9 rebase 合并到 `main`。本记录只填写已经
+发生且可查询的 reference-solution 证据；学习者仍从 start tag 创建自己的
+`learn/0008` 分支，并独立完成实现与文末复盘。下列数值来自 2026-07-31
+的真实运行，不是课程中的期望输出。
 
 ## 变更身份
 
@@ -32,10 +35,15 @@
 - Local review-closure evidence commit：`c210b46`
 - GitHub PR：
   [#9](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/9)
-- Required CI：当前 review-hardening 提交仍为 TBD；较早的远端
-  `fd5b8c7` 已通过，但不作为当前提交证据
-- Public merge identity：TBD
-- Solution tag：TBD，且只能在 reviewed public merge 后创建
+- Required CI：
+  [`required / ubuntu-24.04 / ros-jazzy`](https://github.com/Edddddddddy/voice_nav_robot_ws/actions/runs/30611170011/job/91094030667)
+- Public merge identity：
+  `2906d7fea22966463272640949a65a3833ee6d98`
+- Solution tag：`course/0008-solution`
+- Solution tag object：
+  `835acb8d78bce2069950c0c95467be5f873a75ef`
+- Solution tag peeled target：
+  `2906d7fea22966463272640949a65a3833ee6d98`
 
 ## Immutable start checkpoint
 
@@ -464,7 +472,7 @@ PROCESS_RESIDUE_AUDIT_END
 - [x] headless integration 没有被 skip。
 - [x] `bash scripts/verify.sh` 输出最终成功 marker。
 - [x] Git index 未跟踪 `__pycache__` 或 `*.pyc`，安装规则也排除它们。
-- [ ] 提交前逐项阅读完整 staged diff。
+- [x] reference-solution closure 的完整 diff 已逐项复审。
 
 ```text
 Verification date/environment:
@@ -496,14 +504,14 @@ VoiceNav Robot verification passed.
 ## 评审与远端证据
 
 - [x] Work Item 已关联 GitHub Issue。
-- [ ] PR diff 只包含 VN-0009 范围。
-- [ ] required hosted CI 通过。
+- [x] PR diff 只包含 VN-0009 范围。
+- [x] required hosted CI 通过。
 - [x] independent local review 已完成，发现项均有 RED/GREEN 与重放证据。
-- [ ] review conversations 全部解决。
-- [ ] PR 以 rebase 方式合并。
-- [ ] record 写入 local-to-public rebase identity map。
-- [ ] annotated `course/0008-solution` 指向 public reviewed solution。
-- [ ] start/solution tags 均未被重写。
+- [x] review thread 总数为 0，没有未解决 conversation。
+- [x] PR 以 rebase 方式合并。
+- [x] record 写入 local-to-public rebase identity map。
+- [x] annotated `course/0008-solution` 指向 public reviewed solution。
+- [x] start/solution tags 均未被重写。
 
 ```text
 Issue:
@@ -513,30 +521,53 @@ PR:
 https://github.com/Edddddddddy/voice_nav_robot_ws/pull/9
 
 Required CI:
-Earlier draft-head evidence only:
-remote head fd5b8c7f2622a6eb3f0ae637ea1ab4e059f7bf99
-SUCCESS:
-https://github.com/Edddddddddy/voice_nav_robot_ws/actions/runs/30608156898/job/91084868188
-
-This run predates the review-hardening commits through 68818f3 and this
-documentation update. Current-head hosted CI remains TBD and must be captured
-after those commits are pushed; the earlier success is not completion
-evidence for the current diff.
+https://github.com/Edddddddddy/voice_nav_robot_ws/actions/runs/30611170011/job/91094030667
+Result: success in 4m18s on a5a0e204f7bdb017aa34aa999ab8f73024d828be
 
 Independent review:
+https://github.com/Edddddddddy/voice_nav_robot_ws/pull/9#issuecomment-5140207266
 No remaining P0/P1/P2 after graph, runtime, documentation, source-contract,
 expanded-sensor, expanded-pose, expanded-owner, and generated-document review
 passes.
+Review threads: 0
 
 Merge method/time:
-TBD
+rebase; 2026-07-31T07:01:30Z
 
-Public identity map:
-TBD
+Public implementation tip:
+2906d7fea22966463272640949a65a3833ee6d98
 
 Solution tag object and peeled target:
-TBD
+835acb8d78bce2069950c0c95467be5f873a75ef
+2906d7fea22966463272640949a65a3833ee6d98
 ```
+
+GitHub 的 rebase merge 为 21 个本地 feature commit 生成了下列公开身份。
+`git range-diff` 对每一项都报告 `=`：
+
+| Local feature identity | Public rebase identity | Subject |
+| --- | --- | --- |
+| `40608da24dc73472f637266d77d6c1b86710e60e` | `30b6245c2f5ac967f80f23d7256991e8701d2a59` | `test(sim): define Lesson 0008 perception contract` |
+| `b246340474f87c6e56dcee96f86ed581b92becd7` | `b3a66220d3c2d398cc8475ed91154fcb395f0e20` | `feat(sim): add lidar world and prove tf ownership` |
+| `0f5fdfa57b2f293f63507cc7b7174e58e120c722` | `b127f2aeaa8192629fc2e1e42d6ad692bab7b1ff` | `test(sim): harden graph discovery evidence` |
+| `bc9e636fcbf8800eefcd801265d8c0ad8746a5b4` | `b0b424616ab8dfb9826294665670a54055dab8f3` | `docs(course): record Lesson 0008 implementation evidence` |
+| `6e29dc65b55860ef03f4bfacc25eb137101c750d` | `df16d2685ca163d68804612576d6ae1f9d97d0b3` | `docs(work-item): record Lesson 0008 evidence identity` |
+| `fd5b8c7f2622a6eb3f0ae637ea1ab4e059f7bf99` | `9edae02d417f4ae69d48be04212cfaeceb628391` | `docs(work-item): link Lesson 0008 pull request` |
+| `c463d1ffae6685505424a8a61aadb52512921bc5` | `34ec70185b0cc7e747bc8fc23cf6a7015bd8c304` | `test(sim): expose resource and sensor blind spots` |
+| `7dc889e797fcc27dd7e1d6bf193621f78004de1c` | `7305cc7eebb6e6f678ee0286f403f9dc35775a5c` | `fix(sim): reject hidden world resources and sensors` |
+| `9e0be95511d813776166fce21f3d380752cd1fe8` | `f3a6431a8b13472c8a4954d00f6fbd0b3c7ca885` | `test(sim): define expanded lidar SDF contract` |
+| `e23330cad831af1fa2015c6e32984ae765f2b3ef` | `0c0c6f35081003fa6980de91a9503ab74114cc76` | `fix(sim): validate expanded lidar SDF` |
+| `7b58d0ed83153c40de185e64c1f5e8406898de8d` | `54d6230eff9f8a16da684c08a5e0c4405ebfa8e5` | `test(sim): expose expanded lidar pose blind spot` |
+| `bd3f322a11c76577b54310ec2d105d1e52000b49` | `04fab6a7c6b382135dec1a8cd883a6dda179b199` | `test(sim): reject relative lidar product poses` |
+| `cb388cb363d7076a9ce2723b50b296a0e6fbd2be` | `5ea0c77e073719a8938f790bcd9a2d6e8554a3e4` | `fix(sim): validate canonical expanded lidar pose` |
+| `d50739fa26e028f38fc11e37927962ea95fd8084` | `2cc059b2c6f16aca4dda4f1dd121d409b49cc373` | `test(sim): expose expanded lidar owner blind spot` |
+| `a4afab17757a6552224520410e4c44949f73ca33` | `7174c1432856a9c4dce5c546262ff82ed5f9a255` | `fix(sim): bind expanded lidar pose to base frame` |
+| `d0a3bf2f9d7733901f9cc2cd046fb25d99ed8411` | `e588f3dea01f625b3f3628d1f6ad33ba1ea763f3` | `test(sim): expose nested lidar owner escape` |
+| `13c2a7e06442cc24ac9d76184d0923b5b9d0fe4d` | `392546baae204e6bcdfa8499e07532153085dd74` | `fix(sim): bind lidar to outer base frame identity` |
+| `71d3551269d194d8b34d76e51b9ef77059abd754` | `ef84cb5da9bce19b90fc3321a845d60fa9853798` | `test(sim): expose generated SDF root escape` |
+| `68818f3213c4d2f76860da0f7705e70f1e8e9e60` | `e27e1e4323f7fdcc37bee4804d79ff5a5c340711` | `fix(sim): close generated SDF document boundary` |
+| `c210b46d4279a19055a40844e4f4568edcbe0d87` | `b858d2221c4548b58470e5fa7366ad2170e96a51` | `docs(course): close Lesson 0008 local review` |
+| `a5a0e204f7bdb017aa34aa999ab8f73024d828be` | `2906d7fea22966463272640949a65a3833ee6d98` | `docs(work-item): record final Lesson 0008 evidence identity` |
 
 ## 复盘
 

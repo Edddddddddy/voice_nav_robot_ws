@@ -1,6 +1,6 @@
 # VN-0009: Add LiDAR world and prove TF ownership
 
-**Status:** In Review
+**Status:** Done
 
 **GitHub Issue:**
 [#8](https://github.com/Edddddddddy/voice_nav_robot_ws/issues/8)
@@ -184,10 +184,10 @@ lessons to consume `/scan`, `/odom`, and TF without redefining their ownership.
 - [x] Lesson 0008 contains the tests-first workflow, deterministic range
   derivation, GID ownership model, failure injection, troubleshooting,
   submission evidence, and reflection questions.
-- [ ] The learner record contains only real commands, outputs, commit
-  identities, PR/CI links, and review findings before its status changes from
-  Pending.
-- [ ] A reviewed PR passes required hosted CI and is rebase-merged to `main`;
+- [x] The course reference record contains only real commands, outputs,
+  commit identities, PR/CI links, and review findings before the reference
+  solution is marked complete.
+- [x] A reviewed PR passes required hosted CI and is rebase-merged to `main`;
   only then is annotated tag `course/0008-solution` created.
 
 ## Risks and rollback
@@ -519,14 +519,48 @@ the complete LiDAR identity and geometry. Focused generated-SDF tests report
 
 ### Remote review and completion evidence
 
-Draft PR [#9](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/9)
-exists. Its last-pushed head at this evidence capture was
-`fd5b8c7f2622a6eb3f0ae637ea1ab4e059f7bf99`; required CI for that older head
-[succeeded](https://github.com/Edddddddddy/voice_nav_robot_ws/actions/runs/30608156898/job/91084868188).
-That run predates the local review-hardening series through `68818f3` and
-this documentation update, so it is historical draft evidence rather than
-current-diff completion evidence.
+- [Issue #8](https://github.com/Edddddddddy/voice_nav_robot_ws/issues/8)
+  tracked VN-0009 and closed when the implementation merged.
+- [PR #9](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/9) contains
+  the Lesson 0008 implementation, tests, course, architecture, and evidence.
+- The required
+  [`required / ubuntu-24.04 / ros-jazzy`](https://github.com/Edddddddddy/voice_nav_robot_ws/actions/runs/30611170011/job/91094030667)
+  check passed in 4 minutes 18 seconds on exact feature head
+  `a5a0e204f7bdb017aa34aa999ab8f73024d828be`.
+- The
+  [independent review record](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/9#issuecomment-5140207266)
+  reports no remaining P0/P1/P2 and links every review-hardening
+  RED/GREEN sequence. The PR has zero review threads.
+- PR #9 was rebase-merged at `2026-07-31T07:01:30Z`; the public
+  implementation tip is `2906d7fea22966463272640949a65a3833ee6d98`.
+- The remote feature branch was deleted after merge.
+- `git range-diff` reports `=` for all 21 local-to-public rebase pairs. The
+  authoritative full identity table is in the
+  [Lesson 0008 record](../../course/records/0008-lidar-world-tf-ownership.md#评审与远端证据).
 
-Current-head hosted CI, review-conversation resolution, rebase merge, the
-local-to-public identity map, and `course/0008-solution` remain Pending. They
-must be recorded only after the corresponding public events are queryable.
+Only after that reviewed public merge, annotated tag
+`course/0008-solution` was created. Tag object
+`835acb8d78bce2069950c0c95467be5f873a75ef` peels to public reviewed
+solution `2906d7fea22966463272640949a65a3833ee6d98`. The immutable start tag
+still has object `982ec062889b5a2ab92c391967b9084d15e52b60` and peeled target
+`f99210d8830cd2cd16eb801ffe0de10422cf4584`; neither course tag was
+rewritten.
+
+The closure diff, including the completed reference-solution status, exact
+remote evidence, and all 21 public identities, then passed the full local
+gate:
+
+```text
+Command:
+  bash scripts/verify.sh
+Repository contracts:
+  88 tests, all passed
+Build result:
+  6 packages finished
+Package result:
+  55 tests, 0 errors, 0 failures, 4 skipped
+Final marker:
+  VoiceNav Robot verification passed.
+Post-run process audit:
+  pgrep exit 1; no matching Gazebo or ROS launch-owned process
+```
