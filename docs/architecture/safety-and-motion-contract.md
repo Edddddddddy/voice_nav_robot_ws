@@ -74,22 +74,30 @@ Velocity commands, joint state, odometry, and TF remain in ROS 2 control.
   Mission generation, and step generation **before** the smoother. These
   identities are not present in `TwistStamped`, so MotionGate does not pretend
   to recover or validate them from candidate messages.
-- Runtime opens and renews an opaque authority `lease_id` through a private
-  control seam. The authority lease is **250 ms on MotionGate's steady
-  clock**; velocity candidates never renew it.
-- A renewal has a strictly increasing sequence, at most one request in flight,
-  and is accepted only while that lease is still active. An expired or revoked
-  lease cannot be resurrected; obtaining authority again requires the complete
-  handover protocol below.
+- MotionGate generates the opaque authority `lease_id` and per-lease candidate
+  topic during `PREPARE`; callers cannot supply arbitrary IDs or paths.
+  Runtime opens and renews that lease through the private control seam. The
+  authority lease is **250 ms on MotionGate's steady clock**; velocity
+  candidates never renew it.
+- Every control operation uses one Gate-wide compare-and-swap `control_seq`.
+  `OPEN`, `RENEW`, and `INHIBIT` also match the current Gate instance and
+  lease. A stale request has no state effect, including a late old-lease
+  `INHIBIT` racing a newer lease. An expired or revoked lease cannot be
+  resurrected; obtaining authority again requires the complete handover
+  protocol below.
 - Candidate freshness is a second, independent steady-clock deadline. A
   non-zero output requires both live Runtime authority and a fresh candidate
-  from the currently bound data plane.
-- It rejects NaN, Inf, stale input, non-zero unsupported axes, values outside
-  trusted YAML limits, and samples from any unbound writer or topic generation.
+  from the currently bound data plane. Freshness expires at **150 ms** of
+  MotionGate steady time.
+- Finite `linear.x` and `angular.z` values outside trusted YAML bounds are
+  clamped to those bounds. NaN, Inf, a non-zero unsupported axis, stale input,
+  or a sample from an unbound writer/topic generation retires the lease and
+  selects zero.
 - Authority or candidate expiry inhibits motion and continuously publishes
-  zero without waiting for Runtime, ROS time, Nav2, or Gazebo time.
-- Closing or revoking a lease selects zero before it acknowledges the control
-  request.
+  zero every **20 ms wall time** without waiting for Runtime, ROS time, Nav2,
+  or Gazebo time.
+- A matching current `INHIBIT` selects and publishes zero before it
+  acknowledges the control request.
 - `diff_drive_controller.cmd_vel_timeout` is **0.35 s**. It is the
   consumer-side second deadman if MotionGate itself dies.
 - Runtime crash, cancel, timeout, dependency loss, invalid generation, and
@@ -103,6 +111,61 @@ Velocity commands, joint state, odometry, and TF remain in ROS 2 control.
 
 WSL is not a real-time environment. The 250 ms and 0.35 s values are tested
 budgets for this supported environment, not hard real-time guarantees.
+
+### Package-private control and state seam
+
+The private ROS types live in `voice_nav_mission`, not
+`voice_nav_interfaces`:
+
+```text
+voice_nav_mission/srv/InternalMotionGateControl
+voice_nav_mission/msg/InternalMotionGateState
+```
+
+The node FQN is `/motion_gate_node`; the private absolute endpoints are
+`/motion_gate/internal/control` and `/motion_gate/internal/state`. PREPARE
+returns a bounded topic below
+`/voice_nav_internal/motion_gate/candidate/lease_`. These names and the final
+`/diff_drive_controller/cmd_vel` endpoint are code constants, not YAML
+parameters or product-launch remaps. Trusted parameter YAML uses the exact root
+`motion_gate_node`.
+
+The only operations are `PREPARE`, `OPEN`, `RENEW`, and `INHIBIT`.
+`PREPARE` matches the current Gate instance and expected global
+`control_seq`; the other operations additionally match the current lease.
+Each accepted operation advances the single Gate-wide sequence. A stale
+instance, lease, or sequence returns a bounded typed mismatch without changing
+Gate state. Public `StopMission` remains unconditionally safety-effective at
+the Mission boundary because Runtime first linearizes STOP and then inhibits
+the **current** Gate tuple; an arbitrary private stale `INHIBIT` is not STOP.
+
+`InternalMotionGateControl` contains no writer GID. At `OPEN`, MotionGate uses
+its own graph context to require exactly one publisher endpoint and records
+that endpoint's complete 16-byte GID. Candidate callbacks compare it only with
+the `MessageInfo.publisher_gid` observed in the same Gate context. A
+locked-Fast-DDS self-test proves that those two Gate-local representations
+correlate; failure or mismatch keeps the Gate inhibited. A caller's
+`Publisher::get_gid()` is neither transported nor compared across processes.
+
+The state snapshot uses
+`RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1)` and reports the Gate instance,
+global sequence, `INHIBITED`/`PREPARED`/`ARMED`/`FAULTED` state, current lease
+and topic, validity flags, output sequence/zero state, bounded reason, and an
+optional fixed 16-byte bound GID for run-local diagnosis only. Package-private
+types and obscure topic names reduce the supported Interface surface; they
+are not DDS authentication or authorization.
+
+Candidate input uses `BEST_EFFORT + VOLATILE + KEEP_LAST(1)`. The final Gate
+publisher to `/diff_drive_controller/cmd_vel` uses
+`rclcpp::SystemDefaultsQoS()` to match the pinned controller's subscriber.
+Runtime graph checks prove actual endpoint compatibility and unique ownership;
+an introspected reliability, history, or depth reported as `UNKNOWN` is not
+hard-coded into a false assertion.
+
+Control, candidate, expiry, state, and output decisions cross one publication
+serial barrier. Callbacks never publish directly. Once current-lease
+`INHIBIT`, expiry, or invalid-input retirement publishes zero through that
+barrier, an earlier queued non-zero decision cannot publish afterward.
 
 ### Authority and candidate handover barrier
 
@@ -121,19 +184,22 @@ revoke old authority, inhibit Gate, and select/publish zero
   -> fully unload/destroy the old smoother and Collision Monitor instances
   -> destroy Gate's old candidate subscription
   -> confirm the old output writer GID has disappeared from the ROS graph
-  -> allocate a new opaque lease ID and per-lease candidate topic namespace
-  -> create a new Gate reader, then new Collision Monitor and smoother
-  -> configure downstream-to-upstream while all publishers remain inactive
-  -> discover and bind the new Collision Monitor writer GID at the Gate
+  -> PREPARE; Gate generates a new lease ID and per-lease candidate topic
+  -> Gate may create a provisional reader that discards every sample
+  -> create/configure new Collision Monitor and smoother downstream-to-upstream
+  -> require exactly one writer in the Gate-local graph snapshot
+  -> OPEN serial point destroys the provisional reader and its queued samples
+  -> recreate the VOLATILE KEEP_LAST(1) reader and bind the Gate-observed GID
   -> activate Collision Monitor, then smoother, while Gate remains inhibited
-  -> open the 250 ms Runtime authority lease
+  -> complete OPEN and enter ARMED with a 250 ms Runtime authority lease
   -> start the new producer last
 ```
 
-Candidate topics use bounded volatile QoS and do not use transient-local
-durability. Gate callbacks inspect `MessageInfo.publisher_gid` and accept only
-the writer bound during this handover on the new per-lease channel. An old
-sample retains its old channel or writer GID and remains invalid even if DDS
+At the OPEN serial point, destroying and recreating the reader is a queue
+barrier: samples received or queued by the provisional reader can never become
+valid after the state reaches `ARMED`. Gate callbacks accept only the writer
+bound during this handover on the new per-lease channel. An old sample retains
+its old channel or Gate-local writer identity and remains invalid even if DDS
 delivers it after the new lease opens.
 
 A lifecycle deactivate/cleanup/configure cycle is not sufficient: the pinned
@@ -152,6 +218,12 @@ binding, activation, or acknowledgement keeps the Gate inhibited and becomes
 The barrier is required between consecutive Mission steps too, even when both
 steps use the same producer. Limits, timeouts, and queue bounds come from
 trusted configuration and are verified with deliberately delayed old commands.
+
+Lesson 0009 implements and verifies the normal-running Core, private seam,
+Gate-local binding, barriers, final ownership, and deadline expiry with a test
+authority/candidate harness. It does not claim the complete Runtime/smoother/
+Collision Monitor integration. Process-kill crash-stop and managed/unmanaged
+Gazebo pause behavior are reserved for Lesson 0010 / VN-0011.
 
 ### Gazebo managed safe-pause and resume
 

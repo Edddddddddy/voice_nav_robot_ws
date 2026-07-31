@@ -45,6 +45,37 @@ SLAM, Nav2, MotionGate, Mission Runtime, Agent, and voice remain target claims.
 No `map → odom` owner exists yet. Controller timeout is not presented as
 MotionGate or physical-stop completion.
 
+## In-progress v0.2 slice: Lesson 0009
+
+VN-0010 / Lesson 0009 is implementing the first independent MotionGate
+vertical slice. Until its Work Item, local gates, review, CI, merge, and
+solution tag close, the following remain **in-progress design**, not verified
+current behavior:
+
+- a pure `MotionGateCore` behind one typed event Interface and a
+  `motion_gate_node` ROS Adapter;
+- package-private `InternalMotionGateControl` and
+  `InternalMotionGateState` types with only
+  `PREPARE`/`OPEN`/`RENEW`/`INHIBIT`, exposed only on
+  `/motion_gate/internal/control` and `/motion_gate/internal/state`;
+- Gate-generated lease IDs and candidate topics, one global compare-and-swap
+  `control_seq`, and `INHIBITED`/`PREPARED`/`ARMED`/`FAULTED` states;
+- a Gate-local 16-byte publisher-GID binding plus OPEN reader-queue and final
+  publication barriers;
+- 250 ms authority, 150 ms candidate freshness, and a 20 ms output period on
+  steady/wall time;
+- finite supported-axis clamping, fail-closed retirement for non-finite or
+  unsupported-axis input, and sole final command ownership;
+- a final publisher using `rclcpp::SystemDefaultsQoS()` with runtime proof of
+  compatibility against the controller subscriber. Its node FQN is
+  `/motion_gate_node`; candidate topics use the
+  `/voice_nav_internal/motion_gate/candidate/lease_` prefix.
+
+The private seam reduces product surface but is not DDS access control.
+Lesson 0009 uses a test authority/candidate harness and does not claim
+MissionRuntime, smoother, Collision Monitor, process-kill crash-stop, or
+Gazebo pause/resume completion. Crash-stop and pause recovery are Lesson 0010.
+
 ## Target v1.0 topology
 
 ```text
@@ -110,7 +141,9 @@ velocity and does not import Nav2 or Gazebo types.
   relative motion, and map saving;
 - `motion_gate_node`: package-private control seam, Runtime-renewed 250 ms
   authority lease, per-lease candidate binding/freshness, lock, limits, zero
-  output, and sole final velocity publication.
+  output, and sole final velocity publication. The Gate generates lease IDs
+  and topics; Runtime drives the four locked operations using the Gate instance,
+  current lease, and global compare-and-swap sequence.
 
 The caller learns one execution operation, one stop operation, and one state
 snapshot. Internal complexity remains local to one package while separate

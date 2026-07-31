@@ -55,3 +55,10 @@ slug = "lidar-world-tf-ownership"
 status = "completed"
 lesson = "course/lessons/0008-lidar-world-tf-ownership.md"
 record = "course/records/0008-lidar-world-tf-ownership.md"
+
+[[lessons]]
+id = "0009"
+slug = "independent-motion-gate"
+status = "in_progress"
+lesson = "course/lessons/0009-build-independent-motion-gate.md"
+record = "course/records/0009-independent-motion-gate.md"

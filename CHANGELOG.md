@@ -8,6 +8,10 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Added the in-progress VN-0010 Work Item, Lesson 0009 contract, and pending
+  evidence record for an independent, fail-closed MotionGate. This entry
+  records course and design artifacts; it does not claim implementation
+  completion.
 - Added a packaged, self-contained Gazebo world with an analytic obstacle and
   a 360-degree single-layer GPU LiDAR on `laser_link`.
 - Added a headless perception integration gate that verifies `/scan` type,
@@ -27,6 +31,17 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Locked the Lesson 0009 private Gate seam to
+  `InternalMotionGateControl`/`InternalMotionGateState`, the operations
+  `PREPARE`/`OPEN`/`RENEW`/`INHIBIT`, Gate-generated lease topics, global
+  compare-and-swap sequencing, Gate-local 16-byte writer identity, reader and
+  publication barriers, finite-value clamping, and fail-closed invalid-input
+  retirement. The node FQN is `/motion_gate_node`, private endpoints are
+  `/motion_gate/internal/control` and `/motion_gate/internal/state`, and
+  candidate topics use `/voice_nav_internal/motion_gate/candidate/lease_`.
+  The final controller publisher follows
+  `rclcpp::SystemDefaultsQoS()` and must prove actual endpoint compatibility;
+  crash-stop and pause/resume acceptance remain Lesson 0010 scope.
 - Replaced the product model's native Gazebo DiffDrive plugin with
   `gz_ros2_control`, a Jazzy `diff_drive_controller`, and an event-ordered
   launch owned directly by ROS 2 launch.
