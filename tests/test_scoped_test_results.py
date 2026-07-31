@@ -489,6 +489,35 @@ class ScopedTestResultsTest(unittest.TestCase):
             )
             self.assertNotIn("Summary: 10 tests", completed.stdout)
 
+    def test_report_rejects_malformed_mandatory_xunit_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            selected_package = build_base / "voice_nav_mission"
+            write_xunit(selected_package / "valid.xunit.xml", tests=1)
+            malformed_result = (
+                selected_package
+                / "test_results"
+                / "voice_nav_mission"
+                / "broken.xunit.xml"
+            )
+            malformed_result.parent.mkdir(parents=True)
+            malformed_result.write_text(
+                "<testsuite tests='9' failures='0'",
+                encoding="utf-8",
+            )
+
+            completed = self.run_reporter(
+                build_base,
+                "voice_nav_mission",
+            )
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn(
+                "mandatory xUnit result was not consumed",
+                completed.stderr,
+            )
+            self.assertNotIn("Summary: 1 test", completed.stdout)
+
     def test_boundary_allows_missing_build_base(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             build_base = Path(temporary_directory) / "missing"
