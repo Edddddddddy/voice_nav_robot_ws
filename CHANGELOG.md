@@ -44,6 +44,12 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Prevented a transient RMW `_NODE_*_UNKNOWN_` graph identity from being
   misclassified as a confirmed TF owner mismatch; unresolved identities now
   remain pending until resolution or bounded timeout.
+- Prevented local or relative world resource URIs and Xacro-macro expansion
+  from bypassing the self-contained world and single-LiDAR source contracts.
+- Bound the generated LiDAR to the outer robot model's unique
+  `base_footprint` element and canonical finite pose, rejecting duplicate
+  sensors/poses, wheel-local mounts, nested same-name frame escapes, and
+  unreviewed sibling SDF root objects.
 
 ## [0.1.0] - 2026-07-30
 

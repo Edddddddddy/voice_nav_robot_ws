@@ -41,8 +41,9 @@ lessons to consume `/scan`, `/odom`, and TF without redefining their ownership.
 
 - `voice_nav_sim` packages
   `worlds/voice_nav_test_world.sdf` and loads it from package share.
-- The world is self-contained and network-independent. It does not include a
-  Fuel URI, HTTP(S) URI, or a model that exists only in a developer cache.
+- The world is self-contained and network-independent. This slice permits no
+  `<uri>` element at all: Fuel, HTTP(S), machine-local absolute paths, and
+  working-directory-dependent relative paths are all rejected.
 - The world contains the required Gazebo physics, user-command,
   scene-broadcaster, and rendering-sensor systems.
 - A fixed collision box named by the repository contract has pose center
@@ -56,6 +57,19 @@ lessons to consume `/scan`, `/odom`, and TF without redefining their ownership.
 ### LiDAR and bridge
 
 - The model contains exactly one single-layer `gpu_lidar` on `laser_link`.
+- The source contract requires exactly one directly authored root-level
+  sensor binding with a link-local zero pose. The generated-product contract
+  separately validates the post-Xacro, post-URDF-conversion SDF so an invoked
+  macro cannot hide a second sensor or pose.
+- The generated document has root `<sdf>` and exactly one direct child: the
+  `voice_nav_robot` model. A sibling world, model, actor, light, or include is
+  outside this URDF-derived product boundary and is rejected.
+- In the generated Harmonic SDF, fixed-joint lumping makes the outer
+  `voice_nav_robot` model's unique direct `base_footprint` link element the
+  sensor's owner. A nested model or another same-named link cannot satisfy
+  this identity contract. The product pose must be the one attribute-free,
+  six-finite-number vector `0.1 0 0.195 0 0 0`; owner and pose are one
+  coordinate contract and are never validated independently.
 - The Gazebo sensor publishes `/scan`, reports frame `laser_link`, and uses:
   - update rate `10` Hz;
   - horizontal samples `360`, resolution `1`, angle range `[-pi, +pi]`;
@@ -129,10 +143,10 @@ lessons to consume `/scan`, `/odom`, and TF without redefining their ownership.
 - [x] Tests-first RED proves the repository lacks the packaged
   world/LiDAR/product graph while the checker and all synthetic valid and
   negative fixtures execute successfully.
-- [x] Static contracts reject an empty or network-dependent world, a missing
+- [x] Static contracts reject an empty or URI-dependent world, a missing
   required Gazebo system, incorrect obstacle collision geometry, an absent or
-  duplicate LiDAR, incorrect sensor frame/topic/geometry/noise, and an
-  uninstalled runtime asset.
+  duplicate LiDAR, incorrect sensor owner/pose/frame/topic/geometry/noise, and
+  an uninstalled runtime asset.
 - [x] Static contracts reject a bridge with an extra entry, wrong message
   type, wrong direction, wrong QoS, timestamp override, or any bridge for
   command, joint state, odometry, `/tf`, or `/tf_static`.
@@ -140,8 +154,8 @@ lessons to consume `/scan`, `/odom`, and TF without redefining their ownership.
   remap and reject a relay, an absent remap, or a remaining publisher on the
   controller-native odometry name.
 - [x] Headless Gazebo uses the packaged world with
-  `--headless-rendering`; the world contains no external or network asset
-  URI, and the run publishes advancing `/clock`.
+  `--headless-rendering`; the world contains no resource URI, and the run
+  publishes advancing `/clock`.
 - [x] Gazebo `/scan` and ROS `/scan` publish repeated valid scans with the
   exact frame, geometry, range limits, and simulation-time semantics.
 - [x] The beam whose reported angle has minimum absolute value sees the fixed
@@ -182,8 +196,19 @@ lessons to consume `/scan`, `/odom`, and TF without redefining their ownership.
   return. Static checks inspect collision geometry and the integration test
   verifies the analytic front-face beam.
 - A cached Fuel model can make a developer machine pass and clean CI hang or
-  fail. The world rejects external URIs and is exercised from its installed
+  fail. Machine-local and relative paths can create the same false confidence.
+  This slice rejects every world URI and is exercised from its installed
   package-share path.
+- A source-only XML checker does not execute invoked Xacro macros. A macro can
+  inject a second sensor or pose after the source contract passes, so the
+  generated SDF is independently parsed and validated.
+- Selecting one matching model while ignoring root siblings leaves an
+  unreviewed document scope. The product checker constrains the SDF root and
+  its only direct child before validating model internals.
+- A numeric pose without its parent coordinate frame is ambiguous. Generated
+  SDF checks bind the canonical LiDAR pose to the post-lumping
+  outer `base_footprint` element identity; the same numbers on a wheel link or
+  a nested model's same-named link are rejected.
 - A rendering sensor can work in the GUI but fail in headless CI when the
   Sensors system or rendering flag is missing. The headless integration gate
   is authoritative; a screenshot is supplemental only.
@@ -236,8 +261,8 @@ lessons to consume `/scan`, `/odom`, and TF without redefining their ownership.
 - Static:
   - parse packaged world, Xacro, expanded URDF/SDF, bridge YAML, launch,
     package metadata, CMake install rules, and course catalog;
-  - enforce exact world, LiDAR, bridge, odometry-remap, and process-boundary
-    contracts;
+  - enforce exact world, source and generated-product LiDAR, bridge,
+    odometry-remap, and process-boundary contracts;
   - exercise one valid fixture and focused negative fixtures before applying
     assertions to the repository.
 - Contract:
@@ -251,6 +276,10 @@ lessons to consume `/scan`, `/odom`, and TF without redefining their ownership.
   - compare the nearest-to-zero beam with the analytic box intersection;
   - resolve TF at three scan stamps and compare matched odometry/TF pose.
 - Fault injection:
+  - invoke Xacro macros that inject a second sensor or pose, and move the
+    generated sensor to a wheel link while retaining its numeric pose;
+  - add sibling root objects with unreviewed sensors or plugins and verify the
+    generated document boundary rejects them;
   - run the edge/GID audit against a second same-edge writer that deliberately
     reuses the expected node name;
   - publish bounded motion, then explicit zero, and prove that owner sets and
@@ -359,12 +388,19 @@ not node-name or total-topic-publisher shortcuts.
 Verified locally in WSL2 with ROS 2 Jazzy and Gazebo Harmonic on 2026-07-31.
 The green implementation commit is `b246340`.
 The independent-review hardening commit is `0f5fdfa`.
+The static-boundary review pair is `c463d1f` (RED) and `7dc889e` (GREEN).
+The expanded-sensor review pair is `9e0be95` (RED) and `e23330c` (GREEN).
+The expanded-pose review tests are `7b58d0e` and `bd3f322`; their GREEN is
+`cb388cb`.
+The expanded-owner review pair is `d50739f` (RED) and `a4afab1` (GREEN).
+The outer-owner-identity review pair is `d0a3bf2` (RED) and `13c2a7e` (GREEN).
+The generated-document review pair is `71d3551` (RED) and `68818f3` (GREEN).
 The documentation and local-evidence commit is `bc9e636`.
 The final repository gate reported:
 
 ```text
 Repository contracts:
-  80 tests passed
+  88 tests passed
 
 Build:
   Summary: 6 packages finished
@@ -459,7 +495,37 @@ test also lower-bounds its post-motion odometry/TF lookup by the final
 odometry stamp and validates odometry, legacy odometry, and scan endpoints
 from one decisive graph snapshot.
 
+Independent production review then found five source/generated-product
+blind spots and closed each with tests-first evidence:
+
+1. local absolute/relative world URIs and a second directly authored sensor
+   were accepted by the first source checker;
+1. an invoked Xacro macro could generate a second sensor after the source
+   checker had passed;
+1. a macro could inject a second pose, and a canonical numeric pose could be
+   moved to a wheel link without binding its coordinate frame;
+1. a nested model's same-named `base_footprint` link could imitate the outer
+   robot base when owner identity was reduced to a string comparison;
+1. a valid sibling world or model could sit beside the selected robot model
+   and escape every chosen-model sensor and plugin assertion.
+
+The final two-layer contract rejects every world URI, globally counts sensors
+in a generated document whose only root object is `voice_nav_robot`, requires
+the outer model's unique direct `base_footprint` element identity, and
+validates one attribute-free six-finite-number canonical pose together with
+the complete LiDAR identity and geometry. Focused generated-SDF tests report
+`11/11` passing, and the real Xacro-to-SDF product passes the same checker.
+
 ### Remote review and completion evidence
 
-Pending. Do not fill commit identities, PR, CI, merge, review, or solution-tag
-fields until those events exist and are queryable.
+Draft PR [#9](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/9)
+exists. Its last-pushed head at this evidence capture was
+`fd5b8c7f2622a6eb3f0ae637ea1ab4e059f7bf99`; required CI for that older head
+[succeeded](https://github.com/Edddddddddy/voice_nav_robot_ws/actions/runs/30608156898/job/91084868188).
+That run predates the local review-hardening series through `68818f3` and
+this documentation update, so it is historical draft evidence rather than
+current-diff completion evidence.
+
+Current-head hosted CI, review-conversation resolution, rebase merge, the
+local-to-public identity map, and `course/0008-solution` remain Pending. They
+must be recorded only after the corresponding public events are queryable.
