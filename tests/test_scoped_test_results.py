@@ -413,18 +413,37 @@ class ScopedTestResultsTest(unittest.TestCase):
 
     def test_verify_clears_and_reports_only_selected_packages(self) -> None:
         verify = VERIFY_SCRIPT.read_text(encoding="utf-8")
+        verify_lines = verify.splitlines()
+        boundary_command = (
+            'python3 scripts/check_colcon_build_boundary.py '
+            '"${build_boundary_args[@]}"'
+        )
 
         self.assertIn(
             "colcon list --base-paths src --names-only",
             verify,
         )
-        self.assertEqual(
-            verify.count(
-                'python3 scripts/check_colcon_build_boundary.py '
-                '"${build_boundary_args[@]}"'
-            ),
-            2,
+        boundary_checks = [
+            index
+            for index, line in enumerate(verify_lines)
+            if line.strip() == boundary_command
+        ]
+        colcon_tests = [
+            index
+            for index, line in enumerate(verify_lines)
+            if line.strip() == "colcon test \\"
+        ]
+        final_report = next(
+            index
+            for index, line in enumerate(verify_lines)
+            if line.strip()
+            == 'python3 scripts/report_test_results.py '
+            '"${test_result_args[@]}"'
         )
+        self.assertTrue(boundary_checks)
+        self.assertTrue(colcon_tests)
+        self.assertLess(max(colcon_tests), boundary_checks[-1])
+        self.assertLess(boundary_checks[-1], final_report)
         self.assertIn('test_result_args=("--build-base" "build")', verify)
         self.assertIn(
             'python3 scripts/report_test_results.py "${test_result_args[@]}" '
