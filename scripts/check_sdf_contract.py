@@ -262,15 +262,24 @@ def validate_sdf(sdf_path: Path) -> None:
     except (OSError, element_tree.ParseError) as error:
         raise SdfContractError(f"cannot parse {sdf_path}: {error}") from error
 
-    models = root.findall("./model")
-    matching_models = [
-        model for model in models if model.get("name") == "voice_nav_robot"
-    ]
-    if len(matching_models) != 1:
+    if root.tag != "sdf":
+        raise SdfContractError("generated product root must be sdf")
+    root_children = list(root)
+    direct_models = root.findall("./model")
+    if (
+        len(root_children) != 1
+        or len(direct_models) != 1
+        or root_children[0] is not direct_models[0]
+    ):
+        raise SdfContractError(
+            "generated product SDF must contain exactly one direct model "
+            "and no sibling world, model, actor, light, or include"
+        )
+    model = direct_models[0]
+    if model.get("name") != "voice_nav_robot":
         raise SdfContractError(
             "expected exactly one model named voice_nav_robot"
         )
-    model = matching_models[0]
 
     validate_lidar(model)
 
