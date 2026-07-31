@@ -1,4 +1,5 @@
 import ast
+import re
 import unittest
 from pathlib import Path
 
@@ -13,6 +14,9 @@ SIMULATION_CONTROL_TEST = (
 )
 SIMULATION_CMAKE = (
     REPOSITORY_ROOT / "src" / "voice_nav_sim" / "CMakeLists.txt"
+)
+BRINGUP_CMAKE = (
+    REPOSITORY_ROOT / "src" / "voice_nav_bringup" / "CMakeLists.txt"
 )
 STARTUP_TIMEOUT_NAME = (
     "CONTROLLER_STARTUP_SERVICE_RESPONSE_TIMEOUT_SECONDS"
@@ -120,6 +124,18 @@ class CiReadinessContractTest(unittest.TestCase):
         self.assertIn("ROS_DOMAIN_ID=91", cmake)
         self.assertIn("ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST", cmake)
         self.assertIn("GZ_PARTITION=voice_nav_l0008_sim_test", cmake)
+
+    def test_convergence_unit_test_allows_runner_teardown_headroom(self):
+        cmake = BRINGUP_CMAKE.read_text(encoding="utf-8")
+        registration = re.search(
+            r"ament_add_pytest_test\(\s*"
+            r"motion_gate_open_convergence_test\s+"
+            r"test/test_motion_gate_open_convergence\.py\s+"
+            r"TIMEOUT\s+(\d+)\s*\)",
+            cmake,
+        )
+        self.assertIsNotNone(registration)
+        self.assertGreaterEqual(int(registration.group(1)), 30)
 
 
 if __name__ == "__main__":
