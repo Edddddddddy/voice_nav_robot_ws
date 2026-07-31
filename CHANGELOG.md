@@ -8,9 +8,16 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- Added the in-progress Lesson 0008 Work Item, course contract, and pending
-  evidence template for a packaged LiDAR world, direct product `/odom`, and
-  per-edge TF publisher-GID ownership verification.
+- Added a packaged, self-contained Gazebo world with an analytic obstacle and
+  a 360-degree single-layer GPU LiDAR on `laser_link`.
+- Added a headless perception integration gate that verifies `/scan` type,
+  QoS, simulation timestamps, scan-time TF, analytic range, direct `/odom`,
+  matched odometry/TF pose, bounded motion, and clean shutdown.
+- Added a per-edge TF ownership auditor that correlates message publisher GIDs
+  with fully qualified graph endpoint owners over a complete observation
+  window, plus duplicate-writer and disjoint-writer fault fixtures.
+- Added the Lesson 0008 Work Item, course contract, and evidence record for
+  the packaged LiDAR world and product graph.
 - Added the tests-first Lesson 0007 contract, Work Item, and pending evidence
   record for migrating the simulation drive path to `gz_ros2_control` and
   Jazzy's native `TwistStamped` `diff_drive_controller` input.
@@ -23,13 +30,20 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Replaced the product model's native Gazebo DiffDrive plugin with
   `gz_ros2_control`, a Jazzy `diff_drive_controller`, and an event-ordered
   launch owned directly by ROS 2 launch.
-- Restricted the Lesson 0007 Gazebo bridge to `/clock` and documented normal
-  acceleration shaping as an upstream velocity-smoother responsibility.
+- Changed controller odometry from its private topic to a direct product
+  `/odom` remap without a relay.
+- Expanded the Gazebo bridge allowlist from `/clock` to exactly `/clock` and
+  `/scan`; command, joint state, odometry, and TF remain unbridged.
+- Documented normal acceleration shaping as an upstream velocity-smoother
+  responsibility.
 
 ### Fixed
 
 - Prevented WSL launch tests from orphaning a shell-owned Gazebo process and
   accidentally reusing an old controller graph.
+- Prevented a transient RMW `_NODE_*_UNKNOWN_` graph identity from being
+  misclassified as a confirmed TF owner mismatch; unresolved identities now
+  remain pending until resolution or bounded timeout.
 
 ## [0.1.0] - 2026-07-30
 
