@@ -393,6 +393,25 @@ class ScopedTestResultsTest(unittest.TestCase):
             self.assertEqual(completed.returncode, 2)
             self.assertIn("at least one --package", completed.stderr)
 
+    def test_package_names_match_colcon_compatible_syntax(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            (build_base / "voice-nav-tools").mkdir(parents=True)
+            (build_base / "_private").mkdir()
+
+            compatible = self.run_boundary_check(
+                build_base,
+                "voice-nav-tools",
+            )
+            leading_underscore = self.run_boundary_check(
+                build_base,
+                "_private",
+            )
+
+            self.assertEqual(compatible.returncode, 0, compatible.stderr)
+            self.assertEqual(leading_underscore.returncode, 2)
+            self.assertIn("invalid package name", leading_underscore.stderr)
+
     def test_boundary_rejects_direct_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             build_base = Path(temporary_directory) / "build"
