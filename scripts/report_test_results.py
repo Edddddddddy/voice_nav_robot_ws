@@ -16,6 +16,8 @@ from colcon_test_result.test_result import Result
 from colcon_evidence import ctest_result_path
 from colcon_evidence import open_result_deletion_plan
 from colcon_evidence import open_result_snapshot
+from colcon_evidence import PackageSnapshotIdentity
+from colcon_evidence import ResultFileIdentity
 from colcon_evidence import selected_package_directories
 
 
@@ -24,8 +26,10 @@ class PackageEvidence:
     """Parsed results and their original files for one selected package."""
 
     package_directory: Path
+    package_identity: PackageSnapshotIdentity
     results: tuple[Result, ...]
     files: tuple[Path, ...]
+    file_identities: tuple[ResultFileIdentity, ...]
 
 
 @dataclass(frozen=True)
@@ -192,6 +196,13 @@ def collect_package_evidence(
                 for sandbox_file in parsed.files
             )
         )
+        mapped_identities = tuple(
+            snapshot.identity_for(
+                result_file.relative_to(package_directory)
+            )
+            for result_file in mapped_files
+        )
+        package_identity = snapshot.package_identity()
         for result in package_results:
             result.path = str(
                 _map_sandbox_path(
@@ -203,8 +214,10 @@ def collect_package_evidence(
 
     return PackageEvidence(
         package_directory=package_directory,
+        package_identity=package_identity,
         results=tuple(sorted(package_results, key=lambda result: result.path)),
         files=mapped_files,
+        file_identities=mapped_identities,
     )
 
 
@@ -241,6 +254,8 @@ def clear_results(package_directories: list[Path]) -> int:
                 open_result_deletion_plan(
                     package_evidence.package_directory,
                     package_evidence.files,
+                    expected_identities=package_evidence.file_identities,
+                    expected_package_identity=package_evidence.package_identity,
                 )
             )
             for package_evidence in evidence
