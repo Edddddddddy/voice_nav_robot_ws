@@ -33,15 +33,42 @@ FILE_OPEN_FLAGS = (
 )
 
 
-def _absolute_symlink_target(link_path: Path, raw_target: str) -> Path:
+def _resolved_symlink_target(link_path: Path, raw_target: str) -> Path:
+    """Resolve a raw link target with kernel-equivalent symlink semantics."""
+
     target = Path(raw_target)
     if not target.is_absolute():
         target = link_path.parent / target
-    return Path(os.path.abspath(target))
+    try:
+        return target.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise ValueError(
+            "result path has unexpected symbolic-link target: "
+            f"{link_path}"
+        ) from error
 
 
 def _source_package_path(package_directory: Path) -> Path:
     return package_directory.parent.parent / "src" / package_directory.name
+
+
+def _reject_invalid_existing_source_components(
+    package_directory: Path,
+) -> None:
+    source_root = package_directory.parent.parent / "src"
+    for source_path in (source_root, _source_package_path(package_directory)):
+        try:
+            source_status = os.stat(source_path, follow_symlinks=False)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise ValueError(
+                f"invalid source package layout: {source_path}"
+            ) from error
+        if not stat.S_ISDIR(source_status.st_mode):
+            raise ValueError(
+                f"invalid source package layout: {source_path}"
+            )
 
 
 def _validate_source_package_layout(package_directory: Path) -> Path:
@@ -85,7 +112,8 @@ def _validate_source_package_manifest(
     raw_target: str,
 ) -> None:
     expected_manifest = _source_package_path(package_directory) / "package.xml"
-    if _absolute_symlink_target(link_path, raw_target) != expected_manifest:
+    _reject_invalid_existing_source_components(package_directory)
+    if _resolved_symlink_target(link_path, raw_target) != expected_manifest:
         raise ValueError(
             "result path has unexpected symbolic-link target: "
             f"{link_path}"
@@ -685,8 +713,14 @@ class ResultSnapshotPlan(ResultDeletionPlan):
                             directory_name,
                             dir_fd=directory_fd,
                         )
+                        if relative_child == Path(
+                            self.package_directory.name
+                        ):
+                            _validate_ament_python_source_layout(
+                                self.package_directory
+                            )
                         if (
-                            _absolute_symlink_target(child_path, raw_target)
+                            _resolved_symlink_target(child_path, raw_target)
                             != expected_target
                             or not _is_regular_nonsymlink(
                                 expected_target,
@@ -696,12 +730,6 @@ class ResultSnapshotPlan(ResultDeletionPlan):
                             raise ValueError(
                                 "result path has unexpected symbolic-link "
                                 f"target: {child_path}"
-                            )
-                        if relative_child == Path(
-                            self.package_directory.name
-                        ):
-                            _validate_ament_python_source_layout(
-                                self.package_directory
                             )
                         continue
                     if not stat.S_ISDIR(child_status.st_mode):
