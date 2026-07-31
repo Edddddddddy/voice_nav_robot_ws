@@ -12,6 +12,7 @@ CHECKER = REPOSITORY_ROOT / "scripts" / "check_sdf_contract.py"
 
 VALID_SENSOR = """\
       <sensor name="laser" type="gpu_lidar">
+        <pose>0.1 0 0.195 0 0 0</pose>
         <topic>/scan</topic>
         <gz_frame_id>laser_link</gz_frame_id>
         <update_rate>10</update_rate>
@@ -174,6 +175,46 @@ class SdfContractTest(unittest.TestCase):
 
                 self.assertNotEqual(completed.returncode, 0)
                 self.assertIn(diagnostic, completed.stderr)
+
+    def test_generated_sdf_lidar_pose_is_enforced(self) -> None:
+        canonical_pose = "<pose>0.1 0 0.195 0 0 0</pose>"
+        mutations = (
+            ("missing", VALID_SDF.replace(canonical_pose, "")),
+            (
+                "duplicate",
+                VALID_SDF.replace(
+                    canonical_pose,
+                    canonical_pose + "<pose>0 0 0 0 0 0</pose>",
+                ),
+            ),
+            (
+                "wrong_arity",
+                VALID_SDF.replace(
+                    canonical_pose,
+                    "<pose>0.1 0 0.195 0 0</pose>",
+                ),
+            ),
+            (
+                "non_finite",
+                VALID_SDF.replace(
+                    canonical_pose,
+                    "<pose>nan 0 0.195 0 0 0</pose>",
+                ),
+            ),
+            (
+                "wrong_value",
+                VALID_SDF.replace(
+                    canonical_pose,
+                    "<pose>0.2 0 0.195 0 0 0</pose>",
+                ),
+            ),
+        )
+        for case, invalid_sdf in mutations:
+            with self.subTest(case=case):
+                completed = self.run_checker(invalid_sdf)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("pose", completed.stderr)
 
     def test_generated_sdf_lidar_geometry_is_enforced(self) -> None:
         mutations = (
