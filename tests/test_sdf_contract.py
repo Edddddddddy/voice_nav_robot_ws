@@ -85,19 +85,58 @@ class SdfContractTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("SDF contract passed", completed.stdout)
 
+    def test_generated_sdf_document_boundary_is_enforced(self) -> None:
+        wrong_root = VALID_SDF.replace(
+            '<sdf version="1.11">',
+            "<not_sdf>",
+            1,
+        ).replace("</sdf>", "</not_sdf>", 1)
+        sibling_world = VALID_SDF.replace(
+            "</sdf>",
+            '  <world name="rogue_world">\n'
+            '    <model name="rogue_model">\n'
+            '      <link name="rogue_link">\n'
+            '        <sensor name="rogue_camera" type="camera">\n'
+            "          <camera/>\n"
+            "        </sensor>\n"
+            "      </link>\n"
+            "    </model>\n"
+            "  </world>\n"
+            "</sdf>",
+            1,
+        )
+        sibling_model = VALID_SDF.replace(
+            "</sdf>",
+            '  <model name="rogue_model"/>\n'
+            "</sdf>",
+            1,
+        )
+        mutations = (
+            ("wrong_root", wrong_root, "root must be sdf"),
+            ("sibling_world", sibling_world, "exactly one direct model"),
+            ("sibling_model", sibling_model, "exactly one direct model"),
+        )
+        for case, invalid_sdf, diagnostic in mutations:
+            with self.subTest(case=case):
+                completed = self.run_checker(invalid_sdf)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(diagnostic, completed.stderr)
+
     def test_matching_text_outside_control_plugin_does_not_pass(self) -> None:
         invalid_sdf = VALID_SDF.replace(
             '<plugin name="gz_ros2_control::GazeboSimROS2ControlPlugin"\n'
             '            filename="libgz_ros2_control-system.so">',
             '<plugin name="other" filename="other-system">',
         ).replace(
-            "</model>",
-            "</model>\n"
-            '  <world name="empty">\n'
-            '    <plugin name="gz_ros2_control::'
+            "  </model>",
+            '    <model name="decoy">\n'
+            '      <plugin name="gz_ros2_control::'
             'GazeboSimROS2ControlPlugin" '
             'filename="libgz_ros2_control-system.so"/>\n'
-            "  </world>",
+            "    </model>\n"
+            "  </model>",
+            1,
         )
 
         completed = self.run_checker(invalid_sdf)
