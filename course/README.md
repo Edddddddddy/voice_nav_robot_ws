@@ -14,8 +14,8 @@
 [独立 MotionGate](lessons/0009-build-independent-motion-gate.md) 为
 `in_progress`，对应 VN-0010 / Issue #11；其
 [学习记录](records/0009-independent-motion-gate.md) 已填入教师参考实现的
-local-GREEN 证据，学习者复现仍为 Pending；PR、required CI、merge 与 solution
-tag 尚未闭环。Lesson 0010 才验收进程 crash-stop 与 Gazebo pause/resume，
-不能提前写入 Lesson 0009 完成结论。
+local-GREEN 证据，学习者复现仍为 Pending；draft PR #12 已创建，required
+CI、merge 与 solution tag 尚未闭环。Lesson 0010 才验收进程 crash-stop 与
+Gazebo pause/resume，不能提前写入 Lesson 0009 完成结论。
 
 本课程中的“停止”均指仿真项目的高优先级 operational stop，不是经过功能安全认证的急停。

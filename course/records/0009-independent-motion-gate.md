@@ -27,7 +27,8 @@ merge 与 solution tag 尚未发生，因此仍保持 Pending。
   `8e80dcc`
 - Documentation/evidence commit：
   `3cdd815433c15ff91043827c568c185bc39fff51`
-- GitHub PR：Pending
+- GitHub PR：
+  [#12](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/12)（Draft）
 - Required exact-head CI：Pending
 - Public merge identity：Pending
 - Solution tag object/peeled target：Pending
@@ -473,7 +474,7 @@ SIGKILL 并令该次门禁失败。诊断没有发现 OOM、segfault 或残留�
 - [x] 三次独立只读审查完成；P0/P1 均为零。
 - [x] P2 clean-install 残留问题已以 fresh-prefix audit、规范 overlay 重建和
   regression contract 关闭。
-- [ ] PR diff 只包含 VN-0010 范围。
+- [x] PR diff 只包含 VN-0010 范围。
 - [ ] required hosted CI 在 exact head 通过。
 - [ ] review conversations 全部解决。
 - [ ] PR 以 rebase 方式合并。
@@ -491,7 +492,9 @@ safety review: P0=0, P1=0, P2=0; one fail-closed availability-only P3 noted
 evidence review: P0=0, P1=0, P2=0; final re-review passed; local closure YES
 
 PR:
-Pending
+https://github.com/Edddddddddy/voice_nav_robot_ws/pull/12
+state=OPEN; draft=true; base=main; head=feat/vn-0010-l0009-motion-gate
+creation head=fcf9af874df93438519e3d7472e5b3237fdd21f0
 
 Required exact-head CI:
 Pending
