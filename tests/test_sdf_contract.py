@@ -208,6 +208,14 @@ class SdfContractTest(unittest.TestCase):
                     "<pose>0.2 0 0.195 0 0 0</pose>",
                 ),
             ),
+            (
+                "relative_frame",
+                VALID_SDF.replace(
+                    canonical_pose,
+                    '<pose relative_to="base_link">'
+                    "0.1 0 0.195 0 0 0</pose>",
+                ),
+            ),
         )
         for case, invalid_sdf in mutations:
             with self.subTest(case=case):
