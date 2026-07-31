@@ -22,7 +22,7 @@ merge 与 solution tag 仍保持 Pending。下列数值来自 2026-07-31 的最�
 - Tests-first contract commit：`40608da`
 - Green implementation commit：`b246340`
 - Review-fix commit：`0f5fdfa`
-- Documentation/evidence commit：TBD
+- Documentation/evidence commit：`bc9e636`
 - GitHub PR：TBD
 - Required CI：TBD
 - Public merge identity：TBD
