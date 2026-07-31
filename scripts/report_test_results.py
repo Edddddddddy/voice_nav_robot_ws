@@ -4,7 +4,6 @@
 
 import argparse
 import inspect
-import shutil
 import sys
 import tempfile
 from contextlib import ExitStack
@@ -15,8 +14,8 @@ from colcon_test_result.test_result import get_test_result_extensions
 from colcon_test_result.test_result import Result
 
 from colcon_evidence import ctest_result_path
-from colcon_evidence import discover_result_inputs
 from colcon_evidence import open_result_deletion_plan
+from colcon_evidence import open_result_snapshot
 from colcon_evidence import selected_package_directories
 
 
@@ -162,22 +161,14 @@ def collect_package_evidence(
 ) -> PackageEvidence:
     """Parse one package from a symlink-free copy of validated inputs."""
 
-    source_inputs = discover_result_inputs(package_directory)
-    with tempfile.TemporaryDirectory(
-        prefix=f"voice-nav-results-{package_directory.name}-"
-    ) as temporary_directory:
+    with (
+        open_result_snapshot(package_directory) as snapshot,
+        tempfile.TemporaryDirectory(
+            prefix=f"voice-nav-results-{package_directory.name}-"
+        ) as temporary_directory,
+    ):
         sandbox_package = Path(temporary_directory) / package_directory.name
-        source_by_relative_path: dict[Path, Path] = {}
-        for source_path in source_inputs:
-            relative_path = source_path.relative_to(package_directory)
-            destination_path = sandbox_package / relative_path
-            destination_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(
-                source_path,
-                destination_path,
-                follow_symlinks=False,
-            )
-            source_by_relative_path[relative_path] = source_path
+        source_by_relative_path = snapshot.stage(sandbox_package)
 
         parsed = _parse_sandbox(
             sandbox_package,
