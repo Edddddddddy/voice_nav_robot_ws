@@ -325,6 +325,34 @@ class ScopedTestResultsTest(unittest.TestCase):
             )
             self.assertNotIn("Summary: 1 test", completed.stdout)
 
+    def test_report_rejects_ctest_result_with_wrong_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            selected_package = build_base / "voice_nav_mission"
+            write_xunit(selected_package / "valid.xunit.xml", tests=1)
+            testing_directory = selected_package / "Testing"
+            testing_directory.mkdir()
+            (testing_directory / "TAG").write_text(
+                "20260731-0000\nExperimental\n",
+                encoding="utf-8",
+            )
+            write_xunit(
+                testing_directory / "20260731-0000" / "Test.xml",
+                tests=9,
+            )
+
+            completed = self.run_reporter(
+                build_base,
+                "voice_nav_mission",
+            )
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn(
+                "CTest TAG did not produce a result",
+                completed.stderr,
+            )
+            self.assertNotIn("Summary: 10 tests", completed.stdout)
+
     def test_boundary_allows_missing_build_base(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             build_base = Path(temporary_directory) / "missing"
