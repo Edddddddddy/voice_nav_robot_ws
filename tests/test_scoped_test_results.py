@@ -421,6 +421,85 @@ class ScopedTestResultsTest(unittest.TestCase):
             self.assertIn("invalid source package manifest", completed.stderr)
             self.assertNotIn("Summary: 1 test", completed.stdout)
 
+    def test_report_rejects_unknown_source_manifest_encoding(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            build_base = workspace / "build"
+            package_name = "voice_nav_agent"
+            selected_package = build_base / package_name
+            write_xunit(selected_package / "good.xunit.xml", tests=1)
+            source_manifest = (
+                workspace / "src" / package_name / "package.xml"
+            )
+            source_manifest.parent.mkdir(parents=True)
+            source_manifest.write_bytes(
+                b'<?xml version="1.0" encoding="no-such-codec"?>\n'
+                b"<package><name>voice_nav_agent</name></package>\n"
+            )
+            (selected_package / "package.xml").symlink_to(source_manifest)
+
+            completed = self.run_reporter(build_base, package_name)
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("invalid source package manifest", completed.stderr)
+            self.assertNotIn("Traceback", completed.stderr)
+            self.assertNotIn("Summary: 1 test", completed.stdout)
+
+    def test_report_rejects_symlinked_source_layout_components(self) -> None:
+        for symlink_component in ("src", "package"):
+            with self.subTest(symlink_component=symlink_component):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    workspace = Path(temporary_directory)
+                    build_base = workspace / "build"
+                    package_name = "voice_nav_agent"
+                    selected_package = build_base / package_name
+                    write_xunit(
+                        selected_package / "good.xunit.xml",
+                        tests=1,
+                    )
+                    external_root = workspace / "external-source"
+                    external_package = external_root / package_name
+                    write_package_manifest(
+                        external_package / "package.xml",
+                        package_name=package_name,
+                    )
+                    external_module = external_package / package_name
+                    write_xunit(
+                        external_module
+                        / "test_results"
+                        / "hidden.xunit.xml",
+                        tests=9,
+                    )
+                    if symlink_component == "src":
+                        (workspace / "src").symlink_to(
+                            external_root,
+                            target_is_directory=True,
+                        )
+                    else:
+                        source_root = workspace / "src"
+                        source_root.mkdir()
+                        (source_root / package_name).symlink_to(
+                            external_package,
+                            target_is_directory=True,
+                        )
+                    expected_source = workspace / "src" / package_name
+                    (selected_package / "package.xml").symlink_to(
+                        expected_source / "package.xml"
+                    )
+                    (selected_package / package_name).symlink_to(
+                        expected_source / package_name,
+                        target_is_directory=True,
+                    )
+
+                    completed = self.run_reporter(build_base, package_name)
+
+                    self.assertEqual(completed.returncode, 2)
+                    self.assertIn(
+                        "invalid source package layout",
+                        completed.stderr,
+                    )
+                    self.assertNotIn("Summary: 1 test", completed.stdout)
+
     def test_report_allows_known_non_evidence_build_symlinks(self) -> None:
         cases = (
             (
