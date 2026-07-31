@@ -23,7 +23,8 @@ merge 与 solution tag 仍保持 Pending。下列数值来自 2026-07-31 的最�
 - Green implementation commit：`b246340`
 - Review-fix commit：`0f5fdfa`
 - Documentation/evidence commit：`bc9e636`
-- GitHub PR：TBD
+- GitHub PR：
+  [#9](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/9)
 - Required CI：TBD
 - Public merge identity：TBD
 - Solution tag：TBD，且只能在 reviewed public merge 后创建
@@ -440,7 +441,7 @@ Issue:
 https://github.com/Edddddddddy/voice_nav_robot_ws/issues/8
 
 PR:
-TBD
+https://github.com/Edddddddddy/voice_nav_robot_ws/pull/9
 
 Required CI:
 TBD
