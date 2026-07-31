@@ -457,6 +457,27 @@ class SimulationContractTest(unittest.TestCase):
                     completed.stderr,
                 )
 
+    def test_local_world_resource_uri_is_rejected(self) -> None:
+        for uri in (
+            "/home/developer/cache/hidden.dae",
+            "../meshes/hidden.dae",
+            "meshes/hidden.dae",
+        ):
+            with self.subTest(uri=uri):
+                world = VALID_WORLD.replace(
+                    '<model name="ground_plane">',
+                    f"<include><uri>{uri}</uri></include>\n"
+                    '    <model name="ground_plane">',
+                )
+
+                completed = self.run_checker(world=world)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(
+                    "must not reference resource URI",
+                    completed.stderr,
+                )
+
     def test_inline_ground_collision_is_required(self) -> None:
         ground_start = VALID_WORLD.index(
             '    <model name="ground_plane">'
@@ -576,6 +597,23 @@ class SimulationContractTest(unittest.TestCase):
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn(
             "laser_link must own exactly one Gazebo LiDAR sensor",
+            completed.stderr,
+        )
+
+    def test_second_sensor_on_another_link_is_rejected(self) -> None:
+        robot = VALID_ROBOT.replace(
+            "</robot>",
+            '  <gazebo reference="base_link">\n'
+            '    <sensor name="rogue_lidar" type="gpu_lidar"/>\n'
+            "  </gazebo>\n"
+            "</robot>",
+        )
+
+        completed = self.run_checker(robot=robot)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "exactly one Gazebo sensor",
             completed.stderr,
         )
 
