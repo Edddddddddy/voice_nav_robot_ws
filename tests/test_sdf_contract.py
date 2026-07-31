@@ -153,6 +153,21 @@ class SdfContractTest(unittest.TestCase):
                     completed.stderr,
                 )
 
+    def test_generated_sdf_lidar_owner_is_enforced(self) -> None:
+        sensor_on_wheel = VALID_SDF.replace(VALID_SENSOR, "").replace(
+            "    </link>",
+            "    </link>\n"
+            '    <link name="left_wheel">\n'
+            f"{VALID_SENSOR}"
+            "    </link>",
+            1,
+        )
+
+        completed = self.run_checker(sensor_on_wheel)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("base_footprint", completed.stderr)
+
     def test_generated_sdf_lidar_identity_is_enforced(self) -> None:
         mutations = (
             (
