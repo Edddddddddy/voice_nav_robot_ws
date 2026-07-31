@@ -228,6 +228,123 @@ class ScopedTestResultsTest(unittest.TestCase):
             self.assertIn("result path contains symbolic link", completed.stderr)
             self.assertNotIn("Summary: 9 tests", completed.stdout)
 
+    def test_report_rejects_symlinked_test_results_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            build_base = workspace / "build"
+            selected_package = build_base / "voice_nav_mission"
+            write_xunit(selected_package / "good.xunit.xml", tests=1)
+            external_results = workspace / "external-results"
+            write_xunit(
+                external_results / "hidden.xunit.xml",
+                tests=9,
+            )
+            (selected_package / "test_results").symlink_to(
+                external_results,
+                target_is_directory=True,
+            )
+
+            completed = self.run_reporter(
+                build_base,
+                "voice_nav_mission",
+            )
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("result path contains symbolic link", completed.stderr)
+            self.assertNotIn("Summary: 1 test", completed.stdout)
+
+    def test_report_rejects_unapproved_symlinked_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            build_base = workspace / "build"
+            selected_package = build_base / "voice_nav_mission"
+            write_xunit(selected_package / "good.xunit.xml", tests=1)
+            external_results = workspace / "generated-code"
+            write_xunit(
+                external_results / "hidden.gtest.xml",
+                tests=9,
+            )
+            (selected_package / "generated-code").symlink_to(
+                external_results,
+                target_is_directory=True,
+            )
+
+            completed = self.run_reporter(
+                build_base,
+                "voice_nav_mission",
+            )
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("result path contains symbolic link", completed.stderr)
+            self.assertNotIn("Summary: 1 test", completed.stdout)
+
+    def test_report_rejects_nested_package_xml_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            build_base = workspace / "build"
+            selected_package = build_base / "voice_nav_mission"
+            write_xunit(selected_package / "good.xunit.xml", tests=1)
+            external_result = workspace / "hidden.xunit.xml"
+            write_xunit(external_result, tests=9)
+            nested_manifest = (
+                selected_package
+                / "test_results"
+                / "voice_nav_mission"
+                / "package.xml"
+            )
+            nested_manifest.parent.mkdir(parents=True)
+            nested_manifest.symlink_to(external_result)
+
+            completed = self.run_reporter(
+                build_base,
+                "voice_nav_mission",
+            )
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("result path contains symbolic link", completed.stderr)
+            self.assertNotIn("Summary: 1 test", completed.stdout)
+
+    def test_report_allows_known_non_evidence_build_symlinks(self) -> None:
+        cases = (
+            (
+                "voice_nav_agent",
+                Path("voice_nav_agent"),
+            ),
+            (
+                "voice_nav_mission",
+                Path(
+                    "ament_cmake_python/voice_nav_mission/voice_nav_mission"
+                ),
+            ),
+        )
+        for package_name, relative_link in cases:
+            with self.subTest(relative_link=relative_link):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    workspace = Path(temporary_directory)
+                    build_base = workspace / "build"
+                    selected_package = build_base / package_name
+                    write_xunit(
+                        selected_package / "good.xunit.xml",
+                        tests=1,
+                    )
+                    target = workspace / "generated" / package_name
+                    target.mkdir(parents=True)
+                    link = selected_package / relative_link
+                    link.parent.mkdir(parents=True, exist_ok=True)
+                    link.symlink_to(target, target_is_directory=True)
+
+                    completed = self.run_reporter(
+                        build_base,
+                        package_name,
+                    )
+
+                    self.assertEqual(
+                        completed.returncode,
+                        0,
+                        completed.stderr,
+                    )
+                    self.assertIn("Summary: 1 test", completed.stdout)
+
     def test_anchored_snapshot_rejects_source_replaced_by_symlink(self) -> None:
         from scripts.colcon_evidence import open_result_snapshot
 
