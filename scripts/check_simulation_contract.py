@@ -11,7 +11,6 @@ import sys
 import xml.etree.ElementTree as element_tree
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlsplit
 
 
 class SimulationContractError(ValueError):
@@ -220,14 +219,15 @@ def validate_world(path: Path) -> None:
             "simulation world name must be voice_nav_test_world"
         )
 
-    for uri_node in descendants(world, "uri"):
+    uri_nodes = list(descendants(world, "uri"))
+    if uri_nodes:
+        uri_node = uri_nodes[0]
         uri = (uri_node.text or "").strip()
-        parsed = urlsplit(uri)
-        if parsed.scheme or uri.startswith("//"):
-            raise SimulationContractError(
-                "simulation world must not reference external URI: "
-                f"{uri or '<empty>'}"
-            )
+        raise SimulationContractError(
+            "simulation world must not reference external URI; "
+            "it must not reference resource URI at all: "
+            f"{uri or '<empty>'}"
+        )
 
     plugins = direct_children(world, "plugin")
     plugins_by_name: dict[str, list[element_tree.Element]] = {}
@@ -404,8 +404,20 @@ def validate_robot_description(path: Path) -> None:
             "robot root must directly define exactly one laser_link"
         )
 
+    gazebo_blocks = direct_children(root, "gazebo")
+    sensor_bindings = [
+        (gazebo, sensor)
+        for gazebo in gazebo_blocks
+        for sensor in direct_children(gazebo, "sensor")
+    ]
+    if len(sensor_bindings) != 1:
+        raise SimulationContractError(
+            "robot root must directly define exactly one Gazebo sensor "
+            "for Lesson 0008"
+        )
+
     laser_gazebo_blocks = [
-        gazebo for gazebo in direct_children(root, "gazebo")
+        gazebo for gazebo in gazebo_blocks
         if gazebo.get("reference") == "laser_link"
     ]
     if len(laser_gazebo_blocks) != 1:
@@ -413,16 +425,11 @@ def validate_robot_description(path: Path) -> None:
             "robot root must directly attach Gazebo configuration; "
             "laser_link must own exactly one Gazebo LiDAR sensor"
         )
-    lidar_sensors = [
-        sensor
-        for gazebo in laser_gazebo_blocks
-        for sensor in direct_children(gazebo, "sensor")
-    ]
-    if len(lidar_sensors) != 1:
+    sensor_owner, sensor = sensor_bindings[0]
+    if sensor_owner is not laser_gazebo_blocks[0]:
         raise SimulationContractError(
             "laser_link must own exactly one Gazebo LiDAR sensor"
         )
-    sensor = lidar_sensors[0]
     if sensor.get("type") != "gpu_lidar":
         raise SimulationContractError(
             "laser_link sensor type must be gpu_lidar"
