@@ -1,3 +1,5 @@
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -471,6 +473,78 @@ class ScopedTestResultsTest(unittest.TestCase):
 
         self.assertLess(ros_install, contract_tests)
         self.assertLess(contract_tests, canonical_verify)
+
+    def test_verify_fails_closed_when_package_discovery_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory) / "workspace"
+            scripts_directory = workspace / "scripts"
+            scripts_directory.mkdir(parents=True)
+            shutil.copyfile(VERIFY_SCRIPT, scripts_directory / "verify.sh")
+            (scripts_directory / "check_clean_motion_gate_install.sh").write_text(
+                "#!/usr/bin/env bash\nexit 0\n",
+                encoding="utf-8",
+            )
+            (workspace / "install").mkdir()
+            (workspace / "install" / "setup.bash").write_text(
+                "",
+                encoding="utf-8",
+            )
+
+            trace_file = workspace / "trace.log"
+            bash_environment = workspace / "test-environment.bash"
+            bash_environment.write_text(
+                """python3() { return 0; }
+git() { return 0; }
+rosdep() { return 0; }
+xacro() { return 0; }
+check_urdf() { return 0; }
+gz() { return 0; }
+realpath() { printf '%s\\n' "${1:-}"; }
+colcon() {
+  case "${1:-}" in
+    list)
+      printf 'voice_nav_interfaces\\n'
+      return 1
+      ;;
+    build)
+      printf 'colcon:build\\n' >> "${VOICE_NAV_TEST_TRACE}"
+      return 0
+      ;;
+    test)
+      printf 'colcon:test\\n' >> "${VOICE_NAV_TEST_TRACE}"
+      return 0
+      ;;
+  esac
+  return 0
+}
+export -f python3 git rosdep xacro check_urdf gz realpath colcon
+""",
+                encoding="utf-8",
+            )
+            environment = os.environ.copy()
+            environment["BASH_ENV"] = str(bash_environment)
+            environment["VOICE_NAV_TEST_TRACE"] = str(trace_file)
+
+            completed = subprocess.run(
+                ["bash", str(scripts_directory / "verify.sh")],
+                cwd=workspace,
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            trace = (
+                trace_file.read_text(encoding="utf-8")
+                if trace_file.exists()
+                else ""
+            )
+            self.assertEqual(completed.returncode, 5, completed.stderr)
+            self.assertIn(
+                "Failed to discover ROS packages under src",
+                completed.stderr,
+            )
+            self.assertNotIn("colcon:build", trace)
 
 
 if __name__ == "__main__":
