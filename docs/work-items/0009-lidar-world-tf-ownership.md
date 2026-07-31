@@ -396,6 +396,7 @@ The expanded-owner review pair is `d50739f` (RED) and `a4afab1` (GREEN).
 The outer-owner-identity review pair is `d0a3bf2` (RED) and `13c2a7e` (GREEN).
 The generated-document review pair is `71d3551` (RED) and `68818f3` (GREEN).
 The documentation and local-evidence commit is `bc9e636`.
+The local review-closure evidence commit is `c210b46`.
 The final repository gate reported:
 
 ```text

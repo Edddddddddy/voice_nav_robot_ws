@@ -29,6 +29,7 @@
 - Outer-owner identity review RED/GREEN：`d0a3bf2` / `13c2a7e`
 - Generated-document review RED/GREEN：`71d3551` / `68818f3`
 - Documentation/evidence commit：`bc9e636`
+- Local review-closure evidence commit：`c210b46`
 - GitHub PR：
   [#9](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/9)
 - Required CI：当前 review-hardening 提交仍为 TBD；较早的远端
