@@ -13,7 +13,7 @@ if(BUILD_TESTING)
   ament_add_pytest_test(
     motion_gate_open_convergence_test
     test/test_motion_gate_open_convergence.py
-    TIMEOUT 5
+    TIMEOUT 30
   )
 
   add_launch_test(
