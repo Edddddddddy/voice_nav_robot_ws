@@ -3,15 +3,17 @@
 """Report or clear test results for an explicit set of colcon packages."""
 
 import argparse
+import inspect
 import shutil
 import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from colcon_test_result.test_result import get_test_results
+from colcon_test_result.test_result import get_test_result_extensions
 from colcon_test_result.test_result import Result
 
+from colcon_evidence import ctest_result_path
 from colcon_evidence import discover_result_inputs
 from colcon_evidence import selected_package_directories
 from colcon_evidence import validate_result_input
@@ -24,6 +26,16 @@ class PackageEvidence:
     package_directory: Path
     results: tuple[Result, ...]
     files: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
+class ParsedSandbox:
+    """Official parser output with CTest provenance kept explicit."""
+
+    results: tuple[Result, ...]
+    files: tuple[str, ...]
+    ctest_results: tuple[Result, ...]
+    ctest_files: tuple[str, ...]
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -80,6 +92,67 @@ def _map_sandbox_path(
         ) from error
 
 
+def _parse_sandbox(
+    sandbox_package: Path,
+    *,
+    collect_details: bool,
+) -> ParsedSandbox:
+    all_results: set[Result] = set()
+    all_files: set[str] = set()
+    ctest_results: set[Result] = set()
+    ctest_files: set[str] = set()
+
+    for extension_name, extension in get_test_result_extensions().items():
+        extension_files: set[str] = set()
+        function = extension.get_test_results
+        keyword_arguments = {"collect_details": collect_details}
+        if "files" in inspect.signature(function).parameters:
+            keyword_arguments["files"] = extension_files
+        try:
+            extension_results = function(
+                sandbox_package,
+                **keyword_arguments,
+            )
+        except Exception as error:
+            raise ValueError(
+                f"{extension_name} test-result parser failed: {error}"
+            ) from error
+        if not isinstance(extension_results, set):
+            raise ValueError(
+                f"{extension_name} test-result parser returned invalid data"
+            )
+        all_results |= extension_results
+        all_files |= extension_files
+        if extension_name == "ctest":
+            ctest_results = extension_results
+            ctest_files = extension_files
+
+    return ParsedSandbox(
+        results=tuple(all_results),
+        files=tuple(all_files),
+        ctest_results=tuple(ctest_results),
+        ctest_files=tuple(ctest_files),
+    )
+
+
+def _require_complete_ctest_evidence(
+    sandbox_package: Path,
+    parsed: ParsedSandbox,
+) -> None:
+    ctest_files = {Path(path) for path in parsed.ctest_files}
+    ctest_result_paths = {Path(result.path) for result in parsed.ctest_results}
+    for tag_file in sorted(sandbox_package.glob("**/Testing/TAG")):
+        latest_xml = ctest_result_path(tag_file, sandbox_package)
+        if (
+            tag_file not in ctest_files
+            or latest_xml not in ctest_files
+            or latest_xml not in ctest_result_paths
+        ):
+            raise ValueError(
+                f"CTest TAG did not produce a result: {tag_file}"
+            )
+
+
 def collect_package_evidence(
     package_directory: Path,
     *,
@@ -105,12 +178,12 @@ def collect_package_evidence(
             )
             source_by_relative_path[relative_path] = source_path
 
-        sandbox_files: set[str] = set()
-        package_results = get_test_results(
+        parsed = _parse_sandbox(
             sandbox_package,
             collect_details=collect_details,
-            files=sandbox_files,
         )
+        _require_complete_ctest_evidence(sandbox_package, parsed)
+        package_results = set(parsed.results)
         if require_results and not package_results:
             raise ValueError(
                 "no test results found for selected package: "
@@ -124,7 +197,7 @@ def collect_package_evidence(
                     sandbox_package,
                     source_by_relative_path,
                 )
-                for sandbox_file in sandbox_files
+                for sandbox_file in parsed.files
             )
         )
         for result in package_results:

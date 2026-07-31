@@ -162,28 +162,33 @@ def discover_result_inputs(package_directory: Path) -> tuple[Path, ...]:
                 tag_files.append(path)
 
     for tag_file in tag_files:
-        lines = tag_file.read_text(encoding="utf-8").splitlines()
-        if not lines:
-            raise ValueError(f"malformed CTest TAG file: {tag_file}")
-        tag_entry = lines[0]
-        if (
-            tag_entry in (".", "..")
-            or CTEST_TAG_ENTRY_PATTERN.fullmatch(tag_entry) is None
-        ):
-            raise ValueError(
-                f"unsafe CTest TAG entry in {tag_file}: {tag_entry!r}"
-            )
-
-        latest_xml = tag_file.parent / tag_entry / "Test.xml"
-        if latest_xml.exists() or latest_xml.is_symlink():
-            validate_result_input(latest_xml, package_directory)
-            result_inputs.add(latest_xml)
-        else:
-            raise ValueError(
-                f"CTest TAG result does not exist: {latest_xml}"
-            )
+        result_inputs.add(
+            ctest_result_path(tag_file, package_directory)
+        )
 
     return tuple(sorted(result_inputs))
+
+
+def ctest_result_path(tag_file: Path, package_directory: Path) -> Path:
+    """Resolve one validated CTest TAG to its mandatory local result."""
+
+    validate_result_input(tag_file, package_directory)
+    lines = tag_file.read_text(encoding="utf-8").splitlines()
+    if not lines:
+        raise ValueError(f"malformed CTest TAG file: {tag_file}")
+    tag_entry = lines[0]
+    if (
+        tag_entry in (".", "..")
+        or CTEST_TAG_ENTRY_PATTERN.fullmatch(tag_entry) is None
+    ):
+        raise ValueError(
+            f"unsafe CTest TAG entry in {tag_file}: {tag_entry!r}"
+        )
+
+    latest_xml = tag_file.parent / tag_entry / "Test.xml"
+    if not latest_xml.exists() and not latest_xml.is_symlink():
+        raise ValueError(f"CTest TAG result does not exist: {latest_xml}")
+    return validate_result_input(latest_xml, package_directory)
 
 
 def unexpected_build_entries(
