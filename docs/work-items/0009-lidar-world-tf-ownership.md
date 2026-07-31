@@ -358,6 +358,7 @@ not node-name or total-topic-publisher shortcuts.
 Verified locally in WSL2 with ROS 2 Jazzy and Gazebo Harmonic on 2026-07-31.
 The green implementation commit is `b246340`.
 The independent-review hardening commit is `0f5fdfa`.
+The documentation and local-evidence commit is `bc9e636`.
 The final repository gate reported:
 
 ```text
