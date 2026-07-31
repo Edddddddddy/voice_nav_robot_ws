@@ -11,6 +11,9 @@ SIMULATION_CONTROL_TEST = (
     / "test"
     / "test_simulation_control.py"
 )
+SIMULATION_CMAKE = (
+    REPOSITORY_ROOT / "src" / "voice_nav_sim" / "CMakeLists.txt"
+)
 STARTUP_TIMEOUT_NAME = (
     "CONTROLLER_STARTUP_SERVICE_RESPONSE_TIMEOUT_SECONDS"
 )
@@ -110,6 +113,13 @@ class CiReadinessContractTest(unittest.TestCase):
         self.assertEqual(len(timeout_keywords), 1)
         self.assertIsInstance(timeout_keywords[0], ast.Name)
         self.assertEqual(timeout_keywords[0].id, STARTUP_TIMEOUT_NAME)
+
+    def test_simulation_launch_tests_use_an_isolated_runtime(self):
+        cmake = SIMULATION_CMAKE.read_text(encoding="utf-8")
+        self.assertIn("RMW_IMPLEMENTATION=rmw_fastrtps_cpp", cmake)
+        self.assertIn("ROS_DOMAIN_ID=91", cmake)
+        self.assertIn("ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST", cmake)
+        self.assertIn("GZ_PARTITION=voice_nav_l0008_sim_test", cmake)
 
 
 if __name__ == "__main__":
