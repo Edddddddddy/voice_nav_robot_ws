@@ -9,10 +9,11 @@ VoiceNav Robot 是一套从零手写的 ROS 2 纯仿真学习项目：让普通�
 
 ## 当前状态
 
-Lesson 0001–0007 已完成；Lesson 0008 的 reference implementation 已完成
-本地门禁与独立本地评审；draft
+Lesson 0001–0008 的 reference solution 已完成。Lesson 0008 已通过本地
+门禁、独立评审和 required CI，由
 [PR #9](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/9)
-正在运行远端 CI 与评审。当前 `v0.2` 切片包括：
+rebase 合并，并发布不可变 `course/0008-solution` tag。当前 `v0.2`
+切片包括：
 
 - 六个职责明确的 ROS package；
 - 第一版 `MissionStep` 和 `ExecuteMission` 教学接口；
