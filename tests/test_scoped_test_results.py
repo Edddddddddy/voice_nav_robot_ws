@@ -301,6 +301,30 @@ class ScopedTestResultsTest(unittest.TestCase):
                 completed.stdout,
             )
 
+    def test_report_rejects_ctest_tag_with_missing_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            selected_package = build_base / "voice_nav_mission"
+            write_xunit(selected_package / "valid.xunit.xml", tests=1)
+            testing_directory = selected_package / "Testing"
+            testing_directory.mkdir()
+            (testing_directory / "TAG").write_text(
+                "20260731-0000\nExperimental\n",
+                encoding="utf-8",
+            )
+
+            completed = self.run_reporter(
+                build_base,
+                "voice_nav_mission",
+            )
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn(
+                "CTest TAG result does not exist",
+                completed.stderr,
+            )
+            self.assertNotIn("Summary: 1 test", completed.stdout)
+
     def test_boundary_allows_missing_build_base(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             build_base = Path(temporary_directory) / "missing"
