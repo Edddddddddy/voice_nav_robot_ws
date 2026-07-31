@@ -28,7 +28,7 @@ merge 与 solution tag 尚未发生，因此仍保持 Pending。
 - Documentation/evidence commit：
   `3cdd815433c15ff91043827c568c185bc39fff51`
 - GitHub PR：
-  [#12](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/12)（Draft）
+  [#12](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/12)（Ready）
 - Required exact-head CI：Pending
 - Public merge identity：Pending
 - Solution tag object/peeled target：Pending
@@ -493,7 +493,7 @@ evidence review: P0=0, P1=0, P2=0; final re-review passed; local closure YES
 
 PR:
 https://github.com/Edddddddddy/voice_nav_robot_ws/pull/12
-state=OPEN; draft=true; base=main; head=feat/vn-0010-l0009-motion-gate
+state=OPEN; draft=false; base=main; head=feat/vn-0010-l0009-motion-gate
 creation head=fcf9af874df93438519e3d7472e5b3237fdd21f0
 
 Required exact-head CI:

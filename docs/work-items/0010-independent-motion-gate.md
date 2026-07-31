@@ -9,7 +9,7 @@
 
 **Implementation state:** local GREEN with local evidence closure. The full
 local gate, clean-prefix install audit, and independent evidence review pass.
-Draft PR #12 exists; required hosted CI, rebase merge, and
+PR #12 is ready for review; required hosted CI, rebase merge, and
 `course/0009-solution` do not yet exist.
 
 ## Goal
