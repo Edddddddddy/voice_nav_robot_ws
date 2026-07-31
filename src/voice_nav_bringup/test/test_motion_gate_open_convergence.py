@@ -12,8 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import importlib.util
 from dataclasses import dataclass, replace
+import importlib.util
 from pathlib import Path
 import unittest
 
@@ -230,8 +230,10 @@ class MotionGateOpenConvergenceTest(unittest.TestCase):
 
         self.assertEqual(len(calls), 2)
         self.assertEqual(caught.exception.attempts, 2)
-        self.assertEqual(clock.sleeps, [0.01, 0.015])
-        self.assertEqual(clock.value, 0.025)
+        self.assertEqual(len(clock.sleeps), 2)
+        self.assertAlmostEqual(clock.sleeps[0], 0.01)
+        self.assertAlmostEqual(clock.sleeps[1], 0.015)
+        self.assertAlmostEqual(clock.value, 0.025)
 
 
 if __name__ == '__main__':
