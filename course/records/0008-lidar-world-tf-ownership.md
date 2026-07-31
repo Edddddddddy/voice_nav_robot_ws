@@ -2,9 +2,10 @@
 
 状态：Pending
 
-本记录只填写已经发生且可复查的证据。当前仅 immutable start checkpoint
-已经验证；tests-first、实现、PR、CI、review、merge 与 solution tag 均保持
-Pending。不要把课程中的期望输出复制成实验结果。
+本记录只填写已经发生且可复查的证据。教师侧 reference implementation
+已经完成 tests-first、本地实现与完整本地门禁；学习者复现、PR、CI、review、
+merge 与 solution tag 仍保持 Pending。下列数值来自 2026-07-31 的最终本地
+运行，不是课程中的期望输出。
 
 ## 变更身份
 
@@ -18,8 +19,9 @@ Pending。不要把课程中的期望输出复制成实验结果。
   `982ec062889b5a2ab92c391967b9084d15e52b60`
 - Start tag peeled target：
   `f99210d8830cd2cd16eb801ffe0de10422cf4584`
-- Tests-first contract commit：TBD
-- Green implementation commit：TBD
+- Tests-first contract commit：`40608da`
+- Green implementation commit：`b246340`
+- Review-fix commit：`0f5fdfa`
 - Documentation/evidence commit：TBD
 - GitHub PR：TBD
 - Required CI：TBD
@@ -61,7 +63,7 @@ f99210d8830cd2cd16eb801ffe0de10422cf4584
   fixtures 均因
   预期原因通过。
 - [x] 失败来自缺少产品实现，而不是 syntax/import/fixture/discovery 错误。
-- [ ] 实现修改发生在 tests-first commit 之后。
+- [x] 实现修改发生在 tests-first commit 之后。
 
 ```text
 Command:
@@ -94,182 +96,213 @@ fixture defect. No Lesson 0008 production source had been changed.
 
 ## Packaged world 证据
 
-- [ ] `voice_nav_test_world.sdf` 从 package share 加载。
-- [ ] installed world 与 source contract 一致。
-- [ ] world 不含 Fuel、HTTP(S) 或依赖本机 cache 的 URI。
-- [ ] Physics、UserCommands、SceneBroadcaster、Sensors systems 全部存在。
-- [ ] headless path 使用 `--headless-rendering`。
-- [ ] ground 与固定 obstacle 都有 collision。
-- [ ] obstacle center 为 `(2.0, 0.0, 0.5)` m。
-- [ ] obstacle size 为 `(0.5, 1.0, 1.0)` m。
+- [x] `voice_nav_test_world.sdf` 从 package share 加载。
+- [x] installed world 与 source contract 一致。
+- [x] world 不含 Fuel、HTTP(S) 或依赖本机 cache 的 URI。
+- [x] Physics、UserCommands、SceneBroadcaster、Sensors systems 全部存在。
+- [x] headless path 使用 `--headless-rendering`。
+- [x] ground 与固定 obstacle 都有 collision。
+- [x] obstacle center 为 `(2.0, 0.0, 0.5)` m。
+- [x] obstacle size 为 `(0.5, 1.0, 1.0)` m。
 
 ```text
 Installed world path:
-TBD
+install/voice_nav_sim/share/voice_nav_sim/worlds/voice_nav_test_world.sdf
 
 World validation command and exit status:
-TBD
+python3 scripts/check_simulation_contract.py \
+  --launch src/voice_nav_sim/launch/simulation.launch.py \
+  --world src/voice_nav_sim/worlds/voice_nav_test_world.sdf \
+  --robot-description \
+    src/voice_nav_sim/urdf/voice_nav_robot.urdf.xacro \
+  --bridge src/voice_nav_sim/config/bridge.yaml \
+  --package src/voice_nav_sim/package.xml \
+  --cmake src/voice_nav_sim/CMakeLists.txt
+exit status: 0
+gz sdf -k src/voice_nav_sim/worlds/voice_nav_test_world.sdf
+exit status: 0
 
 Required systems:
-TBD
+Physics, UserCommands, SceneBroadcaster, Sensors(render_engine=ogre2)
 
 Obstacle collision pose/size:
-TBD
+center=(2.0, 0.0, 0.5) m; size=(0.5, 1.0, 1.0) m
 
 Network-dependency audit:
-TBD
+PASS: no Fuel, HTTP(S), or machine-cache resource URI
 ```
 
 ## LiDAR 与 bridge 证据
 
-- [ ] Gazebo `/scan` 持续发布。
-- [ ] ROS `/scan` 类型为 `sensor_msgs/msg/LaserScan`。
-- [ ] `header.frame_id` 精确为 `laser_link`。
-- [ ] update rate、360 samples、360° angle、single layer 与 range contract
+- [x] Gazebo `/scan` 持续发布。
+- [x] ROS `/scan` 类型为 `sensor_msgs/msg/LaserScan`。
+- [x] `header.frame_id` 精确为 `laser_link`。
+- [x] update rate、360 samples、360° angle、single layer 与 range contract
   一致。
-- [ ] sensor 没有 noise。
-- [ ] ROS scan stamps 使用仿真时间且至少三条严格递增。
-- [ ] `/scan` publisher 使用 sensor-data QoS。
-- [ ] bridge allowlist 只有 `/clock` 与 `/scan`。
-- [ ] 两项 direction 均为 `GZ_TO_ROS`。
-- [ ] bridge 没有 wall-time timestamp override。
-- [ ] bridge 不承载 cmd、joint state、odom、`/tf` 或 `/tf_static`。
+- [x] sensor 没有 noise。
+- [x] ROS scan stamps 使用仿真时间且至少三条严格递增。
+- [x] `/scan` publisher 使用 sensor-data QoS。
+- [x] bridge allowlist 只有 `/clock` 与 `/scan`。
+- [x] 两项 direction 均为 `GZ_TO_ROS`。
+- [x] bridge 没有 wall-time timestamp override。
+- [x] bridge 不承载 cmd、joint state、odom、`/tf` 或 `/tf_static`。
 
 ```text
 Gazebo /scan topic/type:
-TBD
+/scan / gz.msgs.LaserScan
 
 ROS /scan type:
-TBD
+sensor_msgs/msg/LaserScan; exactly one publisher: /simulation_bridge
 
 ROS /scan endpoint QoS:
-TBD
+BEST_EFFORT + VOLATILE (SENSOR_DATA)
 
 Frame and scan geometry:
-TBD
+laser_link; 10 Hz; 360 beams; [-pi,+pi]; one vertical layer;
+range=[0.05,8.0] m; resolution=0.01 m; no noise
 
 Three increasing scan stamps:
-TBD
+4.2 s, 4.3 s, 4.4 s
 
 Complete bridge.yaml:
-TBD
+/clock: gz.msgs.Clock -> rosgraph_msgs/msg/Clock, GZ_TO_ROS, CLOCK
+/scan: gz.msgs.LaserScan -> sensor_msgs/msg/LaserScan,
+       GZ_TO_ROS, SENSOR_DATA
 ```
 
 ## 解析 beam 证据
 
-- [ ] 从消息几何计算 `theta_i`，没有硬编码 center index。
-- [ ] 选择 `i* = argmin(abs(theta_i))`。
-- [ ] 根据 box front face 与实际 beam angle 计算 expected range。
-- [ ] ray/plane 交点位于 box 正面 y 范围内。
-- [ ] observed range 在由 range resolution 与仿真数值误差组成的窄容差内。
+- [x] 从消息几何计算 `theta_i`，没有硬编码 center index。
+- [x] 选择 `i* = argmin(abs(theta_i))`。
+- [x] 根据 box front face 与实际 beam angle 计算 expected range。
+- [x] ray/plane 交点位于 box 正面 y 范围内。
+- [x] observed range 在由 range resolution 与仿真数值误差组成的窄容差内。
 
 ```text
 Laser world x:
-TBD
+0.100 m
 
 Box front-face x:
 1.75 m
 
 Selected index:
-TBD
+180
 
 Selected beam angle:
-TBD
+0.008751 rad
 
 Expected analytic range:
-TBD
+1.650 m
 
 Observed range:
-TBD
+1.650 m
 
 Allowed tolerance:
-TBD
+0.020 m
 
 Absolute error:
-TBD
+0.000 m at the recorded precision
 ```
 
 ## Product /odom 证据
 
-- [ ] controller 使用 `--controller-ros-args` 直接 remap
+- [x] controller 使用 `--controller-ros-args` 直接 remap
   `~/odom:=/odom`。
-- [ ] launch 中不存在 odom relay/republisher。
-- [ ] `/odom` 有且只有一个 publisher endpoint。
-- [ ] endpoint GID 映射到 `diff_drive_controller`。
-- [ ] `/diff_drive_controller/odom` 有零个 publisher endpoint。
-- [ ] `/odom` frame 为 `odom`，child frame 为 `base_footprint`。
+- [x] launch 中不存在 odom relay/republisher。
+- [x] `/odom` 有且只有一个 publisher endpoint。
+- [x] endpoint GID 映射到 `diff_drive_controller`。
+- [x] `/diff_drive_controller/odom` 有零个 publisher endpoint。
+- [x] `/odom` frame 为 `odom`，child frame 为 `base_footprint`。
 
 ```text
 Controller remap fragment:
-TBD
+--controller-ros-args '--ros-args --remap ~/odom:=/odom'
 
 /odom verbose publisher endpoint:
-TBD
+count=1; owner=/diff_drive_controller; type=nav_msgs/msg/Odometry
 
 /diff_drive_controller/odom publisher endpoint count:
-TBD
+0
 
 /odom frame sample:
-TBD
+header.frame_id=odom; child_frame_id=base_footprint
 ```
 
 ## Scan-time TF 与 matched pose 证据
 
-- [ ] 至少三条 scan 都在自己的 `header.stamp` 成功查询
+- [x] 至少三条 scan 都在自己的 `header.stamp` 成功查询
   `odom -> laser_link`。
-- [ ] 没有用 latest transform 替代 timestamped lookup。
-- [ ] `/odom` pose 与 `odom -> base_footprint` TF 在同一 odom stamp 比较。
-- [ ] translation 和 yaw 误差在数值容差内。
+- [x] 没有用 latest transform 替代 timestamped lookup。
+- [x] `/odom` pose 与 `odom -> base_footprint` TF 在同一 odom stamp 比较。
+- [x] translation 和 yaw 误差在数值容差内。
 
 ```text
 Scan stamp 1 / transform result:
-TBD
+4.2 s / odom -> laser_link exact-time lookup PASS
 
 Scan stamp 2 / transform result:
-TBD
+4.3 s / odom -> laser_link exact-time lookup PASS
 
 Scan stamp 3 / transform result:
-TBD
+4.4 s / odom -> laser_link exact-time lookup PASS
 
 Matched odom stamp:
-TBD
+4.529 s
 
 Odometry pose:
-TBD
+x=0.000 m, y=-0.000 m, yaw=-0.000 rad
 
 TF pose:
-TBD
+x=0.000 m, y=-0.000 m, yaw=-0.000 rad
 
 Translation error:
-TBD
+<= 1e-5 m
 
 Yaw error:
-TBD
+<= 1e-5 rad
 ```
 
 ## TF edge / publisher GID ownership 证据
 
-- [ ] `/tf` 与 `/tf_static` callback 都记录
+- [x] `/tf` 与 `/tf_static` callback 都记录
   `MessageInfo.publisher_gid`。
-- [ ] graph endpoint GID 与 observed message GID 成功关联。
-- [ ] 每个 expected edge 恰好有一个 publisher GID。
-- [ ] 每个 GID 映射到预期 node owner。
-- [ ] frame 名精确且无前导 `/`。
-- [ ] `map -> odom` 不存在。
-- [ ] `/tf_static` 使用 transient-local-compatible 订阅 QoS。
+- [x] graph endpoint GID 与 observed message GID 成功关联。
+- [x] 每个 expected edge 恰好有一个 publisher GID。
+- [x] 每个 GID 映射到预期 node owner。
+- [x] frame 名精确且无前导 `/`。
+- [x] `map -> odom` 不存在。
+- [x] `/tf_static` 使用 transient-local-compatible 订阅 QoS。
 
 ```text
 Runtime ownership table:
 
 topic | parent -> child | publisher GID | graph owner | result
-TBD
+/tf_static | base_footprint -> base_link | run-local | /robot_state_publisher | PASS
+/tf_static | base_link -> caster_link | run-local | /robot_state_publisher | PASS
+/tf_static | base_link -> laser_link | run-local | /robot_state_publisher | PASS
+/tf | base_link -> left_wheel | run-local | /robot_state_publisher | PASS
+/tf | base_link -> right_wheel | run-local | /robot_state_publisher | PASS
+/tf | odom -> base_footprint | run-local | /diff_drive_controller | PASS
+
+The auditor observed the complete 35.000-second window and required a final
+3.000-second stable interval. Publisher GIDs are DDS run-local identities and
+are intentionally not copied into this durable record.
 
 Unknown/unmapped GIDs:
-TBD
+0
 
 map -> odom:
-TBD
+absent; reject-undeclared audit PASS
 ```
+
+The review-fix extracted endpoint-identity decisions into a pure evaluator.
+Its eight deterministic GTests cover absent graph data, both RMW unknown
+placeholders, an expected owner, expected plus unresolved data, wrong plus
+unresolved data, a fully resolved wrong owner, and the critical case where an
+expected owner must not hide a second resolved wrong owner. The integration
+test also lower-bounds its post-motion odometry/TF lookup by the final
+odometry stamp and validates odometry, legacy odometry, and scan endpoints
+from one decisive graph snapshot.
 
 ## 唯一性算法故障注入
 
@@ -297,7 +330,9 @@ The same /tf_static graph contained four publisher endpoints in total.
 Dynamic-topic and owner mapping:
 A periodic /tf writer mapped to /dynamic_tf_owner and passed its full
 observation window. A second auditor expecting /wrong_dynamic_tf_owner exited
-1 and logged topic=/tf endpoints={/dynamic_tf_owner}.
+1 and logged:
+GID <run-local> on /tf maps to {/dynamic_tf_owner};
+expected /wrong_dynamic_tf_owner.
 
 Why node-name deduplication would be wrong:
 The two conflicting endpoints deliberately reused duplicate_tf_owner but had
@@ -307,75 +342,90 @@ as endpoint identity would collapse a real two-writer conflict into one.
 
 ## Bounded motion 后的稳定性
 
-- [ ] 运动前记录完整 edge/GID owner set。
-- [ ] 只发送可信限速范围内的 `TwistStamped`。
-- [ ] 实验结束显式发送零。
-- [ ] 运动后 owner set 不变。
-- [ ] 运动后 scan-time transforms 仍成功。
-- [ ] `/odom` 与旧 topic endpoint count 不变。
-- [ ] launch cleanup 后没有 Gazebo/ROS process residue。
+- [x] 运动前记录完整 edge/GID owner set。
+- [x] 只发送可信限速范围内的 `TwistStamped`。
+- [x] 实验结束显式发送零。
+- [x] 运动后 owner set 不变。
+- [x] 运动后 scan-time transforms 仍成功。
+- [x] `/odom` 与旧 topic endpoint count 不变。
+- [x] launch cleanup 后没有 Gazebo/ROS process residue。
 
 ```text
 Bounded command:
-TBD
+linear.x=0.12 m/s for 0.80 s, then explicit zero for 0.30 s;
+measured travel=0.096 m
 
 Owner set before:
-TBD
+six expected TF edges; /odom owner=/diff_drive_controller;
+legacy odom publishers=0
 
 Owner set after:
-TBD
+unchanged
 
 Post-motion scan-time TF:
-TBD
+5.5 s, 5.6 s, 5.7 s; all exact-time odom -> laser_link lookups PASS
 
 Explicit zero:
-TBD
+published and final odometry linear/angular velocity entered zero tolerance
 
 Post-run process audit:
-TBD
+printf 'PROCESS_RESIDUE_AUDIT_BEGIN\n'
+if pgrep -af '[g]z sim|[g]z-sim|[g]zserver|[r]os2 launch .*voice_nav_sim|[l]aunch_testing\.launch_test.*voice_nav_sim|[p]arameter_bridge|[r]obot_state_publisher|[t]f_ownership_auditor|[c]ontroller_manager|[r]os_gz_sim.*create|[s]pawner.*(joint_state_broadcaster|diff_drive_controller)'
+then
+  printf 'FAIL: launch-owned process residue detected\n'
+  exit 1
+fi
+printf 'PASS: no matching launch-owned process remains\n'
+printf 'PROCESS_RESIDUE_AUDIT_END\n'
+
+Output appended to /tmp/vn0009-final-verify.log:
+PROCESS_RESIDUE_AUDIT_BEGIN
+PASS: no matching launch-owned process remains
+PROCESS_RESIDUE_AUDIT_END
 ```
 
 ## 本地完整门禁
 
-- [ ] `git diff --check` 通过。
-- [ ] repository tests 通过且新断言真实执行。
-- [ ] Xacro、URDF/SDF、world 与 bridge contracts 通过。
-- [ ] 六个 package build 通过。
-- [ ] package tests 零 error / failure。
-- [ ] headless integration 没有被 skip。
-- [ ] `bash scripts/verify.sh` 输出最终成功 marker。
-- [ ] source tree 没有 `__pycache__` 或 `*.pyc`。
+- [x] `git diff --check` 通过。
+- [x] repository tests 通过且新断言真实执行。
+- [x] Xacro、URDF/SDF、world 与 bridge contracts 通过。
+- [x] 六个 package build 通过。
+- [x] package tests 零 error / failure。
+- [x] headless integration 没有被 skip。
+- [x] `bash scripts/verify.sh` 输出最终成功 marker。
+- [x] Git index 未跟踪 `__pycache__` 或 `*.pyc`，安装规则也排除它们。
 - [ ] 提交前逐项阅读完整 staged diff。
 
 ```text
 Verification date/environment:
-TBD
+2026-07-31; WSL2 Ubuntu 24.04; ROS 2 Jazzy; Gazebo Harmonic
 
 Command:
 bash scripts/verify.sh
 
 Exit status:
-TBD
+0
 
 Repository test summary:
-TBD
+80 tests; 80 passed
 
 Build summary:
-TBD
+Summary: 6 packages finished
 
 ROS/package test summary:
-TBD
+Summary: 55 tests, 0 errors, 0 failures, 4 skipped
 
 Integration metrics:
-TBD
+/scan owner/QoS, exact-time TF, analytic beam, direct odom, full-window GID
+ownership and bounded-motion assertions all executed and passed
 
 Final marker:
-TBD
+VoiceNav Robot verification passed.
 ```
 
 ## 评审与远端证据
 
-- [ ] Work Item 已关联 GitHub Issue。
+- [x] Work Item 已关联 GitHub Issue。
 - [ ] PR diff 只包含 VN-0009 范围。
 - [ ] required hosted CI 通过。
 - [ ] independent review 已完成。

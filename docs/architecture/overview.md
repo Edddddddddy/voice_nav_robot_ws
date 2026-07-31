@@ -23,23 +23,27 @@ At the v0.1 checkpoint, the target ros2_control stack, 2D LiDAR bridge, SLAM,
 Nav2, Mission Runtime, Motion Gate, and local voice pipeline were not current
 claims.
 
-## Current v0.2 slice after Lesson 0007
+## Current v0.2 slice after Lesson 0008
 
-Verified by the Lesson 0007 static and headless-Gazebo gates:
+Verified by the Lesson 0007 and Lesson 0008 static and headless-Gazebo gates:
 
 - the product model uses `gz_ros2_control/GazeboSimSystem`;
 - Jazzy's `diff_drive_controller` owns both wheel velocity commands;
 - its native input is `geometry_msgs/msg/TwistStamped`;
 - `joint_state_broadcaster` publishes wheel state;
-- the controller publishes controller-native odometry and
+- the controller directly publishes product `/odom` and
   `odom → base_footprint`;
 - `cmd_vel_timeout=0.35` provides the consumer-side deadman;
-- `/clock` is the only ROS–Gazebo bridge in this slice.
+- the installed, self-contained test world provides a fixed analytic obstacle;
+- one 360-degree, single-layer GPU LiDAR publishes frame `laser_link`;
+- `/clock` and `/scan` are the only ROS–Gazebo bridges in this slice;
+- scan-time TF, matched odometry/TF pose, and every TF edge's topic,
+  publisher GID, and fully qualified owner are exercised over a bounded
+  observation window.
 
-The 2D LiDAR world, product `/odom` naming, graph-wide TF ownership audit,
-SLAM, Nav2, MotionGate, Mission Runtime, Agent, and voice pipeline remain target
-claims. Controller timeout is not presented as MotionGate or physical-stop
-completion.
+SLAM, Nav2, MotionGate, Mission Runtime, Agent, and voice remain target claims.
+No `map → odom` owner exists yet. Controller timeout is not presented as
+MotionGate or physical-stop completion.
 
 ## Target v1.0 topology
 

@@ -38,6 +38,10 @@ base_footprint → laser_link = [0.100, 0.000, 0.195]
   controller-native odometry 和 `odom → base_footprint`，而
   `robot_state_publisher` 发布机器人内部 frame；当时产品级 `/odom`
   direct remap、LiDAR 和跨 graph 唯一所有权审计仍未完成。
+- Lesson 0008 已把 controller 的私有 odometry 直接 remap 为产品
+  `/odom`，接入 frame 为 `laser_link` 的 LiDAR，并在 35 秒完整窗口内按
+  topic、edge、publisher GID 和完整 node FQN 证明当前 TF owner 唯一。
+  当前仍不存在 `map → odom`；它要到 Mapping 或 Navigation 课程才出现。
 
 ## 如何证明一条 TF edge 只有一个 owner
 
@@ -75,9 +79,10 @@ transforms。VIOLATION 可以立即失败，但成功必须等完整观测窗口
 | `odom → base_footprint` | `diff_drive_controller` | `diff_drive_controller` |
 | 机器人内部 frame | `robot_state_publisher` | `robot_state_publisher` |
 
-这张表从 Lesson 0007 的 `gz_ros2_control` 迁移开始逐步实现，不描述当前
-0001–0006 checkpoint。目标状态中 `slam_toolbox` 与 AMCL 不能同时启动；
-`ros_gz_bridge` 是 transport adapter，不是 TF 语义 owner，也不桥接
-`/tf`。
+这张表从 Lesson 0007 的 `gz_ros2_control` 迁移开始逐步实现。到 Lesson
+0008，`odom → base_footprint` 与内部 frame owner 已实现并完成 GID
+审计；`map → odom` 仍是后续目标。最终状态中 `slam_toolbox` 与 AMCL 不能
+同时启动；`ros_gz_bridge` 是 transport adapter，不是 TF 语义 owner，也
+不桥接 `/tf`。
 
 资料：[ROS 2 Jazzy：Using URDF with robot_state_publisher](https://docs.ros.org/en/jazzy/Tutorials/Intermediate/URDF/Using-URDF-with-Robot-State-Publisher.html)。

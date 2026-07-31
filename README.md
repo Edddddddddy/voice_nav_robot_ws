@@ -9,17 +9,20 @@ VoiceNav Robot 是一套从零手写的 ROS 2 纯仿真学习项目：让普通�
 
 ## 当前状态
 
-Lesson 0001–0006 已完成并迁入版本化课程目录，包括：
+Lesson 0001–0007 已完成；Lesson 0008 的 reference implementation 已完成
+本地门禁与独立本地评审，正在准备 PR。当前 `v0.2` 切片包括：
 
 - 六个职责明确的 ROS package；
 - 第一版 `MissionStep` 和 `ExecuteMission` 教学接口；
 - 手写差速机器人 Xacro、TF、碰撞、惯量和稳定落地；
-- Gazebo 原生 DiffDrive 教学 checkpoint；
+- `gz_ros2_control`、`diff_drive_controller` 与消费端 timeout；
+- 自包含测试 world、360° 2D LiDAR、`/clock`/`/scan` 单向 bridge；
+- controller 直接发布产品 `/odom`，以及按 edge、publisher GID 和完整
+  node FQN 验证的 TF 唯一所有权；
 - Work Item、质量门禁、变更记录和课程记录。
 
-当前正在建设 `v0.1.0` 工程与课程基线。原生 DiffDrive 仅保留为历史教学
-checkpoint；Lesson 0007 起按目标架构迁移到 `gz_ros2_control`、
-`diff_drive_controller` 和独立 MotionGate。
+原生 Gazebo DiffDrive 仅保留为历史教学 checkpoint。下一切片将加入独立
+MotionGate 和 crash-stop，不把当前 controller timeout 误称为完整安全链。
 
 实现状态与目标设计必须区分阅读：
 

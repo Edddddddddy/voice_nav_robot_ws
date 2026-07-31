@@ -1,6 +1,6 @@
 # VN-0009: Add LiDAR world and prove TF ownership
 
-**Status:** In Progress
+**Status:** In Review
 
 **GitHub Issue:**
 [#8](https://github.com/Edddddddddy/voice_nav_robot_ws/issues/8)
@@ -128,45 +128,45 @@ lessons to consume `/scan`, `/odom`, and TF without redefining their ownership.
 - [x] Tests-first RED proves the repository lacks the packaged
   world/LiDAR/product graph while the checker and all synthetic valid and
   negative fixtures execute successfully.
-- [ ] Static contracts reject an empty or network-dependent world, a missing
+- [x] Static contracts reject an empty or network-dependent world, a missing
   required Gazebo system, incorrect obstacle collision geometry, an absent or
   duplicate LiDAR, incorrect sensor frame/topic/geometry/noise, and an
   uninstalled runtime asset.
-- [ ] Static contracts reject a bridge with an extra entry, wrong message
+- [x] Static contracts reject a bridge with an extra entry, wrong message
   type, wrong direction, wrong QoS, timestamp override, or any bridge for
   command, joint state, odometry, `/tf`, or `/tf_static`.
-- [ ] Static and launch contracts prove that `/odom` is a direct controller
+- [x] Static and launch contracts prove that `/odom` is a direct controller
   remap and reject a relay, an absent remap, or a remaining publisher on the
   controller-native odometry name.
-- [ ] Headless Gazebo uses the packaged world with
-  `--headless-rendering`, starts without network access, and publishes
-  advancing `/clock`.
-- [ ] Gazebo `/scan` and ROS `/scan` publish repeated valid scans with the
+- [x] Headless Gazebo uses the packaged world with
+  `--headless-rendering`; the world contains no external or network asset
+  URI, and the run publishes advancing `/clock`.
+- [x] Gazebo `/scan` and ROS `/scan` publish repeated valid scans with the
   exact frame, geometry, range limits, and simulation-time semantics.
-- [ ] The beam whose reported angle has minimum absolute value sees the fixed
+- [x] The beam whose reported angle has minimum absolute value sees the fixed
   box front face within an analytic tolerance derived from its angle and the
   configured range resolution.
-- [ ] At least three increasing scan stamps can each resolve
+- [x] At least three increasing scan stamps can each resolve
   `odom -> laser_link` at that scan's own timestamp.
-- [ ] `/odom` has one controller publisher endpoint;
+- [x] `/odom` has one controller publisher endpoint;
   `/diff_drive_controller/odom` has no publisher endpoint.
-- [ ] `/odom` pose and `odom -> base_footprint` TF agree at a matched
+- [x] `/odom` pose and `odom -> base_footprint` TF agree at a matched
   timestamp.
-- [ ] The runtime audit observes every expected dynamic and static TF edge,
+- [x] The runtime audit observes every expected dynamic and static TF edge,
   maps its publisher GID to the graph endpoint, and reports exactly the
   expected owner for each edge.
-- [ ] The audit reports that no `map -> odom` edge is present.
-- [ ] A negative fixture with a second writer for the same edge fails even
+- [x] The audit reports that no `map -> odom` edge is present.
+- [x] A negative fixture with a second writer for the same edge fails even
   when both endpoint records reuse the same node name.
-- [ ] A separate valid fixture proves that multiple publishers on `/tf` are
+- [x] A separate valid fixture proves that multiple publishers on `/tf` are
   allowed when they own disjoint edges, preventing a publisher-count shortcut.
-- [ ] A bounded direct-controller motion followed by an explicit zero keeps
+- [x] A bounded direct-controller motion followed by an explicit zero keeps
   the same edge-to-owner set and preserves scan-time transformability.
-- [ ] Launch cleanup leaves no Gazebo, bridge, controller, state-publisher, or
+- [x] Launch cleanup leaves no Gazebo, bridge, controller, state-publisher, or
   entity-spawner process behind.
-- [ ] Repository contracts, Xacro/URDF/SDF checks, build, package tests, and
+- [x] Repository contracts, Xacro/URDF/SDF checks, build, package tests, and
   full verification pass in WSL2 with ROS 2 Jazzy and Gazebo Harmonic.
-- [ ] Lesson 0008 contains the tests-first workflow, deterministic range
+- [x] Lesson 0008 contains the tests-first workflow, deterministic range
   derivation, GID ownership model, failure injection, troubleshooting,
   submission evidence, and reflection questions.
 - [ ] The learner record contains only real commands, outputs, commit
@@ -355,17 +355,107 @@ not node-name or total-topic-publisher shortcuts.
 
 ### Local implementation evidence
 
-Pending. Record only output from the final implementation state, including:
+Verified locally in WSL2 with ROS 2 Jazzy and Gazebo Harmonic on 2026-07-31.
+The green implementation commit is `b246340`.
+The independent-review hardening commit is `0f5fdfa`.
+The final repository gate reported:
 
-- installed world and bridge asset paths;
-- Gazebo and ROS scan contracts;
-- analytic beam angle, expected range, observed range, and tolerance;
-- three scan timestamps and successful timestamped transforms;
-- `/odom` and old-topic publisher endpoint counts;
-- matched odometry/TF pose error;
-- edge, topic, publisher GID, and expected graph owner table before and after
-  bounded motion;
-- full verification summary and post-run process audit.
+```text
+Repository contracts:
+  80 tests passed
+
+Build:
+  Summary: 6 packages finished
+
+Package tests:
+  Summary: 55 tests, 0 errors, 0 failures, 4 skipped
+
+Full gate:
+  VoiceNav Robot verification passed.
+```
+
+The installed package-share assets used by the headless launch were:
+
+```text
+install/voice_nav_sim/share/voice_nav_sim/worlds/voice_nav_test_world.sdf
+install/voice_nav_sim/share/voice_nav_sim/config/bridge.yaml
+```
+
+One successful integration-run evidence sample reported:
+
+```text
+scan endpoint:
+  owner=/simulation_bridge
+  type=sensor_msgs/msg/LaserScan
+  reliability=BEST_EFFORT
+  durability=VOLATILE
+
+initial scan stamps:
+  4.2 s, 4.3 s, 4.4 s
+  odom -> laser_link resolved at each scan timestamp
+
+nearest-to-zero beam:
+  index=180
+  angle=0.008751 rad
+  expected=1.650 m
+  observed=1.650 m
+  tolerance=0.020 m
+
+odometry endpoints:
+  /odom owner=/diff_drive_controller
+  /diff_drive_controller/odom publisher endpoints=0
+
+matched odometry/TF:
+  stamp=4.529 s
+  x=0.000 m, y=-0.000 m, yaw=-0.000 rad
+
+bounded motion:
+  forward travel=0.096 m
+  post-motion scan stamps=5.5 s, 5.6 s, 5.7 s
+```
+
+The ownership auditor completed its full `35.000 s` observation window with
+a final continuously valid `3.000 s` interval. The following table is the
+publisher-GID sample from that run; GIDs are run-local evidence, not stable
+configuration identifiers:
+
+| Edge | Topic | Graph owner | Publisher GID sample |
+|---|---|---|---|
+| `base_footprint -> base_link` | `/tf_static` | `/robot_state_publisher` | `010f0c2653f686580000000000001603` |
+| `base_link -> caster_link` | `/tf_static` | `/robot_state_publisher` | `010f0c2653f686580000000000001603` |
+| `base_link -> laser_link` | `/tf_static` | `/robot_state_publisher` | `010f0c2653f686580000000000001603` |
+| `base_link -> left_wheel` | `/tf` | `/robot_state_publisher` | `010f0c2653f686580000000000001503` |
+| `base_link -> right_wheel` | `/tf` | `/robot_state_publisher` | `010f0c2653f686580000000000001503` |
+| `odom -> base_footprint` | `/tf` | `/diff_drive_controller` | `010f0c2660f62d900000000000007c03` |
+
+No `map -> odom` edge was observed. The same expected ownership and direct
+odometry endpoint sets remained valid after the bounded `0.096 m` movement,
+and the three post-motion scan timestamps remained transformable. Launch
+cleanup then terminated the bridge, Gazebo/controller process, robot state
+publisher, controller spawners, entity spawner, and auditor without leaving a
+launch-owned process behind. A guarded full-command-line residue audit
+covering Gazebo's Ruby wrapper, `gz-sim`, launch, bridge, controller,
+spawners, state publisher, and auditor was appended to the final evidence log
+and reported `PASS: no matching launch-owned process remains`.
+
+A repeated graph-correlation test exposed a DDS discovery race: a TF sample's
+`MessageInfo.publisher_gid` can be visible before the graph resolves that
+endpoint's node identity, temporarily yielding the RMW
+`_NODE_NAME_UNKNOWN_` or `_NODE_NAMESPACE_UNKNOWN_` placeholder. The auditor
+now treats an absent GID mapping or unresolved node identity as `PENDING`,
+which resets the stable interval. It reports an owner mismatch only after the
+identity is resolved, using the actual fully qualified owner from the same
+decisive graph snapshot. A mapping that remains unknown never passes: it
+stays pending until the bounded observation timeout and then fails the audit.
+
+The review-fix extracted endpoint-identity decisions into a pure evaluator.
+Its eight deterministic GTests cover absent graph data, both RMW unknown
+placeholders, an expected owner, expected plus unresolved data, wrong plus
+unresolved data, a fully resolved wrong owner, and the critical case where an
+expected owner must not hide a second resolved wrong owner. The integration
+test also lower-bounds its post-motion odometry/TF lookup by the final
+odometry stamp and validates odometry, legacy odometry, and scan endpoints
+from one decisive graph snapshot.
 
 ### Remote review and completion evidence
 

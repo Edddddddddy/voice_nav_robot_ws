@@ -142,6 +142,21 @@ x_front = 2.0 - 0.5 / 2 = 1.75 m
 dx = 1.75 - 0.10 = 1.65 m
 ```
 
+launch 继续使用 `--z 0.03`，因为现有完整集成测试已经证明机器人落地后，
+scan、TF 和解析距离都满足契约。不要把 Lesson 0007 记录的
+`x ≈ 0.077 m`、`yaw ≈ 0.249 rad` 误判为 3 cm 落体导致的漂移：测试在
+记录这组 pose 前，已经发送过 0.2 s 的限幅命令 `v = 0.4 m/s`、
+`omega = 1.2 rad/s`。理想圆弧给出：
+
+```text
+yaw = omega * t = 0.24 rad
+x = (v / omega) * sin(omega * t) ≈ 0.079 m
+```
+
+这与记录值一致。若未来 soak 或重复运行真的暴露初始位姿不稳定，先用全程
+零命令的 A/B 实验重复测量 spawn 后的 x、y、yaw 和速度，再考虑把离地量
+降到 `1–2 mm`；不要凭这组包含主动运动的数据猜测并修改生成高度。
+
 ### LiDAR 几何
 
 本课固定一个 single-layer 360° `gpu_lidar`：
@@ -528,6 +543,13 @@ value = (topic, publisher_gid)
 关联。未知 GID 不能被忽略；它可能只是 discovery race，也可能是已经退出的
 writer。测试应有 bounded retry，超时后明确失败。
 
+graph 中已经出现 endpoint 也不代表 node identity 已经完成发现：
+`node_name` 或 `node_namespace` 可能短暂显示为 `_NODE_*_UNKNOWN_`。此时
+audit 必须进入 `PENDING`，并重置成功所需的 stable window，不能把 unknown
+缓存为最终 owner。identity 解析为预期 owner 后才能重新累计稳定时间；
+解析为非 unknown 的错误 owner 后立即进入 `VIOLATION` 并失败；直到总体
+timeout 仍为 unknown，则携带 topic、edge 和 GID 诊断信息失败。
+
 ### 本课预期 edge
 
 | Topic | Edge | Expected owner |
@@ -753,8 +775,11 @@ node。检查 `--controller-ros-args` 的完整字符串：
 
 ### TF audit 报 unknown GID
 
-先用 bounded discovery retry 等待 graph endpoint；仍然未知时保留 GID、
-topic 和采样时间并失败。不要把 unknown writer 归到“看起来最像”的 node。
+先用 bounded discovery retry 等待 graph endpoint。endpoint 存在但
+`node_name` 或 `node_namespace` 为 `_NODE_*_UNKNOWN_` 时同样属于
+`PENDING`，并且必须重置 stable window；不要把 unknown writer 归到
+“看起来最像”的 node。identity 解析为错误 owner 后应立即失败，永久
+unknown 则在总体 timeout 时保留 GID、topic、edge 和采样时间并失败。
 
 ## 14. 完整门禁、自审与提交
 
