@@ -144,6 +144,7 @@ else
     --event-handlers console_direct+
 fi
 
+python3 scripts/check_colcon_build_boundary.py "${build_boundary_args[@]}"
 python3 scripts/report_test_results.py "${test_result_args[@]}"
 echo "[6/6] Auditing the clean MotionGate install boundary"
 bash scripts/check_clean_motion_gate_install.sh
