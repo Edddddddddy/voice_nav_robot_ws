@@ -30,6 +30,18 @@ FILE_OPEN_FLAGS = (
 )
 
 
+def _is_known_non_evidence_directory_symlink(
+    relative_path: Path,
+    package_name: str,
+) -> bool:
+    """Allow only the directory links emitted by the locked ament layouts."""
+
+    return relative_path in (
+        Path(package_name),
+        Path("ament_cmake_python") / package_name / package_name,
+    )
+
+
 @dataclass(frozen=True)
 class ResultFileIdentity:
     """Package-relative identity captured before any clear mutation."""
@@ -559,10 +571,10 @@ class ResultSnapshotPlan(ResultDeletionPlan):
 
                 traversable_directories = []
                 for directory_name in sorted(directory_names):
+                    relative_child = relative_directory / directory_name
                     child_path = (
                         self.package_directory
-                        / relative_directory
-                        / directory_name
+                        / relative_child
                     )
                     child_status = os.stat(
                         directory_name,
@@ -570,15 +582,15 @@ class ResultSnapshotPlan(ResultDeletionPlan):
                         follow_symlinks=False,
                     )
                     if stat.S_ISLNK(child_status.st_mode):
-                        if (
-                            directory_name == "Testing"
-                            or relative_directory.name == "Testing"
+                        if _is_known_non_evidence_directory_symlink(
+                            relative_child,
+                            self.package_directory.name,
                         ):
-                            raise ValueError(
-                                "result path contains symbolic link: "
-                                f"{child_path}"
-                            )
-                        continue
+                            continue
+                        raise ValueError(
+                            "result path contains symbolic link: "
+                            f"{child_path}"
+                        )
                     if not stat.S_ISDIR(child_status.st_mode):
                         raise ValueError(
                             "result directory is not a directory: "
@@ -602,7 +614,11 @@ class ResultSnapshotPlan(ResultDeletionPlan):
                         follow_symlinks=False,
                     )
                     if stat.S_ISLNK(file_status.st_mode):
-                        if is_xml and file_name == "package.xml":
+                        if (
+                            is_xml
+                            and relative_directory == Path()
+                            and file_name == "package.xml"
+                        ):
                             continue
                         raise ValueError(
                             "result path contains symbolic link: "
