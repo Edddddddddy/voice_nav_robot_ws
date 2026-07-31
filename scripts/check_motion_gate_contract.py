@@ -40,40 +40,78 @@ ARTIFACTS = {
     "controller_config": "src/voice_nav_sim/config/controllers.yaml",
 }
 
-CONTROL_REQUIRED_LINES = {
+CONTROL_REQUEST_CONSTANTS = {
     "uint8 PREPARE=1",
     "uint8 OPEN=2",
     "uint8 RENEW=3",
     "uint8 INHIBIT=4",
+}
+
+CONTROL_REQUEST_FIELDS = {
     "uint8 operation",
     "string<=36 request_id",
     "string<=36 gate_instance_id",
     "string<=36 lease_id",
     "uint64 expected_control_seq",
+}
+
+CONTROL_RESPONSE_CONSTANTS = {
     "uint16 APPLIED=0",
     "uint16 DUPLICATE=1",
     "uint16 REJECTED=2",
     "uint16 FAULTED=3",
+}
+
+REASON_CONSTANTS = {
+    "uint16 NONE=0",
+    "uint16 INVALID_REQUEST=1",
+    "uint16 STALE_GATE=2",
+    "uint16 STALE_SEQUENCE=3",
+    "uint16 INVALID_STATE=4",
+    "uint16 STALE_LEASE=5",
+    "uint16 REQUEST_ID_COLLISION=6",
+    "uint16 PREPARE_EXPIRED=7",
+    "uint16 AUTHORITY_EXPIRED=8",
+    "uint16 CANDIDATE_EXPIRED=9",
+    "uint16 WRITER_UNAVAILABLE=10",
+    "uint16 WRITER_AMBIGUOUS=11",
+    "uint16 WRITER_MISMATCH=12",
+    "uint16 WRITER_STILL_PRESENT=13",
+    "uint16 INVALID_CANDIDATE=14",
+    "uint16 SEQUENCE_EXHAUSTED=15",
+    "uint16 CONFIGURATION_INVALID=16",
+    "uint16 PUBLISH_FAILED=17",
+    "uint16 INTERNAL_FAILURE=18",
+}
+
+CONTROL_RESPONSE_FIELDS = {
     "uint16 code",
     "uint16 reason",
+    "string<=36 gate_instance_id",
     "uint64 control_seq",
     "uint8 state",
+    "string<=36 lease_id",
+    "string<=128 candidate_topic",
+    "uint8[16] bound_writer_gid",
+    "bool motion_inhibited",
+    "bool authority_live",
+    "bool candidate_fresh",
     "bool writer_bound",
     "bool zero_selected",
-    "bool motion_inhibited",
     "bool zero_published",
     "uint64 output_publish_seq",
     "uint64 zero_publish_seq",
-    "uint8[16] bound_writer_gid",
-    "string<=128 candidate_topic",
     "string<=160 detail",
 }
 
-STATE_REQUIRED_LINES = {
+STATE_CONSTANTS = {
     "uint8 INHIBITED=0",
     "uint8 PREPARED=1",
     "uint8 ARMED=2",
     "uint8 FAULTED=3",
+}
+
+STATE_FIELDS = {
     "string<=36 gate_instance_id",
     "uint64 control_seq",
     "uint64 state_seq",
@@ -121,14 +159,17 @@ FORBIDDEN_CONFIGURABLE_ENDPOINTS = {
 
 MISSION_DEPENDENCIES = {
     "geometry_msgs",
+    "rcl_interfaces",
     "rclcpp",
     "rmw",
+    "rmw_fastrtps_cpp",
     "rosidl_default_generators",
     "rosidl_default_runtime",
 }
 
 MISSION_TEST_DEPENDENCIES = {
     "ament_cmake_gtest",
+    "launch_ros",
     "launch_testing",
     "launch_testing_ament_cmake",
 }
@@ -136,6 +177,7 @@ MISSION_TEST_DEPENDENCIES = {
 BRINGUP_DEPENDENCIES = {
     "launch",
     "launch_ros",
+    "rmw_fastrtps_cpp",
     "voice_nav_mission",
     "voice_nav_sim",
 }
@@ -174,18 +216,82 @@ def normalized_idl_lines(path: Path) -> list[str]:
     return lines
 
 
-def validate_idl(
-    path: Path,
-    required_lines: set[str],
+def split_idl_sections(
+    lines: list[str],
+    expected_count: int,
     interface_name: str,
-) -> None:
-    lines = normalized_idl_lines(path)
-    missing = sorted(required_lines - set(lines))
-    if missing:
+) -> list[list[str]]:
+    separators = [
+        index for index, line in enumerate(lines) if line == "---"
+    ]
+    if len(separators) != expected_count - 1:
         raise MotionGateContractError(
-            f"{interface_name} is missing bounded contract line(s): "
-            + ", ".join(missing)
+            f"{interface_name} must contain exactly "
+            f"{expected_count} closed section(s)"
         )
+    sections: list[list[str]] = []
+    start = 0
+    for separator in separators:
+        sections.append(lines[start:separator])
+        start = separator + 1
+    sections.append(lines[start:])
+    return sections
+
+
+def validate_closed_idl_section(
+    lines: list[str],
+    expected_constants: set[str],
+    expected_fields: set[str],
+    context: str,
+) -> None:
+    def is_constant(line: str) -> bool:
+        return re.match(
+            r"^[^\s]+\s+[A-Za-z_][A-Za-z0-9_]*\s*=",
+            line,
+        ) is not None
+
+    constants = [line for line in lines if is_constant(line)]
+    fields = [line for line in lines if not is_constant(line)]
+    duplicate_lines = sorted(
+        line
+        for line in set(lines)
+        if lines.count(line) > 1
+    )
+    if duplicate_lines:
+        raise MotionGateContractError(
+            f"{context} contains duplicate declaration(s): "
+            + ", ".join(duplicate_lines)
+        )
+    missing_constants = sorted(expected_constants - set(constants))
+    extra_constants = sorted(set(constants) - expected_constants)
+    missing_fields = sorted(expected_fields - set(fields))
+    extra_fields = sorted(set(fields) - expected_fields)
+    if (
+        missing_constants
+        or extra_constants
+        or missing_fields
+        or extra_fields
+    ):
+        details = []
+        for label, values in (
+            ("missing constants", missing_constants),
+            ("unexpected constants", extra_constants),
+            ("missing fields", missing_fields),
+            ("unexpected fields", extra_fields),
+        ):
+            if values:
+                details.append(f"{label}: {', '.join(values)}")
+        raise MotionGateContractError(
+            f"{context} is a closed private protocol; "
+            + "; ".join(details)
+        )
+
+
+def validate_idl_common(
+    path: Path,
+    interface_name: str,
+) -> list[str]:
+    lines = normalized_idl_lines(path)
     unbounded_strings = [
         line
         for line in lines
@@ -196,6 +302,59 @@ def validate_idl(
             f"{interface_name} must not contain unbounded strings: "
             + ", ".join(unbounded_strings)
         )
+    unbounded_sequences = [
+        line
+        for line in lines
+        if re.search(r"\[\s*\]", line)
+        or re.search(r"\bsequence\s*<\s*[^,>]+\s*>", line)
+    ]
+    if unbounded_sequences:
+        raise MotionGateContractError(
+            f"{interface_name} must not contain unbounded sequences: "
+            + ", ".join(unbounded_sequences)
+        )
+    return lines
+
+
+def validate_control_idl(path: Path) -> None:
+    interface_name = "InternalMotionGateControl.srv"
+    sections = split_idl_sections(
+        validate_idl_common(path, interface_name),
+        2,
+        interface_name,
+    )
+    if any("gid" in line.lower() for line in sections[0]):
+        raise MotionGateContractError(
+            f"{interface_name} must not carry a cross-process writer GID; "
+            "OPEN binds in the Gate-local graph context"
+        )
+    validate_closed_idl_section(
+        sections[0],
+        CONTROL_REQUEST_CONSTANTS,
+        CONTROL_REQUEST_FIELDS,
+        f"{interface_name} request",
+    )
+    validate_closed_idl_section(
+        sections[1],
+        CONTROL_RESPONSE_CONSTANTS | REASON_CONSTANTS,
+        CONTROL_RESPONSE_FIELDS,
+        f"{interface_name} response",
+    )
+
+
+def validate_state_idl(path: Path) -> None:
+    interface_name = "InternalMotionGateState.msg"
+    sections = split_idl_sections(
+        validate_idl_common(path, interface_name),
+        1,
+        interface_name,
+    )
+    validate_closed_idl_section(
+        sections[0],
+        STATE_CONSTANTS | REASON_CONSTANTS,
+        STATE_FIELDS,
+        interface_name,
+    )
 
 
 def validate_private_idl_location(root: Path) -> None:
@@ -256,10 +415,7 @@ def validate_mission_package(path: Path) -> None:
             "voice_nav_mission is missing MotionGate dependency declarations: "
             + ", ".join(missing)
         )
-    all_test_dependencies = dependencies | package_dependencies(
-        root,
-        {"test_depend"},
-    )
+    all_test_dependencies = package_dependencies(root, {"test_depend"})
     missing_test = sorted(
         MISSION_TEST_DEPENDENCIES - all_test_dependencies
     )
@@ -267,6 +423,12 @@ def validate_mission_package(path: Path) -> None:
         raise MotionGateContractError(
             "voice_nav_mission is missing MotionGate test dependencies: "
             + ", ".join(missing_test)
+        )
+    runtime_dependencies = package_dependencies(root, {"exec_depend"})
+    if "rmw_fastrtps_cpp" not in runtime_dependencies:
+        raise MotionGateContractError(
+            "voice_nav_mission must declare rmw_fastrtps_cpp as an "
+            "exec_depend because the node runtime-checks that implementation"
         )
     groups = package_dependencies(root, {"member_of_group"})
     if "rosidl_interface_packages" not in groups:
@@ -292,6 +454,12 @@ def validate_bringup_package(path: Path) -> None:
         raise MotionGateContractError(
             "voice_nav_bringup is missing product-composition dependencies: "
             + ", ".join(missing)
+        )
+    runtime_dependencies = package_dependencies(root, {"exec_depend"})
+    if "rmw_fastrtps_cpp" not in runtime_dependencies:
+        raise MotionGateContractError(
+            "voice_nav_bringup must declare rmw_fastrtps_cpp as an "
+            "exec_depend because product_sim.launch.py selects it"
         )
 
 
@@ -511,29 +679,43 @@ def method_body(
     method_name: str,
     context: str,
 ) -> str:
-    definition = re.search(
-        rf"(?:\b{re.escape(class_name)}::)?"
-        rf"{re.escape(method_name)}\s*\([^;{{}}]*\)\s*\{{",
+    candidates = re.finditer(
+        rf"\b{re.escape(method_name)}\s*\(",
         source,
-        flags=re.DOTALL,
     )
-    if definition is None:
-        raise MotionGateContractError(
-            f"{context} must define {class_name}::{method_name}("
+    for candidate in candidates:
+        opening_parenthesis = source.find("(", candidate.start())
+        depth = 0
+        closing_parenthesis = -1
+        for index in range(opening_parenthesis, len(source)):
+            character = source[index]
+            if character == "(":
+                depth += 1
+            elif character == ")":
+                depth -= 1
+                if depth == 0:
+                    closing_parenthesis = index
+                    break
+        if closing_parenthesis < 0:
+            continue
+        suffix = re.match(
+            r"\s*(?:const\s*)?(?:noexcept\s*)?\{",
+            source[closing_parenthesis + 1 :],
         )
-    opening = source.find("{", definition.start())
-    depth = 0
-    for index in range(opening, len(source)):
-        character = source[index]
-        if character == "{":
-            depth += 1
-        elif character == "}":
-            depth -= 1
-            if depth == 0:
-                return source[opening + 1 : index]
+        if suffix is None:
+            continue
+        opening = closing_parenthesis + 1 + suffix.end() - 1
+        brace_depth = 0
+        for index in range(opening, len(source)):
+            character = source[index]
+            if character == "{":
+                brace_depth += 1
+            elif character == "}":
+                brace_depth -= 1
+                if brace_depth == 0:
+                    return source[opening + 1 : index]
     raise MotionGateContractError(
-        f"{context} has an unterminated body for "
-        f"{class_name}::{method_name}("
+        f"{context} must define {class_name}::{method_name}("
     )
 
 
@@ -607,6 +789,25 @@ def validate_core(header_path: Path, source_path: Path) -> None:
         ),
         "MotionGateCore::open",
     )
+    if open_body.count("binding_provider()") != 1:
+        raise MotionGateContractError(
+            "MotionGateCore::open must invoke the graph binding provider "
+            "exactly once after pure validation"
+        )
+    validate_order(
+        open_body,
+        (
+            "replay_or_collision(request)",
+            "validate_common(request, Operation::Open",
+            "state_ != State::Prepared",
+            "request.expected_control_seq != control_seq_",
+            "request.lease_id != lease_id_",
+            "now >= prepare_deadline_",
+            "!binding_provider",
+            "binding_provider()",
+        ),
+        "MotionGateCore::open pure validation before graph provider",
+    )
     renew = function_body(
         source,
         "MotionGateCore::renew(",
@@ -618,7 +819,7 @@ def validate_core(header_path: Path, source_path: Path) -> None:
             "State::Armed",
             "request.expected_control_seq != control_seq_",
             "now >= authority_deadline_",
-            "authority_deadline_ = now + authority_lease_",
+            "authority_deadline_ = now + authority_lease",
         ),
         "MotionGateCore::renew",
     )
@@ -693,6 +894,50 @@ def validate_order(
         cursor = index
 
 
+def parenthesized_call_bodies(
+    source: str,
+    call_token: str,
+) -> list[str]:
+    calls: list[str] = []
+    cursor = 0
+    while True:
+        token_index = source.find(call_token, cursor)
+        if token_index < 0:
+            return calls
+        opening = source.find("(", token_index + len(call_token))
+        if opening < 0:
+            raise MotionGateContractError(
+                f"unterminated call marker {call_token}"
+            )
+        depth = 0
+        quote = ""
+        escaped = False
+        for index in range(opening, len(source)):
+            character = source[index]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == quote:
+                    quote = ""
+                continue
+            if character in {'"', "'"}:
+                quote = character
+            elif character == "(":
+                depth += 1
+            elif character == ")":
+                depth -= 1
+                if depth == 0:
+                    calls.append(source[opening + 1 : index])
+                    cursor = index + 1
+                    break
+        else:
+            raise MotionGateContractError(
+                f"unterminated call marker {call_token}"
+            )
+
+
 def validate_node(path: Path) -> None:
     source = read_text(path)
     require_source_tokens(
@@ -710,8 +955,6 @@ def validate_node(path: Path) -> None:
             '"/motion_gate/internal/state"',
             '"/voice_nav_internal/motion_gate/candidate/lease_"',
             '"/diff_drive_controller/cmd_vel"',
-            ".reliable()",
-            ".transient_local()",
             "read_only = true",
             "rclcpp::MessageInfo",
             "publisher_gid",
@@ -719,6 +962,11 @@ def validate_node(path: Path) -> None:
             "SingleThreadedExecutor",
             "command.header.stamp",
             "get_clock()->now()",
+            "add_on_set_parameters_callback",
+            "MotionGate use_sim_time is immutable after startup",
+            "use_sim_time runtime invariant was violated",
+            "ros_time_is_active()",
+            "command.header.stamp.sec = 0",
         ),
         "motion_gate_node",
     )
@@ -737,6 +985,48 @@ def validate_node(path: Path) -> None:
             "motion_gate_node must create exactly one final TwistStamped "
             "publisher"
         )
+
+    state_qos_start = source.find("auto state_qos")
+    state_publisher_start = source.find(
+        "state_publisher_",
+        state_qos_start + 1,
+    )
+    state_publisher_end = source.find(";", state_publisher_start)
+    if (
+        state_qos_start < 0
+        or state_publisher_start < 0
+        or state_publisher_end < 0
+    ):
+        raise MotionGateContractError(
+            "motion_gate_node must construct the state publisher from a "
+            "dedicated state_qos"
+        )
+    state_publisher_construction = source[
+        state_qos_start : state_publisher_end + 1
+    ]
+    require_source_tokens(
+        state_publisher_construction,
+        (
+            "rclcpp::QoS(rclcpp::KeepLast(1))",
+            ".reliable()",
+            ".transient_local()",
+            "state_publisher_",
+            "create_publisher<StateMessage>",
+            "state_qos",
+        ),
+        "MotionGate state publisher construction",
+    )
+    validate_order(
+        state_publisher_construction,
+        (
+            "rclcpp::QoS(rclcpp::KeepLast(1))",
+            ".reliable()",
+            ".transient_local()",
+            "state_publisher_",
+            "create_publisher<StateMessage>",
+        ),
+        "MotionGate state publisher QoS",
+    )
 
     discovery = method_body(
         source,
@@ -760,17 +1050,60 @@ def validate_node(path: Path) -> None:
         "open_candidate_reader",
         "motion_gate_node",
     )
+    core_open_index = open_reader.find("core_.open(")
+    if core_open_index < 0:
+        raise MotionGateContractError(
+            "MotionGate OPEN adapter must delegate admission to core_.open"
+        )
+    graph_before_core = open_reader[:core_open_index]
+    forbidden_graph_before_core = [
+        token
+        for token in (
+            "discover_unique_writer_gid_on_topic",
+            "create_candidate_subscription",
+            "final_controller_health_error",
+        )
+        if token in graph_before_core
+    ]
+    if forbidden_graph_before_core:
+        raise MotionGateContractError(
+            "MotionGate OPEN must enter Core validation before touching the "
+            "DDS graph: "
+            + ", ".join(forbidden_graph_before_core)
+        )
+    if open_reader.count("discover_unique_writer_gid_on_topic") != 3:
+        raise MotionGateContractError(
+            "MotionGate OPEN must take exactly three "
+            "discover_unique_writer_gid_on_topic snapshots"
+        )
     validate_order(
         open_reader,
         (
+            "core_.open(",
             "discover_unique_writer_gid_on_topic",
             "candidate_subscription_.reset()",
             "create_candidate_subscription",
-            "bind_writer_gid",
-            "core_.open(",
+            "discover_unique_writer_gid_on_topic",
+            "result.code != ResultCode::Applied",
+            "candidate_subscription_.reset()",
+            "create_candidate_subscription",
+            "discover_unique_writer_gid_on_topic",
         ),
-        "MotionGate OPEN queue barrier",
+        "MotionGate OPEN queue barrier with three snapshots",
     )
+    reader_calls = parenthesized_call_bodies(
+        open_reader,
+        "create_candidate_subscription",
+    )
+    if (
+        len(reader_calls) != 2
+        or re.search(r",\s*true\s*$", reader_calls[0]) is None
+        or re.search(r",\s*false\s*$", reader_calls[1]) is None
+    ):
+        raise MotionGateContractError(
+            "MotionGate OPEN must build a discard reader inside the "
+            "validated provider and an accepting reader only after APPLIED"
+        )
 
     candidate = method_body(
         source,
@@ -810,16 +1143,159 @@ def validate_node(path: Path) -> None:
         "handle_inhibit",
         "motion_gate_node",
     )
-    validate_order(
+    require_source_tokens(
         inhibit,
         (
             "core_.inhibit(",
-            "publish_serialized(make_zero_command())",
-            "response->motion_inhibited = true",
-            "response->zero_published = true",
+            "reconcile_adapter_transition",
         ),
-        "MotionGate INHIBIT acknowledgement",
+        "MotionGate INHIBIT adapter transition",
     )
+    control = method_body(
+        source,
+        "MotionGateNode",
+        "on_control",
+        "motion_gate_node",
+    )
+    validate_order(
+        control,
+        (
+            "case Operation::Inhibit",
+            "result = handle_inhibit(",
+            "core_.tick(",
+            "publish_serialized(command)",
+            "publish_state()",
+            "fill_response(",
+        ),
+        "MotionGate INHIBIT zero-before-response linearization",
+    )
+    fill_response = method_body(
+        source,
+        "MotionGateNode",
+        "fill_response",
+        "motion_gate_node",
+    )
+    require_source_tokens(
+        fill_response,
+        (
+            "motion_inhibited",
+            "zero_published",
+            "output_publish_seq",
+            "zero_publish_seq",
+        ),
+        "MotionGate control response acknowledgement",
+    )
+
+
+def cmake_call_bodies(source: str, command: str) -> list[str]:
+    uncommented = "\n".join(
+        line.split("#", maxsplit=1)[0] for line in source.splitlines()
+    )
+    calls: list[str] = []
+    for match in re.finditer(
+        rf"\b{re.escape(command)}\s*\(",
+        uncommented,
+        flags=re.IGNORECASE,
+    ):
+        opening = uncommented.find("(", match.start())
+        depth = 0
+        quote = ""
+        escaped = False
+        for index in range(opening, len(uncommented)):
+            character = uncommented[index]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif character == "\\":
+                    escaped = True
+                elif character == quote:
+                    quote = ""
+                continue
+            if character in {'"', "'"}:
+                quote = character
+            elif character == "(":
+                depth += 1
+            elif character == ")":
+                depth -= 1
+                if depth == 0:
+                    calls.append(uncommented[opening + 1 : index])
+                    break
+        else:
+            raise MotionGateContractError(
+                f"CMake has an unterminated {command}( call"
+            )
+    return calls
+
+
+def cmake_arguments(body: str) -> list[str]:
+    return [
+        token[1:-1]
+        if len(token) >= 2 and token[0] == token[-1] in {'"', "'"}
+        else token
+        for token in re.findall(
+            r'"(?:\\.|[^"])*"|\'(?:\\.|[^\'])*\'|[^\s]+',
+            body,
+        )
+    ]
+
+
+def validate_launch_test_registration(
+    source: str,
+    package_name: str,
+    expected_path: str,
+    timeout_seconds: int,
+) -> None:
+    if "find_package(launch_testing_ament_cmake REQUIRED)" not in source:
+        raise MotionGateContractError(
+            f"{package_name} CMake must require "
+            "launch_testing_ament_cmake before add_launch_test"
+        )
+    launch_tests = cmake_call_bodies(source, "add_launch_test")
+    if len(launch_tests) != 1:
+        raise MotionGateContractError(
+            f"{package_name} CMake must register exactly one "
+            "add_launch_test"
+        )
+    expected_arguments = [
+        expected_path,
+        "TIMEOUT",
+        str(timeout_seconds),
+    ]
+    actual_arguments = cmake_arguments(launch_tests[0])
+    if actual_arguments != expected_arguments:
+        raise MotionGateContractError(
+            f"{package_name} add_launch_test must be exactly "
+            f"{expected_path} TIMEOUT {timeout_seconds}; found "
+            + " ".join(actual_arguments)
+        )
+
+    generated_test_name = f"test_{Path(expected_path).name}"
+    properties_calls = cmake_call_bodies(source, "set_tests_properties")
+    matching_properties = [
+        cmake_arguments(body)
+        for body in properties_calls
+        if cmake_arguments(body)[:1] == [generated_test_name]
+    ]
+    if len(matching_properties) != 1:
+        raise MotionGateContractError(
+            f"{package_name} launch test {generated_test_name} must have "
+            "one set_tests_properties call with RUN_SERIAL TRUE"
+        )
+    properties = matching_properties[0]
+    run_serial_indices = [
+        index
+        for index, token in enumerate(properties)
+        if token == "RUN_SERIAL"
+    ]
+    if (
+        run_serial_indices != [len(properties) - 2]
+        or properties[-1] != "TRUE"
+        or "PROPERTIES" not in properties
+    ):
+        raise MotionGateContractError(
+            f"{package_name} launch test {generated_test_name} must set "
+            "RUN_SERIAL TRUE"
+        )
 
 
 def validate_mission_cmake(path: Path) -> None:
@@ -831,26 +1307,108 @@ def validate_mission_cmake(path: Path) -> None:
             "rosidl_generate_interfaces(${PROJECT_NAME}",
             '"msg/InternalMotionGateState.msg"',
             '"srv/InternalMotionGateControl.srv"',
-            "add_library(motion_gate_core",
-            "add_executable(motion_gate_node",
             "rosidl_get_typesupport_target(",
             "rosidl_typesupport_cpp",
-            "target_link_libraries(motion_gate_node",
             "ament_add_gtest(",
             "install(",
             "motion_gate_node",
         ),
         "voice_nav_mission CMake",
     )
+    core_library_calls = [
+        cmake_arguments(body)
+        for body in cmake_call_bodies(source, "add_library")
+        if cmake_arguments(body)[:1] == ["motion_gate_core"]
+    ]
+    expected_core_library = [
+        "motion_gate_core",
+        "STATIC",
+        "src/motion_gate_core.cpp",
+    ]
+    if core_library_calls != [expected_core_library]:
+        raise MotionGateContractError(
+            "motion_gate_core must be one internal STATIC target built from "
+            "src/motion_gate_core.cpp"
+        )
+
+    for body in cmake_call_bodies(source, "install"):
+        arguments = cmake_arguments(body)
+        if any("motion_gate_core" in argument for argument in arguments):
+            if any(
+                argument.endswith("motion_gate_core.hpp")
+                for argument in arguments
+            ):
+                raise MotionGateContractError(
+                    "motion_gate_core.hpp must not be installed"
+                )
+            raise MotionGateContractError(
+                "motion_gate_core must not be installed"
+            )
+        if (
+            arguments[:1] == ["DIRECTORY"]
+            and any(argument.rstrip("/") == "include" for argument in arguments)
+        ):
+            raise MotionGateContractError(
+                "motion_gate_core.hpp must not be installed through the "
+                "package include directory"
+            )
+
+    for command in (
+        "ament_export_targets",
+        "ament_export_libraries",
+        "ament_export_include_directories",
+        "export",
+    ):
+        for body in cmake_call_bodies(source, command):
+            arguments = cmake_arguments(body)
+            if any("motion_gate_core" in argument for argument in arguments):
+                raise MotionGateContractError(
+                    "motion_gate_core must not be exported"
+                )
+            if (
+                command == "ament_export_include_directories"
+                and any(
+                    argument.rstrip("/") == "include"
+                    for argument in arguments
+                )
+            ):
+                raise MotionGateContractError(
+                    "motion_gate_core.hpp must not be exported through the "
+                    "package include directory"
+                )
+
+    target_patterns = {
+        r"add_executable\s*\(\s*motion_gate_node\b": (
+            "CMake must build motion_gate_node"
+        ),
+        r"target_link_libraries\s*\(\s*motion_gate_node\b": (
+            "motion_gate_node must link its Core and generated typesupport"
+        ),
+    }
+    for pattern, error_message in target_patterns.items():
+        if re.search(pattern, source, flags=re.DOTALL) is None:
+            raise MotionGateContractError(error_message)
     if "rosidl_target_interfaces(" in source:
         raise MotionGateContractError(
             "voice_nav_mission must use rosidl_get_typesupport_target instead "
             "of deprecated rosidl_target_interfaces"
         )
+    validate_launch_test_registration(
+        source,
+        "voice_nav_mission",
+        "test/test_motion_gate_node.py",
+        60,
+    )
 
 
 def validate_bringup_cmake(path: Path) -> None:
     source = read_text(path)
+    validate_launch_test_registration(
+        source,
+        "voice_nav_bringup",
+        "test/test_motion_gate_product.py",
+        180,
+    )
     install_match = re.search(
         r"install\s*\(\s*DIRECTORY(?P<body>.*?)"
         r"DESTINATION\s+share/\$\{PROJECT_NAME\}",
@@ -889,6 +1447,144 @@ def literal_string(node: ast.expr | None) -> str | None:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
     return None
+
+
+def assigned_call_names(tree: ast.AST) -> dict[int, str]:
+    names: dict[int, str] = {}
+    for assignment in ast.walk(tree):
+        if not isinstance(assignment, ast.Assign):
+            continue
+        if not isinstance(assignment.value, ast.Call):
+            continue
+        if len(assignment.targets) != 1:
+            continue
+        target = assignment.targets[0]
+        if isinstance(target, ast.Name):
+            names[id(assignment.value)] = target.id
+    return names
+
+
+def assigned_values(tree: ast.AST) -> dict[str, ast.expr]:
+    values: dict[str, ast.expr] = {}
+    for assignment in ast.walk(tree):
+        if not isinstance(assignment, ast.Assign):
+            continue
+        if len(assignment.targets) != 1:
+            continue
+        target = assignment.targets[0]
+        if isinstance(target, ast.Name):
+            values[target.id] = assignment.value
+    return values
+
+
+def path_join_matches(
+    node: ast.expr,
+    package_name: str,
+    path_parts: tuple[str, ...],
+) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    if call_name(node) != "PathJoinSubstitution":
+        return False
+    if len(node.args) != 1 or node.keywords:
+        return False
+    parts = node.args[0]
+    if not isinstance(parts, (ast.List, ast.Tuple)):
+        return False
+    if len(parts.elts) != len(path_parts) + 1:
+        return False
+    package = parts.elts[0]
+    if not isinstance(package, ast.Call):
+        return False
+    if call_name(package) != "FindPackageShare":
+        return False
+    if (
+        len(package.args) != 1
+        or package.keywords
+        or literal_string(package.args[0]) != package_name
+    ):
+        return False
+    return tuple(
+        literal_string(part) for part in parts.elts[1:]
+    ) == path_parts
+
+
+def launch_description_returned_actions(tree: ast.AST) -> list[ast.expr]:
+    functions = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "generate_launch_description"
+    ]
+    if len(functions) != 1:
+        raise MotionGateContractError(
+            "product launch must define exactly one "
+            "generate_launch_description"
+        )
+    returns = [
+        node
+        for node in ast.walk(functions[0])
+        if isinstance(node, ast.Return)
+    ]
+    if len(returns) != 1 or not isinstance(returns[0].value, ast.Call):
+        raise MotionGateContractError(
+            "generate_launch_description must directly return one "
+            "LaunchDescription"
+        )
+    description = returns[0].value
+    if call_name(description) != "LaunchDescription":
+        raise MotionGateContractError(
+            "generate_launch_description must return LaunchDescription"
+        )
+    if len(description.args) != 1 or description.keywords:
+        raise MotionGateContractError(
+            "product LaunchDescription must receive one explicit action list"
+        )
+    actions = description.args[0]
+    if not isinstance(actions, (ast.List, ast.Tuple)):
+        raise MotionGateContractError(
+            "product LaunchDescription actions must be an explicit list"
+        )
+    return list(actions.elts)
+
+
+def returned_call_position(
+    call: ast.Call,
+    assigned_names: dict[int, str],
+    returned_actions: list[ast.expr],
+) -> int | None:
+    assigned_name = assigned_names.get(id(call))
+    for index, action in enumerate(returned_actions):
+        if action is call:
+            return index
+        if (
+            assigned_name is not None
+            and isinstance(action, ast.Name)
+            and action.id == assigned_name
+        ):
+            return index
+    return None
+
+
+def environment_action_values(call: ast.Call) -> tuple[str | None, str | None]:
+    if len(call.args) > 2:
+        return None, None
+    name_node = (
+        call.args[0]
+        if call.args
+        else keyword_value(call, "name")
+    )
+    value_node = (
+        call.args[1]
+        if len(call.args) > 1
+        else keyword_value(call, "value")
+    )
+    allowed_keywords = {"name", "value"}
+    if any(
+        keyword.arg not in allowed_keywords for keyword in call.keywords
+    ):
+        return None, None
+    return literal_string(name_node), literal_string(value_node)
 
 
 def validate_product_launch(path: Path) -> None:
@@ -932,6 +1628,46 @@ def validate_product_launch(path: Path) -> None:
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
     ]
+    assigned_names = assigned_call_names(tree)
+    assignments = assigned_values(tree)
+    returned_actions = launch_description_returned_actions(tree)
+
+    simulation_calls = [
+        call for call in calls if call_name(call) == "IncludeLaunchDescription"
+    ]
+    if len(simulation_calls) != 1:
+        raise MotionGateContractError(
+            "product launch must construct exactly one simulation include"
+        )
+    simulation_sources = [
+        node
+        for node in ast.walk(simulation_calls[0])
+        if isinstance(node, ast.Call)
+        and call_name(node) == "PythonLaunchDescriptionSource"
+    ]
+    if (
+        len(simulation_sources) != 1
+        or len(simulation_sources[0].args) != 1
+        or not path_join_matches(
+            simulation_sources[0].args[0],
+            "voice_nav_sim",
+            ("launch", "simulation.launch.py"),
+        )
+    ):
+        raise MotionGateContractError(
+            "returned simulation action must include the installed "
+            "voice_nav_sim/launch/simulation.launch.py"
+        )
+    simulation_position = returned_call_position(
+        simulation_calls[0],
+        assigned_names,
+        returned_actions,
+    )
+    if simulation_position is None:
+        raise MotionGateContractError(
+            "product launch must actually return the simulation action"
+        )
+
     gate_nodes = []
     for call in calls:
         if call_name(call) != "Node":
@@ -945,13 +1681,42 @@ def validate_product_launch(path: Path) -> None:
             "product launch must start exactly one motion_gate_node"
         )
     gate = gate_nodes[0]
+    gate_position = returned_call_position(
+        gate,
+        assigned_names,
+        returned_actions,
+    )
+    if gate_position is None:
+        raise MotionGateContractError(
+            "product launch must actually return the motion_gate action"
+        )
     if literal_string(keyword_value(gate, "name")) != "motion_gate_node":
         raise MotionGateContractError(
             "product MotionGate node name must be motion_gate_node"
         )
-    if keyword_value(gate, "parameters") is None:
+    parameters = keyword_value(gate, "parameters")
+    if not (
+        isinstance(parameters, ast.List)
+        and len(parameters.elts) == 1
+        and isinstance(parameters.elts[0], ast.Name)
+        and parameters.elts[0].id == "gate_config"
+    ):
         raise MotionGateContractError(
-            "product motion_gate_node must load the trusted YAML"
+            "product motion_gate_node parameters must be exactly [gate_config]"
+        )
+    gate_config = assignments.get("gate_config")
+    if gate_config is None or not path_join_matches(
+        gate_config,
+        "voice_nav_bringup",
+        ("config", "motion_gate.yaml"),
+    ):
+        raise MotionGateContractError(
+            "gate_config must resolve the installed trusted "
+            "voice_nav_bringup/config/motion_gate.yaml"
+        )
+    if keyword_value(gate, "remappings") is not None:
+        raise MotionGateContractError(
+            "product motion_gate_node must not accept endpoint remappings"
         )
     if keyword_value(gate, "on_exit") is not None:
         raise MotionGateContractError(
@@ -961,6 +1726,42 @@ def validate_product_launch(path: Path) -> None:
     if keyword_value(gate, "respawn") is not None:
         raise MotionGateContractError(
             "motion_gate_node must not be automatically respawned"
+        )
+
+    rmw_actions = [
+        call
+        for call in calls
+        if call_name(call) == "SetEnvironmentVariable"
+    ]
+    if len(rmw_actions) != 1:
+        raise MotionGateContractError(
+            "product launch must construct exactly one locked RMW "
+            "SetEnvironmentVariable action"
+        )
+    rmw_action = rmw_actions[0]
+    if environment_action_values(rmw_action) != (
+        "RMW_IMPLEMENTATION",
+        "rmw_fastrtps_cpp",
+    ):
+        raise MotionGateContractError(
+            "product RMW action must unconditionally set "
+            "RMW_IMPLEMENTATION=rmw_fastrtps_cpp"
+        )
+    rmw_position = returned_call_position(
+        rmw_action,
+        assigned_names,
+        returned_actions,
+    )
+    if rmw_position is None:
+        raise MotionGateContractError(
+            "product launch must actually return the locked RMW action"
+        )
+    if not (
+        rmw_position < simulation_position
+        and rmw_position < gate_position
+    ):
+        raise MotionGateContractError(
+            "locked RMW action must execute before simulation and MotionGate"
         )
 
 
@@ -996,23 +1797,8 @@ def validate_unique_final_publisher(root: Path, node_path: Path) -> None:
 
 def validate_contract(root: Path) -> None:
     paths = required_artifacts(root)
-    validate_idl(
-        paths["control_interface"],
-        CONTROL_REQUIRED_LINES,
-        "InternalMotionGateControl.srv",
-    )
-    control_lines = normalized_idl_lines(paths["control_interface"])
-    separator = control_lines.index("---")
-    if any("gid" in line.lower() for line in control_lines[:separator]):
-        raise MotionGateContractError(
-            "InternalMotionGateControl.srv must not carry a cross-process "
-            "writer GID; OPEN binds in the Gate-local graph context"
-        )
-    validate_idl(
-        paths["state_interface"],
-        STATE_REQUIRED_LINES,
-        "InternalMotionGateState.msg",
-    )
+    validate_control_idl(paths["control_interface"])
+    validate_state_idl(paths["state_interface"])
     validate_private_idl_location(root)
     validate_mission_package(paths["mission_package"])
     validate_bringup_package(paths["bringup_package"])

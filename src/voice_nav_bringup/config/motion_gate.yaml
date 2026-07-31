@@ -1,0 +1,15 @@
+motion_gate_node:
+  ros__parameters:
+    use_sim_time: true
+    output_frequency_hz: 50.0
+    authority_lease_ms: 250
+    candidate_freshness_ms: 150
+    prepare_timeout_ms: 1000
+    writer_graph_timeout_ms: 1000
+    candidate_qos_depth: 1
+    expected_candidate_writer_fqn: /collision_monitor
+    request_cache_size: 64
+    linear_x_min: -0.20
+    linear_x_max: 0.40
+    angular_z_min: -1.20
+    angular_z_max: 1.20

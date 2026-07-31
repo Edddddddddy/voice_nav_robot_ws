@@ -1,26 +1,34 @@
 cmake_minimum_required(VERSION 3.8)
 project(voice_nav_bringup)
 
-if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-  add_compile_options(-Wall -Wextra -Wpedantic)
-endif()
-
-# find dependencies
 find_package(ament_cmake REQUIRED)
-# uncomment the following section in order to fill in
-# further dependencies manually.
-# find_package(<dependency> REQUIRED)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
-  # the following line skips the linter which checks for copyrights
-  # comment the line when a copyright and license is added to all source files
-  set(ament_cmake_copyright_FOUND TRUE)
-  # the following line skips cpplint (only works in a git repo)
-  # comment the line when this package is in a git repo and when
-  # a copyright and license is added to all source files
-  set(ament_cmake_cpplint_FOUND TRUE)
+  find_package(launch_testing_ament_cmake REQUIRED)
+
   ament_lint_auto_find_test_dependencies()
+
+  add_launch_test(
+    test/test_motion_gate_product.py
+    TIMEOUT 180
+  )
+  set_tests_properties(
+    test_test_motion_gate_product.py
+    PROPERTIES
+      ENVIRONMENT
+        "RMW_IMPLEMENTATION=rmw_fastrtps_cpp;ROS_DOMAIN_ID=92;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;GZ_PARTITION=voice_nav_l0009_product_test"
+      RUN_SERIAL TRUE
+  )
 endif()
+
+install(
+  DIRECTORY
+    config
+    launch
+  DESTINATION share/${PROJECT_NAME}
+  PATTERN "__pycache__" EXCLUDE
+  PATTERN "*.pyc" EXCLUDE
+)
 
 ament_package()
