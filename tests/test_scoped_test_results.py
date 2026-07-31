@@ -38,6 +38,23 @@ def write_ctest(path: Path, *, status: str = "passed") -> None:
     )
 
 
+def write_package_manifest(path: Path, *, package_name: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        (
+            '<?xml version="1.0"?>\n'
+            '<package format="3">\n'
+            f"  <name>{package_name}</name>\n"
+            "  <version>0.0.0</version>\n"
+            "  <description>fixture</description>\n"
+            "  <maintainer email=\"fixture@example.com\">Fixture</maintainer>\n"
+            "  <license>Apache-2.0</license>\n"
+            "</package>\n"
+        ),
+        encoding="utf-8",
+    )
+
+
 class ScopedTestResultsTest(unittest.TestCase):
     def run_boundary_check(
         self,
@@ -304,6 +321,106 @@ class ScopedTestResultsTest(unittest.TestCase):
             self.assertIn("result path contains symbolic link", completed.stderr)
             self.assertNotIn("Summary: 1 test", completed.stdout)
 
+    def test_report_rejects_spoofed_ament_python_module_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            build_base = workspace / "build"
+            package_name = "voice_nav_agent"
+            selected_package = build_base / package_name
+            write_xunit(selected_package / "good.xunit.xml", tests=1)
+            source_package = workspace / "src" / package_name
+            write_package_manifest(
+                source_package / "package.xml",
+                package_name=package_name,
+            )
+            (selected_package / "package.xml").symlink_to(
+                source_package / "package.xml"
+            )
+            external_module = workspace / "external-module"
+            write_xunit(external_module / "hidden.xunit.xml", tests=9)
+            (selected_package / package_name).symlink_to(
+                external_module,
+                target_is_directory=True,
+            )
+
+            completed = self.run_reporter(build_base, package_name)
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("unexpected symbolic-link target", completed.stderr)
+            self.assertNotIn("Summary: 1 test", completed.stdout)
+
+    def test_report_rejects_spoofed_ament_cmake_python_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            build_base = workspace / "build"
+            package_name = "voice_nav_mission"
+            selected_package = build_base / package_name
+            write_xunit(selected_package / "good.xunit.xml", tests=1)
+            external_module = workspace / "external-module"
+            testing = external_module / "Testing"
+            testing.mkdir(parents=True)
+            (testing / "TAG").write_text(
+                "20260801-0000\nExperimental\n",
+                encoding="utf-8",
+            )
+            write_ctest(
+                testing / "20260801-0000" / "Test.xml",
+                status="failed",
+            )
+            generated_link = (
+                selected_package
+                / "ament_cmake_python"
+                / package_name
+                / package_name
+            )
+            generated_link.parent.mkdir(parents=True)
+            generated_link.symlink_to(
+                external_module,
+                target_is_directory=True,
+            )
+
+            completed = self.run_reporter(build_base, package_name)
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("unexpected symbolic-link target", completed.stderr)
+            self.assertNotIn("Summary: 1 test", completed.stdout)
+
+    def test_report_rejects_spoofed_root_package_manifest_target(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            build_base = workspace / "build"
+            package_name = "voice_nav_agent"
+            selected_package = build_base / package_name
+            write_xunit(selected_package / "good.xunit.xml", tests=1)
+            external_manifest = workspace / "external" / "package.xml"
+            write_xunit(external_manifest, tests=9)
+            (selected_package / "package.xml").symlink_to(external_manifest)
+
+            completed = self.run_reporter(build_base, package_name)
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("unexpected symbolic-link target", completed.stderr)
+            self.assertNotIn("Summary: 1 test", completed.stdout)
+
+    def test_report_rejects_non_package_source_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            build_base = workspace / "build"
+            package_name = "voice_nav_agent"
+            selected_package = build_base / package_name
+            write_xunit(selected_package / "good.xunit.xml", tests=1)
+            source_manifest = (
+                workspace / "src" / package_name / "package.xml"
+            )
+            write_xunit(source_manifest, tests=9)
+            (selected_package / "package.xml").symlink_to(source_manifest)
+
+            completed = self.run_reporter(build_base, package_name)
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("invalid source package manifest", completed.stderr)
+            self.assertNotIn("Summary: 1 test", completed.stdout)
+
     def test_report_allows_known_non_evidence_build_symlinks(self) -> None:
         cases = (
             (
@@ -327,7 +444,22 @@ class ScopedTestResultsTest(unittest.TestCase):
                         selected_package / "good.xunit.xml",
                         tests=1,
                     )
-                    target = workspace / "generated" / package_name
+                    source_package = workspace / "src" / package_name
+                    write_package_manifest(
+                        source_package / "package.xml",
+                        package_name=package_name,
+                    )
+                    if relative_link == Path(package_name):
+                        target = source_package / package_name
+                        (selected_package / "package.xml").symlink_to(
+                            source_package / "package.xml"
+                        )
+                    else:
+                        target = (
+                            selected_package
+                            / "rosidl_generator_py"
+                            / package_name
+                        )
                     target.mkdir(parents=True)
                     link = selected_package / relative_link
                     link.parent.mkdir(parents=True, exist_ok=True)
