@@ -125,9 +125,20 @@ def validate_lidar(model: element_tree.Element) -> None:
             "generated product SDF must contain exactly one sensor"
         )
     sensor = sensors[0]
+    top_level_links = model.findall("./link")
+    base_footprint_links = [
+        link
+        for link in top_level_links
+        if link.get("name") == "base_footprint"
+    ]
+    if len(base_footprint_links) != 1:
+        raise SdfContractError(
+            "generated product model must contain exactly one top-level "
+            "link named base_footprint"
+        )
     sensor_bindings = [
         (link, candidate)
-        for link in model.findall(".//link")
+        for link in top_level_links
         for candidate in link.findall("./sensor")
     ]
     if (
@@ -135,10 +146,11 @@ def validate_lidar(model: element_tree.Element) -> None:
         or sensor_bindings[0][1] is not sensor
     ):
         raise SdfContractError(
-            "generated product sensor must be a direct child of one link"
+            "generated product sensor must be a direct child of one "
+            "top-level link"
         )
     sensor_owner = sensor_bindings[0][0]
-    if sensor_owner.get("name") != "base_footprint":
+    if sensor_owner is not base_footprint_links[0]:
         raise SdfContractError(
             "generated product LiDAR must be owned by base_footprint "
             "after fixed-joint lumping"
