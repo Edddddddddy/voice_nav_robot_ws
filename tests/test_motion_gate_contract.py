@@ -18,28 +18,50 @@ uint8 INHIBIT=4
 uint8 operation
 string<=36 request_id
 string<=36 gate_instance_id
-string<=36 lease_id
 uint64 expected_control_seq
+string<=36 lease_id
 ---
 uint16 APPLIED=0
 uint16 DUPLICATE=1
 uint16 REJECTED=2
 uint16 FAULTED=3
 
+uint16 NONE=0
+uint16 INVALID_REQUEST=1
+uint16 STALE_GATE=2
+uint16 STALE_SEQUENCE=3
+uint16 INVALID_STATE=4
+uint16 STALE_LEASE=5
+uint16 REQUEST_ID_COLLISION=6
+uint16 PREPARE_EXPIRED=7
+uint16 AUTHORITY_EXPIRED=8
+uint16 CANDIDATE_EXPIRED=9
+uint16 WRITER_UNAVAILABLE=10
+uint16 WRITER_AMBIGUOUS=11
+uint16 WRITER_MISMATCH=12
+uint16 WRITER_STILL_PRESENT=13
+uint16 INVALID_CANDIDATE=14
+uint16 SEQUENCE_EXHAUSTED=15
+uint16 CONFIGURATION_INVALID=16
+uint16 PUBLISH_FAILED=17
+uint16 INTERNAL_FAILURE=18
+
 uint16 code
 uint16 reason
-uint64 control_seq
 string<=36 gate_instance_id
-string<=36 lease_id
+uint64 control_seq
 uint8 state
+string<=36 lease_id
+string<=128 candidate_topic
+uint8[16] bound_writer_gid
+bool motion_inhibited
+bool authority_live
+bool candidate_fresh
 bool writer_bound
 bool zero_selected
-bool motion_inhibited
 bool zero_published
 uint64 output_publish_seq
 uint64 zero_publish_seq
-uint8[16] bound_writer_gid
-string<=128 candidate_topic
 string<=160 detail
 """
 
@@ -49,20 +71,40 @@ uint8 PREPARED=1
 uint8 ARMED=2
 uint8 FAULTED=3
 
+uint16 NONE=0
+uint16 INVALID_REQUEST=1
+uint16 STALE_GATE=2
+uint16 STALE_SEQUENCE=3
+uint16 INVALID_STATE=4
+uint16 STALE_LEASE=5
+uint16 REQUEST_ID_COLLISION=6
+uint16 PREPARE_EXPIRED=7
+uint16 AUTHORITY_EXPIRED=8
+uint16 CANDIDATE_EXPIRED=9
+uint16 WRITER_UNAVAILABLE=10
+uint16 WRITER_AMBIGUOUS=11
+uint16 WRITER_MISMATCH=12
+uint16 WRITER_STILL_PRESENT=13
+uint16 INVALID_CANDIDATE=14
+uint16 SEQUENCE_EXHAUSTED=15
+uint16 CONFIGURATION_INVALID=16
+uint16 PUBLISH_FAILED=17
+uint16 INTERNAL_FAILURE=18
+
 string<=36 gate_instance_id
-uint64 control_seq
 uint64 state_seq
+uint64 control_seq
 uint8 state
 string<=36 lease_id
+string<=128 candidate_topic
+uint8[16] bound_writer_gid
+bool motion_inhibited
 bool authority_live
 bool candidate_fresh
 bool writer_bound
 bool zero_selected
-bool motion_inhibited
 uint64 output_publish_seq
 uint64 zero_publish_seq
-uint8[16] bound_writer_gid
-string<=128 candidate_topic
 uint16 reason
 string<=160 detail
 """
@@ -80,6 +122,8 @@ namespace voice_nav_mission
 enum class State {Inhibited, Prepared, Armed, Faulted};
 struct ControlRequest;
 struct ControlResult;
+struct OpenBinding;
+struct OpenBindingProvider;
 struct Candidate;
 struct Command;
 
@@ -88,7 +132,10 @@ class MotionGateCore
 public:
   using SteadyTimePoint = std::chrono::steady_clock::time_point;
   ControlResult prepare(const ControlRequest &, SteadyTimePoint);
-  ControlResult open(const ControlRequest &, SteadyTimePoint);
+  ControlResult open(
+    const ControlRequest &,
+    SteadyTimePoint,
+    const OpenBindingProvider &);
   ControlResult renew(const ControlRequest &, SteadyTimePoint);
   ControlResult inhibit(const ControlRequest &, SteadyTimePoint);
   ControlResult accept_candidate(const Candidate &, SteadyTimePoint);
@@ -135,14 +182,38 @@ ControlResult MotionGateCore::prepare(
 
 ControlResult MotionGateCore::open(
   const ControlRequest & request,
-  SteadyTimePoint now)
+  SteadyTimePoint now,
+  const OpenBindingProvider & binding_provider)
 {
-  if (state_ != State::Prepared ||
-    request.expected_control_seq != control_seq_ ||
-    !writer_bound_)
-  {
+  reconcile_deadlines(now);
+  if (const auto replay = replay_or_collision(request)) {
+    return *replay;
+  }
+  ControlResult rejection;
+  if (!validate_common(request, Operation::Open, true, rejection)) {
+    return rejection;
+  }
+  if (state_ != State::Prepared) {
     return stale_request();
   }
+  if (request.expected_control_seq != control_seq_) {
+    return stale_request();
+  }
+  if (request.lease_id != lease_id_) {
+    return stale_request();
+  }
+  if (now >= prepare_deadline_) {
+    return stale_request();
+  }
+  if (!binding_provider) {
+    return stale_request();
+  }
+  const auto binding = binding_provider();
+  if (!binding.ready) {
+    return stale_request();
+  }
+  bound_writer_gid_ = binding.writer_gid;
+  writer_bound_ = true;
   authority_deadline_ = now + authority_lease_;
   candidate_deadline_ = now + candidate_freshness_;
   ++control_seq_;
@@ -245,9 +316,20 @@ public:
     (void)"/motion_gate/internal/state";
     (void)"/voice_nav_internal/motion_gate/candidate/lease_";
     (void)"/diff_drive_controller/cmd_vel";
+    use_sim_time_guard_ = add_on_set_parameters_callback(
+      [](const auto &) {
+        SetParametersResult result;
+        result.successful = false;
+        result.reason =
+          "MotionGate use_sim_time is immutable after startup";
+        return result;
+      });
     final_command_publisher_ =
       create_publisher<geometry_msgs::msg::TwistStamped>(
       final_command_topic_, rclcpp::SystemDefaultsQoS());
+    state_publisher_ =
+      create_publisher<StateMessage>(
+      "/motion_gate/internal/state", state_qos);
     output_timer_ = create_wall_timer(
       std::chrono::milliseconds(20),
       [this]() {
@@ -270,13 +352,36 @@ public:
     const ControlRequest & request,
     ControlResponse & response)
   {
-    const auto bound_writer_gid =
-      discover_unique_writer_gid_on_topic(candidate_topic_);
+    OpenBinding expected_binding;
+    const auto result = core_.open(
+      request,
+      std::chrono::steady_clock::now(),
+      [this, &request, &expected_binding]() {
+        const auto first =
+          discover_unique_writer_gid_on_topic(candidate_topic_);
+        candidate_subscription_.reset();
+        candidate_subscription_ =
+          create_candidate_subscription(
+          candidate_topic_, request.lease_id, true);
+        const auto second =
+          discover_unique_writer_gid_on_topic(candidate_topic_);
+        if (second.writer_gid != first.writer_gid) {
+          return OpenBinding{};
+        }
+        expected_binding = first;
+        return first;
+      });
+    if (result.code != ResultCode::Applied) {
+      return;
+    }
     candidate_subscription_.reset();
     candidate_subscription_ =
-      create_candidate_subscription(candidate_topic_);
-    bind_writer_gid(bound_writer_gid);
-    core_.open(request, std::chrono::steady_clock::now());
+      create_candidate_subscription(
+      candidate_topic_, request.lease_id, false);
+    const auto third =
+      discover_unique_writer_gid_on_topic(candidate_topic_);
+    (void)third;
+    (void)expected_binding;
     response.code = response.APPLIED;
   }
 
@@ -294,18 +399,58 @@ public:
   void publish_serialized(Command command)
   {
     std::scoped_lock lock(publication_mutex_);
-    command.header.stamp = get_clock()->now();
+    if (!get_parameter("use_sim_time").as_bool() ||
+      !get_clock()->ros_time_is_active())
+    {
+      core_.force_fault(
+        Reason::ConfigurationInvalid,
+        "use_sim_time runtime invariant was violated");
+      command = Command{};
+      command.header.stamp.sec = 0;
+    } else {
+      command.header.stamp = get_clock()->now();
+    }
     final_command_publisher_->publish(command);
   }
 
-  void handle_inhibit(
+  ControlResult handle_inhibit(
     const ControlRequest & request,
-    ControlResponse * response)
+    SteadyTimePoint now)
   {
-    core_.inhibit(request, std::chrono::steady_clock::now());
-    publish_serialized(make_zero_command());
-    response->motion_inhibited = true;
-    response->zero_published = true;
+    const auto before = core_.snapshot();
+    const auto result = core_.inhibit(request, now);
+    const auto after = core_.snapshot();
+    reconcile_adapter_transition(before, after);
+    return result;
+  }
+
+  void fill_response(
+    const ControlResult & result,
+    ControlResponse & response,
+    bool zero_published)
+  {
+    response.motion_inhibited = result.motion_inhibited;
+    response.zero_published = zero_published;
+    response.output_publish_seq = output_publish_seq_;
+    response.zero_publish_seq = zero_publish_seq_;
+  }
+
+  void on_control(
+    const ControlRequest & request,
+    ControlResponse & response)
+  {
+    ControlResult result;
+    switch (request.operation) {
+      case Operation::Inhibit:
+        result = handle_inhibit(
+          request, std::chrono::steady_clock::now());
+        break;
+    }
+    const auto command =
+      core_.tick(std::chrono::steady_clock::now());
+    publish_serialized(command);
+    publish_state();
+    fill_response(result, response, command.is_zero());
   }
 
 private:
@@ -334,10 +479,13 @@ MISSION_PACKAGE = """\
   <buildtool_depend>ament_cmake</buildtool_depend>
   <buildtool_depend>rosidl_default_generators</buildtool_depend>
   <depend>geometry_msgs</depend>
+  <depend>rcl_interfaces</depend>
   <depend>rclcpp</depend>
   <depend>rmw</depend>
   <exec_depend>rosidl_default_runtime</exec_depend>
+  <exec_depend>rmw_fastrtps_cpp</exec_depend>
   <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>launch_ros</test_depend>
   <test_depend>launch_testing</test_depend>
   <test_depend>launch_testing_ament_cmake</test_depend>
   <member_of_group>rosidl_interface_packages</member_of_group>
@@ -350,13 +498,14 @@ project(voice_nav_mission)
 
 find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
+find_package(launch_testing_ament_cmake REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/InternalMotionGateState.msg"
   "srv/InternalMotionGateControl.srv"
 )
 
-add_library(motion_gate_core src/motion_gate_core.cpp)
+add_library(motion_gate_core STATIC src/motion_gate_core.cpp)
 add_executable(motion_gate_node src/motion_gate_node.cpp)
 rosidl_get_typesupport_target(
   motion_gate_typesupport
@@ -367,10 +516,19 @@ target_link_libraries(motion_gate_node motion_gate_core "${motion_gate_typesuppo
 
 if(BUILD_TESTING)
   ament_add_gtest(motion_gate_core_test test/motion_gate_core_test.cpp)
+  add_launch_test(
+    test/test_motion_gate_node.py
+    TIMEOUT 60
+  )
+  set_tests_properties(
+    test_test_motion_gate_node.py
+    PROPERTIES
+      RUN_SERIAL TRUE
+  )
 endif()
 
 install(
-  TARGETS motion_gate_core motion_gate_node
+  TARGETS motion_gate_node
   DESTINATION lib/${PROJECT_NAME}
 )
 ament_package()
@@ -396,7 +554,7 @@ motion_gate_node:
 
 PRODUCT_LAUNCH = """\
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription
+from launch.actions import IncludeLaunchDescription, SetEnvironmentVariable
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import PathJoinSubstitution
 from launch_ros.actions import Node
@@ -404,6 +562,10 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
+    locked_rmw = SetEnvironmentVariable(
+        name='RMW_IMPLEMENTATION',
+        value='rmw_fastrtps_cpp',
+    )
     simulation = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution([
@@ -424,7 +586,7 @@ def generate_launch_description():
         name='motion_gate_node',
         parameters=[gate_config],
     )
-    return LaunchDescription([simulation, motion_gate])
+    return LaunchDescription([locked_rmw, simulation, motion_gate])
 """
 
 BRINGUP_PACKAGE = """\
@@ -438,6 +600,7 @@ BRINGUP_PACKAGE = """\
   <buildtool_depend>ament_cmake</buildtool_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rmw_fastrtps_cpp</exec_depend>
   <exec_depend>voice_nav_mission</exec_depend>
   <exec_depend>voice_nav_sim</exec_depend>
 </package>
@@ -448,6 +611,18 @@ cmake_minimum_required(VERSION 3.8)
 project(voice_nav_bringup)
 
 find_package(ament_cmake REQUIRED)
+find_package(launch_testing_ament_cmake REQUIRED)
+if(BUILD_TESTING)
+  add_launch_test(
+    test/test_motion_gate_product.py
+    TIMEOUT 180
+  )
+  set_tests_properties(
+    test_test_motion_gate_product.py
+    PROPERTIES
+      RUN_SERIAL TRUE
+  )
+endif()
 install(
   DIRECTORY
     config
@@ -563,6 +738,57 @@ class MotionGateContractTest(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
+    def test_core_target_is_static_and_never_installed_or_exported(self) -> None:
+        mutations = (
+            (
+                "add_library(motion_gate_core STATIC src/motion_gate_core.cpp)",
+                "add_library(motion_gate_core SHARED src/motion_gate_core.cpp)",
+                "motion_gate_core must be one internal STATIC target",
+            ),
+            (
+                "TARGETS motion_gate_node",
+                "TARGETS motion_gate_core motion_gate_node",
+                "motion_gate_core must not be installed",
+            ),
+            (
+                "ament_package()",
+                (
+                    "ament_export_targets(export_motion_gate_core "
+                    "HAS_LIBRARY_TARGET)\n"
+                    "ament_package()"
+                ),
+                "motion_gate_core must not be exported",
+            ),
+            (
+                "ament_package()",
+                (
+                    "install(FILES "
+                    "include/voice_nav_mission/motion_gate_core.hpp "
+                    "DESTINATION include/voice_nav_mission)\n"
+                    "ament_package()"
+                ),
+                "motion_gate_core.hpp must not be installed",
+            ),
+        )
+        for old, new, diagnostic in mutations:
+            with self.subTest(mutation=diagnostic):
+                def mutation(
+                    root: Path,
+                    old_value: str = old,
+                    new_value: str = new,
+                ) -> None:
+                    self.replace(
+                        root,
+                        "src/voice_nav_mission/CMakeLists.txt",
+                        old_value,
+                        new_value,
+                    )
+
+                completed = self.run_checker(mutation)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(diagnostic, completed.stderr)
+
     def test_state_diagnostic_gid_width_is_pinned_to_jazzy_rmw(self) -> None:
         def mutation(root: Path) -> None:
             self.replace(
@@ -606,7 +832,58 @@ class MotionGateContractTest(unittest.TestCase):
         completed = self.run_checker(mutation)
 
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("bounded contract", completed.stderr)
+        self.assertIn("unbounded strings", completed.stderr)
+
+    def test_private_idl_fields_are_closed_on_every_side(self) -> None:
+        mutations = (
+            (
+                "src/voice_nav_mission/srv/InternalMotionGateControl.srv",
+                "uint64 expected_control_seq",
+                "uint64 expected_control_seq\nbool rogue_request_field",
+                "request",
+            ),
+            (
+                "src/voice_nav_mission/srv/InternalMotionGateControl.srv",
+                "string<=160 detail",
+                "string<=160 detail\nbool rogue_response_field",
+                "response",
+            ),
+            (
+                "src/voice_nav_mission/msg/InternalMotionGateState.msg",
+                "string<=160 detail",
+                "string<=160 detail\nbool rogue_state_field",
+                "InternalMotionGateState.msg",
+            ),
+        )
+        for relative_path, old, new, diagnostic in mutations:
+            with self.subTest(section=diagnostic):
+                def mutation(
+                    root: Path,
+                    path: str = relative_path,
+                    old_value: str = old,
+                    new_value: str = new,
+                ) -> None:
+                    self.replace(root, path, old_value, new_value)
+
+                completed = self.run_checker(mutation)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn("closed private protocol", completed.stderr)
+                self.assertIn(diagnostic, completed.stderr)
+
+    def test_private_idl_rejects_unbounded_sequences(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_mission/msg/InternalMotionGateState.msg",
+                "uint8[16] bound_writer_gid",
+                "uint8[] bound_writer_gid",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("unbounded sequences", completed.stderr)
 
     def test_internal_idl_cannot_leak_into_public_package(self) -> None:
         def mutation(root: Path) -> None:
@@ -654,6 +931,53 @@ class MotionGateContractTest(unittest.TestCase):
                 self.assertNotEqual(completed.returncode, 0)
                 self.assertIn("MotionGate parameter", completed.stderr)
 
+    def test_use_sim_time_is_immutable_and_fail_closed_at_publication(self) -> None:
+        mutations = (
+            (
+                "add_on_set_parameters_callback",
+                "add_post_set_parameters_callback",
+                "add_on_set_parameters_callback",
+            ),
+            (
+                "MotionGate use_sim_time is immutable after startup",
+                "MotionGate clock policy changed",
+                "MotionGate use_sim_time is immutable after startup",
+            ),
+            (
+                "use_sim_time runtime invariant was violated",
+                "clock invariant ignored",
+                "use_sim_time runtime invariant was violated",
+            ),
+            (
+                "ros_time_is_active()",
+                "system_time_is_active()",
+                "ros_time_is_active()",
+            ),
+            (
+                "command.header.stamp.sec = 0",
+                "command.header.stamp.sec = 1",
+                "command.header.stamp.sec = 0",
+            ),
+        )
+        for old, new, diagnostic in mutations:
+            with self.subTest(contract=diagnostic):
+                def mutation(
+                    root: Path,
+                    old_value: str = old,
+                    new_value: str = new,
+                ) -> None:
+                    self.replace(
+                        root,
+                        "src/voice_nav_mission/src/motion_gate_node.cpp",
+                        old_value,
+                        new_value,
+                    )
+
+                completed = self.run_checker(mutation)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(diagnostic, completed.stderr)
+
     def test_candidate_and_final_command_qos_are_explicit(self) -> None:
         mutations = (
             (
@@ -685,6 +1009,141 @@ class MotionGateContractTest(unittest.TestCase):
 
                 self.assertNotEqual(completed.returncode, 0)
                 self.assertIn(diagnostic, completed.stderr)
+
+    def test_state_qos_cannot_be_satisfied_by_candidate_tokens(self) -> None:
+        def mutation(root: Path) -> None:
+            path = (
+                root
+                / "src"
+                / "voice_nav_mission"
+                / "src"
+                / "motion_gate_node.cpp"
+            )
+            source = path.read_text(encoding="utf-8")
+            source = source.replace(
+                ".reliable().transient_local();",
+                ".best_effort().durability_volatile();",
+                1,
+            )
+            source = source.replace(
+                ".best_effort().durability_volatile();",
+                (
+                    ".best_effort().durability_volatile()"
+                    ".reliable().transient_local();"
+                ),
+                1,
+            )
+            path.write_text(source, encoding="utf-8")
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "MotionGate state publisher construction",
+            completed.stderr,
+        )
+
+    def test_package_dependencies_pin_test_and_runtime_owners(self) -> None:
+        mutations = (
+            (
+                "src/voice_nav_mission/package.xml",
+                "<test_depend>launch_ros</test_depend>",
+                "<exec_depend>launch_ros</exec_depend>",
+                "launch_ros",
+            ),
+            (
+                "src/voice_nav_mission/package.xml",
+                "<exec_depend>rmw_fastrtps_cpp</exec_depend>",
+                "<depend>rmw_fastrtps_cpp</depend>",
+                "node runtime-checks",
+            ),
+            (
+                "src/voice_nav_bringup/package.xml",
+                "<exec_depend>rmw_fastrtps_cpp</exec_depend>",
+                "<depend>rmw_fastrtps_cpp</depend>",
+                "product_sim.launch.py selects",
+            ),
+        )
+        for relative_path, old, new, diagnostic in mutations:
+            with self.subTest(path=relative_path, dependency=old):
+                def mutation(
+                    root: Path,
+                    path: str = relative_path,
+                    old_value: str = old,
+                    new_value: str = new,
+                ) -> None:
+                    self.replace(root, path, old_value, new_value)
+
+                completed = self.run_checker(mutation)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(diagnostic, completed.stderr)
+
+    def test_each_package_registers_one_serial_launch_test(self) -> None:
+        specifications = (
+            (
+                "voice_nav_mission",
+                "src/voice_nav_mission/CMakeLists.txt",
+                "test/test_motion_gate_node.py",
+                "60",
+                "test_test_motion_gate_node.py",
+            ),
+            (
+                "voice_nav_bringup",
+                "src/voice_nav_bringup/CMakeLists.txt",
+                "test/test_motion_gate_product.py",
+                "180",
+                "test_test_motion_gate_product.py",
+            ),
+        )
+        for package, relative_path, test_path, timeout, test_name in (
+            specifications
+        ):
+            mutations = (
+                (
+                    f"TIMEOUT {timeout}",
+                    f"TIMEOUT {int(timeout) + 1}",
+                    "TIMEOUT",
+                ),
+                (
+                    "RUN_SERIAL TRUE",
+                    "RUN_SERIAL FALSE",
+                    "RUN_SERIAL TRUE",
+                ),
+                (
+                    (
+                        "add_launch_test(\n"
+                        f"    {test_path}\n"
+                        f"    TIMEOUT {timeout}\n"
+                        "  )"
+                    ),
+                    (
+                        "add_launch_test(\n"
+                        f"    {test_path}\n"
+                        f"    TIMEOUT {timeout}\n"
+                        "  )\n"
+                        "  add_launch_test(\n"
+                        f"    {test_path}\n"
+                        f"    TIMEOUT {timeout}\n"
+                        "  )"
+                    ),
+                    "exactly one add_launch_test",
+                ),
+            )
+            for old, new, diagnostic in mutations:
+                with self.subTest(package=package, mutation=diagnostic):
+                    def mutation(
+                        root: Path,
+                        path: str = relative_path,
+                        old_value: str = old,
+                        new_value: str = new,
+                    ) -> None:
+                        self.replace(root, path, old_value, new_value)
+
+                    completed = self.run_checker(mutation)
+
+                    self.assertNotEqual(completed.returncode, 0)
+                    self.assertIn(diagnostic, completed.stderr)
 
     def test_gate_limits_cannot_exceed_controller_limits(self) -> None:
         def mutation(root: Path) -> None:
@@ -801,6 +1260,108 @@ class MotionGateContractTest(unittest.TestCase):
             completed.stderr,
         )
 
+    def test_core_open_validates_before_invoking_graph_provider(self) -> None:
+        def mutation(root: Path) -> None:
+            path = (
+                root
+                / "src"
+                / "voice_nav_mission"
+                / "src"
+                / "motion_gate_core.cpp"
+            )
+            source = path.read_text(encoding="utf-8")
+            source = source.replace(
+                "  const auto binding = binding_provider();",
+                "  const auto binding = OpenBinding{};",
+                1,
+            )
+            source = source.replace(
+                "  ControlResult rejection;",
+                (
+                    "  const auto premature_binding = binding_provider();\n"
+                    "  (void)premature_binding;\n"
+                    "  ControlResult rejection;"
+                ),
+                1,
+            )
+            path.write_text(source, encoding="utf-8")
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "pure validation before graph provider",
+            completed.stderr,
+        )
+
+    def test_open_rejection_path_cannot_touch_graph_before_core(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_mission/src/motion_gate_node.cpp",
+                (
+                    "OpenBinding expected_binding;\n"
+                    "    const auto result = core_.open("
+                ),
+                (
+                    "OpenBinding expected_binding;\n"
+                    "    const auto unsafe_snapshot =\n"
+                    "      discover_unique_writer_gid_on_topic("
+                    "candidate_topic_);\n"
+                    "    (void)unsafe_snapshot;\n"
+                    "    const auto result = core_.open("
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("before touching the DDS graph", completed.stderr)
+
+    def test_accepting_reader_requires_applied_and_third_snapshot(self) -> None:
+        mutations = (
+            (
+                "if (result.code != ResultCode::Applied)",
+                "if (false)",
+                "result.code != ResultCode::Applied",
+            ),
+            (
+                "candidate_topic_, request.lease_id, false",
+                "candidate_topic_, request.lease_id, true",
+                "accepting reader only after APPLIED",
+            ),
+            (
+                (
+                    "const auto third =\n"
+                    "      discover_unique_writer_gid_on_topic("
+                    "candidate_topic_);"
+                ),
+                "const auto third = expected_binding;",
+                "exactly three",
+            ),
+        )
+        for old, new, diagnostic in mutations:
+            with self.subTest(mutation=diagnostic):
+                def mutation(
+                    root: Path,
+                    old_value: str = old,
+                    new_value: str = new,
+                ) -> None:
+                    self.replace(
+                        root,
+                        (
+                            "src/voice_nav_mission/src/"
+                            "motion_gate_node.cpp"
+                        ),
+                        old_value,
+                        new_value,
+                    )
+
+                completed = self.run_checker(mutation)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(diagnostic, completed.stderr)
+
     def test_final_publication_must_be_serialized(self) -> None:
         def mutation(root: Path) -> None:
             self.replace(
@@ -821,21 +1382,23 @@ class MotionGateContractTest(unittest.TestCase):
                 root,
                 "src/voice_nav_mission/src/motion_gate_node.cpp",
                 (
-                    "publish_serialized(make_zero_command());\n"
-                    "    response->motion_inhibited = true;\n"
-                    "    response->zero_published = true;"
+                    "publish_serialized(command);\n"
+                    "    publish_state();\n"
+                    "    fill_response("
+                    "result, response, command.is_zero());"
                 ),
                 (
-                    "response->zero_published = true;\n"
-                    "    publish_serialized(make_zero_command());"
-                    "\n    response->motion_inhibited = true;"
+                    "fill_response("
+                    "result, response, command.is_zero());\n"
+                    "    publish_serialized(command);\n"
+                    "    publish_state();"
                 ),
             )
 
         completed = self.run_checker(mutation)
 
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("INHIBIT acknowledgement", completed.stderr)
+        self.assertIn("zero-before-response", completed.stderr)
 
     def test_product_launch_must_have_one_gate_and_no_mux(self) -> None:
         def mutation(root: Path) -> None:
@@ -844,12 +1407,15 @@ class MotionGateContractTest(unittest.TestCase):
                 (
                     "src/voice_nav_bringup/launch/product_sim.launch.py"
                 ),
-                "return LaunchDescription([simulation, motion_gate])",
+                (
+                    "return LaunchDescription("
+                    "[locked_rmw, simulation, motion_gate])"
+                ),
                 (
                     "twist_mux = Node(package='twist_mux', "
                     "executable='twist_mux')\n"
-                    "    return LaunchDescription([simulation, motion_gate, "
-                    "twist_mux])"
+                    "    return LaunchDescription([locked_rmw, simulation, "
+                    "motion_gate, twist_mux])"
                 ),
             )
 
@@ -874,6 +1440,125 @@ class MotionGateContractTest(unittest.TestCase):
 
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("consumer deadman", completed.stderr)
+
+    def test_product_launch_returns_simulation_gate_and_rmw_lock(self) -> None:
+        mutations = (
+            (
+                "[locked_rmw, simulation, motion_gate]",
+                "[locked_rmw, motion_gate]",
+                "simulation action",
+            ),
+            (
+                "[locked_rmw, simulation, motion_gate]",
+                "[locked_rmw, simulation]",
+                "motion_gate action",
+            ),
+            (
+                "[locked_rmw, simulation, motion_gate]",
+                "[simulation, motion_gate]",
+                "locked RMW action",
+            ),
+            (
+                "value='rmw_fastrtps_cpp'",
+                "value='rmw_cyclonedds_cpp'",
+                "RMW_IMPLEMENTATION=rmw_fastrtps_cpp",
+            ),
+            (
+                "[locked_rmw, simulation, motion_gate]",
+                "[simulation, locked_rmw, motion_gate]",
+                "execute before",
+            ),
+        )
+        for old, new, diagnostic in mutations:
+            with self.subTest(mutation=diagnostic):
+                def mutation(
+                    root: Path,
+                    old_value: str = old,
+                    new_value: str = new,
+                ) -> None:
+                    self.replace(
+                        root,
+                        (
+                            "src/voice_nav_bringup/launch/"
+                            "product_sim.launch.py"
+                        ),
+                        old_value,
+                        new_value,
+                    )
+
+                completed = self.run_checker(mutation)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(diagnostic, completed.stderr)
+
+    def test_product_gate_uses_only_trusted_config_without_remaps(self) -> None:
+        mutations = (
+            (
+                "parameters=[gate_config],",
+                "parameters=[{'use_sim_time': True}],",
+                "exactly [gate_config]",
+            ),
+            (
+                "'motion_gate.yaml',",
+                (
+                    "('unsafe.yaml' if True else "
+                    "'motion_gate.yaml'),"
+                ),
+                "installed trusted",
+            ),
+            (
+                "parameters=[gate_config],",
+                (
+                    "parameters=[gate_config],\n"
+                    "        remappings=[('/unsafe', '/bypass')],"
+                ),
+                "must not accept endpoint remappings",
+            ),
+        )
+        for old, new, diagnostic in mutations:
+            with self.subTest(mutation=diagnostic):
+                def mutation(
+                    root: Path,
+                    old_value: str = old,
+                    new_value: str = new,
+                ) -> None:
+                    self.replace(
+                        root,
+                        (
+                            "src/voice_nav_bringup/launch/"
+                            "product_sim.launch.py"
+                        ),
+                        old_value,
+                        new_value,
+                    )
+
+                completed = self.run_checker(mutation)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(diagnostic, completed.stderr)
+
+    def test_returned_simulation_uses_the_installed_launch(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                (
+                    "src/voice_nav_bringup/launch/"
+                    "product_sim.launch.py"
+                ),
+                "'simulation.launch.py',",
+                (
+                    "('unsafe.launch.py' if True else "
+                    "'simulation.launch.py'),"
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "installed voice_nav_sim/launch/simulation.launch.py",
+            completed.stderr,
+        )
 
     def test_no_second_production_source_may_name_final_endpoint(self) -> None:
         def mutation(root: Path) -> None:

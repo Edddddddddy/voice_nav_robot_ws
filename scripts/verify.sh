@@ -26,7 +26,7 @@ cd "${workspace_root}"
 export XML_CATALOG_FILES="${workspace_root}/tools/schema/catalog.xml"
 export PYTHONDONTWRITEBYTECODE=1
 
-echo "[1/5] Checking repository and course contracts"
+echo "[1/6] Checking repository and course contracts"
 python3 scripts/check_repository.py
 python3 scripts/check_motion_gate_contract.py --root .
 python3 -m unittest discover -s tests -p "test_*.py" -v
@@ -43,10 +43,10 @@ fi
 git diff --check
 git diff --cached --check
 
-echo "[2/5] Checking declared dependencies"
+echo "[2/6] Checking declared dependencies"
 rosdep check --from-paths src --ignore-src
 
-echo "[3/5] Validating the robot model contract"
+echo "[3/6] Validating the robot model contract"
 robot_xacro="src/voice_nav_sim/urdf/voice_nav_robot.urdf.xacro"
 controllers_yaml="src/voice_nav_sim/config/controllers.yaml"
 bridge_yaml="src/voice_nav_sim/config/bridge.yaml"
@@ -85,7 +85,7 @@ gz sdf -k "${simulation_world}"
 
 package_args=("$@")
 
-echo "[4/5] Building"
+echo "[4/6] Building"
 if (( ${#package_args[@]} > 0 )); then
   colcon build \
     --packages-up-to "${package_args[@]}" \
@@ -101,7 +101,7 @@ set +u
 source install/setup.bash
 set -u
 
-echo "[5/5] Testing"
+echo "[5/6] Testing"
 if (( ${#package_args[@]} > 0 )); then
   colcon test \
     --packages-select "${package_args[@]}" \
@@ -114,4 +114,6 @@ else
 fi
 
 colcon test-result --verbose
+echo "[6/6] Auditing the clean MotionGate install boundary"
+bash scripts/check_clean_motion_gate_install.sh
 echo "VoiceNav Robot verification passed."
