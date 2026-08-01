@@ -447,6 +447,15 @@ class GazeboTeardownMutationTest(unittest.TestCase):
             "must not disable or rebind critical teardown",
         )
 
+    def test_active_test_generator_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
+            "    def test_motion_gate_product_contract(self):\n",
+            "    def test_motion_gate_product_contract(self):\n"
+            "        yield\n",
+            "active launch test method",
+        )
+
     def test_assert_exit_codes_rebinding_is_rejected(self):
         self.assert_mutation_rejected(
             "src/voice_nav_bringup/test/test_motion_gate_product.py",
@@ -540,6 +549,15 @@ class GazeboTeardownMutationTest(unittest.TestCase):
             "must not disable or rebind critical teardown",
         )
 
+    def test_cleanup_generator_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
+            "    def inhibit_for_cleanup(self):\n",
+            "    def inhibit_for_cleanup(self):\n"
+            "        yield\n",
+            "cleanup zero/inhibit",
+        )
+
     def test_early_return_from_fixture_destroy_is_rejected(self):
         self.assert_mutation_rejected(
             "src/voice_nav_bringup/test/test_motion_gate_product.py",
@@ -553,6 +571,14 @@ class GazeboTeardownMutationTest(unittest.TestCase):
                 "        node = getattr(self, 'node', None)"
             ),
             "destroy_ros_fixture must not terminate early",
+        )
+
+    def test_fixture_destroy_must_keep_every_required_resource_step(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
+            "            steps.append(('node destroy', node.destroy_node))",
+            "            pass  # node destruction omitted",
+            "must exhaust all cleanup steps",
         )
 
     def test_product_exit_policy_must_default_on(self):

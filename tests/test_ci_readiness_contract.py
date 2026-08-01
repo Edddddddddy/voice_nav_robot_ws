@@ -221,8 +221,22 @@ class CiReadinessContractTest(unittest.TestCase):
                     cmake,
                 )
                 self.assertEqual(cmake.count(isolated_runner), expected_count)
-                self.assertIn("ENVIRONMENT_MODIFICATION", cmake)
-                self.assertIn(environment_reset, cmake)
+                self.assertEqual(cmake.count("ENVIRONMENT_MODIFICATION"), 1)
+                self.assertEqual(cmake.count(environment_reset), 1)
+                self.assertNotIn("DISABLED", cmake)
+                self.assertNotIn("SKIP_RETURN_CODE", cmake)
+                self.assertIsNone(
+                    re.search(
+                        r"ROS_DOMAIN_ID=(?!unset:)",
+                        cmake,
+                    )
+                )
+                self.assertIsNone(
+                    re.search(
+                        r"DISABLE_ROS_ISOLATION=(?!unset:)",
+                        cmake,
+                    )
+                )
                 self.assertNotIn("ROS_DOMAIN_ID=91", cmake)
                 self.assertNotIn("ROS_DOMAIN_ID=92", cmake)
                 self.assertNotIn("ROS_DOMAIN_ID=93", cmake)
