@@ -2,7 +2,8 @@
 
 **Status:** In Progress
 
-**GitHub Issue:** TBD
+**GitHub Issue:**
+[Edddddddddy/voice_nav_robot_ws#15](https://github.com/Edddddddddy/voice_nav_robot_ws/issues/15)
 
 **Branch:** `fix/vn-0010-gazebo-teardown`
 
@@ -59,11 +60,14 @@ Give every launch test that starts Gazebo one explicit lifecycle contract:
   the test runner alive while its registered cleanup stops and joins Gazebo.
 - Cleanup is registered before the active test body can fail and remains
   effective when `setUp` or a behavior assertion fails.
-- Product ordering is Gate inhibit, structured server stop, positive ACK,
+- Cleanup ordering is zero/Gate inhibit, structured server stop, positive ACK,
   launch-managed process-exit barrier, then ROS fixture destruction.
-- The helper uses direct argv with `shell=False`, inherits the CMake-owned
-  partition, and refuses any missing or different partition before invoking
-  the CLI.
+- Each launch-test process replaces any inherited `GZ_PARTITION` with a
+  scope, PID, and 128-bit random nonce before launch constructs its context.
+  CMake retains `RUN_SERIAL` but owns no fixed Gazebo partition.
+- The helper uses direct argv with `shell=False`, validates the claimed
+  partition, and passes the same checked environment snapshot to the CLI so a
+  concurrent environment mutation cannot redirect the stop request.
 - RPC timeout, non-zero CLI exit, false/malformed ACK, an already-dead server,
   or failure to observe the real process exit all fail the test.
 - ACK means only that the stop request was accepted; it never substitutes for
@@ -83,6 +87,10 @@ Give every launch test that starts Gazebo one explicit lifecycle contract:
 - [x] Static mutation guards reject ACK-only cleanup, filtered exit codes,
   fixed sleep, process-kill shortcuts, `shell=True`, missing partition
   isolation, and cleanup absent from a failure path.
+- [x] Every Gazebo test claims a process-unique partition; fixed CMake
+  partitions and mismatched RPC environments are rejected.
+- [x] The canonical repository runner executes the real non-package `tests/`
+  layout and fails the gate if any contract test is skipped.
 - [ ] The `voice_nav_sim` control test passes 20 serial fresh launches.
 - [ ] The complete MotionGate product test passes 20 serial fresh launches.
 - [ ] Exact-head package tests, clean-install audit, and
@@ -96,8 +104,11 @@ Give every launch test that starts Gazebo one explicit lifecycle contract:
 
 ## Risks and rollback
 
-- A stop request could target another server. Exact non-empty test partitions
-  and the launch-managed process barrier bound both transport and ownership.
+- A stop request could target another server. A per-process scope/PID/random
+  partition, the exact checked RPC environment, and the launch-managed process
+  barrier bind both transport and ownership. This prevents accidental stale,
+  concurrent CTest, and cross-worktree collisions; it does not claim to resist
+  a malicious same-UID process that steals a live nonce.
 - A positive RPC response could be mistaken for completion. The separate
   process barrier and global exit-code assertion prevent that collapse.
 - Cleanup failure could hide the original assertion. unittest records cleanup
@@ -108,7 +119,10 @@ Give every launch test that starts Gazebo one explicit lifecycle contract:
 
 ## Design impact
 
-- Stable Interfaces changed: none.
+- Stable Interfaces changed: the simulation/product launch configuration gains
+  the backward-compatible `shutdown_on_gazebo_exit` argument, defaulting to
+  `true`. Public ROS names, types, QoS, TF ownership, and motion semantics are
+  unchanged.
 - TF or motion ownership changed: none.
 - Runtime product default changed: none.
 - ADR required: no. This is a test-fixture lifecycle correction. Migrating the
@@ -119,8 +133,14 @@ Give every launch test that starts Gazebo one explicit lifecycle contract:
 
 - `841b7a7`: deterministic helper/static lifecycle RED and strict integration
   exit oracles.
-- Pending commit: structured stop, default-on launch seam, cleanup ordering,
-  control-checker refinement, and mutation guards GREEN.
+- `a9dec46`: structured stop, default-on launch seam, and must-run cleanup
+  GREEN.
+- `91c6318` / `8096f0b`: unreachable-oracle RED/GREEN.
+- `59136c8` / `fe92c6c`: process-unique Gazebo partition RED/GREEN.
+- `d3b1dfa` / `23c9b8f`: skip, rebind, and unreachable-checker bypass
+  RED/GREEN.
+- `1d7653c`, `ebd2fe1` / `a651bca`: real non-package repository discovery and
+  fail-on-skip runner correction.
 - Pending: 20-run evidence, exact full gate, review, CI, and merge.
 
 ## Verification evidence
@@ -139,3 +159,13 @@ Fresh launch 6 post-shutdown: gazebo exit -9; strict assertExitCodes failed
 Final exact-head hashes, 20-run reports, static-contract counts, full
 verification, independent review, hosted CI, PR, and merge evidence remain
 pending and must not be claimed early.
+
+Pre-final repository-contract evidence:
+
+```text
+Head: a651bca
+Command: source /opt/ros/jazzy/setup.bash &&
+  python3 scripts/run_repository_tests.py
+Result: 214 tests, 0 skipped, 0 errors, 0 failures
+Classification: implementation evidence only; final exact-head gate pending
+```

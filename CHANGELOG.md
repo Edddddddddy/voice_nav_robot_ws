@@ -67,8 +67,12 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Prevented otherwise-green Gazebo launch tests from relying only on signal
   escalation during teardown. Isolated fixtures now request structured server
   stop, require a positive ACK, wait for the launch-managed process, and retain
-  strict global exit-code checks; product launch behavior still defaults to
-  shutdown on an unexpected Gazebo exit.
+  strict global exit-code checks. Each test process claims a unique random
+  Gazebo partition, binds the stop RPC to the validated environment snapshot,
+  and runs cleanup as a must-run ladder. Repository contracts now fail on any
+  skipped test and are discovered from the real non-package test layout;
+  product launch behavior still defaults to shutdown on an unexpected Gazebo
+  exit.
 - Prevented a DDS-matched candidate writer from being terminally rejected
   solely because its Gate-local ROS node identity snapshot had not converged.
   MotionGate now types only that narrow state as

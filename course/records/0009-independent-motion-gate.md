@@ -835,8 +835,11 @@ strict post-shutdown check reported `-9`. The corrective work is tracked in
 [PIT-0012](../reference/engineering-pitfalls.md#pit-0012-no-residual-gazebo-process-is-not-a-clean-gazebo-exit).
 
 This note does not relabel the earlier Lesson 0009 evidence and does not count
-as Lesson 0010 crash-stop or pause evidence. The new fixture uses an isolated
-partition, structured server-stop ACK, a real launch-managed process-exit
-barrier, and the unchanged strict exit-code oracle. PIT-0012 remains
-`Known (guard planned)` until repeated exact-head and hosted-CI evidence is
-complete.
+as Lesson 0010 crash-stop or pause evidence. The new fixture claims a unique
+scope/PID/random partition per launch-test process, uses a structured
+server-stop ACK with an exact environment snapshot, crosses a real
+launch-managed process-exit barrier, and retains the unchanged strict exit-code
+oracle. Cleanup steps are must-run, and the repository contract runner fails
+if critical evidence is skipped. PIT-0012 remains
+`Known (guard implemented; final evidence pending)` until repeated exact-head
+and hosted-CI evidence is complete.

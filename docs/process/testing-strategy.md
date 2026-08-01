@@ -28,7 +28,11 @@ Before review or merge:
 bash scripts/verify.sh
 ```
 
-The full gate starts from declared dependencies, validates repository and robot-model contracts, builds all packages, runs all tests, and reports a zero-error `colcon test-result`.
+The full gate starts from declared dependencies, validates repository and
+robot-model contracts, builds all packages, runs all tests, and reports a
+zero-error `colcon test-result`. Repository contracts run through
+`scripts/run_repository_tests.py`; discovery uses the real non-package
+`tests/` layout and any skipped contract makes the gate fail.
 
 PR CI uses deterministic in-memory fakes as soon as their Module exists and
 adds bounded headless Gazebo tests with the v0.2 simulation milestones. At
@@ -91,19 +95,25 @@ Every automated motion test uses configured limits, a steady-clock deadline, zer
 ### Gazebo launch-test lifecycle
 
 Tests that own a Gazebo server use a lifecycle oracle separate from their
-product assertions. Each test runs in a fixed non-empty `GZ_PARTITION`, first
-selects zero or inhibits MotionGate, sends `stop: true` to `/server_control`,
-requires a positive `gz.msgs.Boolean` acknowledgement, and then waits for the
-launch-managed `gazebo` process itself to exit. An ACK is request acceptance,
-not process completion. A post-shutdown test finally applies an unfiltered
-`assertExitCodes(proc_info)` to every launch-managed process.
+product assertions. At module import, each test process overwrites inherited
+state with a scope/PID/128-bit-random non-empty `GZ_PARTITION`; CMake does not
+provide a reusable fixed partition. Cleanup first selects zero or inhibits
+MotionGate, sends `stop: true` to `/server_control` with the same environment
+snapshot that was validated, requires a positive `gz.msgs.Boolean`
+acknowledgement, and then waits for the launch-managed `gazebo` process itself
+to exit. An ACK is request acceptance, not process completion. A post-shutdown
+test finally applies an unfiltered `assertExitCodes(proc_info)` to every
+launch-managed process.
 
 The product launch still defaults to shutting down when Gazebo exits. Tests
 disable only that immediate event handler while their failure-safe cleanup
-performs the structured stop and process join. Static mutation tests reject
-fixed sleeps, global process killing, shell execution, forced-exit allowlists,
-ACK-only cleanup, wrong partitions, and cleanup registration that can be
-skipped after an active assertion failure.
+performs the structured stop and process join. The cleanup ladder is must-run:
+structured stop is attempted even when zero/inhibit fails, and ROS fixture
+destruction is attempted even when structured stop fails. Static mutation
+tests reject fixed partitions, fixed sleeps, global process killing, shell
+execution, forced-exit allowlists, ACK-only cleanup, rebound or unreachable
+oracles, disabled critical test modules, wrong RPC environments, and cleanup
+registration that can be skipped after an active assertion failure.
 
 This fixture contract proves deterministic test teardown. It does not prove
 the internal cause of a slow signal-only Gazebo shutdown, ordinary user
