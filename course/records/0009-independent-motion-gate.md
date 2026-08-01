@@ -1,7 +1,6 @@
 # Lesson 0009 学习记录：独立 MotionGate
 
-状态：Final reviewed implementation/documentation local gate and hosted CI
-GREEN / evidence-only closure CI and merge pending
+状态：VN-0010-C2 local/hosted gates GREEN and PR #16 rebase-merged
 （VN-0010-C2 corrective addendum；Lesson 0009 主账本 closure 仍由 PR #13 维护）
 （教师参考实现）
 
@@ -844,7 +843,7 @@ launch-managed process-exit barrier, and retains the unchanged strict exit-code
 oracle. Cleanup steps are must-run, and the repository contract runner fails
 if critical evidence is skipped. PIT-0012 is `Guarded` after both repeated
 gates, exact-head local verification, independent review, and required hosted
-CI completed; PR merge remains a separate delivery state.
+CI completed; PR #16 subsequently rebase-merged without tree drift.
 
 Local corrective evidence on implementation head `2d11d9e` completed the
 ground-truth parser's fresh-launch stability gate: `voice_nav_sim` passed
@@ -861,6 +860,9 @@ failure/error;
 the 10 skips were the exact package-local cppcheck allowlist, and the clean
 MotionGate install audit passed. Required hosted CI run `30710167163` attempt 1
 passed on that exact head; its required job completed in 6m20s after two
-independent rereviews reported P0=0, P1=0, P2=0. The evidence-only closure
-commit still requires CI before merge. This correction closes PIT-0012 but
-does not count as Lesson 0010.
+independent rereviews reported P0=0, P1=0, P2=0. Evidence-only closure head
+`66f6834` then passed required workflow run `30710678583` on attempt 1, with a
+5m49s required job. PR #16 rebase-merged as public head `f31e3b7` at
+2026-08-01T17:43:10Z; its tree equals the reviewed tree and all 58 range-diff
+rows are `=`. Issue #15 closed as completed. This correction closes PIT-0012
+but does not count as Lesson 0010.
