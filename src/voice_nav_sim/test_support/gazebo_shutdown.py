@@ -27,6 +27,7 @@ from launch.events.process import ProcessExited
 
 SERVICE_TIMEOUT_MILLISECONDS = 5000
 SUBPROCESS_TIMEOUT_SECONDS = 7.0
+STOP_RPC_ATTEMPTS = 2
 PROCESS_TIMEOUT_SECONDS = 10.0
 POSITIVE_ACK = re.compile(r'\s*data:\s*true\s*')
 TEST_PARTITION_SCOPE = re.compile(r'[a-z0-9][a-z0-9_]{0,31}')
@@ -129,21 +130,28 @@ def structured_stop_gazebo(
         '--req',
         'stop: true',
     ]
-    try:
-        completed = runner(
-            arguments,
-            capture_output=True,
-            text=True,
-            timeout=SUBPROCESS_TIMEOUT_SECONDS,
-            check=False,
-            shell=False,
-            env=active_environment,
-        )
-    except subprocess.TimeoutExpired as error:
+    last_timeout = None
+    for _attempt in range(STOP_RPC_ATTEMPTS):
+        try:
+            completed = runner(
+                arguments,
+                capture_output=True,
+                text=True,
+                timeout=SUBPROCESS_TIMEOUT_SECONDS,
+                check=False,
+                shell=False,
+                env=active_environment,
+            )
+        except subprocess.TimeoutExpired as error:
+            last_timeout = error
+            continue
+        break
+    else:
         raise AssertionError(
             'Gazebo structured stop RPC timed out after '
+            f'{STOP_RPC_ATTEMPTS} attempts of '
             f'{SUBPROCESS_TIMEOUT_SECONDS:.1f} seconds'
-        ) from error
+        ) from last_timeout
 
     if completed.returncode != 0:
         raise AssertionError(

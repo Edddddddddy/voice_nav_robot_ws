@@ -204,7 +204,28 @@ class GazeboShutdownSupportTest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "timed out"):
             self.stop(proc_info, runner)
 
+        self.assertEqual(len(runner.calls), 2)
         self.assertEqual(proc_info.shutdown_calls, [])
+
+    def test_transient_timeout_is_retried_before_positive_ack(self):
+        proc_info = FakeProcInfo()
+        successful = RecordingRunner()
+        calls = []
+
+        def transient_runner(arguments, **kwargs):
+            calls.append((arguments, kwargs))
+            if len(calls) == 1:
+                raise subprocess.TimeoutExpired("gz service", 7.0)
+            return successful(arguments, **kwargs)
+
+        self.stop(proc_info, transient_runner)
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(successful.calls), 1)
+        self.assertEqual(
+            proc_info.shutdown_calls,
+            [{"process": "gazebo", "timeout": 10.0}],
+        )
 
     def test_false_or_malformed_ack_fails_without_process_wait(self):
         for response in (
