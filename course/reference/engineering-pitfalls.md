@@ -21,6 +21,11 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0011 | Every ament CTest fails to import `ament_cmake_test` | Were ROS and the workspace overlay sourced in that shell? | Guarded |
 | PIT-0012 | Product assertions pass, but Gazebo exits `-9` during CTest teardown | Did failure occur in the active test or the strict post-shutdown exit check? | Known (guard implemented; final evidence pending) |
 | PIT-0013 | A focused runner test passes, but canonical discovery cannot import the real test tree | Does the fixture match the repository's package markers and import path? | Guarded |
+| PIT-0014 | Concurrent launch tests collide despite a fixed `ROS_DOMAIN_ID` | Does generated CTest metadata invoke the official isolated runner without overriding its domain? | Guarded |
+| PIT-0015 | One cleanup failure prevents later fixture destruction | Are teardown phases independent LIFO cleanups with exhaustive error aggregation? | Guarded |
+| PIT-0016 | A green report did not execute the intended contract | Do source inventory, generated CTest, and critical xUnit name the same tests with no unapproved skip? | Guarded |
+| PIT-0017 | Repeated WSL simulation fails while collecting Gazebo pose evidence | Is the server unhealthy, or did the bounded CLI query time out / emit a small JSON burst? | Guarded |
+| PIT-0018 | CTest prints a failure but the surrounding command returns zero | Did a later diagnostic command replace the gate's shell exit status? | Guarded |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -224,7 +229,10 @@ construction. A failure-safe cleanup always attempts zero/inhibit, then issues
 direct-argv `/server_control` `stop: true` with the same checked environment
 snapshot, requires a positive Boolean ACK, waits for the launch-managed Gazebo
 process itself to exit, and destroys the ROS fixture even if an earlier cleanup
-step fails. ACK is not process completion. The final global
+step fails. These are independent LIFO cleanups with exhaustive sub-resource
+aggregation. Only a typed CLI timeout retries the same idempotent request once;
+all other errors and two timeouts fail closed. ACK is not process completion.
+The tests use the official isolated ROS runner, and the final global
 `assertExitCodes(proc_info)` remains unchanged. Static mutation tests reject
 fixed partitions, unreachable or rebound oracles, skipped critical modules,
 fixed sleeps, unbounded timeout extensions, `-9` allowlists, shell execution,
@@ -257,3 +265,139 @@ discovery, and removes the transient test-directory path added by discovery.
 Run that exact entry point, not only its `run_suite()` unit helper, before
 claiming the gate is usable. The same runner fails closed if any discovered
 contract is skipped.
+
+## PIT-0014: A fixed ROS domain is not concurrent test isolation
+
+**Symptom.** A launch test passes alone but intermittently discovers another
+test's nodes, services, or topics under concurrent CI, another worktree, or a
+repeated local run. Giving every test the same apparently unused
+`ROS_DOMAIN_ID` only changes which runs can collide.
+
+**Cause.** A DDS domain ID is a shared discovery namespace, not an ownership
+lease. A fixed value cannot be unique across independently scheduled
+processes. ROS 2's `run_test_isolated.py` provides a cooperative isolation
+boundary for test processes that use the generated runner contract; it is not
+effective if CMake or inherited environment state replaces its selected
+domain. Inspecting only the source `CMakeLists.txt` is insufficient because
+macros and later test properties determine the final CTest command.
+
+**Guardrail.** Register each critical launch test with the official isolated
+runner, clear inherited `ROS_DOMAIN_ID` and `DISABLE_ROS_ISOLATION`, and keep
+the expected local discovery and RMW environment explicit. After configure,
+treat `ctest --show-only=json-v1` as the final evidence: verify the exact test
+inventory, source-test path, runner path, environment modifications,
+serialization, and a closed allowlist of CTest properties; keep the bounded
+timeout in the matching source registration contract. This also
+rejects result-semantic overrides such as `WILL_FAIL`,
+`PASS_REGULAR_EXPRESSION`, and `SKIP_REGULAR_EXPRESSION` that source-level
+checks could otherwise miss.
+
+## PIT-0015: One composite cleanup is one failure boundary
+
+**Symptom.** The active assertion fails, the first teardown operation raises,
+and zero publication, structured Gazebo stop, thread join, or ROS fixture
+destruction never runs. The opposite failure mode is a broad `except` that
+continues teardown but hides the cleanup error from the test result.
+
+**Cause.** `unittest` continues through separately registered cleanups in LIFO
+order, but it cannot resume halfway through one composite callback after that
+callback raises. A helper that performs several destructive phases in one
+ordinary sequence therefore short-circuits the remaining phases; a helper
+that swallows exceptions makes incomplete cleanup look successful.
+
+**Guardrail.** Register independent cleanup phases as soon as their resources
+can exist, in reverse of the required execution order: the LIFO run should
+first publish zero or inhibit, then request and await structured server stop,
+then destroy the ROS fixture. When one phase itself owns multiple independent
+resources, use an exhaustive aggregator that attempts every callback, retains
+each original exception, and raises one `ExceptionGroup` afterward. Failure to
+annotate one exception must not skip later callbacks. Do not replace
+`doCleanups()`, clear `_cleanups`, or use a composite wrapper to bypass these
+independent failure boundaries. See
+[VN-0010-C2](../../docs/work-items/0010-corrective-gazebo-teardown.md).
+
+## PIT-0016: Green status is not proof that the intended tests ran
+
+**Symptom.** The test command returns zero and the summary is green, but a new
+contract was not discovered, a critical launch test was marked skipped, an
+exit code was inverted or ignored by CTest, or an xUnit file describes fewer
+tests than the source and generated registration require.
+
+**Cause.** Discovery, CTest execution, and xUnit reporting are separate
+inventories with different extension and skip mechanisms. Any one layer can
+look internally consistent while omitting work from another layer. Examples
+include a module-level `def test_*` ignored by a `unittest` runner, a
+`load_tests` hook that replaces discovery, CTest pass/skip regex properties,
+and an aggregate skipped count with no matching allowed testcase.
+
+**Guardrail.** Close the evidence chain rather than trusting one summary:
+
+1. Build a source inventory for every repository `test_*.py`, reject
+   unsupported test shapes and collection hooks, and require discovered IDs
+   and the executed count to match that inventory exactly.
+2. Inspect generated CTest JSON after configure and require the exact launch
+   tests, official command, isolation environment, and closed property set.
+3. Validate each critical launch xUnit artifact structurally: all required
+   testcase identities, named non-duplicate cases, counts consistent with the
+   actual elements and suite aggregates, and zero failure, error, or skip
+   elements.
+4. Permit skips only through an exact allowlist of artifact path and testcase
+   classname. The current exception is the package's own
+   `test_results/<package>/cppcheck.xunit.xml` with classname
+   `<package>.cppcheck`; a global skipped total is never an exemption.
+
+**Checker threat boundary.** These guards prevent ordinary and accidental
+source, CMake, discovery, and report regressions in a cooperative repository.
+They are correctness checks, not a security sandbox. They do not claim to
+resist a malicious same-UID process or deliberately hostile Python dynamic
+metaprogramming that mutates files, imported objects, or runtime test IDs.
+
+## PIT-0017: A Gazebo query timeout is not a teardown diagnosis
+
+**Symptom.** During repeated WSL launch tests, the general
+`gz model -m voice_nav_robot -p` query occasionally reaches its five-second
+timeout. The server may still be publishing the robot pose, and the later
+structured shutdown may still complete cleanly.
+
+**Supported diagnosis and boundary.** The observed failure is instability in
+the generic model query path under repetition, not evidence by itself that the
+launch-managed Gazebo process died or failed teardown. That command performs
+more discovery and model-query work than the assertion needs. The exact
+upstream transport cause remains unproven. Classify a timeout raised during
+the active test separately from a post-shutdown process exit failure; only the
+latter belongs to the PIT-0012 teardown oracle.
+
+**Guardrail.** Read the narrowest authoritative stream directly from the
+exact isolated `GZ_PARTITION`: query
+`/world/voice_nav_test_world/pose/info` with `gz topic --echo`, `--num 1`, and
+`--json-output`. Use a 10-second subprocess bound and at most one read-only
+retry. In observed high-rate runs the CLI could return two complete JSON
+documents despite `--num 1`, so the parser accepts no more than four adjacent
+complete documents, validates every document, and uses the newest. Reject a
+wrong partition, malformed or trailing data, missing/duplicate model, invalid
+or non-finite quaternion, and non-finite XYZ/RPY. This removes the unneeded
+general model-query seam without turning evidence collection into an unbounded
+or permissive operation. Keep structured server stop, launch-managed process
+completion, and strict exit codes as separate teardown evidence. See
+[PIT-0012](#pit-0012-no-residual-gazebo-process-is-not-a-clean-gazebo-exit).
+
+## PIT-0018: A trailing diagnostic can erase a failed gate status
+
+**Symptom.** CTest clearly prints `The following tests FAILED`, but the outer
+PowerShell/WSL command reports exit code zero. Automation could therefore
+classify a real failure as success even though the test artifact is red.
+
+**Cause and boundary.** A shell pipeline or command list normally returns the
+status of its last command. Adding a successful `ps` process snapshot after
+CTest can replace CTest's non-zero status. Attempting to preserve `$?` inside
+nested PowerShell, `wsl.exe`, and `bash -lc` quoting adds a second independent
+failure seam if the variable is expanded or lost in the outer shell. This is
+an evidence-wrapper defect, not a CTest or product defect.
+
+**Guardrail.** Make the gate the terminal command whose status the caller
+consumes. Run read-only process snapshots in a separate invocation after the
+gate returns, and record the two results independently. If a repository-owned
+script must combine them, test that script with a deliberately failing child
+and require the original non-zero status; do not improvise cross-shell `$?`
+capture in an acceptance command. Canonical `scripts/verify.sh` and the repeat
+commands follow this terminal-gate rule.

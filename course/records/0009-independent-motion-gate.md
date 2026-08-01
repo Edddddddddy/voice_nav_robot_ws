@@ -843,3 +843,14 @@ oracle. Cleanup steps are must-run, and the repository contract runner fails
 if critical evidence is skipped. PIT-0012 remains
 `Known (guard implemented; final evidence pending)` until repeated exact-head
 and hosted-CI evidence is complete.
+
+Local corrective evidence on implementation head `53f9568` completed both
+fresh-launch stability gates: `voice_nav_sim` passed 20/20 launches in
+716.29 seconds and the MotionGate product passed 20/20 in 507.21 seconds.
+After both commands, the only matching Gazebo/control process was the
+pre-existing user-owned PID `3631225`; no test-owned process remained. During
+the tests-first loop, bounded query timeout, structured-stop timeout, and a
+two-document `gz topic --num 1` burst were kept as separate evidence failures
+and corrected without weakening positive ACK, process-exit, or strict xUnit
+oracles. Full final-head verification and hosted CI are still pending, so this
+note does not close PIT-0012 or Lesson 0010.

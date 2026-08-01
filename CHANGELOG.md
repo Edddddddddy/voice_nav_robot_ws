@@ -69,10 +69,17 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   stop, require a positive ACK, wait for the launch-managed process, and retain
   strict global exit-code checks. Each test process claims a unique random
   Gazebo partition, binds the stop RPC to the validated environment snapshot,
-  and runs cleanup as a must-run ladder. Repository contracts now fail on any
-  skipped test and are discovered from the real non-package test layout;
-  product launch behavior still defaults to shutdown on an unexpected Gazebo
-  exit.
+  and runs cleanup as independent must-run phases. A typed transient CLI
+  timeout retries the idempotent stop once; all other failures remain
+  fail-closed. Product launch behavior still defaults to shutdown on an
+  unexpected Gazebo exit.
+- Prevented green test summaries from omitting or semantically overriding
+  critical evidence. Repository source inventory, official isolated launch
+  runners, generated CTest metadata, exact xUnit structure, and a narrow skip
+  allowlist now form one fail-closed chain. Gazebo movement evidence uses a
+  bounded, partition-checked pose snapshot parser that handles a small
+  complete JSON burst while rejecting malformed, duplicate, non-finite, or
+  invalid-quaternion data.
 - Prevented a DDS-matched candidate writer from being terminally rejected
   solely because its Gate-local ROS node identity snapshot had not converged.
   MotionGate now types only that narrow state as
