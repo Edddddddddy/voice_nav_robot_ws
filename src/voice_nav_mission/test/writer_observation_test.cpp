@@ -18,6 +18,9 @@
 
 #include <rmw/qos_profiles.h>
 
+#include <algorithm>
+#include <array>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <string>
@@ -60,6 +63,44 @@ WriterEndpointObservation endpoint(
     RMW_ENDPOINT_PUBLISHER,
     candidate_qos(),
     gid};
+}
+
+void expect_complete_bounded_diagnostic(const OpenBinding & observation)
+{
+  EXPECT_LE(observation.detail.size(), 160U);
+  constexpr std::array<const char *, 7U> markers{
+    "n=1", " k=", " id=", " q=", " g=", " ms=", " t="};
+  std::array<std::size_t, markers.size()> positions{};
+  for (std::size_t index = 0U; index < markers.size(); ++index) {
+    positions[index] = observation.detail.find(markers[index]);
+    ASSERT_NE(positions[index], std::string::npos)
+      << "missing diagnostic field " << markers[index]
+      << " in: " << observation.detail;
+    if (index > 0U) {
+      ASSERT_LT(positions[index - 1U], positions[index])
+        << "diagnostic fields are out of order in: " << observation.detail;
+    }
+  }
+  EXPECT_NE(
+    observation.detail.rfind("; ", positions.front()),
+    std::string::npos);
+  for (std::size_t index = 1U; index < markers.size(); ++index) {
+    const auto value_start = positions[index] +
+      std::char_traits<char>::length(markers[index]);
+    const auto value_end = index + 1U < markers.size() ?
+      positions[index + 1U] : observation.detail.size();
+    EXPECT_LT(value_start, value_end)
+      << "empty diagnostic field " << markers[index]
+      << " in: " << observation.detail;
+  }
+
+  const auto gid_start = positions[4] + 3U;
+  const auto gid = observation.detail.substr(
+    gid_start, positions[5] - gid_start);
+  EXPECT_EQ(gid.size(), 32U);
+  EXPECT_TRUE(std::all_of(
+      gid.cbegin(), gid.cend(),
+      [](unsigned char character) {return std::isxdigit(character) != 0;}));
 }
 
 TEST(WriterObservationSession, PinsUnresolvedIdentityUntilTheSameWriterResolves)
@@ -242,6 +283,69 @@ TEST(WriterObservationSession, DefinitivePolicyViolationsNeverEnterPending)
 
   auto zero_gid = endpoint({}, "collision_monitor");
   assert_terminal_but_unpinned(std::move(zero_gid));
+}
+
+TEST(WriterObservationSession, LongVariableFieldsPreserveEveryDiagnosticMarker)
+{
+  const auto observe_mismatch = [](
+    WriterEndpointObservation invalid)
+    {
+      WriterObservationSession session({
+          "geometry_msgs/msg/TwistStamped",
+          "/collision_monitor"});
+      const auto rejected = session.observe({std::move(invalid)}, 123456ms);
+      EXPECT_FALSE(rejected.ready);
+      EXPECT_EQ(rejected.reason, Reason::WriterMismatch);
+      expect_complete_bounded_diagnostic(rejected);
+      return rejected;
+    };
+
+  (void)observe_mismatch(
+    endpoint(writer_gid(0x66U), std::string(240U, 'n')));
+  (void)observe_mismatch(
+    endpoint(
+      writer_gid(0x67U), "collision_monitor",
+      "/" + std::string(240U, 's')));
+
+  auto long_type = endpoint(writer_gid(0x68U), "collision_monitor");
+  long_type.topic_type = std::string(240U, 't');
+  (void)observe_mismatch(std::move(long_type));
+
+  auto first_name = std::string(240U, 'p');
+  auto second_name = first_name;
+  first_name.back() = 'a';
+  second_name.back() = 'b';
+  const auto first = observe_mismatch(
+    endpoint(writer_gid(0x69U), first_name));
+  const auto second = observe_mismatch(
+    endpoint(writer_gid(0x69U), second_name));
+  EXPECT_NE(first.detail, second.detail)
+    << "the compact value must digest bytes beyond the visible prefix";
+}
+
+TEST(
+  WriterObservationSession,
+  PinnedReplacementAndTerminalReplayPreserveEveryDiagnosticMarker)
+{
+  WriterObservationSession session({
+        "geometry_msgs/msg/TwistStamped",
+        "/collision_monitor"});
+  const auto pinned_gid = writer_gid(0x6aU);
+  const auto replacement_gid = writer_gid(0x6bU);
+
+  ASSERT_EQ(
+    session.observe({endpoint(pinned_gid, "")}, 1ms).reason,
+    Reason::WriterMetadataPending);
+  const auto replacement = session.observe(
+    {endpoint(replacement_gid, "collision_monitor")}, 123456ms);
+  ASSERT_EQ(replacement.reason, Reason::WriterMismatch);
+  expect_complete_bounded_diagnostic(replacement);
+
+  const auto replayed = session.observe(
+    {endpoint(pinned_gid, "collision_monitor")}, 123457ms);
+  ASSERT_EQ(replayed.reason, Reason::WriterMismatch);
+  expect_complete_bounded_diagnostic(replayed);
+  EXPECT_EQ(replayed.detail, replacement.detail);
 }
 
 TEST(WriterObservationSession, MissingAndDuplicateWritersStayFailClosed)

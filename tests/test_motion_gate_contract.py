@@ -357,6 +357,11 @@ namespace voice_nav_mission
 namespace
 {
 constexpr std::size_t kMaximumDetailLength = 160U;
+constexpr std::size_t kDigestSuffixLength = 9U;
+constexpr std::size_t kSummaryFixedLength = 55U;
+constexpr std::size_t kSummaryValueCount = 5U;
+constexpr std::size_t kMinimumSummaryLength =
+  kSummaryFixedLength + kSummaryValueCount * kDigestSuffixLength;
 constexpr char kUnknownNodeName[] = "_NODE_NAME_UNKNOWN_";
 constexpr char kUnknownNodeNamespace[] = "_NODE_NAMESPACE_UNKNOWN_";
 
@@ -366,6 +371,28 @@ std::string bounded_detail(std::string detail)
     detail.resize(kMaximumDetailLength);
   }
   return detail;
+}
+
+std::string digest_text(const std::string & value)
+{
+  std::uint32_t digest = 2166136261U;
+  digest *= 16777619U;
+  return std::to_string(digest + value.size());
+}
+
+std::string compact_field(
+  const std::string & value,
+  std::size_t maximum_length)
+{
+  return value.size() <= maximum_length ? value : digest_text(value);
+}
+
+std::string observation_detail(
+  std::string reason,
+  const WriterEndpointObservation &,
+  std::chrono::milliseconds)
+{
+  return compact_field(reason, kMaximumDetailLength);
 }
 
 bool gid_is_zero(const WriterGid & gid)
@@ -524,6 +551,36 @@ WRITER_OBSERVATION_TEST = """\
 #include "writer_observation.hpp"
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
+#include <cctype>
+
+void expect_complete_bounded_diagnostic(const OpenBinding & observation)
+{
+  EXPECT_LE(observation.detail.size(), 160U);
+  constexpr std::array<const char *, 7U> markers{
+    "n=1", " k=", " id=", " q=", " g=", " ms=", " t="};
+  std::array<std::size_t, markers.size()> positions{};
+  for (std::size_t index = 0U; index < markers.size(); ++index) {
+    positions[index] = observation.detail.find(markers[index]);
+    ASSERT_NE(positions[index], std::string::npos);
+    if (index > 0U) {
+      ASSERT_LT(positions[index - 1U], positions[index]);
+    }
+  }
+  for (std::size_t index = 1U; index < markers.size(); ++index) {
+    const auto value_start = positions[index] + 3U;
+    const auto value_end = index + 1U < markers.size() ?
+      positions[index + 1U] : observation.detail.size();
+    EXPECT_LT(value_start, value_end);
+  }
+  const auto gid = observation.detail.substr(0U, 32U);
+  EXPECT_EQ(gid.size(), 32U);
+  EXPECT_TRUE(std::all_of(
+      gid.cbegin(), gid.cend(),
+      [](unsigned char character) {return std::isxdigit(character) != 0;}));
+}
+
 TEST(WriterObservationSession, PinsUnresolvedIdentityUntilTheSameWriterResolves)
 {
   EXPECT_EQ(pending.reason, Reason::WriterMetadataPending);
@@ -559,6 +616,30 @@ TEST(WriterObservationSession, ExactUnknownIdentityMarkersConvergeForPinnedGid)
 TEST(WriterObservationSession, KnownPartialIdentityMustAgreeBeforePending)
 {
   EXPECT_EQ(contradiction.reason, Reason::WriterMismatch);
+}
+
+TEST(WriterObservationSession, LongVariableFieldsPreserveEveryDiagnosticMarker)
+{
+  expect_complete_bounded_diagnostic(rejected);
+  const auto long_name = std::string(240U, 'n');
+  const auto long_namespace = std::string(240U, 's');
+  const auto long_type = std::string(240U, 't');
+  auto first_name = long_name;
+  auto second_name = long_name;
+  first_name.back() = 'a';
+  second_name.back() = 'b';
+  EXPECT_NE(first.detail, second.detail);
+}
+
+TEST(
+  WriterObservationSession,
+  PinnedReplacementAndTerminalReplayPreserveEveryDiagnosticMarker)
+{
+  EXPECT_EQ(pending.reason, Reason::WriterMetadataPending);
+  EXPECT_EQ(replacement.reason, Reason::WriterMismatch);
+  expect_complete_bounded_diagnostic(replacement);
+  expect_complete_bounded_diagnostic(replayed);
+  EXPECT_EQ(replayed.detail, replacement.detail);
 }
 """
 
@@ -1181,6 +1262,107 @@ class MotionGateContractTest(unittest.TestCase):
 
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("WriterObservationSession implementation", completed.stderr)
+
+    def test_long_writer_diagnostic_regression_must_remain_active(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_mission/test/writer_observation_test.cpp",
+                (
+                    "TEST(WriterObservationSession, "
+                    "LongVariableFieldsPreserveEveryDiagnosticMarker)"
+                ),
+                (
+                    "TEST(WriterObservationSession, "
+                    "DISABLED_LongVariableFieldsPreserveEveryDiagnosticMarker)"
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("bounded writer diagnostic regression", completed.stderr)
+
+    def test_long_writer_diagnostic_regression_covers_all_fields(self) -> None:
+        mutations = (
+            ("std::string(240U, 'n')", "std::string(24U, 'n')"),
+            ("std::string(240U, 's')", "std::string(24U, 's')"),
+            ("std::string(240U, 't')", "std::string(24U, 't')"),
+            ('" g="', '" gid="'),
+            (
+                "EXPECT_NE(first.detail, second.detail);",
+                "EXPECT_EQ(first.detail, second.detail);",
+            ),
+        )
+        for old, new in mutations:
+            with self.subTest(mutation=old):
+                def mutation(
+                    root: Path,
+                    old_value: str = old,
+                    new_value: str = new,
+                ) -> None:
+                    self.replace(
+                        root,
+                        (
+                            "src/voice_nav_mission/test/"
+                            "writer_observation_test.cpp"
+                        ),
+                        old_value,
+                        new_value,
+                    )
+
+                completed = self.run_checker(mutation)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertTrue(
+                    "bounded writer diagnostic" in completed.stderr,
+                    completed.stderr,
+                )
+
+    def test_pinned_replacement_and_terminal_replay_diagnostics_are_required(
+        self,
+    ) -> None:
+        mutations = (
+            (
+                "PinnedReplacementAndTerminalReplayPreserveEveryDiagnosticMarker",
+                (
+                    "DISABLED_"
+                    "PinnedReplacementAndTerminalReplayPreserveEveryDiagnosticMarker"
+                ),
+            ),
+            (
+                "expect_complete_bounded_diagnostic(replayed);",
+                "// replay detail is not checked",
+            ),
+            (
+                "EXPECT_EQ(replayed.detail, replacement.detail);",
+                "EXPECT_NE(replayed.detail, replacement.detail);",
+            ),
+        )
+        for old, new in mutations:
+            with self.subTest(mutation=old):
+                def mutation(
+                    root: Path,
+                    old_value: str = old,
+                    new_value: str = new,
+                ) -> None:
+                    self.replace(
+                        root,
+                        (
+                            "src/voice_nav_mission/test/"
+                            "writer_observation_test.cpp"
+                        ),
+                        old_value,
+                        new_value,
+                    )
+
+                completed = self.run_checker(mutation)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(
+                    "writer terminal diagnostic replay regression",
+                    completed.stderr,
+                )
 
     def test_open_attempt_deadline_precedes_all_response_classification(
         self,
