@@ -1146,6 +1146,48 @@ TEST(MotionGateCore, OpenPreservesWriterMismatchAndCachesItsRejection)
   EXPECT_EQ(provider_calls, 1U);
 }
 
+TEST(MotionGateCore, OpenPreservesTypedWriterMetadataPendingWithoutBinding)
+{
+  MotionGateCore gate(MotionGateConfig{}, kGateId);
+  ASSERT_EQ(prepare_with(gate, 150U, at(0ms)).code, ResultCode::Applied);
+  const auto writer = writer_gid();
+  const auto request =
+    lease_request(Operation::Open, 151U, gate.snapshot());
+  std::size_t provider_calls = 0U;
+  const auto pending_provider = [&provider_calls, writer]() {
+      ++provider_calls;
+      return OpenBinding{
+        false,
+        Reason::WriterMetadataPending,
+        writer,
+        "candidate writer identity is unresolved"};
+    };
+
+  const auto pending = gate.open(request, at(1ms), pending_provider);
+  ASSERT_EQ(pending.code, ResultCode::Rejected);
+  EXPECT_EQ(pending.reason, Reason::WriterMetadataPending);
+  EXPECT_EQ(pending.state, State::Prepared);
+  EXPECT_EQ(pending.control_seq, 1U);
+  EXPECT_FALSE(pending.writer_bound);
+  EXPECT_TRUE(std::all_of(
+      pending.bound_writer_gid.cbegin(),
+      pending.bound_writer_gid.cend(),
+      [](std::uint8_t value) {return value == 0U;}));
+  EXPECT_TRUE(pending.motion_inhibited);
+  EXPECT_TRUE(pending.zero_selected);
+  EXPECT_EQ(provider_calls, 1U);
+
+  const auto duplicate = gate.open(request, at(2ms), pending_provider);
+  EXPECT_EQ(duplicate.code, ResultCode::Duplicate);
+  EXPECT_EQ(duplicate.reason, Reason::WriterMetadataPending);
+  EXPECT_EQ(provider_calls, 1U);
+
+  const auto opened = open_with(gate, 152U, at(3ms), writer);
+  EXPECT_EQ(opened.code, ResultCode::Applied);
+  EXPECT_EQ(opened.state, State::Armed);
+  EXPECT_EQ(opened.bound_writer_gid, writer);
+}
+
 TEST(MotionGateCore, DuplicateAfterDeadlineCarriesCurrentSnapshot)
 {
   MotionGateCore prepared_gate(MotionGateConfig{}, kGateId);
