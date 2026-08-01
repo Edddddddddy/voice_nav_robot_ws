@@ -214,6 +214,18 @@ ControlResult MotionGateCore::open(
   if (!binding.ready) {
     return stale_request();
   }
+  if (binding.reason != Reason::None) {
+    force_fault(
+      Reason::InternalFailure,
+      "writer binding provider returned ready with a non-NONE reason");
+    auto fault = result_from_snapshot(
+      ResultCode::Faulted, reason_, detail_);
+    remember(request, fault);
+    return fault;
+  }
+  if (!gid_is_nonzero(binding.writer_gid)) {
+    return stale_request();
+  }
   bound_writer_gid_ = binding.writer_gid;
   writer_bound_ = true;
   authority_deadline_ = now + authority_lease_;
@@ -951,6 +963,42 @@ install(
 ament_package()
 """
 
+OPEN_CONVERGENCE = """\
+def converge_open(
+    *,
+    expected,
+    protocol,
+    attempt,
+    new_request_id,
+    deadline,
+    now,
+    sleep,
+    backoff_seconds,
+):
+    last_response = None
+    attempts = 0
+    seen_request_ids = set()
+    while True:
+        remaining = deadline - now()
+        if remaining <= 0.0:
+            raise OpenConvergenceTimeout(last_response, attempts)
+        request_id = new_request_id()
+        seen_request_ids.add(request_id)
+        response = attempt(request_id, remaining)
+        last_response = response
+        attempts += 1
+        remaining = deadline - now()
+        if remaining <= 0.0:
+            raise OpenConvergenceTimeout(last_response, attempts)
+        if not _is_writer_discovery_pending(response, protocol):
+            return response
+        _validate_pending_snapshot(response, expected, protocol)
+        remaining = deadline - now()
+        if remaining <= 0.0:
+            raise OpenConvergenceTimeout(last_response, attempts)
+        sleep(min(backoff_seconds[0], remaining))
+"""
+
 CONTROLLERS = """\
 controller_manager:
   ros__parameters:
@@ -995,6 +1043,10 @@ FIXTURE_FILES = {
     ): PRODUCT_LAUNCH,
     "src/voice_nav_bringup/package.xml": BRINGUP_PACKAGE,
     "src/voice_nav_bringup/CMakeLists.txt": BRINGUP_CMAKE,
+    (
+        "src/voice_nav_bringup/test/"
+        "motion_gate_open_convergence.py"
+    ): OPEN_CONVERGENCE,
     "src/voice_nav_sim/config/controllers.yaml": CONTROLLERS,
 }
 
@@ -1112,6 +1164,74 @@ class MotionGateContractTest(unittest.TestCase):
 
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("WriterObservationSession implementation", completed.stderr)
+
+    def test_open_attempt_deadline_precedes_all_response_classification(
+        self,
+    ) -> None:
+        deadline_block = (
+            "        remaining = deadline - now()\n"
+            "        if remaining <= 0.0:\n"
+            "            raise OpenConvergenceTimeout("
+            "last_response, attempts)\n"
+        )
+        transition = (
+            "        attempts += 1\n"
+            + deadline_block
+            + "        if not _is_writer_discovery_pending("
+            "response, protocol):\n"
+            "            return response\n"
+            "        _validate_pending_snapshot("
+            "response, expected, protocol)"
+        )
+        mutations = (
+            (
+                transition,
+                (
+                    "        attempts += 1\n"
+                    "        if not _is_writer_discovery_pending("
+                    "response, protocol):\n"
+                    "            return response\n"
+                    "        _validate_pending_snapshot("
+                    "response, expected, protocol)"
+                ),
+            ),
+            (
+                transition,
+                (
+                    "        attempts += 1\n"
+                    "        if not _is_writer_discovery_pending("
+                    "response, protocol):\n"
+                    "            return response\n"
+                    + deadline_block
+                    + "        _validate_pending_snapshot("
+                    "response, expected, protocol)"
+                ),
+            ),
+        )
+        for old, new in mutations:
+            with self.subTest(mutation=new):
+                def mutation(
+                    root: Path,
+                    old_value: str = old,
+                    new_value: str = new,
+                ) -> None:
+                    self.replace(
+                        root,
+                        (
+                            "src/voice_nav_bringup/test/"
+                            "motion_gate_open_convergence.py"
+                        ),
+                        old_value,
+                        new_value,
+                    )
+
+                completed = self.run_checker(mutation)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(
+                    "immediate post-attempt deadline",
+                    completed.stderr,
+                )
 
     def test_core_target_is_static_and_never_installed_or_exported(self) -> None:
         mutations = (
@@ -1668,6 +1788,53 @@ class MotionGateContractTest(unittest.TestCase):
             "pure validation before graph provider",
             completed.stderr,
         )
+
+    def test_core_open_faults_and_remembers_contradictory_ready_binding(
+        self,
+    ) -> None:
+        contradictory_binding_block = (
+            "  if (binding.reason != Reason::None) {\n"
+            "    force_fault(\n"
+            "      Reason::InternalFailure,\n"
+            "      \"writer binding provider returned ready with a "
+            "non-NONE reason\");\n"
+            "    auto fault = result_from_snapshot(\n"
+            "      ResultCode::Faulted, reason_, detail_);\n"
+            "    remember(request, fault);\n"
+            "    return fault;\n"
+            "  }"
+        )
+        mutations = (
+            (
+                contradictory_binding_block,
+                "  // contradictory ready binding is ignored",
+            ),
+            (
+                "if (binding.reason != Reason::None)",
+                "if (binding.reason == Reason::None)",
+            ),
+        )
+        for old, new in mutations:
+            with self.subTest(mutation=new):
+                def mutation(
+                    root: Path,
+                    old_value: str = old,
+                    new_value: str = new,
+                ) -> None:
+                    self.replace(
+                        root,
+                        "src/voice_nav_mission/src/motion_gate_core.cpp",
+                        old_value,
+                        new_value,
+                    )
+
+                completed = self.run_checker(mutation)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(
+                    "binding.reason != Reason::None",
+                    completed.stderr,
+                )
 
     def test_open_rejection_path_cannot_touch_graph_before_core(self) -> None:
         def mutation(root: Path) -> None:
