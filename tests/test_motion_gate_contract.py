@@ -807,6 +807,7 @@ MISSION_PACKAGE = """\
   <exec_depend>rosidl_default_runtime</exec_depend>
   <exec_depend>rmw_fastrtps_cpp</exec_depend>
   <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>ament_cmake_ros</test_depend>
   <test_depend>launch_ros</test_depend>
   <test_depend>launch_testing</test_depend>
   <test_depend>launch_testing_ament_cmake</test_depend>
@@ -815,10 +816,11 @@ MISSION_PACKAGE = """\
 """
 
 MISSION_CMAKE = """\
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.22)
 project(voice_nav_mission)
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_ros REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(launch_testing_ament_cmake REQUIRED)
 
@@ -850,6 +852,7 @@ if(BUILD_TESTING)
   add_launch_test(
     test/test_motion_gate_node.py
     TIMEOUT 60
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
   )
   set_tests_properties(
     test_test_motion_gate_node.py
@@ -938,15 +941,17 @@ BRINGUP_PACKAGE = """\
 """
 
 BRINGUP_CMAKE = """\
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.22)
 project(voice_nav_bringup)
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_ros REQUIRED)
 find_package(launch_testing_ament_cmake REQUIRED)
 if(BUILD_TESTING)
   add_launch_test(
     test/test_motion_gate_product.py
     TIMEOUT 180
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
   )
   set_tests_properties(
     test_test_motion_gate_product.py
@@ -1606,20 +1611,43 @@ class MotionGateContractTest(unittest.TestCase):
                     "RUN_SERIAL TRUE",
                 ),
                 (
+                    "      RUN_SERIAL TRUE\n  )",
+                    (
+                        "      RUN_SERIAL TRUE\n  )\n"
+                        "  set_tests_properties(\n"
+                        f"    {test_name}\n"
+                        "    PROPERTIES\n"
+                        "      DISABLED TRUE\n"
+                        "  )"
+                    ),
+                    "must remain enabled",
+                ),
+                (
+                    "${ament_cmake_ros_DIR}/run_test_isolated.py",
+                    "${ament_cmake_ros_DIR}/run_test.py",
+                    "isolated RUNNER",
+                ),
+                (
                     (
                         "add_launch_test(\n"
                         f"    {test_path}\n"
                         f"    TIMEOUT {timeout}\n"
+                        "    RUNNER "
+                        '"${ament_cmake_ros_DIR}/run_test_isolated.py"\n'
                         "  )"
                     ),
                     (
                         "add_launch_test(\n"
                         f"    {test_path}\n"
                         f"    TIMEOUT {timeout}\n"
+                        "    RUNNER "
+                        '"${ament_cmake_ros_DIR}/run_test_isolated.py"\n'
                         "  )\n"
                         "  add_launch_test(\n"
                         f"    {test_path}\n"
                         f"    TIMEOUT {timeout}\n"
+                        "    RUNNER "
+                        '"${ament_cmake_ros_DIR}/run_test_isolated.py"\n'
                         "  )"
                     ),
                     "exactly one add_launch_test",

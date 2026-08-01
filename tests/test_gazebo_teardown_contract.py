@@ -269,6 +269,15 @@ class GazeboTeardownMutationTest(unittest.TestCase):
             "process-exit barrier must be unconditional",
         )
 
+    def test_early_return_before_process_exit_barrier_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_sim/test_support/gazebo_shutdown.py",
+            "    # The ACK means only that the request was accepted.",
+            "    return\n\n"
+            "    # The ACK means only that the request was accepted.",
+            "process-exit barrier must be unconditional",
+        )
+
     def test_positive_ack_validation_is_required(self):
         self.assert_mutation_rejected(
             "src/voice_nav_sim/test_support/gazebo_shutdown.py",
@@ -520,6 +529,15 @@ class GazeboTeardownMutationTest(unittest.TestCase):
                 "        self.addCleanup(self.inhibit_for_cleanup)"
             ),
             "register independent failure-path cleanups first",
+        )
+
+    def test_registered_cleanups_cannot_be_cleared(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
+            "        self.addCleanup(self.inhibit_for_cleanup)\n",
+            "        self.addCleanup(self.inhibit_for_cleanup)\n"
+            "        self._cleanups.clear()\n",
+            "must not disable or rebind critical teardown",
         )
 
     def test_early_return_from_fixture_destroy_is_rejected(self):
