@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.22)
 project(voice_nav_mission)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -59,6 +59,7 @@ target_link_libraries(
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(ament_cmake_ros REQUIRED)
   find_package(ament_lint_auto REQUIRED)
   find_package(launch_testing_ament_cmake REQUIRED)
 
@@ -93,13 +94,20 @@ if(BUILD_TESTING)
   add_launch_test(
     test/test_motion_gate_node.py
     TIMEOUT 60
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
   )
   set_tests_properties(
     test_test_motion_gate_node.py
     PROPERTIES
       ENVIRONMENT
-        "RMW_IMPLEMENTATION=rmw_fastrtps_cpp;ROS_DOMAIN_ID=91;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
+        "RMW_IMPLEMENTATION=rmw_fastrtps_cpp;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
       RUN_SERIAL TRUE
+  )
+  set_tests_properties(
+    test_test_motion_gate_node.py
+    PROPERTIES
+      ENVIRONMENT_MODIFICATION
+        "ROS_DOMAIN_ID=unset:;DISABLE_ROS_ISOLATION=unset:"
   )
 endif()
 

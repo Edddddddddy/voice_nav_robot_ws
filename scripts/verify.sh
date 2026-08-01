@@ -142,6 +142,7 @@ set -u
 
 echo "[5/6] Testing"
 python3 scripts/check_colcon_build_boundary.py "${build_boundary_args[@]}"
+python3 scripts/check_generated_launch_tests.py "${test_result_args[@]}"
 python3 scripts/report_test_results.py "${test_result_args[@]}" --clear
 if (( ${#package_args[@]} > 0 )); then
   colcon test \

@@ -207,6 +207,117 @@ class RepositoryTestRunnerTest(unittest.TestCase):
 
         self.assertEqual(return_code, 1, stream.getvalue())
 
+    def test_assigned_load_tests_hook_cannot_hide_contract(self):
+        runner = load_runner()
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository_root = Path(temporary_directory)
+            tests_directory = repository_root / "tests"
+            tests_directory.mkdir()
+            test_module = "test_repository_runner_assigned_load_tests"
+            (tests_directory / f"{test_module}.py").write_text(
+                "import unittest\n\n"
+                "class ManifestAnchor(unittest.TestCase):\n"
+                "    def test_anchor(self):\n"
+                "        pass\n\n"
+                "class HiddenContract(unittest.TestCase):\n"
+                "    def test_must_execute(self):\n"
+                "        self.fail('assigned hook hid this contract')\n\n"
+                "load_tests = lambda loader, tests, pattern: "
+                "loader.loadTestsFromTestCase(ManifestAnchor)\n",
+                encoding="utf-8",
+            )
+
+            repository_path = str(repository_root)
+            stream = io.StringIO()
+            try:
+                suite = runner.discover_suite(repository_root)
+                return_code = runner.run_suite(
+                    suite,
+                    stream=stream,
+                    required_test_ids={
+                        f"{test_module}.ManifestAnchor.test_anchor"
+                    },
+                )
+            finally:
+                while repository_path in sys.path:
+                    sys.path.remove(repository_path)
+                sys.modules.pop(test_module, None)
+
+        self.assertEqual(return_code, 1, stream.getvalue())
+
+    def test_post_definition_test_rebinding_is_rejected(self):
+        runner = load_runner()
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository_root = Path(temporary_directory)
+            tests_directory = repository_root / "tests"
+            tests_directory.mkdir()
+            test_module = "test_repository_runner_rebound_fixture"
+            (tests_directory / f"{test_module}.py").write_text(
+                "import unittest\n\n"
+                "class Guard(unittest.TestCase):\n"
+                "    def test_contract(self):\n"
+                "        self.fail('original contract must execute')\n\n"
+                "Guard.test_contract = lambda self: None\n",
+                encoding="utf-8",
+            )
+
+            repository_path = str(repository_root)
+            stream = io.StringIO()
+            try:
+                suite = runner.discover_suite(repository_root)
+                return_code = runner.run_suite(
+                    suite,
+                    stream=stream,
+                    required_test_ids={
+                        f"{test_module}.Guard.test_contract"
+                    },
+                )
+            finally:
+                while repository_path in sys.path:
+                    sys.path.remove(repository_path)
+                sys.modules.pop(test_module, None)
+
+        self.assertEqual(return_code, 1, stream.getvalue())
+
+    def test_test_method_decorator_is_rejected(self):
+        runner = load_runner()
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository_root = Path(temporary_directory)
+            tests_directory = repository_root / "tests"
+            tests_directory.mkdir()
+            test_module = "test_repository_runner_decorated_fixture"
+            (tests_directory / f"{test_module}.py").write_text(
+                "import unittest\n\n"
+                "def disable(function):\n"
+                "    return lambda self: None\n\n"
+                "class Guard(unittest.TestCase):\n"
+                "    @disable\n"
+                "    def test_contract(self):\n"
+                "        self.fail('decorated contract must execute')\n",
+                encoding="utf-8",
+            )
+
+            repository_path = str(repository_root)
+            stream = io.StringIO()
+            try:
+                suite = runner.discover_suite(repository_root)
+                return_code = runner.run_suite(
+                    suite,
+                    stream=stream,
+                    required_test_ids={
+                        f"{test_module}.Guard.test_contract"
+                    },
+                )
+            finally:
+                while repository_path in sys.path:
+                    sys.path.remove(repository_path)
+                sys.modules.pop(test_module, None)
+
+        self.assertEqual(return_code, 1, stream.getvalue())
+
     def test_discovers_tests_directory_without_package_marker(self):
         runner = load_runner()
 

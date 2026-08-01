@@ -1,4 +1,5 @@
 import ast
+import importlib.util
 import re
 import unittest
 from pathlib import Path
@@ -29,6 +30,63 @@ PACKAGE_MANIFESTS = (
 STARTUP_TIMEOUT_NAME = (
     "CONTROLLER_STARTUP_SERVICE_RESPONSE_TIMEOUT_SECONDS"
 )
+GENERATED_CHECKER = (
+    REPOSITORY_ROOT / "scripts" / "check_generated_launch_tests.py"
+)
+
+
+def load_generated_checker():
+    specification = importlib.util.spec_from_file_location(
+        "voice_nav_generated_launch_test_checker",
+        GENERATED_CHECKER,
+    )
+    if specification is None or specification.loader is None:
+        raise AssertionError("could not load generated launch-test checker")
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
+def generated_mission_payload():
+    return {
+        "kind": "ctestInfo",
+        "tests": [
+            {
+                "name": "test_test_motion_gate_node.py",
+                "command": [
+                    "/usr/bin/python3",
+                    "-u",
+                    (
+                        "/opt/ros/jazzy/share/ament_cmake_ros/cmake/"
+                        "run_test_isolated.py"
+                    ),
+                    "/tmp/result.xunit.xml",
+                    "--command",
+                    (
+                        "/workspace/src/voice_nav_mission/test/"
+                        "test_motion_gate_node.py"
+                    ),
+                ],
+                "properties": [
+                    {
+                        "name": "ENVIRONMENT",
+                        "value": [
+                            "RMW_IMPLEMENTATION=rmw_fastrtps_cpp",
+                            "ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST",
+                        ],
+                    },
+                    {
+                        "name": "ENVIRONMENT_MODIFICATION",
+                        "value": [
+                            "ROS_DOMAIN_ID=unset:",
+                            "DISABLE_ROS_ISOLATION=unset:",
+                        ],
+                    },
+                    {"name": "RUN_SERIAL", "value": True},
+                ],
+            },
+        ],
+    }
 
 
 def function_named(tree: ast.AST, name: str) -> ast.FunctionDef:
@@ -248,6 +306,60 @@ class CiReadinessContractTest(unittest.TestCase):
                     "<test_depend>ament_cmake_ros</test_depend>",
                     package,
                 )
+
+    def test_generated_launch_test_metadata_contract_accepts_baseline(self):
+        checker = load_generated_checker()
+
+        checker.validate_package_payload(
+            "voice_nav_mission",
+            generated_mission_payload(),
+        )
+
+    def test_generated_metadata_rejects_isolation_override(self):
+        checker = load_generated_checker()
+        payload = generated_mission_payload()
+        environment_modification = next(
+            prop
+            for prop in payload["tests"][0]["properties"]
+            if prop["name"] == "ENVIRONMENT_MODIFICATION"
+        )
+        environment_modification["value"] = ["ROS_DOMAIN_ID=set:77"]
+
+        with self.assertRaises(
+            checker.GeneratedLaunchTestContractError,
+        ):
+            checker.validate_package_payload(
+                "voice_nav_mission",
+                payload,
+            )
+
+    def test_generated_metadata_rejects_disabled_launch_test(self):
+        checker = load_generated_checker()
+        payload = generated_mission_payload()
+        payload["tests"][0]["properties"].append(
+            {"name": "DISABLED", "value": True}
+        )
+
+        with self.assertRaises(
+            checker.GeneratedLaunchTestContractError,
+        ):
+            checker.validate_package_payload(
+                "voice_nav_mission",
+                payload,
+            )
+
+    def test_canonical_verify_checks_generated_metadata_after_build(self):
+        verify = (REPOSITORY_ROOT / "scripts" / "verify.sh").read_text(
+            encoding="utf-8"
+        )
+        generated_check = (
+            "python3 scripts/check_generated_launch_tests.py "
+            '"${test_result_args[@]}"'
+        )
+
+        self.assertIn(generated_check, verify)
+        self.assertLess(verify.index("colcon build"), verify.index(generated_check))
+        self.assertLess(verify.index(generated_check), verify.index("colcon test"))
 
     def test_convergence_unit_test_allows_runner_teardown_headroom(self):
         cmake = BRINGUP_CMAKE.read_text(encoding="utf-8")

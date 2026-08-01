@@ -1558,11 +1558,21 @@ def validate_launch_test_registration(
     expected_path: str,
     timeout_seconds: int,
 ) -> None:
-    if "find_package(launch_testing_ament_cmake REQUIRED)" not in source:
-        raise MotionGateContractError(
-            f"{package_name} CMake must require "
-            "launch_testing_ament_cmake before add_launch_test"
+    launch_test_position = source.find("add_launch_test")
+    for dependency in (
+        "ament_cmake_ros",
+        "launch_testing_ament_cmake",
+    ):
+        dependency_position = source.find(
+            f"find_package({dependency} REQUIRED)"
         )
+        if dependency_position < 0 or not (
+            dependency_position < launch_test_position
+        ):
+            raise MotionGateContractError(
+                f"{package_name} CMake must require {dependency} "
+                "before add_launch_test"
+            )
     launch_tests = cmake_call_bodies(source, "add_launch_test")
     if len(launch_tests) != 1:
         raise MotionGateContractError(
@@ -1573,12 +1583,15 @@ def validate_launch_test_registration(
         expected_path,
         "TIMEOUT",
         str(timeout_seconds),
+        "RUNNER",
+        "${ament_cmake_ros_DIR}/run_test_isolated.py",
     ]
     actual_arguments = cmake_arguments(launch_tests[0])
     if actual_arguments != expected_arguments:
         raise MotionGateContractError(
             f"{package_name} add_launch_test must be exactly "
-            f"{expected_path} TIMEOUT {timeout_seconds}; found "
+            f"{expected_path} TIMEOUT {timeout_seconds} with the official "
+            "isolated RUNNER; found "
             + " ".join(actual_arguments)
         )
 
@@ -1589,12 +1602,26 @@ def validate_launch_test_registration(
         for body in properties_calls
         if cmake_arguments(body)[:1] == [generated_test_name]
     ]
-    if len(matching_properties) != 1:
+    if any(
+        forbidden in properties
+        for properties in matching_properties
+        for forbidden in ("DISABLED", "SKIP_RETURN_CODE")
+    ):
+        raise MotionGateContractError(
+            f"{package_name} launch test {generated_test_name} "
+            "must remain enabled"
+        )
+    run_serial_properties = [
+        properties
+        for properties in matching_properties
+        if "RUN_SERIAL" in properties
+    ]
+    if len(run_serial_properties) != 1:
         raise MotionGateContractError(
             f"{package_name} launch test {generated_test_name} must have "
             "one set_tests_properties call with RUN_SERIAL TRUE"
         )
-    properties = matching_properties[0]
+    properties = run_serial_properties[0]
     run_serial_indices = [
         index
         for index, token in enumerate(properties)
@@ -1608,6 +1635,23 @@ def validate_launch_test_registration(
         raise MotionGateContractError(
             f"{package_name} launch test {generated_test_name} must set "
             "RUN_SERIAL TRUE"
+        )
+
+    isolation_properties = [
+        properties
+        for properties in matching_properties
+        if "ENVIRONMENT_MODIFICATION" in properties
+    ]
+    expected_isolation_properties = [
+        generated_test_name,
+        "PROPERTIES",
+        "ENVIRONMENT_MODIFICATION",
+        "ROS_DOMAIN_ID=unset:;DISABLE_ROS_ISOLATION=unset:",
+    ]
+    if isolation_properties != [expected_isolation_properties]:
+        raise MotionGateContractError(
+            f"{package_name} launch test {generated_test_name} must keep "
+            "one exact process-scoped Domain isolation reset"
         )
 
 

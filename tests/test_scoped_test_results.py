@@ -134,13 +134,12 @@ class ScopedTestResultsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             build_base = Path(temporary_directory) / "build"
             write_xunit(
-                build_base / "voice_nav_mission" / "current.xml",
+                build_base / "voice_nav_audio" / "current.xml",
                 tests=3,
-                skipped=1,
             )
             write_xunit(
                 build_base
-                / "voice_nav_mission.stale-l0009"
+                / "voice_nav_audio.stale-l0009"
                 / "stale.xml",
                 tests=74,
                 skipped=4,
@@ -148,15 +147,64 @@ class ScopedTestResultsTest(unittest.TestCase):
 
             completed = self.run_reporter(
                 build_base,
-                "voice_nav_mission",
+                "voice_nav_audio",
             )
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertIn(
-                "Summary: 3 tests, 0 errors, 0 failures, 1 skipped",
+                "Summary: 3 tests, 0 errors, 0 failures, 0 skipped",
                 completed.stdout,
             )
             self.assertNotIn("74 tests", completed.stdout)
+
+    def test_report_rejects_unallowlisted_skipped_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            skipped_case = (
+                "voice_nav_audio.FunctionalTest",
+                "test_disabled",
+            )
+            write_launch_xunit(
+                build_base / "voice_nav_audio" / "functional.xunit.xml",
+                (skipped_case,),
+                skipped_case=skipped_case,
+            )
+
+            completed = self.run_reporter(
+                build_base,
+                "voice_nav_audio",
+            )
+
+            self.assertEqual(completed.returncode, 2, completed.stdout)
+            self.assertIn(
+                "skipped tests are not allowlisted",
+                completed.stderr,
+            )
+
+    def test_report_allows_official_cppcheck_skip(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            skipped_case = (
+                "voice_nav_audio.cppcheck",
+                "src/example.cpp",
+            )
+            write_launch_xunit(
+                build_base
+                / "voice_nav_audio"
+                / "test_results"
+                / "voice_nav_audio"
+                / "cppcheck.xunit.xml",
+                (skipped_case,),
+                skipped_case=skipped_case,
+            )
+
+            completed = self.run_reporter(
+                build_base,
+                "voice_nav_audio",
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("1 skipped", completed.stdout)
 
     def test_report_requires_complete_critical_launch_inventory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -288,6 +336,10 @@ class ScopedTestResultsTest(unittest.TestCase):
                 results / "test_test_simulation_control.py.xunit.xml",
                 (
                     (
+                        "voice_nav_sim.LaunchStartupPolicyTest",
+                        "test_startup_handler_stops_after_failed_stage",
+                    ),
+                    (
                         "voice_nav_sim.SimulationControlTest",
                         "test_stamped_drive_odometry_tf_and_consumer_timeout",
                     ),
@@ -315,6 +367,61 @@ class ScopedTestResultsTest(unittest.TestCase):
 
             self.assertEqual(completed.returncode, 2, completed.stdout)
             self.assertIn("critical launch evidence", completed.stderr)
+
+    def test_report_requires_simulation_startup_policy_inventory(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            results = (
+                build_base
+                / "voice_nav_sim"
+                / "test_results"
+                / "voice_nav_sim"
+            )
+            write_launch_xunit(
+                results / "test_test_simulation_control.py.xunit.xml",
+                (
+                    (
+                        "voice_nav_sim.SimulationControlTest",
+                        "test_stamped_drive_odometry_tf_and_consumer_timeout",
+                    ),
+                    (
+                        "voice_nav_sim.SimulationControlShutdownTest",
+                        "test_all_launch_managed_processes_exit_cleanly",
+                    ),
+                ),
+            )
+            write_launch_xunit(
+                results / "test_test_simulation_interfaces.py.xunit.xml",
+                (
+                    (
+                        "voice_nav_sim.SimulationInterfacesTest",
+                        "test_perception_odom_tf_and_ownership_contract",
+                    ),
+                    (
+                        "voice_nav_sim.SimulationInterfacesShutdownTest",
+                        "test_all_launch_managed_processes_exit_cleanly",
+                    ),
+                ),
+            )
+            write_launch_xunit(
+                results / "test_test_tf_ownership_conflict.py.xunit.xml",
+                (
+                    (
+                        "voice_nav_sim.TfOwnershipConflictTest",
+                        (
+                            "test_normal_audit_rejects_and_sentinel_"
+                            "proves_the_conflict"
+                        ),
+                    ),
+                ),
+            )
+
+            completed = self.run_reporter(build_base, "voice_nav_sim")
+
+            self.assertEqual(completed.returncode, 2, completed.stdout)
+            self.assertIn("inventory is incomplete", completed.stderr)
 
     def test_report_rejects_inconsistent_critical_launch_inventory(
         self,
@@ -870,6 +977,27 @@ class ScopedTestResultsTest(unittest.TestCase):
                         selected_package / "good.xunit.xml",
                         tests=1,
                     )
+                    if package_name == "voice_nav_mission":
+                        write_launch_xunit(
+                            selected_package
+                            / "test_results"
+                            / "voice_nav_mission"
+                            / "test_test_motion_gate_node.py.xunit.xml",
+                            (
+                                (
+                                    "voice_nav_mission.MotionGateNodeTest",
+                                    (
+                                        "test_steady_fail_closed_protocol_"
+                                        "without_clock"
+                                    ),
+                                ),
+                                (
+                                    "voice_nav_mission."
+                                    "MotionGateNodeShutdownTest",
+                                    "test_motion_gate_exits_cleanly",
+                                ),
+                            ),
+                        )
                     source_package = workspace / "src" / package_name
                     write_package_manifest(
                         source_package / "package.xml",
@@ -901,7 +1029,13 @@ class ScopedTestResultsTest(unittest.TestCase):
                         0,
                         completed.stderr,
                     )
-                    self.assertIn("Summary: 1 test", completed.stdout)
+                    expected_tests = (
+                        3 if package_name == "voice_nav_mission" else 1
+                    )
+                    self.assertIn(
+                        f"Summary: {expected_tests} test",
+                        completed.stdout,
+                    )
 
     def test_anchored_snapshot_rejects_source_replaced_by_symlink(self) -> None:
         from scripts.colcon_evidence import open_result_snapshot
@@ -1090,7 +1224,7 @@ class ScopedTestResultsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             build_base = Path(temporary_directory) / "build"
             testing_directory = (
-                build_base / "voice_nav_mission" / "Testing"
+                build_base / "voice_nav_audio" / "Testing"
             )
             testing_directory.mkdir(parents=True)
             (testing_directory / "TAG").write_text(
@@ -1103,7 +1237,7 @@ class ScopedTestResultsTest(unittest.TestCase):
 
             completed = self.run_reporter(
                 build_base,
-                "voice_nav_mission",
+                "voice_nav_audio",
             )
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
