@@ -152,6 +152,59 @@ TEST(WriterObservationSession, KnownWrongNamespaceCannotEnterPending)
   EXPECT_EQ(valid.writer_gid, gid);
 }
 
+TEST(WriterObservationSession, ExactUnknownIdentityMarkersConvergeForPinnedGid)
+{
+  WriterObservationSession session({
+    "geometry_msgs/msg/TwistStamped",
+    "/collision_monitor"});
+  const auto gid = writer_gid(0x58U);
+
+  const auto pending = session.observe(
+    {
+      endpoint(
+        gid,
+        "_NODE_NAME_UNKNOWN_",
+        "_NODE_NAMESPACE_UNKNOWN_")},
+    1ms);
+  ASSERT_EQ(pending.reason, Reason::WriterMetadataPending);
+  EXPECT_EQ(pending.writer_gid, gid);
+
+  const auto ready = session.observe(
+    {endpoint(gid, "collision_monitor")}, 2ms);
+  EXPECT_TRUE(ready.ready);
+  EXPECT_EQ(ready.writer_gid, gid);
+}
+
+TEST(WriterObservationSession, KnownPartialIdentityMustAgreeBeforePending)
+{
+  const auto gid = writer_gid(0x59U);
+  WriterObservationSession compatible({
+    "geometry_msgs/msg/TwistStamped",
+    "/collision_monitor"});
+  EXPECT_EQ(
+    compatible.observe(
+      {
+        endpoint(
+          gid,
+          "collision_monitor",
+          "_NODE_NAMESPACE_UNKNOWN_")},
+      1ms).reason,
+    Reason::WriterMetadataPending);
+
+  WriterObservationSession contradictory({
+    "geometry_msgs/msg/TwistStamped",
+    "/collision_monitor"});
+  EXPECT_EQ(
+    contradictory.observe(
+      {
+        endpoint(
+          gid,
+          "unexpected_writer",
+          "_NODE_NAMESPACE_UNKNOWN_")},
+      1ms).reason,
+    Reason::WriterMismatch);
+}
+
 TEST(WriterObservationSession, DefinitivePolicyViolationsNeverEnterPending)
 {
   const auto valid_gid = writer_gid(0x61U);
