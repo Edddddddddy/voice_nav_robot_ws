@@ -1,8 +1,14 @@
 # Lesson 0009 学习记录：独立 MotionGate
 
-状态：Completed reference solution / PR #13 public-ledger closure pending
-VN-0010-C1 closure, exact-head CI, and merge
-（教师参考实现）
+状态：Completed reference solution（教师参考实现）
+
+本页是 [PR #13](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/13)
+承载的公开身份台账。不可变 `course/0009-solution` 只包含 PR #12 的原始
+reviewed snapshot；后续 [VN-0010-C1](../../docs/work-items/0010-corrective-writer-identity-convergence.md)
+和 [VN-0010-C2](../../docs/work-items/0010-corrective-gazebo-teardown.md)
+均已独立闭环，但不在该 tag 中，也不扩张 Lesson 0009 的产品验收边界。
+累计修正版的下一不可变对照点是正式发布后的 `course/0010-start`；发布前
+只以两个矫正 Work Item 记录的精确提交为证，不把移动的 `main` 当成标签。
 
 学习者复现状态：Pending
 
@@ -940,7 +946,14 @@ Learner reflection:
 TBD
 ```
 
-## Corrective fixture note: VN-0010-C2
+## Post-tag errata boundary
+
+下述 C2 记录和课件中的 C1 writer-observation 修正都发生在
+`course/0009-solution` 之后。它们保留在 Lesson 0009 附近，是为了让故障原因
+和原始课程语义相邻，而不是声称冻结标签已经包含后续代码。标签保持不变；
+累计修正版由未来的 `course/0010-start` 冻结。
+
+### Corrective fixture note: VN-0010-C2
 
 A later repeated product run exposed a separate test-lifecycle defect: all
 MotionGate assertions passed, but launch eventually killed Gazebo and the

@@ -520,3 +520,29 @@ See
 [the testing strategy](../../docs/process/testing-strategy.md#shared-test-result-ownership)
 and
 [VN-0010-C1](../../docs/work-items/0010-corrective-writer-identity-convergence.md).
+
+## PIT-0023: An immutable course solution tag cannot absorb later errata
+
+**Symptom.** A lesson continues to document post-release corrections, but its
+published `course/NNNN-solution` tag still points to the earlier reviewed
+snapshot. A learner follows the current lesson and then finds that the promised
+solution comparison lacks the corrected files or behavior.
+
+**Cause.** Course prose on `main` can evolve, while an annotated solution tag is
+an immutable delivery identity. Treating the moving document and frozen tree as
+if they always contained the same scope either makes the exercise misleading or
+creates pressure to rewrite a published tag.
+
+**Guardrail.** Never rewrite the old tag. Mark later material explicitly as
+post-tag errata, link its corrective Work Item, and state which original steps
+remain comparable with the frozen solution. Publish the next cumulative
+corrected baseline under the next course start tag only after that tag actually
+exists. Until then, use the exact correction commits recorded in the Work Item;
+do not call moving `main` an immutable answer. Repository review must compare
+the current lesson tree with its advertised solution tag whenever a correction
+is appended after publication.
+
+Lesson 0009 applies this rule to
+[VN-0010-C1](../../docs/work-items/0010-corrective-writer-identity-convergence.md)
+and
+[VN-0010-C2](../../docs/work-items/0010-corrective-gazebo-teardown.md).

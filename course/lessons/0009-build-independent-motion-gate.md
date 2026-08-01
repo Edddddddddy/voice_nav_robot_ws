@@ -24,6 +24,13 @@ Runtime crash；YAML 中已有 `cmd_vel_timeout` 也不是 Gate-death 证据。
 required CI，并由 PR #12 rebase 合并。不可变 `course/0009-solution` 已发布；
 公共提交和 local-to-public rebase map 记录在本课学习记录中。
 
+`course/0009-solution` 只冻结 PR #12 的原始 reviewed snapshot。本课材料中标为
+“post-tag errata”的 C1/C2 内容在标签发布后才交付并分别完成治理闭环，
+不存在于该 tag 中。
+复现原课时仍以该 tag 为答案；需要累计修正版时，等待
+`course/0010-start` 正式发布后再作为下一不可变对照点，禁止重写
+`course/0009-solution`。
+
 先阅读：
 
 - [VN-0010 Work Item](../../docs/work-items/0010-independent-motion-gate.md)
@@ -361,7 +368,11 @@ sample 永远不能在 OPEN 后变成 non-zero。
 fail closed。State 可暴露固定 `uint8[16] bound_writer_gid` 作为 run-local
 诊断；caller 的 GID 不参与协议。
 
-### 6.1 事后修正：DDS matched 不等于 ROS graph identity 已收敛
+### 6.1 Post-tag errata：DDS matched 不等于 ROS graph identity 已收敛
+
+本节记录 [VN-0010-C1](../../docs/work-items/0010-corrective-writer-identity-convergence.md)
+的后续修正，不属于 `course/0009-solution` 的 tree。它用于解释当前累计产品
+约束，不改变该不可变标签所代表的原始课程 checkpoint。
 
 DDS reader/writer 已匹配，只能证明传输层已经满足匹配条件；它不能证明
 `get_publishers_info_by_topic()` 在 Gate 进程中的同一时刻快照已经拿到完整的
@@ -381,7 +392,7 @@ WRITER_METADATA_PENDING
     + every already-known name/namespace component agrees
 
 DEFINITIVE_MISMATCH
-  = wrong kind/type/FQN/partial namespace/QoS, zero or duplicate GID,
+  = wrong kind/type/FQN/partial namespace/QoS, zero GID or duplicate endpoints,
     disappearance/replacement after pinning, or barrier-time writer change
 ```
 
@@ -397,8 +408,10 @@ Node 必须先确认 final controller health，再开始 candidate GID pinning�
 controller 暂不可用误记为 candidate generation 身份。调用端只重试 typed reason
 `WRITER_METADATA_PENDING`，以及既有的精确 no-writer pending；每次使用新
 request ID、同一个一秒 absolute steady deadline，并重新验证响应仍为
-`PREPARED`、unbound、selected/published zero。`detail` 只记录有界的 count、kind、
-type、node identity、QoS、GID 和 elapsed time，不能参与 reason 19 的控制判断。
+`PREPARED`、unbound、selected/published zero。唯一 endpoint 的 `detail` 使用
+有界的 count、kind、type、node identity、QoS、GID 和 elapsed-time 完整布局；
+zero/multiple-endpoint 分支只报告其封闭的 unavailable/ambiguous 摘要。诊断文本
+不能参与 reason 19 的控制判断。
 调用端在每个 RPC 前后都检查同一个 steady deadline；已经越过 deadline 的
 `APPLIED` 也必须报告 timeout，不能因为它是 terminal response 就绕过总预算。
 
@@ -728,6 +741,13 @@ rm -f -- "${residue_before}" "${residue_after}"
 ```
 
 三层验收不能合并成一条模糊的“integration passed”：
+
+### Post-tag errata：C2 动态测试隔离
+
+原始 `course/0009-solution` 的 Node/product launch tests 分别固定使用 ROS
+domain 91/92；这是 PR #12 的历史验收事实。下述动态 domain 与生成态 CTest
+约束来自 [VN-0010-C2](../../docs/work-items/0010-corrective-gazebo-teardown.md)，
+只描述当前累计实现，不追溯改写旧 tag 的验收证据。
 
 两个 launch test 都必须通过 Jazzy 官方 `run_test_isolated.py` 运行。生成态
 CTest 必须清除继承的 `ROS_DOMAIN_ID` 和 `DISABLE_ROS_ISOLATION`；ROS domain
