@@ -57,6 +57,9 @@ public:
 private:
   WriterObservationPolicy policy_;
   std::optional<WriterGid> pinned_writer_gid_;
+  bool identity_confirmed_{false};
+  bool terminal_mismatch_{false};
+  std::string terminal_detail_;
 };
 
 }  // namespace voice_nav_mission
