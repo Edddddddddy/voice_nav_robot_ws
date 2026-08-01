@@ -34,6 +34,21 @@ zero-error `colcon test-result`. Repository contracts run through
 `scripts/run_repository_tests.py`; discovery uses the real non-package
 `tests/` layout and any skipped contract makes the gate fail.
 
+Critical launch tests use Jazzy's official `run_test_isolated.py`. Their
+generated CTest contract clears inherited `ROS_DOMAIN_ID` and
+`DISABLE_ROS_ISOLATION`, retains `RUN_SERIAL`, and permits only the reviewed
+result-neutral properties. Source CMake is not final evidence: after configure,
+`scripts/check_generated_launch_tests.py` inspects
+`ctest --show-only=json-v1` for the exact runner, source target, environment,
+timeout, working directory, labels, and result semantics. The reporter then
+requires the matching critical xUnit testcase structure; a skip is accepted
+only for the exact package-local cppcheck artifact/class allowlist.
+
+Run a release gate as the terminal command whose exit status is consumed.
+Process snapshots and other diagnostics run as separate commands afterward;
+a trailing successful `ps`, `grep`, or cleanup command must never replace a
+failed CTest status.
+
 PR CI uses deterministic in-memory fakes as soon as their Module exists and
 adds bounded headless Gazebo tests with the v0.2 simulation milestones. At
 v0.1 the hosted gate covers repository metadata, static robot-model
@@ -108,12 +123,26 @@ launch-managed process.
 The product launch still defaults to shutting down when Gazebo exits. Tests
 disable only that immediate event handler while their failure-safe cleanup
 performs the structured stop and process join. The cleanup ladder is must-run:
-structured stop is attempted even when zero/inhibit fails, and ROS fixture
-destruction is attempted even when structured stop fails. Static mutation
-tests reject fixed partitions, fixed sleeps, global process killing, shell
-execution, forced-exit allowlists, ACK-only cleanup, rebound or unreachable
-oracles, disabled critical test modules, wrong RPC environments, and cleanup
-registration that can be skipped after an active assertion failure.
+zero/inhibit, structured stop, and ROS fixture destruction are independent
+LIFO `unittest` cleanups, so one exception cannot short-circuit the next.
+Cleanup phases that own multiple resources use an exhaustive aggregator and
+raise the collected errors only after every step was attempted. A typed
+`TimeoutExpired` from the isolated idempotent stop request is retried once in a
+fresh CLI process; all other CLI/ACK errors fail immediately, and two timeouts
+still fail. Static mutation tests reject fixed partitions, fixed sleeps,
+global process killing, shell execution, forced-exit allowlists, ACK-only
+cleanup, rebound or unreachable oracles, disabled critical test modules,
+wrong RPC environments, cleanup list mutation, and cleanup registration that
+can be skipped after an active assertion failure.
+
+Gazebo ground-truth movement evidence is separate from ROS odometry. A pure
+test-support module queries the exact isolated world's pose topic with a
+10-second deadline and one read-only retry. It accepts at most four adjacent
+complete JSON documents because `gz topic --num 1` can race with a high-rate
+publisher and emit a small burst; every document must contain one valid model
+pose, and the newest is used. Wrong partition, malformed/extra output,
+duplicate/missing model, zero/non-finite quaternion, and non-finite pose all
+fail. Query failure remains an active-test failure, not a teardown diagnosis.
 
 This fixture contract proves deterministic test teardown. It does not prove
 the internal cause of a slow signal-only Gazebo shutdown, ordinary user
@@ -121,6 +150,11 @@ the internal cause of a slow signal-only Gazebo shutdown, ordinary user
 pause/resume semantics. See
 [VN-0010-C2](../work-items/0010-corrective-gazebo-teardown.md) and
 [PIT-0012](../../course/reference/engineering-pitfalls.md#pit-0012-no-residual-gazebo-process-is-not-a-clean-gazebo-exit).
+
+The source/AST guards are cooperative correctness controls for ordinary
+reviewed changes. They do not claim to sandbox a malicious same-UID process or
+deliberate Python dynamic metaprogramming that rewrites files or imported
+objects at runtime.
 
 ### Lesson 0009 normal-running Gate slice
 

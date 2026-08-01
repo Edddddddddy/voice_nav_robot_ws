@@ -70,6 +70,9 @@ Give every launch test that starts Gazebo one explicit lifecycle contract:
   concurrent environment mutation cannot redirect the stop request.
 - RPC timeout, non-zero CLI exit, false/malformed ACK, an already-dead server,
   or failure to observe the real process exit all fail the test.
+- A `TimeoutExpired` from the isolated, idempotent `stop: true` CLI is retried
+  once in a fresh process. Non-zero exit, malformed ACK, wrong partition, two
+  timeouts, and the process-exit barrier remain fail-closed.
 - ACK means only that the stop request was accepted; it never substitutes for
   the process-exit barrier.
 - The final post-shutdown assertion remains strict and global.
@@ -91,11 +94,11 @@ Give every launch test that starts Gazebo one explicit lifecycle contract:
   partitions and mismatched RPC environments are rejected.
 - [x] The canonical repository runner executes the real non-package `tests/`
   layout and fails the gate if any contract test is skipped.
-- [ ] The `voice_nav_sim` control test passes 20 serial fresh launches.
-- [ ] The complete MotionGate product test passes 20 serial fresh launches.
+- [x] The `voice_nav_sim` control test passes 20 serial fresh launches.
+- [x] The complete MotionGate product test passes 20 serial fresh launches.
 - [ ] Exact-head package tests, clean-install audit, and
   `bash scripts/verify.sh` pass.
-- [ ] Before/after process evidence has no newly introduced residual process;
+- [x] Before/after process evidence has no newly introduced residual process;
   this remains supporting evidence rather than the clean-exit oracle.
 - [ ] Independent review has no unresolved P0-P2 finding.
 - [ ] Required hosted CI passes on the final head.
@@ -141,7 +144,16 @@ Give every launch test that starts Gazebo one explicit lifecycle contract:
   RED/GREEN.
 - `1d7653c`, `ebd2fe1` / `a651bca`: real non-package repository discovery and
   fail-on-skip runner correction.
-- Pending: 20-run evidence, exact full gate, review, CI, and merge.
+- `5f65d65`: failure-safe independent cleanup, structured-stop process join,
+  official per-process ROS isolation, and strict post-shutdown GREEN.
+- `cc2733b`: generated CTest/xUnit/source inventory closes execution and skip
+  evidence gaps.
+- `281f409`: generated-result semantics, module-level test, cleanup-rebinding,
+  and direct pose-topic evidence hardening.
+- `46f7b71`: typed transient structured-stop timeout RED/GREEN retry.
+- `09d213c` / `53f9568`: bounded, isolated ground-truth pose module and
+  multi-document CLI burst RED/GREEN.
+- Pending: exact full gate, final review, hosted CI, and merge.
 
 ## Verification evidence
 
@@ -156,9 +168,37 @@ Fresh launch 6 active MotionGate/product assertions: PASS
 Fresh launch 6 post-shutdown: gazebo exit -9; strict assertExitCodes failed
 ```
 
-Final exact-head hashes, 20-run reports, static-contract counts, full
-verification, independent review, hosted CI, PR, and merge evidence remain
-pending and must not be claimed early.
+Final documentation-head static-contract counts, full verification,
+independent review, hosted CI, PR, and merge evidence remain pending and must
+not be claimed early.
+
+Repeated runtime evidence after the final implementation change:
+
+```text
+Implementation head: 53f9568
+Command: ctest --test-dir build/voice_nav_sim --output-on-failure \
+  --repeat until-fail:20 -R '^test_test_simulation_control.py$'
+Result: 20/20 PASS; 31.84-43.81 s per launch; CTest exit 0
+Total CTest time: 716.29 s
+
+Command: ctest --test-dir build/voice_nav_bringup --output-on-failure \
+  --repeat until-fail:20 -R '^test_test_motion_gate_product.py$'
+Result: 20/20 PASS; 19.58-28.41 s per launch; CTest exit 0
+Total CTest time: 507.21 s
+
+Postcondition: the only matching Gazebo/launch/control process was the
+pre-existing user-owned PID 3631225 (PPID 1); no test-owned process remained.
+This process snapshot supports, but does not replace, positive ACK, process
+join, and unfiltered assertExitCodes evidence.
+```
+
+During the repeat gate, three distinct client-side evidence failures were
+preserved and corrected tests-first: a 5 s `gz model` timeout, a 7 s
+structured-stop CLI timeout, and `gz topic --num 1` returning two complete
+JSON documents. None was relabeled as a Gazebo clean-exit failure. The final
+pose helper uses the exact isolated partition, two bounded 10 s read-only
+attempts, at most four complete documents, the newest complete snapshot, a
+unique model pose, a valid finite quaternion, and finite XYZ/RPY fields.
 
 Pre-final repository-contract evidence:
 
