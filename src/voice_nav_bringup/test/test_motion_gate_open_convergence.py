@@ -275,6 +275,32 @@ class MotionGateOpenConvergenceTest(unittest.TestCase):
         self.assertAlmostEqual(clock.sleeps[1], 0.015)
         self.assertAlmostEqual(clock.value, 0.025)
 
+    def test_response_completed_after_deadline_is_not_accepted(self):
+        clock = FakeClock()
+        applied = self.terminal()
+        calls = []
+
+        def attempt(request_id, remaining):
+            calls.append((request_id, remaining))
+            clock.value = 1.001
+            return applied
+
+        with self.assertRaises(self.support.OpenConvergenceTimeout) as caught:
+            self.support.converge_open(
+                expected=self.expected,
+                protocol=self.protocol,
+                attempt=attempt,
+                new_request_id=lambda: 'request-1',
+                deadline=1.0,
+                now=clock.now,
+                sleep=clock.sleep,
+            )
+
+        self.assertEqual(calls, [('request-1', 1.0)])
+        self.assertIs(caught.exception.last_response, applied)
+        self.assertEqual(caught.exception.attempts, 1)
+        self.assertEqual(clock.sleeps, [])
+
 
 if __name__ == '__main__':
     unittest.main()
