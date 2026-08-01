@@ -53,6 +53,23 @@ Diff 自审 / PR / CI
 - 禁止使用 `reset --hard` 或 `clean -fdx` 处理不清楚的工作区。
 - 发布后的 tag 与历史不重写。
 
+## 不可自引用的交付身份
+
+Git tree 不能包含由该 tree 在未来生成的最终本地或 pushed HEAD、该 HEAD 的
+门禁结果、tag object、rebase 后 public commit 或最终 CI 身份。课程 start tag
+必须在功能分支创建前从公开 `main` 发布，因此可安全写入 Work Item；solution
+tag 必须在 reviewed PR 合并后从新的公开 `main` 发布，因此不能成为其目标
+tree 内的强制字段。
+
+课程或 Release Work Item 的 PR 默认使用 `Refs #NN`。树内只记录提交时已经
+存在且可验证的事实；最终提交完成后，在 exact local/pushed HEAD 上运行门禁，
+把该 HEAD、结果、merge、public tree、required CI 和最终 tag 的精确身份写入
+PR 与 Issue closure comment，而不再提交 evidence-only 修改。树内 Work Item
+可在 repository acceptance 完成时标记 `Done`，linked Issue 则继续保持打开并
+承担 post-merge delivery ledger。发布不可变 artifact、核验本地/远端对象并在
+Issue 留下 closure comment 后，再通过 closed-state event 关闭 Issue；不再创建
+一个只为把未来身份抄回仓库的递归 ledger PR。
+
 ## 提交前最小检查
 
 ```

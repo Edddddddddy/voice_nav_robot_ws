@@ -1,6 +1,12 @@
 ## Work item
 
-Closes #
+Refs #
+
+Use `Refs #NN` when a public merge identity/tree verification or another
+immutable course/release artifact remains after landing. Use `Closes #NN` when
+the merge itself is the final delivery event. Close a referenced Issue only
+after the remaining external identities are recorded; do not require a target
+tree to contain its own future HEAD, gate result, tag, or rebase identity.
 
 Repository record: `docs/work-items/...`
 

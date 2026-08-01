@@ -30,6 +30,8 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0020 | A scaled quaternion produces the wrong RPY and misleading movement evidence | Is the finite valid quaternion normalized before unit-quaternion formulas? | Guarded |
 | PIT-0021 | A bounded diagnostic loses mandatory fields when one value is long | Are variable fields compacted independently before composing the fixed field layout? | Guarded |
 | PIT-0022 | Canonical verification rejects an xUnit file that changed during evidence collection | Did another reviewer or test process write the same shared build tree? | Guarded |
+| PIT-0023 | Current lesson content no longer matches its frozen solution tag | Was later material marked as post-tag errata with a new cumulative checkpoint? | Guarded |
+| PIT-0024 | Delivery closure creates another closure PR | Is the tree being asked to contain its own future tag or public identity? | Guarded |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -153,8 +155,10 @@ evidence.
 
 **Guardrail.** Keep pre-final evidence labeled as such. After the final product
 or contract change, rerun focused tests, repeated fresh-launch tests, clean
-install audit, and canonical `scripts/verify.sh`; record the exact HEAD. Hosted
-CI must test that same pushed head.
+install audit, and canonical `scripts/verify.sh`. Record that exact local or
+pushed HEAD and its result in the PR / Issue evidence, not in a new commit to
+the tree it verifies. Hosted CI must test that same pushed head. See
+[the change lifecycle](../../docs/process/change-lifecycle.md#不可自引用的交付身份).
 
 ## PIT-0009: Documentation is part of the closed-set contract
 
@@ -546,3 +550,31 @@ Lesson 0009 applies this rule to
 [VN-0010-C1](../../docs/work-items/0010-corrective-writer-identity-convergence.md)
 and
 [VN-0010-C2](../../docs/work-items/0010-corrective-gazebo-teardown.md).
+
+## PIT-0024: An artifact cannot contain its own future identity
+
+**Symptom.** A course or release PR cannot satisfy its closure checklist until
+the PR is merged and a tag is created, so another documentation-only PR is
+opened to copy the resulting public commit and tag object back into the tree.
+That second PR then has its own future rebase identity, creating a recursive
+closure cycle.
+
+**Cause.** A Git tree contributes to the hashes of the commit and annotated tag
+that will identify it. The tree cannot already contain identities that exist
+only after review, hosted CI, rebase merge, or tag publication. Treating those
+future values as required in-tree evidence confuses implementation acceptance
+with artifact publication.
+
+**Guardrail.** Publish the course start tag from public `main` before creating
+the feature branch and record that existing identity in the Work Item. Use
+`Refs #NN` while exact-final-head or post-merge work remains. The reviewed tree
+records only facts that already exist; after the final commit, record the
+exact-head gate externally. After merge, verify the public tree, create the
+immutable solution/release artifact, record its exact identities in the PR and
+Issue closure comment, and then close the Issue. Never open a recursive ledger
+PR only to make a target tree claim its own future identity. The durable rule
+lives in [the change lifecycle](../../docs/process/change-lifecycle.md#不可自引用的交付身份),
+the [Work Item template](../../docs/work-items/TEMPLATE.md), and the
+[PR template](../../.github/PULL_REQUEST_TEMPLATE.md); PR
+[#13](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/13) is the bounded
+incident that exposed the cycle.
