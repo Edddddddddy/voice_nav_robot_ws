@@ -19,7 +19,8 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0009 | Code/tests support a case that the lesson still forbids | Do prose, tests, and implementation describe the same closed set? | Guarded |
 | PIT-0010 | A bounded RPC returns success after its total budget | Is the deadline checked again immediately after the RPC? | Guarded |
 | PIT-0011 | Every ament CTest fails to import `ament_cmake_test` | Were ROS and the workspace overlay sourced in that shell? | Guarded |
-| PIT-0012 | Product assertions pass, but Gazebo exits `-9` during CTest teardown | Did failure occur in the active test or the strict post-shutdown exit check? | Known (guard planned) |
+| PIT-0012 | Product assertions pass, but Gazebo exits `-9` during CTest teardown | Did failure occur in the active test or the strict post-shutdown exit check? | Known (guard implemented; final evidence pending) |
+| PIT-0013 | A focused runner test passes, but canonical discovery cannot import the real test tree | Does the fixture match the repository's package markers and import path? | Guarded |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -213,20 +214,46 @@ useful supporting evidence, but `-9` still violates the clean-exit contract.
 **Safe diagnostic path.** First separate an active-test assertion failure from
 the strict post-shutdown process failure. Record the exact head, repeat index,
 exit code, and signal escalation. Reproduce at the smaller
-`voice_nav_sim`/controller seam inside its fixed `GZ_PARTITION`, and compare
+`voice_nav_sim`/controller seam inside its claimed `GZ_PARTITION`, and compare
 the before/after process set without stopping any pre-existing user process.
 A successful rerun demonstrates low frequency; it is not remediation.
 
-**Planned guardrail.** A failure-safe test cleanup will issue direct-argv
-`/server_control` `stop: true` only in the exact isolated test partition,
-require a positive Boolean ACK, and then wait for the launch-managed Gazebo
-process itself to exit. ACK is not process completion. The final global
-`assertExitCodes(proc_info)` remains unchanged. Fixed sleeps, unbounded timeout
-extensions, `-9` allowlists, deleted assertions, and global process killing are
-forbidden. See
+**Implemented guardrail.** Every Gazebo launch-test process overwrites inherited
+state with a scope/PID/128-bit-random `GZ_PARTITION` before launch context
+construction. A failure-safe cleanup always attempts zero/inhibit, then issues
+direct-argv `/server_control` `stop: true` with the same checked environment
+snapshot, requires a positive Boolean ACK, waits for the launch-managed Gazebo
+process itself to exit, and destroys the ROS fixture even if an earlier cleanup
+step fails. ACK is not process completion. The final global
+`assertExitCodes(proc_info)` remains unchanged. Static mutation tests reject
+fixed partitions, unreachable or rebound oracles, skipped critical modules,
+fixed sleeps, unbounded timeout extensions, `-9` allowlists, shell execution,
+and global process killing. The canonical repository runner also treats every
+skipped contract as failure. See
 [VN-0010-C2](../../docs/work-items/0010-corrective-gazebo-teardown.md).
 
 **Scope.** This is a test/process-lifecycle correction. It is not Lesson 0010
 Runtime/Gate process-death, controller consumer-deadman, managed safe-pause, or
-first-resume-zero evidence. Keep this entry `Known (guard planned)` until the
-unit, integration, repeated, full-gate, review, and hosted-CI evidence passes.
+first-resume-zero evidence. Keep this entry
+`Known (guard implemented; final evidence pending)` until the unit,
+integration, repeated, full-gate, review, and hosted-CI evidence passes.
+
+## PIT-0013: Test discovery fixtures must match the repository layout
+
+**Symptom.** Unit tests for a custom test runner pass, but running that runner
+from `scripts/` fails with `Start directory is not importable` or repository
+modules such as `scripts.colcon_evidence` cannot be imported.
+
+**Cause.** The focused fixture used an importable temporary package while the
+real repository deliberately has no `tests/__init__.py`. In addition,
+`unittest.defaultTestLoader` is a mutable singleton whose remembered
+`top_level_dir` can leak between discoveries, and `python3 scripts/tool.py`
+places `scripts/`, not the repository root, at the front of `sys.path`.
+
+**Guardrail.** Exercise a temporary non-package `tests/` directory that imports
+a helper from its repository root. The canonical runner inserts the resolved
+repository root for the complete run, uses a fresh `unittest.TestLoader` per
+discovery, and removes the transient test-directory path added by discovery.
+Run that exact entry point, not only its `run_suite()` unit helper, before
+claiming the gate is usable. The same runner fails closed if any discovered
+contract is skipped.
