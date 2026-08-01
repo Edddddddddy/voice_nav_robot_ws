@@ -24,6 +24,7 @@ import subprocess
 
 QUERY_TIMEOUT_SECONDS = 10.0
 QUERY_ATTEMPTS = 2
+MAX_SNAPSHOT_DOCUMENTS = 4
 
 
 def _number(
@@ -40,16 +41,35 @@ def _number(
         ) from error
 
 
-def _parse_model_pose(
-    output: str,
+def _decode_snapshot_documents(output: str) -> list[object]:
+    decoder = json.JSONDecoder()
+    documents = []
+    offset = 0
+    while offset < len(output):
+        while offset < len(output) and output[offset].isspace():
+            offset += 1
+        if offset == len(output):
+            break
+        try:
+            document, offset = decoder.raw_decode(output, offset)
+        except json.JSONDecodeError as error:
+            raise AssertionError(
+                f'cannot parse Gazebo pose JSON: {error}: {output}'
+            ) from error
+        documents.append(document)
+        if len(documents) > MAX_SNAPSHOT_DOCUMENTS:
+            raise AssertionError(
+                'Gazebo pose query returned too many JSON snapshots'
+            )
+    if not documents:
+        raise AssertionError('Gazebo pose query returned no JSON snapshot')
+    return documents
+
+
+def _parse_snapshot(
+    payload: object,
     model_name: str,
 ) -> tuple[float, float, float, float, float, float]:
-    try:
-        payload = json.loads(output)
-    except json.JSONDecodeError as error:
-        raise AssertionError(
-            f'cannot parse Gazebo pose JSON: {error}: {output}'
-        ) from error
     if not isinstance(payload, dict) or not isinstance(
         payload.get('pose'),
         list,
@@ -104,6 +124,17 @@ def _parse_model_pose(
     if not all(math.isfinite(value) for value in result):
         raise AssertionError('Gazebo pose fields must be finite')
     return result
+
+
+def _parse_model_pose(
+    output: str,
+    model_name: str,
+) -> tuple[float, float, float, float, float, float]:
+    poses = [
+        _parse_snapshot(document, model_name)
+        for document in _decode_snapshot_documents(output)
+    ]
+    return poses[-1]
 
 
 def read_model_pose(
