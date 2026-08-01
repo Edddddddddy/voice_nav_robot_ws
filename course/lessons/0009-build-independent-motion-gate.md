@@ -347,6 +347,45 @@ sample 永远不能在 OPEN 后变成 non-zero。
 fail closed。State 可暴露固定 `uint8[16] bound_writer_gid` 作为 run-local
 诊断；caller 的 GID 不参与协议。
 
+### 6.1 事后修正：DDS matched 不等于 ROS graph identity 已收敛
+
+DDS reader/writer 已匹配，只能证明传输层已经满足匹配条件；它不能证明
+`get_publishers_info_by_topic()` 在 Gate 进程中的同一时刻快照已经拿到完整的
+ROS node identity。两者不是一个原子事务。这里不能用固定 sleep，也不能把所有
+`WRITER_MISMATCH` 改成可重试，否则真正的错误 writer 会穿过门禁。
+
+修正后的 Node Adapter 把 endpoint 快照交给 package-private
+`WriterObservationSession`，并保持三类封闭结果：
+
+```text
+READY
+  = unique + Publisher + exact type/FQN + compatible QoS + non-zero GID
+
+WRITER_METADATA_PENDING
+  = unique + kind/type/QoS/namespace valid + non-zero pinned GID
+    + only node name unresolved
+
+DEFINITIVE_MISMATCH
+  = wrong kind/type/FQN/partial namespace/QoS, zero or duplicate GID,
+    disappearance/replacement after pinning, or barrier-time writer change
+```
+
+第一次合法的未决快照立即把非零 GID 临时绑定到当前 PREPARE generation；只有
+同一 GID 补齐 identity 才能 READY。GID 替换会把该 observation session 锁成
+terminal mismatch，直到下一次成功 PREPARE 重置。完整 identity 已经确认后，
+同一 GID 在后续 barrier 快照中仅丢失 node name，可以沿用已经确认的身份；任何
+非空矛盾字段仍然终止。
+
+Node 必须先确认 final controller health，再开始 candidate GID pinning，避免把
+controller 暂不可用误记为 candidate generation 身份。调用端只重试 typed reason
+`WRITER_METADATA_PENDING`，以及既有的精确 no-writer pending；每次使用新
+request ID、同一个一秒 absolute steady deadline，并重新验证响应仍为
+`PREPARED`、unbound、selected/published zero。`detail` 只记录有界的 count、kind、
+type、node identity、QoS、GID 和 elapsed time，不能参与 reason 19 的控制判断。
+
+这个修正不增加 ROS 进程、Topic、公开 Interface 或第五个 MotionGate operation；
+也不改变三次 graph snapshot、reader A/B/C 或最终速度所有权。
+
 这里的“锁定”是可执行约束，不只是测试备注：
 
 - `product_sim.launch.py` 必须在任何 ROS process 前设置
