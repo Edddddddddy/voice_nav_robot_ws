@@ -110,7 +110,7 @@ std::string observed_identity(
   }
   const auto node_namespace = namespace_unresolved ?
     std::string{"<unresolved-namespace>"} :
-    normalized_namespace(endpoint.node_namespace);
+  normalized_namespace(endpoint.node_namespace);
   const auto node_name = name_unresolved ?
     std::string{"<unresolved>"} : endpoint.node_name;
   return node_namespace == "/" ?

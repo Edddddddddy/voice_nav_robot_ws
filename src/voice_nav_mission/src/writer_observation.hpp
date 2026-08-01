@@ -12,10 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef VOICE_NAV_MISSION__WRITER_OBSERVATION_HPP_
-#define VOICE_NAV_MISSION__WRITER_OBSERVATION_HPP_
-
-#include "voice_nav_mission/motion_gate_core.hpp"
+#ifndef WRITER_OBSERVATION_HPP_
+#define WRITER_OBSERVATION_HPP_
 
 #include <rmw/types.h>
 
@@ -23,6 +21,8 @@
 #include <optional>
 #include <string>
 #include <vector>
+
+#include "voice_nav_mission/motion_gate_core.hpp"
 
 namespace voice_nav_mission
 {
@@ -64,4 +64,4 @@ private:
 
 }  // namespace voice_nav_mission
 
-#endif  // VOICE_NAV_MISSION__WRITER_OBSERVATION_HPP_
+#endif  // WRITER_OBSERVATION_HPP_

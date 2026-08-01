@@ -65,8 +65,8 @@ WriterEndpointObservation endpoint(
 TEST(WriterObservationSession, PinsUnresolvedIdentityUntilTheSameWriterResolves)
 {
   WriterObservationSession session({
-    "geometry_msgs/msg/TwistStamped",
-    "/collision_monitor"});
+        "geometry_msgs/msg/TwistStamped",
+        "/collision_monitor"});
   const auto first_gid = writer_gid(0x11U);
 
   const auto pending = session.observe(
@@ -95,8 +95,8 @@ TEST(WriterObservationSession, PinsUnresolvedIdentityUntilTheSameWriterResolves)
 TEST(WriterObservationSession, ReplacementPoisonsPinnedGenerationUntilReset)
 {
   WriterObservationSession session({
-    "geometry_msgs/msg/TwistStamped",
-    "/collision_monitor"});
+        "geometry_msgs/msg/TwistStamped",
+        "/collision_monitor"});
   const auto first_gid = writer_gid(0x31U);
   const auto replacement_gid = writer_gid(0x32U);
 
@@ -121,8 +121,8 @@ TEST(WriterObservationSession, ReplacementPoisonsPinnedGenerationUntilReset)
 TEST(WriterObservationSession, ConfirmedSameGidSurvivesIdentityOnlyGraphRegression)
 {
   WriterObservationSession session({
-    "geometry_msgs/msg/TwistStamped",
-    "/collision_monitor"});
+        "geometry_msgs/msg/TwistStamped",
+        "/collision_monitor"});
   const auto gid = writer_gid(0x41U);
 
   ASSERT_TRUE(
@@ -137,8 +137,8 @@ TEST(WriterObservationSession, ConfirmedSameGidSurvivesIdentityOnlyGraphRegressi
 TEST(WriterObservationSession, KnownWrongNamespaceCannotEnterPending)
 {
   WriterObservationSession session({
-    "geometry_msgs/msg/TwistStamped",
-    "/collision_monitor"});
+        "geometry_msgs/msg/TwistStamped",
+        "/collision_monitor"});
   const auto gid = writer_gid(0x51U);
 
   const auto partial_mismatch = session.observe(
@@ -155,13 +155,13 @@ TEST(WriterObservationSession, KnownWrongNamespaceCannotEnterPending)
 TEST(WriterObservationSession, ExactUnknownIdentityMarkersConvergeForPinnedGid)
 {
   WriterObservationSession session({
-    "geometry_msgs/msg/TwistStamped",
-    "/collision_monitor"});
+        "geometry_msgs/msg/TwistStamped",
+        "/collision_monitor"});
   const auto gid = writer_gid(0x58U);
 
   const auto pending = session.observe(
-    {
-      endpoint(
+      {
+        endpoint(
         gid,
         "_NODE_NAME_UNKNOWN_",
         "_NODE_NAMESPACE_UNKNOWN_")},
@@ -179,8 +179,8 @@ TEST(WriterObservationSession, KnownPartialIdentityMustAgreeBeforePending)
 {
   const auto gid = writer_gid(0x59U);
   WriterObservationSession compatible({
-    "geometry_msgs/msg/TwistStamped",
-    "/collision_monitor"});
+        "geometry_msgs/msg/TwistStamped",
+        "/collision_monitor"});
   EXPECT_EQ(
     compatible.observe(
       {
@@ -192,8 +192,8 @@ TEST(WriterObservationSession, KnownPartialIdentityMustAgreeBeforePending)
     Reason::WriterMetadataPending);
 
   WriterObservationSession contradictory({
-    "geometry_msgs/msg/TwistStamped",
-    "/collision_monitor"});
+        "geometry_msgs/msg/TwistStamped",
+        "/collision_monitor"});
   EXPECT_EQ(
     contradictory.observe(
       {
@@ -212,8 +212,8 @@ TEST(WriterObservationSession, DefinitivePolicyViolationsNeverEnterPending)
     WriterEndpointObservation invalid)
     {
       WriterObservationSession session({
-        "geometry_msgs/msg/TwistStamped",
-        "/collision_monitor"});
+          "geometry_msgs/msg/TwistStamped",
+          "/collision_monitor"});
       const auto rejected = session.observe({std::move(invalid)}, 1ms);
       EXPECT_FALSE(rejected.ready);
       EXPECT_EQ(rejected.reason, Reason::WriterMismatch);
@@ -247,17 +247,17 @@ TEST(WriterObservationSession, DefinitivePolicyViolationsNeverEnterPending)
 TEST(WriterObservationSession, MissingAndDuplicateWritersStayFailClosed)
 {
   WriterObservationSession session({
-    "geometry_msgs/msg/TwistStamped",
-    "/collision_monitor"});
+        "geometry_msgs/msg/TwistStamped",
+        "/collision_monitor"});
   const auto first_gid = writer_gid(0x71U);
 
   const auto missing = session.observe({}, 1ms);
   EXPECT_EQ(missing.reason, Reason::WriterUnavailable);
 
   const auto duplicate = session.observe(
-    {
-      endpoint(first_gid, "collision_monitor"),
-      endpoint(writer_gid(0x72U), "collision_monitor")},
+      {
+        endpoint(first_gid, "collision_monitor"),
+        endpoint(writer_gid(0x72U), "collision_monitor")},
     2ms);
   EXPECT_EQ(duplicate.reason, Reason::WriterAmbiguous);
 
