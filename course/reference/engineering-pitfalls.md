@@ -19,7 +19,7 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0009 | Code/tests support a case that the lesson still forbids | Do prose, tests, and implementation describe the same closed set? | Guarded |
 | PIT-0010 | A bounded RPC returns success after its total budget | Is the deadline checked again immediately after the RPC? | Guarded |
 | PIT-0011 | Every ament CTest fails to import `ament_cmake_test` | Were ROS and the workspace overlay sourced in that shell? | Guarded |
-| PIT-0012 | Product assertions pass, but Gazebo exits `-9` during CTest teardown | Did failure occur in the active test or the strict post-shutdown exit check? | Known (guard implemented; final evidence pending) |
+| PIT-0012 | Product assertions pass, but Gazebo exits `-9` during CTest teardown | Did failure occur in the active test or the strict post-shutdown exit check? | Guarded |
 | PIT-0013 | A focused runner test passes, but canonical discovery cannot import the real test tree | Does the fixture match the repository's package markers and import path? | Guarded |
 | PIT-0014 | Concurrent launch tests collide despite a fixed `ROS_DOMAIN_ID` | Does generated CTest metadata invoke the official isolated runner without overriding its domain? | Guarded |
 | PIT-0015 | One cleanup failure prevents later fixture destruction | Are teardown phases independent LIFO cleanups with exhaustive error aggregation? | Guarded |
@@ -242,11 +242,14 @@ and global process killing. The canonical repository runner also treats every
 skipped contract as failure. See
 [VN-0010-C2](../../docs/work-items/0010-corrective-gazebo-teardown.md).
 
-**Scope.** This is a test/process-lifecycle correction. It is not Lesson 0010
+**Status and scope.** The guard is complete: both 20-run fresh-launch gates,
+the exact local canonical gate, two independent P0-P2 rereviews, and required
+hosted CI on the final reviewed implementation/documentation head passed.
+This is a test/process-lifecycle correction. It is not Lesson 0010
 Runtime/Gate process-death, controller consumer-deadman, managed safe-pause, or
-first-resume-zero evidence. Keep this entry
-`Known (guard implemented; final evidence pending)` until the unit,
-integration, repeated, full-gate, review, and hosted-CI evidence passes.
+first-resume-zero evidence. See
+[PR #16](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/16) and
+VN-0010-C2 for exact evidence; the PR merge remains a separate delivery state.
 
 ## PIT-0013: Test discovery fixtures must match the repository layout
 

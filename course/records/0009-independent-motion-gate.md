@@ -1,7 +1,8 @@
 # Lesson 0009 学习记录：独立 MotionGate
 
-状态：Latest complete ancestor local gate GREEN / final review GREEN /
-current exact-head canonical and hosted CI pending
+状态：Final reviewed implementation/documentation local gate and hosted CI
+GREEN / evidence-only closure CI and merge pending
+（VN-0010-C2 corrective addendum；Lesson 0009 主账本 closure 仍由 PR #13 维护）
 （教师参考实现）
 
 学习者复现状态：Pending
@@ -841,9 +842,9 @@ scope/PID/random partition per launch-test process, uses a structured
 server-stop ACK with an exact environment snapshot, crosses a real
 launch-managed process-exit barrier, and retains the unchanged strict exit-code
 oracle. Cleanup steps are must-run, and the repository contract runner fails
-if critical evidence is skipped. PIT-0012 remains
-`Known (guard implemented; final evidence pending)` until repeated exact-head
-and hosted-CI evidence is complete.
+if critical evidence is skipped. PIT-0012 is `Guarded` after both repeated
+gates, exact-head local verification, independent review, and required hosted
+CI completed; PR merge remains a separate delivery state.
 
 Local corrective evidence on implementation head `2d11d9e` completed the
 ground-truth parser's fresh-launch stability gate: `voice_nav_sim` passed
@@ -854,9 +855,12 @@ pre-existing user-owned PID `3631225`; no test-owned process remained. During
 the tests-first loop, bounded query timeout, structured-stop timeout, and a
 two-document `gz topic --num 1` burst were kept as separate evidence failures
 and corrected without weakening positive ACK, process-exit, or strict xUnit
-oracles. A complete local canonical gate passed on ancestor `22b83ce`: 277
-repository contracts and 177 package tests completed with zero failure/error;
+oracles. The exact reviewed head `1ddd970` passed the complete local canonical
+gate: 279 repository contracts and 177 package tests completed with zero
+failure/error;
 the 10 skips were the exact package-local cppcheck allowlist, and the clean
-MotionGate install audit passed. Final review then required the `2d11d9e`
-quaternion and generated-metadata corrections, so exact-head canonical and
-hosted CI remain pending. This note does not close PIT-0012 or Lesson 0010.
+MotionGate install audit passed. Required hosted CI run `30710167163` attempt 1
+passed on that exact head; its required job completed in 6m20s after two
+independent rereviews reported P0=0, P1=0, P2=0. The evidence-only closure
+commit still requires CI before merge. This correction closes PIT-0012 but
+does not count as Lesson 0010.
