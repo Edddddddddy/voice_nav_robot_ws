@@ -248,6 +248,15 @@ ControlResult MotionGateCore::open(
       binding.detail.empty() ? "candidate writer is not ready" :
       binding.detail);
   }
+  if (binding.reason != Reason::None) {
+    force_fault(
+      Reason::InternalFailure,
+      "writer binding provider returned ready with a non-NONE reason");
+    auto fault = result_from_snapshot(
+      ResultCode::Faulted, reason_, detail_);
+    remember(request, fault);
+    return fault;
+  }
   if (!gid_is_nonzero(binding.writer_gid)) {
     return reject(
       request, Reason::WriterUnavailable,
