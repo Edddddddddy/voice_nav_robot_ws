@@ -248,6 +248,32 @@ class GazeboTeardownMutationTest(unittest.TestCase):
             "strictly check every process exit",
         )
 
+    def test_unreachable_shutdown_assertion_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
+            "        assertExitCodes(proc_info)",
+            (
+                "        if False:\n"
+                "            assertExitCodes(proc_info)"
+            ),
+            "single unconditional top-level assertion",
+        )
+
+    def test_early_return_from_cleanup_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
+            (
+                "    def cleanup_fixture(self, proc_info):\n"
+                "        self.best_effort_inhibit()"
+            ),
+            (
+                "    def cleanup_fixture(self, proc_info):\n"
+                "        return\n"
+                "        self.best_effort_inhibit()"
+            ),
+            "unconditional cleanup control flow",
+        )
+
     def test_product_exit_policy_must_default_on(self):
         self.assert_mutation_rejected(
             "src/voice_nav_bringup/launch/product_sim.launch.py",
