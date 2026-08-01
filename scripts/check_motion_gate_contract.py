@@ -1459,10 +1459,8 @@ def validate_writer_observation(
             "observation.detail.substr(",
             "gid_start, positions[5] - gid_start",
             "EXPECT_EQ(gid.size(), 32U)",
-            "bool gid_is_hex = true",
-            "gid_is_hex = gid_is_hex && std::isxdigit(character) != 0",
-            "EXPECT_TRUE(gid_is_hex)",
-            "std::isxdigit(character)",
+            'gid.find_first_not_of("0123456789abcdefABCDEF")',
+            "std::string::npos",
         ),
         "bounded writer diagnostic helper",
     )
@@ -1475,13 +1473,10 @@ def validate_writer_observation(
                 "gid_start, positions[5] - gid_start);"
             ),
             "EXPECT_EQ(gid.size(), 32U);",
-            "bool gid_is_hex = true;",
             (
-                "for (const unsigned char character : gid) { "
-                "gid_is_hex = gid_is_hex && "
-                "std::isxdigit(character) != 0; }"
+                "EXPECT_EQ( gid.find_first_not_of("
+                '"0123456789abcdefABCDEF"), std::string::npos);'
             ),
-            "EXPECT_TRUE(gid_is_hex);",
         ),
         "bounded writer diagnostic helper",
     )
@@ -1536,10 +1531,11 @@ def validate_writer_observation(
                 "expect_complete_bounded_diagnostic("
                 "long_namespace_rejected);"
             ),
-            "long_type.topic_type = std::string(240U, 't');",
             (
                 "const auto long_type_rejected = long_type_session.observe( "
-                "{std::move(long_type)}, 123456ms);"
+                "{WriterEndpointObservation{ std::string(240U, 't'), "
+                '"collision_monitor", "/", RMW_ENDPOINT_PUBLISHER, '
+                "candidate_qos(), writer_gid(0x68U)}}, 123456ms);"
             ),
             "EXPECT_FALSE(long_type_rejected.ready);",
             (
