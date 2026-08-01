@@ -1,6 +1,6 @@
 # VN-0010: Add fail-closed MotionGate authority
 
-**Status:** Completed
+**Status:** Done
 
 **GitHub Issue:**
 [#11](https://github.com/Edddddddddy/voice_nav_robot_ws/issues/11)
@@ -446,7 +446,7 @@ fresh-prefix Core/node install audit, and printed
 `VoiceNav Robot verification passed.` It remains historical evidence rather
 than the final hosted gate.
 
-Focused checks on current hardening head
+Focused checks on the then-current hardening head
 `517339a3d313910a937fef973a9bdd635b457fc8` passed 41 scoped-evidence tests,
 all 168 repository-static tests,
 a read-only `148/0/0/8` scoped package report,

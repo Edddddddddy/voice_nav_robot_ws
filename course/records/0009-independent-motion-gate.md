@@ -794,7 +794,8 @@ the scoped reporter rejects missing results and cannot traverse package paths
 - [x] evidence-review P2 已由 scoped reporting、三阶段 build-boundary guard 与
   干净 148-result 全量门禁关闭。
 - [x] scoped-evidence implementation head `517339a` 的 code/safety re-review 完成。
-- [x] final documentation head 的 evidence re-review 完成且无 P0-P3 finding。
+- [x] final feature head `956fde3` 的 code/safety/documentation re-review
+  完成且无 P0-P3 finding。
 - [x] PR diff 只包含 VN-0010 范围。
 - [x] required hosted CI 在 exact head 通过。
 - [x] review conversations 全部解决（提交 review 与 thread 均为零）。
