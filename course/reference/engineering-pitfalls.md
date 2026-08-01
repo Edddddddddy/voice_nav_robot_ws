@@ -360,10 +360,14 @@ and an aggregate skipped count with no matching allowed testcase.
    enabled in source; it is never added to this allowlist.
 5. When a static contract requires an active C++ GTest, parse a same-length
    lexical code view that masks comments plus ordinary, character, and raw
-   string literals. Reject disabled or preprocessor-guarded tests, skip macros,
-   and top-level early returns. Prove that boundary values flow into the tested
-   call and that assertions derive from the product result; scattered tokens
-   or a string containing a decoy `TEST(...)` are not execution evidence.
+   string literals. For a dedicated contract source, make the whole-file rule
+   explicit: conditional compilation is forbidden, and directive inspection
+   happens after C++ line-splice normalization. Reject skip macros, every
+   early return, and conditional or looping control flow in the required
+   linear tests. Prove that boundary values reach the tested call through
+   top-level statements and that assertions derive from the product result;
+   unreachable branches, ternary decoys, scattered tokens, or a string
+   containing a decoy `TEST(...)` are not execution evidence.
 
 **Checker threat boundary.** These guards prevent ordinary and accidental
 source, CMake, discovery, and report regressions in a cooperative repository.
