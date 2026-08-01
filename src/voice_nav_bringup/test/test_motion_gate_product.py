@@ -224,14 +224,19 @@ class MotionGateProductTest(unittest.TestCase):
         self.spin_thread.start()
 
     def cleanup_fixture(self, proc_info):
-        self.best_effort_inhibit()
         try:
-            gazebo_shutdown.structured_stop_gazebo(
-                proc_info,
-                expected_partition=PRODUCT_TEST_PARTITION,
-            )
+            try:
+                self.best_effort_inhibit()
+            except Exception:
+                pass
         finally:
-            self.destroy_ros_fixture()
+            try:
+                gazebo_shutdown.structured_stop_gazebo(
+                    proc_info,
+                    expected_partition=PRODUCT_TEST_PARTITION,
+                )
+            finally:
+                self.destroy_ros_fixture()
 
     def destroy_ros_fixture(self):
         node = getattr(self, 'node', None)

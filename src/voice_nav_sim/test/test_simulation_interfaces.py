@@ -267,22 +267,19 @@ class SimulationInterfacesTest(unittest.TestCase):
         self.spin_thread.start()
 
     def cleanup_fixture(self, proc_info):
-        if (
-            rclpy.ok()
-            and getattr(self, 'node', None) is not None
-            and getattr(self, 'command_publisher', None) is not None
-        ):
+        try:
             try:
                 self.publish_command_for(0.0, 0.0, 0.25)
             except Exception:
                 pass
-        try:
-            gazebo_shutdown.structured_stop_gazebo(
-                proc_info,
-                expected_partition=SIMULATION_TEST_PARTITION,
-            )
         finally:
-            self.destroy_ros_fixture()
+            try:
+                gazebo_shutdown.structured_stop_gazebo(
+                    proc_info,
+                    expected_partition=SIMULATION_TEST_PARTITION,
+                )
+            finally:
+                self.destroy_ros_fixture()
 
     def destroy_ros_fixture(self):
         executor = getattr(self, 'executor', None)
