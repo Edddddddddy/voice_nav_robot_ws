@@ -522,10 +522,10 @@ TEST(MotionGateCore, OpenFaultsClosedWhenReadyBindingCarriesNonNoneReason)
     request, at(1ms),
     []() {
       return OpenBinding{
-        true,
-        Reason::WriterMetadataPending,
-        writer_gid(),
-        "contradictory ready binding"};
+      true,
+      Reason::WriterMetadataPending,
+      writer_gid(),
+      "contradictory ready binding"};
     });
 
   EXPECT_EQ(result.code, ResultCode::Faulted);
@@ -1184,10 +1184,10 @@ TEST(MotionGateCore, OpenPreservesTypedWriterMetadataPendingWithoutBinding)
   const auto pending_provider = [&provider_calls, writer]() {
       ++provider_calls;
       return OpenBinding{
-        false,
-        Reason::WriterMetadataPending,
-        writer,
-        "candidate writer identity is unresolved"};
+      false,
+      Reason::WriterMetadataPending,
+      writer,
+      "candidate writer identity is unresolved"};
     };
 
   const auto pending = gate.open(request, at(1ms), pending_provider);

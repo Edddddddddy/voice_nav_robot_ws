@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "voice_nav_mission/motion_gate_core.hpp"
-#include "writer_observation.hpp"
-
 #include <rmw/qos_profiles.h>
 #include <rmw/rmw.h>
 #include <rmw/types.h>
@@ -41,8 +38,10 @@
 #include <geometry_msgs/msg/twist_stamped.hpp>
 #include <rclcpp/rclcpp.hpp>
 
+#include "voice_nav_mission/motion_gate_core.hpp"
 #include "voice_nav_mission/msg/internal_motion_gate_state.hpp"
 #include "voice_nav_mission/srv/internal_motion_gate_control.hpp"
+#include "writer_observation.hpp"
 
 namespace voice_nav_mission
 {
@@ -417,12 +416,12 @@ private:
         endpoint_gid.cend(),
         writer_gid.begin());
       observations.push_back(WriterEndpointObservation{
-        endpoint.topic_type(),
-        endpoint.node_name(),
-        endpoint.node_namespace(),
-        static_cast<rmw_endpoint_type_t>(endpoint.endpoint_type()),
-        endpoint.qos_profile().get_rmw_qos_profile(),
-        writer_gid});
+          endpoint.topic_type(),
+          endpoint.node_name(),
+          endpoint.node_namespace(),
+          static_cast<rmw_endpoint_type_t>(endpoint.endpoint_type()),
+          endpoint.qos_profile().get_rmw_qos_profile(),
+          writer_gid});
     }
 
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -492,10 +491,10 @@ private:
       [this, &request, &expected_binding]() {
         if (const auto error = final_controller_health_error()) {
           return OpenBinding{
-            false,
-            Reason::WriterUnavailable,
-            {},
-            *error};
+          false,
+          Reason::WriterUnavailable,
+          {},
+          *error};
         }
 
         const auto first =
