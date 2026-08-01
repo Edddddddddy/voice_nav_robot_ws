@@ -43,6 +43,8 @@ result-neutral properties. Source CMake is not final evidence: after configure,
 timeout, working directory, labels, and result semantics. The reporter then
 requires the matching critical xUnit testcase structure; a skip is accepted
 only for the exact package-local cppcheck artifact/class allowlist.
+Scaffolded Python lint skips are removed and made to pass rather than added to
+that allowlist.
 
 Run a release gate as the terminal command whose exit status is consumed.
 Process snapshots and other diagnostics run as separate commands afterward;

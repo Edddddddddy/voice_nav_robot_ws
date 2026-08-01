@@ -153,6 +153,8 @@ Give every launch test that starts Gazebo one explicit lifecycle contract:
 - `46f7b71`: typed transient structured-stop timeout RED/GREEN retry.
 - `09d213c` / `53f9568`: bounded, isolated ground-truth pose module and
   multi-document CLI burst RED/GREEN.
+- `00916cb`: removed the stale generated Agent copyright skip; the enabled
+  package lint contract passes 3/3 and the result reporter sees zero skips.
 - Pending: exact full gate, final review, hosted CI, and merge.
 
 ## Verification evidence
