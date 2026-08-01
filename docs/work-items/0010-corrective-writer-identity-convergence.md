@@ -116,7 +116,7 @@ is never a control discriminator for reason 19.
   repetitions; this is retrospective evidence collected at unchanged C1
   runtime tree `04db928c` during C2 verification, not an exact-head C1-only
   gate.
-- [ ] Canonical `scripts/verify.sh` passes on the exact final head.
+- [x] Canonical `scripts/verify.sh` passes on the exact final head.
 - [x] Independent safety/code review has no unresolved P0-P2 finding.
 - [x] Combined PR #16 contains the complete original C1 stack, passes required
   hosted CI on closure head `66f6834`, and rebase-merges without C1 tree drift.
@@ -291,5 +291,25 @@ The shared tree was made quiescent before retry. This occurrence is preserved
 as [PIT-0022](../../course/reference/engineering-pitfalls.md#pit-0022-test-result-evidence-requires-one-shared-tree-writer),
 not counted as acceptance, and not "fixed" by weakening identity validation.
 
-Exact full verification, hosted CI, closure-PR identity, merge mapping, and
-Issue #14 closure remain pending and must not be claimed early.
+### Exact local canonical evidence
+
+```text
+Verified source/document head:
+3be14f8d3c43a4b8133dc9a8d8f0ca2440f84a03
+tree=536d9331adb978879557024337d6a8a563fdb783
+
+bash scripts/verify.sh
+Result: PASS; exit 0; 346.9 s
+
+Repository no-skip inventory: 288/288 passed
+ROS result inventory: 179 tests, 0 errors, 0 failures, 10 skipped
+Allowed skips: package-local generated cppcheck artifacts only (7 Mission,
+3 Simulation); canonical structural skip policy passed.
+Clean MotionGate install-boundary audit: passed.
+```
+
+The learner-owned Gazebo server PID `3631225` remained alive with PPID 1 after
+the gate, so acceptance did not obtain a false clean state by killing an
+unowned process. The closure-evidence documentation commit is rerun locally
+and by hosted CI; hosted CI, closure-PR identity, merge mapping, and Issue #14
+closure remain pending and must not be claimed early.
