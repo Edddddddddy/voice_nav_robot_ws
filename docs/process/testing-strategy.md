@@ -40,9 +40,12 @@ generated CTest contract clears inherited `ROS_DOMAIN_ID` and
 result-neutral properties. Source CMake is not final evidence: after configure,
 `scripts/check_generated_launch_tests.py` inspects
 `ctest --show-only=json-v1` for the exact runner, source target, environment,
-timeout, working directory, labels, and result semantics. The reporter then
-requires the matching critical xUnit testcase structure; a skip is accepted
-only for the exact package-local cppcheck artifact/class allowlist.
+reviewed per-test timeout, resolved package build working directory, the single
+`launch_test` label, and result semantics. Required mutation tests replace
+`LABELS`, `TIMEOUT`, and `WORKING_DIRECTORY` independently and require every
+replacement to fail. The reporter then requires the matching critical xUnit
+testcase structure; a skip is accepted only for the exact package-local
+cppcheck artifact/class allowlist.
 Scaffolded Python lint skips are removed and made to pass rather than added to
 that allowlist.
 
@@ -144,7 +147,10 @@ complete JSON documents because `gz topic --num 1` can race with a high-rate
 publisher and emit a small burst; every document must contain one valid model
 pose, and the newest is used. Wrong partition, malformed/extra output,
 duplicate/missing model, zero/non-finite quaternion, and non-finite pose all
-fail. Query failure remains an active-test failure, not a teardown diagnosis.
+fail. After a finite valid-norm check, all four quaternion components are
+normalized before the unit-quaternion RPY formulas run; a scaled-quaternion
+regression must produce the same RPY as its equivalent unit quaternion. Query
+failure remains an active-test failure, not a teardown diagnosis.
 
 This fixture contract proves deterministic test teardown. It does not prove
 the internal cause of a slow signal-only Gazebo shutdown, ordinary user
