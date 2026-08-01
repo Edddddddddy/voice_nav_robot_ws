@@ -28,6 +28,7 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0018 | CTest prints a failure but the surrounding command returns zero | Did a later diagnostic command replace the gate's shell exit status? | Guarded |
 | PIT-0019 | Generated CTest passes with a wrong label, timeout, or working directory | Does the checker compare exact property values or only property names? | Guarded |
 | PIT-0020 | A scaled quaternion produces the wrong RPY and misleading movement evidence | Is the finite valid quaternion normalized before unit-quaternion formulas? | Guarded |
+| PIT-0021 | A bounded diagnostic loses mandatory fields when one value is long | Are variable fields compacted independently before composing the fixed field layout? | Guarded |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -199,6 +200,11 @@ source /opt/ros/jazzy/setup.bash
 source install/setup.bash
 ctest --test-dir build/voice_nav_mission --output-on-failure
 ```
+
+When a diagnostic shell uses Bash strict mode, enable `set -e -o pipefail`,
+source both setup files, and only then enable `set -u`. Jazzy setup scripts may
+legitimately inspect an unset environment variable; enabling nounset first
+turns environment initialization into a false product failure.
 
 If all targets fail at the same import, fix the invocation before diagnosing
 product code. Canonical `scripts/verify.sh` already sources both environments.
@@ -445,3 +451,25 @@ four components by that norm, and only then compute RPY. Keep zero, too-small,
 and non-finite norms fail-closed. A required regression supplies a deliberately
 scaled quaternion for a known rotation and proves it yields the same RPY as
 the equivalent unit quaternion.
+
+## PIT-0021: A size bound is not a schema-completeness guarantee
+
+**Symptom.** `detail.size() <= 160` passes, but a long wrong node name,
+namespace, or topic type consumes the prefix and whole-message truncation
+removes later `q=`, `g=`, or `ms=` fields. Rejection remains fail-closed, but
+the diagnostic no longer satisfies the required observation record.
+
+**Cause.** Resizing the complete concatenated string proves only an upper byte
+bound. It makes fields near the tail conditional on earlier untrusted values.
+Adding another terminal prefix and truncating again can also erase fields from
+a previously complete record.
+
+**Guardrail.** Reserve space for the fixed `n=1`, `k=`, `t=`, `id=`, `q=`,
+`g=`, and `ms=` schema, then compact each variable field independently before
+composition, using a stable digest for omitted bytes. Preserve the stored
+terminal record instead of wrapping and truncating it again. Required unit and
+static/mutation regressions use overlong node name, namespace, and type values
+and assert both the 160-character bound and every mandatory field marker.
+
+See
+[VN-0010-C1](../../docs/work-items/0010-corrective-writer-identity-convergence.md).
