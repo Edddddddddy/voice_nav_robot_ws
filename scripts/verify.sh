@@ -30,7 +30,7 @@ echo "[1/6] Checking repository and course contracts"
 python3 scripts/check_repository.py
 python3 scripts/check_motion_gate_contract.py --root .
 python3 scripts/check_gazebo_teardown_contract.py --root .
-python3 -m unittest discover -s tests -p "test_*.py" -v
+python3 scripts/run_repository_tests.py
 
 tracked_generated="$(
   git ls-files -- "build/**" "install/**" "log/**"

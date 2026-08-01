@@ -182,6 +182,39 @@ def has_exact_literal_arguments(
     )
 
 
+def is_exact_positive_ack_guard(statement: ast.stmt) -> bool:
+    if not isinstance(statement, ast.If):
+        return False
+    condition = statement.test
+    if not (
+        isinstance(condition, ast.Compare)
+        and len(condition.ops) == 1
+        and isinstance(condition.ops[0], ast.Is)
+        and len(condition.comparators) == 1
+        and isinstance(condition.comparators[0], ast.Constant)
+        and condition.comparators[0].value is None
+        and isinstance(condition.left, ast.Call)
+        and isinstance(condition.left.func, ast.Attribute)
+        and isinstance(condition.left.func.value, ast.Name)
+        and condition.left.func.value.id == "POSITIVE_ACK"
+        and condition.left.func.attr == "fullmatch"
+        and len(condition.left.args) == 1
+        and isinstance(condition.left.args[0], ast.Attribute)
+        and isinstance(condition.left.args[0].value, ast.Name)
+        and condition.left.args[0].value.id == "completed"
+        and condition.left.args[0].attr == "stdout"
+        and not condition.left.keywords
+        and len(statement.body) == 1
+        and isinstance(statement.body[0], ast.Raise)
+        and isinstance(statement.body[0].exc, ast.Call)
+        and isinstance(statement.body[0].exc.func, ast.Name)
+        and statement.body[0].exc.func.id == "AssertionError"
+        and not statement.orelse
+    ):
+        return False
+    return True
+
+
 def validate_support(path: Path) -> None:
     source, tree = parse_python(path)
     forbidden = {
@@ -219,6 +252,11 @@ def validate_support(path: Path) -> None:
     function = function_named(tree, "structured_stop_gazebo")
     runner_calls = method_calls(function, "runner")
     ack_calls = method_calls(function, "fullmatch")
+    ack_guards = [
+        statement
+        for statement in function.body
+        if is_exact_positive_ack_guard(statement)
+    ]
     startup_calls = method_calls(function, "assertWaitForStartup")
     shutdown_calls = method_calls(function, "assertWaitForShutdown")
     if len(runner_calls) != 1:
@@ -248,6 +286,10 @@ def validate_support(path: Path) -> None:
     if len(ack_calls) != 1:
         raise GazeboTeardownContractError(
             "structured stop must require one exact positive ACK"
+        )
+    if len(ack_guards) != 1:
+        raise GazeboTeardownContractError(
+            "positive ACK condition must be unconditional"
         )
     if len(shutdown_calls) != 1:
         raise GazeboTeardownContractError(
@@ -466,11 +508,33 @@ def validate_cleanup_control_flow(
         )
 
 
+def validate_destroy_control_flow(
+    destroy: ast.FunctionDef,
+    path: Path,
+) -> None:
+    if not (
+        has_plain_arguments(destroy, ["self"])
+        and destroy.body
+        and not any(
+            isinstance(node, (ast.Return, ast.Raise))
+            for node in ast.walk(destroy)
+        )
+    ):
+        raise GazeboTeardownContractError(
+            f"{path.name} destroy_ros_fixture must not terminate early"
+        )
+
+
 def validate_shutdown_assertion(
     tree: ast.Module,
     shutdown_class_name: str,
 ) -> None:
     shutdown_class = class_named(tree, shutdown_class_name)
+    if not tree.body or tree.body[-1] is not shutdown_class:
+        raise GazeboTeardownContractError(
+            f"{shutdown_class_name} module must not disable or rebind "
+            "critical teardown"
+        )
     if not (
         len(shutdown_class.decorator_list) == 1
         and isinstance(shutdown_class.decorator_list[0], ast.Call)
@@ -521,8 +585,71 @@ def validate_shutdown_assertion(
         )
 
 
+def validate_no_module_disable_or_rebind(
+    tree: ast.Module,
+    path: Path,
+) -> None:
+    exact_imports = [
+        statement
+        for statement in tree.body
+        if isinstance(statement, ast.ImportFrom)
+        and statement.module == "launch_testing.asserts"
+        and [
+            (alias.name, alias.asname)
+            for alias in statement.names
+        ] == [("assertExitCodes", None)]
+    ]
+    if len(exact_imports) != 1:
+        raise GazeboTeardownContractError(
+            f"{path.name} must not disable or rebind critical teardown"
+        )
+
+    forbidden_names = {
+        "pytestmark",
+        "__unittest_skip__",
+        "assertExitCodes",
+    }
+    forbidden_attributes = {
+        "__unittest_skip__",
+        "assertExitCodes",
+        "cleanup_fixture",
+        "destroy_ros_fixture",
+        "structured_stop_gazebo",
+    }
+    for statement in tree.body:
+        if (
+            isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and statement.name == "assertExitCodes"
+        ):
+            raise GazeboTeardownContractError(
+                f"{path.name} must not disable or rebind critical teardown"
+            )
+        targets: list[ast.expr] = []
+        if isinstance(statement, ast.Assign):
+            targets.extend(statement.targets)
+        elif isinstance(statement, ast.AnnAssign):
+            targets.append(statement.target)
+        elif isinstance(statement, ast.AugAssign):
+            targets.append(statement.target)
+        if any(
+            (
+                isinstance(target, ast.Name)
+                and target.id in forbidden_names
+            )
+            or (
+                isinstance(target, ast.Attribute)
+                and target.attr in forbidden_attributes
+            )
+            for target in targets
+        ):
+            raise GazeboTeardownContractError(
+                f"{path.name} must not disable or rebind critical teardown"
+            )
+
+
 def validate_test(path: Path, policy: dict[str, object]) -> None:
     source, tree = parse_python(path)
+    validate_no_module_disable_or_rebind(tree, path)
     if "'shutdown_on_gazebo_exit': 'false'" not in source:
         raise GazeboTeardownContractError(
             f"{path.name} must enable the structured test teardown seam"
@@ -562,6 +689,8 @@ def validate_test(path: Path, policy: dict[str, object]) -> None:
     validate_cleanup_registration(test_class)
     cleanup = function_named(test_class, "cleanup_fixture")
     validate_cleanup_control_flow(cleanup, policy, path)
+    destroy = function_named(test_class, "destroy_ros_fixture")
+    validate_destroy_control_flow(destroy, path)
     validate_shutdown_assertion(tree, policy["shutdown_class"])
     if re.search(r"allowable_exit_codes\s*=\s*\[[^]]*(?:-9|137)", source):
         raise GazeboTeardownContractError(
@@ -603,6 +732,13 @@ def validate_contract(root: Path) -> None:
     if "python3 scripts/check_gazebo_teardown_contract.py --root ." not in verify:
         raise GazeboTeardownContractError(
             "canonical verification must run the Gazebo teardown checker"
+        )
+    if (
+        "python3 scripts/run_repository_tests.py" not in verify
+        or "python3 -m unittest discover" in verify
+    ):
+        raise GazeboTeardownContractError(
+            "canonical verification must fail skipped repository tests"
         )
 
 
