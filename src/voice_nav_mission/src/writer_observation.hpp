@@ -20,6 +20,7 @@
 #include <rmw/types.h>
 
 #include <chrono>
+#include <optional>
 #include <string>
 #include <vector>
 
