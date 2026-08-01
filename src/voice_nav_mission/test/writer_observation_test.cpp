@@ -86,5 +86,47 @@ TEST(WriterObservationSession, PinsUnresolvedIdentityUntilTheSameWriterResolves)
   EXPECT_EQ(replacement.reason, Reason::WriterMismatch);
 }
 
+TEST(WriterObservationSession, ReplacementPoisonsPinnedGenerationUntilReset)
+{
+  WriterObservationSession session({
+    "geometry_msgs/msg/TwistStamped",
+    "/collision_monitor"});
+  const auto first_gid = writer_gid(0x31U);
+  const auto replacement_gid = writer_gid(0x32U);
+
+  ASSERT_EQ(
+    session.observe({endpoint(first_gid, "")}, 2ms).reason,
+    Reason::WriterMetadataPending);
+  EXPECT_EQ(
+    session.observe(
+      {endpoint(replacement_gid, "collision_monitor")}, 3ms).reason,
+    Reason::WriterMismatch);
+  EXPECT_EQ(
+    session.observe({endpoint(first_gid, "collision_monitor")}, 4ms).reason,
+    Reason::WriterMismatch);
+
+  session.reset();
+  const auto next_generation = session.observe(
+    {endpoint(replacement_gid, "collision_monitor")}, 1ms);
+  EXPECT_TRUE(next_generation.ready);
+  EXPECT_EQ(next_generation.writer_gid, replacement_gid);
+}
+
+TEST(WriterObservationSession, ConfirmedSameGidSurvivesIdentityOnlyGraphRegression)
+{
+  WriterObservationSession session({
+    "geometry_msgs/msg/TwistStamped",
+    "/collision_monitor"});
+  const auto gid = writer_gid(0x41U);
+
+  ASSERT_TRUE(
+    session.observe({endpoint(gid, "collision_monitor")}, 1ms).ready);
+  const auto regressed = session.observe({endpoint(gid, "")}, 2ms);
+
+  EXPECT_TRUE(regressed.ready);
+  EXPECT_EQ(regressed.reason, Reason::None);
+  EXPECT_EQ(regressed.writer_gid, gid);
+}
+
 }  // namespace
 }  // namespace voice_nav_mission
