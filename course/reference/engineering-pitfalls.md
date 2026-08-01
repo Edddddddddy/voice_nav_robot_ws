@@ -29,6 +29,7 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0019 | Generated CTest passes with a wrong label, timeout, or working directory | Does the checker compare exact property values or only property names? | Guarded |
 | PIT-0020 | A scaled quaternion produces the wrong RPY and misleading movement evidence | Is the finite valid quaternion normalized before unit-quaternion formulas? | Guarded |
 | PIT-0021 | A bounded diagnostic loses mandatory fields when one value is long | Are variable fields compacted independently before composing the fixed field layout? | Guarded |
+| PIT-0022 | Canonical verification rejects an xUnit file that changed during evidence collection | Did another reviewer or test process write the same shared build tree? | Guarded |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -488,4 +489,34 @@ static/mutation regressions use overlong node name, namespace, and type values
 and assert both the 160-character bound and every mandatory field marker.
 
 See
+[VN-0010-C1](../../docs/work-items/0010-corrective-writer-identity-convergence.md).
+
+## PIT-0022: Test-result evidence requires one shared-tree writer
+
+**Symptom.** Canonical verification passes repository tests, dependency
+checks, model validation, and build, then fails closed with `result path
+changed after evidence collection` for an xUnit file. Rerunning immediately
+without identifying the writer would hide whether the evidence boundary or a
+product test failed.
+
+**Confirmed cause and discriminator.** During the C1 closure gate, an
+independent documentation reviewer ran `ctest` against the same
+`build/voice_nav_mission` tree while `scripts/verify.sh` was collecting result
+identities. The xUnit modification time fell inside that overlap, and the
+reviewer confirmed the command. No product assertion failed; the evidence
+snapshot correctly detected a concurrent writer.
+
+**Guardrail.** Treat the workspace `build/**/test_results` tree as a
+single-writer resource. From the start of canonical verification until its
+terminal status returns, reviewers and parallel agents perform read-only
+inspection only. A necessary concurrent test uses its own build, install, and
+log bases; otherwise it waits. Before retrying this failure, identify and stop
+the writer, prove the tree is quiescent, and rerun the complete gate. Never
+weaken file-identity validation or delete the reported artifact to manufacture
+a pass. The existing anchored snapshot is the automated fail-closed guard;
+the process rule prevents avoidable collisions.
+
+See
+[the testing strategy](../../docs/process/testing-strategy.md#shared-test-result-ownership)
+and
 [VN-0010-C1](../../docs/work-items/0010-corrective-writer-identity-convergence.md).

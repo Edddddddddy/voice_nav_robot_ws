@@ -54,6 +54,22 @@ Process snapshots and other diagnostics run as separate commands afterward;
 a trailing successful `ps`, `grep`, or cleanup command must never replace a
 failed CTest status.
 
+### Shared test-result ownership
+
+The workspace `build/**/test_results` tree has one writer at a time. A
+canonical `scripts/verify.sh` run owns an exclusive operational window from
+startup through its terminal status. During that window, reviewers and
+parallel agents may inspect source, Git metadata, and already copied evidence,
+but must not run `ctest`, `colcon test`, another verify process, or any helper
+that rewrites the shared result tree. Concurrent test work must use isolated
+build, install, and log bases or wait for the canonical gate to finish.
+
+The result reporter deliberately snapshots inode, size, mtime, and ctime and
+fails closed if a writer overlaps evidence collection. On that diagnostic,
+identify the writer and establish quiescence before a full retry; do not clear
+the named file or relax the identity check. See
+[PIT-0022](../../course/reference/engineering-pitfalls.md#pit-0022-test-result-evidence-requires-one-shared-tree-writer).
+
 PR CI uses deterministic in-memory fakes as soon as their Module exists and
 adds bounded headless Gazebo tests with the v0.2 simulation milestones. At
 v0.1 the hosted gate covers repository metadata, static robot-model
