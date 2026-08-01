@@ -147,5 +147,67 @@ TEST(WriterObservationSession, KnownWrongNamespaceCannotEnterPending)
   EXPECT_EQ(valid.writer_gid, gid);
 }
 
+TEST(WriterObservationSession, DefinitivePolicyViolationsNeverEnterPending)
+{
+  const auto valid_gid = writer_gid(0x61U);
+  const auto assert_terminal_but_unpinned = [valid_gid](
+    WriterEndpointObservation invalid)
+    {
+      WriterObservationSession session({
+        "geometry_msgs/msg/TwistStamped",
+        "/collision_monitor"});
+      const auto rejected = session.observe({std::move(invalid)}, 1ms);
+      EXPECT_FALSE(rejected.ready);
+      EXPECT_EQ(rejected.reason, Reason::WriterMismatch);
+      EXPECT_LE(rejected.detail.size(), 160U);
+
+      const auto valid = session.observe(
+        {endpoint(valid_gid, "collision_monitor")}, 2ms);
+      EXPECT_TRUE(valid.ready);
+      EXPECT_EQ(valid.writer_gid, valid_gid);
+    };
+
+  auto wrong_kind = endpoint(writer_gid(0x62U), "collision_monitor");
+  wrong_kind.endpoint_type = RMW_ENDPOINT_SUBSCRIPTION;
+  assert_terminal_but_unpinned(std::move(wrong_kind));
+
+  auto wrong_type = endpoint(writer_gid(0x63U), "collision_monitor");
+  wrong_type.topic_type = std::string(240U, 'x');
+  assert_terminal_but_unpinned(std::move(wrong_type));
+
+  auto wrong_qos = endpoint(writer_gid(0x64U), "collision_monitor");
+  wrong_qos.qos.reliability = RMW_QOS_POLICY_RELIABILITY_RELIABLE;
+  assert_terminal_but_unpinned(std::move(wrong_qos));
+
+  auto wrong_fqn = endpoint(writer_gid(0x65U), "unexpected_writer");
+  assert_terminal_but_unpinned(std::move(wrong_fqn));
+
+  auto zero_gid = endpoint({}, "collision_monitor");
+  assert_terminal_but_unpinned(std::move(zero_gid));
+}
+
+TEST(WriterObservationSession, MissingAndDuplicateWritersStayFailClosed)
+{
+  WriterObservationSession session({
+    "geometry_msgs/msg/TwistStamped",
+    "/collision_monitor"});
+  const auto first_gid = writer_gid(0x71U);
+
+  const auto missing = session.observe({}, 1ms);
+  EXPECT_EQ(missing.reason, Reason::WriterUnavailable);
+
+  const auto duplicate = session.observe(
+    {
+      endpoint(first_gid, "collision_monitor"),
+      endpoint(writer_gid(0x72U), "collision_monitor")},
+    2ms);
+  EXPECT_EQ(duplicate.reason, Reason::WriterAmbiguous);
+
+  const auto valid = session.observe(
+    {endpoint(first_gid, "collision_monitor")}, 3ms);
+  EXPECT_TRUE(valid.ready);
+  EXPECT_EQ(valid.writer_gid, first_gid);
+}
+
 }  // namespace
 }  // namespace voice_nav_mission
