@@ -18,6 +18,7 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0008 | Local evidence was green, then the final change invalidated it | Were tests rerun on the exact final HEAD? | Guarded |
 | PIT-0009 | Code/tests support a case that the lesson still forbids | Do prose, tests, and implementation describe the same closed set? | Guarded |
 | PIT-0010 | A bounded RPC returns success after its total budget | Is the deadline checked again immediately after the RPC? | Guarded |
+| PIT-0011 | Every ament CTest fails to import `ament_cmake_test` | Were ROS and the workspace overlay sourced in that shell? | Guarded |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -39,6 +40,9 @@ required, keep the inner program single-quoted at the PowerShell layer, and
 avoid command substitution in the outer command. For serial CTest repetition,
 prefer `ctest --repeat until-fail:20` over a shell loop. A quoting failure is
 not evidence that any Git mutation occurred; inspect `git status` immediately.
+Regex characters such as `()|` are shell metacharacters too; either quote them
+inside one controlled Linux shell or run the small complete CTest set instead
+of building a fragile cross-shell filter.
 
 ## PIT-0002: WSL transport warnings are not the command result
 
@@ -167,3 +171,25 @@ own post-RPC steady-clock check on the terminal path.
 deadline immediately after every RPC and before either terminal return or
 pending validation/backoff. A fake clock regression test advances past the
 deadline inside `attempt()` and proves the late APPLIED result is rejected.
+
+## PIT-0011: CTest needs the ROS environment, not only a build directory
+
+**Symptom.** Every CTest target fails at `/opt/ros/.../run_test.py` with
+`ModuleNotFoundError: ament_cmake_test`, including otherwise unrelated GTests
+and linters.
+
+**Cause.** `ctest --test-dir build/<package>` was invoked from a fresh WSL shell
+without sourcing ROS. The generated ament wrappers need ROS Python paths; the
+existence of compiled test binaries does not supply that environment.
+
+**Guardrail.** Source the base installation and current overlay in the same
+shell before CTest:
+
+```bash
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+ctest --test-dir build/voice_nav_mission --output-on-failure
+```
+
+If all targets fail at the same import, fix the invocation before diagnosing
+product code. Canonical `scripts/verify.sh` already sources both environments.
