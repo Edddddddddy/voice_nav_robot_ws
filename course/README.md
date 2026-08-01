@@ -6,6 +6,10 @@
 - `records/`：真实完成证据与复盘；
 - `reference/`：跨课程复用的技术速查。
 
+重复出现的故障模式统一登记在
+[工程踩坑速查](reference/engineering-pitfalls.md)；一次事故的完整证据仍留在
+对应 Work Item，不在课件之间复制日志。
+
 源码只有一份，`main` 始终保存参考 solution。新课程从 `course/NNNN-start` annotated tag 创建独立 `learn/NNNN` 分支或 worktree，完成后与 `course/NNNN-solution` tag 比较；不要在课程目录复制一套源码。
 
 每课至少包含：单一成果、范围外事项、最小纵向切片、故障定位、自动验收、提交证据和复盘问题。Lesson 0001–0006 是迁移后的历史课程；从 Lesson 0007 开始严格执行 start/solution tag 双轨。
