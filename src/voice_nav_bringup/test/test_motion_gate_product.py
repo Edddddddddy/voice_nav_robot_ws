@@ -150,7 +150,13 @@ def is_zero(message: TwistStamped) -> bool:
 
 class MotionGateProductTest(unittest.TestCase):
     def setUp(self, proc_info):
-        self.addCleanup(self.cleanup_fixture, proc_info)
+        self.addCleanup(self.destroy_ros_fixture)
+        self.addCleanup(
+            gazebo_shutdown.structured_stop_gazebo,
+            proc_info,
+            expected_partition=PRODUCT_TEST_PARTITION,
+        )
+        self.addCleanup(self.inhibit_for_cleanup)
         rclpy.init()
         self.node = rclpy.create_node(
             'collision_monitor',
@@ -227,47 +233,52 @@ class MotionGateProductTest(unittest.TestCase):
         self.open_convergence_deadline = 0.0
         self.spin_thread.start()
 
-    def cleanup_fixture(self, proc_info):
-        try:
-            try:
-                self.best_effort_inhibit()
-            except Exception:
-                pass
-        finally:
-            try:
-                gazebo_shutdown.structured_stop_gazebo(
-                    proc_info,
-                    expected_partition=PRODUCT_TEST_PARTITION,
-                )
-            finally:
-                self.destroy_ros_fixture()
-
     def destroy_ros_fixture(self):
         node = getattr(self, 'node', None)
-        for publisher in tuple(
+        steps = []
+        for index, publisher in enumerate(tuple(
             getattr(self, 'candidate_publishers', ())
-        ):
-            try:
-                if node is not None:
-                    node.destroy_publisher(publisher)
-            except Exception:
-                pass
+        )):
+            if node is not None:
+                steps.append(
+                    (
+                        f'candidate publisher {index} destroy',
+                        lambda publisher=publisher: (
+                            node.destroy_publisher(publisher)
+                        ),
+                    )
+                )
         executor = getattr(self, 'executor', None)
         if executor is not None:
-            try:
-                executor.shutdown(timeout_sec=2.0)
-            except Exception:
-                pass
+            steps.append(
+                (
+                    'executor shutdown',
+                    lambda: executor.shutdown(timeout_sec=2.0),
+                )
+            )
         spin_thread = getattr(self, 'spin_thread', None)
         if spin_thread is not None:
-            spin_thread.join(timeout=2.0)
+            steps.append(
+                (
+                    'spin thread join',
+                    lambda: gazebo_shutdown.join_started_thread(
+                        spin_thread,
+                        timeout_seconds=2.0,
+                    ),
+                )
+            )
         if node is not None:
-            try:
-                node.destroy_node()
-            except Exception:
-                pass
-        if rclpy.ok():
-            rclpy.shutdown()
+            steps.append(('node destroy', node.destroy_node))
+
+        def shutdown_rclpy():
+            if rclpy.ok():
+                rclpy.shutdown()
+
+        steps.append(('rclpy shutdown', shutdown_rclpy))
+        gazebo_shutdown.run_cleanup_steps(
+            'MotionGate product ROS fixture destruction failed',
+            steps,
+        )
 
     def append_sample(self, samples, message):
         with self.samples_lock:
@@ -455,7 +466,7 @@ class MotionGateProductTest(unittest.TestCase):
         self.update_authority(response)
         return started, completed, response
 
-    def best_effort_inhibit(self):
+    def inhibit_for_cleanup(self):
         control_client = getattr(self, 'control_client', None)
         if (
             not rclpy.ok()
@@ -464,10 +475,7 @@ class MotionGateProductTest(unittest.TestCase):
             or not getattr(self, 'current_lease_id', '')
         ):
             return
-        try:
-            self.inhibit()
-        except Exception:
-            pass
+        self.inhibit()
 
     def create_candidate_publisher(self, topic: str):
         qos = QoSProfile(

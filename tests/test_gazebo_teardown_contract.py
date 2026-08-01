@@ -456,6 +456,15 @@ class GazeboTeardownMutationTest(unittest.TestCase):
             "active launch test method",
         )
 
+    def test_active_test_early_return_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
+            "    def test_motion_gate_product_contract(self):\n",
+            "    def test_motion_gate_product_contract(self):\n"
+            "        return\n",
+            "active launch test method",
+        )
+
     def test_assert_exit_codes_rebinding_is_rejected(self):
         self.assert_mutation_rejected(
             "src/voice_nav_bringup/test/test_motion_gate_product.py",
@@ -556,6 +565,34 @@ class GazeboTeardownMutationTest(unittest.TestCase):
             "    def inhibit_for_cleanup(self):\n"
             "        yield\n",
             "cleanup zero/inhibit",
+        )
+
+    def test_pre_cleanup_early_return_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
+            "    def inhibit_for_cleanup(self):\n",
+            "    def inhibit_for_cleanup(self):\n"
+            "        return\n",
+            "cleanup zero/inhibit",
+        )
+
+    def test_fixture_destroy_steps_cannot_be_cleared(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
+            "        gazebo_shutdown.run_cleanup_steps(\n",
+            "        steps.clear()\n"
+            "        gazebo_shutdown.run_cleanup_steps(\n",
+            "must exhaust all cleanup steps",
+        )
+
+    def test_unittest_cleanup_dispatch_cannot_be_overridden(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
+            "    def append_sample(self, samples, message):\n",
+            "    def doCleanups(self):\n"
+            "        pass\n\n"
+            "    def append_sample(self, samples, message):\n",
+            "independent registered cleanup",
         )
 
     def test_early_return_from_fixture_destroy_is_rejected(self):
