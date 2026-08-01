@@ -281,5 +281,15 @@ Independent final-candidate reviews at `f43a725` report:
 - product diagnostic implementation and C++ regression: P0=0, P1=0, P2=0;
 - static/mutation contract and cooperative bypass review: P0=0, P1=0, P2=0.
 
+The first canonical attempt on documentation head `d2bfa8c` passed 288/288
+repository tests, dependency checks, robot-model contracts, and package build,
+then intentionally failed closed while clearing prior evidence because an
+independent reviewer concurrently ran CTest against the same
+`build/voice_nav_mission/test_results` tree. The reviewer confirmed the
+overlap; the named xUnit mtime was inside it, and no product assertion failed.
+The shared tree was made quiescent before retry. This occurrence is preserved
+as [PIT-0022](../../course/reference/engineering-pitfalls.md#pit-0022-test-result-evidence-requires-one-shared-tree-writer),
+not counted as acceptance, and not "fixed" by weakening identity validation.
+
 Exact full verification, hosted CI, closure-PR identity, merge mapping, and
 Issue #14 closure remain pending and must not be claimed early.
