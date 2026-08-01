@@ -370,7 +370,10 @@ and an aggregate skipped count with no matching allowed testcase.
    top-level sequence from boundary-value setup through the tested call,
    expected rejection state, and product-derived assertion. Unreachable or
    reordered statements, ternary decoys, scattered tokens, or a string
-   containing a decoy `TEST(...)` are not execution evidence.
+   containing a decoy `TEST(...)` are not execution evidence. Where an input
+   or derived predicate could be rebound between those statements, remove the
+   mutable seam: construct the boundary value directly in the product call
+   and assert a direct pure expression of the product result.
 
 **Checker threat boundary.** These guards prevent ordinary and accidental
 source, CMake, discovery, and report regressions in a cooperative repository.
