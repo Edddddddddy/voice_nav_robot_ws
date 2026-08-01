@@ -14,7 +14,7 @@
 
 """Failure-safe Gazebo process teardown for isolated launch tests."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 import os
 import re
 import secrets
@@ -30,6 +30,41 @@ SUBPROCESS_TIMEOUT_SECONDS = 7.0
 PROCESS_TIMEOUT_SECONDS = 10.0
 POSITIVE_ACK = re.compile(r'\s*data:\s*true\s*')
 TEST_PARTITION_SCOPE = re.compile(r'[a-z0-9][a-z0-9_]{0,31}')
+
+
+def run_cleanup_steps(
+    message: str,
+    steps: Iterable[tuple[str, Callable[[], None]]],
+) -> None:
+    """Attempt every fixture-destruction step and report all failures."""
+    errors = []
+    for label, callback in steps:
+        try:
+            callback()
+        except Exception as error:
+            try:
+                error.add_note(f'cleanup step failed: {label}')
+            except Exception:
+                # Exhausting the cleanup ladder is more important than an
+                # optional diagnostic note supplied by an exception subtype.
+                pass
+            errors.append(error)
+
+    if errors:
+        raise ExceptionGroup(message, errors)
+
+
+def join_started_thread(thread: Any, *, timeout_seconds: float) -> None:
+    """Join a started thread without failing on partial fixture setup."""
+    if thread.ident is None:
+        return
+
+    thread.join(timeout=timeout_seconds)
+    if thread.is_alive():
+        raise TimeoutError(
+            f'fixture spin thread did not stop within '
+            f'{timeout_seconds:.1f} seconds'
+        )
 
 
 def claim_unique_test_partition(scope: str) -> str:
