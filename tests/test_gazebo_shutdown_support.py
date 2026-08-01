@@ -1,6 +1,9 @@
 import importlib.util
+import os
+import re
 import subprocess
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -97,6 +100,27 @@ class GazeboShutdownSupportTest(unittest.TestCase):
             runner=runner,
         )
 
+    def test_claimed_partition_is_process_unique_and_overrides_inherited(self):
+        with mock.patch.dict(
+            os.environ,
+            {"GZ_PARTITION": "inherited_user_partition"},
+        ):
+            first = self.support.claim_unique_test_partition(
+                "l0008_sim_control"
+            )
+            second = self.support.claim_unique_test_partition(
+                "l0008_sim_control"
+            )
+
+            pattern = re.compile(
+                rf"^voice_nav_l0008_sim_control_{os.getpid()}_"
+                r"[0-9a-f]{32}$"
+            )
+            self.assertRegex(first, pattern)
+            self.assertRegex(second, pattern)
+            self.assertNotEqual(first, second)
+            self.assertEqual(os.environ["GZ_PARTITION"], second)
+
     def test_positive_ack_is_followed_by_real_process_exit_barrier(self):
         proc_info = FakeProcInfo()
         runner = RecordingRunner()
@@ -139,6 +163,7 @@ class GazeboShutdownSupportTest(unittest.TestCase):
                 "timeout": 7.0,
                 "check": False,
                 "shell": False,
+                "env": {"GZ_PARTITION": SIM_PARTITION},
             },
         )
 
