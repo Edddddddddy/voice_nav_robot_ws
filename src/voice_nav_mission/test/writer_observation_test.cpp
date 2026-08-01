@@ -50,12 +50,13 @@ rmw_qos_profile_t candidate_qos()
 
 WriterEndpointObservation endpoint(
   WriterGid gid,
-  std::string node_name)
+  std::string node_name,
+  std::string node_namespace = "/")
 {
   return WriterEndpointObservation{
     "geometry_msgs/msg/TwistStamped",
     std::move(node_name),
-    "/",
+    std::move(node_namespace),
     RMW_ENDPOINT_PUBLISHER,
     candidate_qos(),
     gid};
@@ -126,6 +127,24 @@ TEST(WriterObservationSession, ConfirmedSameGidSurvivesIdentityOnlyGraphRegressi
   EXPECT_TRUE(regressed.ready);
   EXPECT_EQ(regressed.reason, Reason::None);
   EXPECT_EQ(regressed.writer_gid, gid);
+}
+
+TEST(WriterObservationSession, KnownWrongNamespaceCannotEnterPending)
+{
+  WriterObservationSession session({
+    "geometry_msgs/msg/TwistStamped",
+    "/collision_monitor"});
+  const auto gid = writer_gid(0x51U);
+
+  const auto partial_mismatch = session.observe(
+    {endpoint(gid, "", "/unexpected")}, 1ms);
+  EXPECT_FALSE(partial_mismatch.ready);
+  EXPECT_EQ(partial_mismatch.reason, Reason::WriterMismatch);
+
+  const auto valid = session.observe(
+    {endpoint(gid, "collision_monitor")}, 2ms);
+  EXPECT_TRUE(valid.ready);
+  EXPECT_EQ(valid.writer_gid, gid);
 }
 
 }  // namespace
