@@ -12,6 +12,13 @@
 
 源码只有一份，`main` 始终保存参考 solution。新课程从 `course/NNNN-start` annotated tag 创建独立 `learn/NNNN` 分支或 worktree，完成后与 `course/NNNN-solution` tag 比较；不要在课程目录复制一套源码。
 
+不可变 solution tag 只代表发布当时的 reviewed snapshot，不能吸收后续
+errata。Lesson 0009 的 `course/0009-solution` 不包含后来交付并分别完成治理
+闭环的 C1/C2 修正；原课复现仍与该 tag 比较，修正版累计对照点则等待
+`course/0010-start` 正式发布。发布前只使用矫正 Work Item 中记录的精确提交，
+不能把移动的 `main` 当成不可变答案。参见
+[PIT-0023](reference/engineering-pitfalls.md#pit-0023-an-immutable-course-solution-tag-cannot-absorb-later-errata)。
+
 每课至少包含：单一成果、范围外事项、最小纵向切片、故障定位、自动验收、提交证据和复盘问题。Lesson 0001–0006 是迁移后的历史课程；从 Lesson 0007 开始严格执行 start/solution tag 双轨。
 
 当前 Lesson 0001–0009 为 `completed`。Lesson 0009

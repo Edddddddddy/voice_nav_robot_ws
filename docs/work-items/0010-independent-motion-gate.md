@@ -585,19 +585,28 @@ python3 scripts/report_test_results.py \
   --package voice_nav_sim
 ```
 
+Historical tag boundary: the immutable `course/0009-solution` and PR #12
+evidence used fixed ROS domains 91/92 for the Node/product layers. The layer
+behaviors below are unchanged, but their isolation clauses describe the
+current cumulative implementation after
+[VN-0010-C2](0010-corrective-gazebo-teardown.md): it uses the official isolated
+runner and is not retroactive PR #12 acceptance evidence.
+
 1. **Layer 1 — pure Core GTest**: manual-clock tables cover every state, CAS,
    exact 249/250 ms and 149/150 ms boundaries, idempotence/collision,
    exact-32 identity validation, clamp/invalid retirement, permanent lease
    retirement, and selected-zero behavior without ROS I/O or sleeps.
 2. **Layer 2 — Node without Gazebo or `/clock`**: the 60-second serial launch
-   test runs with `rmw_fastrtps_cpp`, ROS domain 91, and localhost discovery.
+   test runs with `rmw_fastrtps_cpp`, localhost discovery, and the official
+   isolated-test runner after clearing inherited ROS-isolation overrides.
    It covers private service/state behavior, frozen ROS time with advancing
    steady deadlines, zero/one/two writers, A/B/C readers and three same-writer
    graph snapshots, Gate-local graph/MessageInfo GID correlation, pre-OPEN and
    stale samples, and zero-before-ack publication ordering.
 3. **Layer 3 — headless product**: the 180-second serial launch test runs with
-   `rmw_fastrtps_cpp`, ROS domain 92, localhost discovery, and a unique Gazebo
-   partition. It covers canonical composition, sole final owner, bounded and
+   `rmw_fastrtps_cpp`, localhost discovery, the same official isolated-test
+   runner, and a unique Gazebo partition. It covers canonical composition,
+   sole final owner, bounded and
    clamped motion, authority/freshness expiry, separate Gate/controller zero
    observations, odometry stationarity, and clean launch-managed shutdown.
 
