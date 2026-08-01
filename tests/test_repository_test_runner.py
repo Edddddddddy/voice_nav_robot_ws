@@ -1,6 +1,7 @@
 import importlib.util
 import io
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 
@@ -72,17 +73,36 @@ class RepositoryTestRunnerTest(unittest.TestCase):
             repository_root = Path(temporary_directory)
             tests_directory = repository_root / "tests"
             tests_directory.mkdir()
-            (tests_directory / "test_example.py").write_text(
-                "import unittest\n\n"
+            support_module = "repository_runner_fixture_support"
+            test_module = "test_repository_runner_fixture_layout"
+            (repository_root / f"{support_module}.py").write_text(
+                "VALUE = 7\n",
+                encoding="utf-8",
+            )
+            (tests_directory / f"{test_module}.py").write_text(
+                "import unittest\n"
+                f"from {support_module} import VALUE\n\n"
                 "class ExampleTest(unittest.TestCase):\n"
                 "    def test_example(self):\n"
-                "        self.assertTrue(True)\n",
+                "        self.assertEqual(VALUE, 7)\n",
                 encoding="utf-8",
             )
 
-            suite = runner.discover_suite(repository_root)
+            repository_path = str(repository_root)
+            try:
+                suite = runner.discover_suite(repository_root)
+                return_code = runner.run_suite(
+                    suite,
+                    stream=io.StringIO(),
+                )
+            finally:
+                while repository_path in sys.path:
+                    sys.path.remove(repository_path)
+                sys.modules.pop(support_module, None)
+                sys.modules.pop(test_module, None)
 
         self.assertEqual(suite.countTestCases(), 1)
+        self.assertEqual(return_code, 0)
 
 
 if __name__ == "__main__":

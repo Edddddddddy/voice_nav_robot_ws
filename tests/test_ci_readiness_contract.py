@@ -191,18 +191,8 @@ class CiReadinessContractTest(unittest.TestCase):
             "bringup": "92",
         })
         self.assertEqual(len(set(domains.values())), len(domains))
-        self.assertEqual(
-            sim_environment["GZ_PARTITION"],
-            "voice_nav_l0008_sim_test",
-        )
-        self.assertEqual(
-            bringup_environment["GZ_PARTITION"],
-            "voice_nav_l0009_product_test",
-        )
-        self.assertNotEqual(
-            sim_environment["GZ_PARTITION"],
-            bringup_environment["GZ_PARTITION"],
-        )
+        self.assertNotIn("GZ_PARTITION", sim_environment)
+        self.assertNotIn("GZ_PARTITION", bringup_environment)
 
     def test_convergence_unit_test_allows_runner_teardown_headroom(self):
         cmake = BRINGUP_CMAKE.read_text(encoding="utf-8")
