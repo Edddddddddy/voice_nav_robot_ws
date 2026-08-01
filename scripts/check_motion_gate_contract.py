@@ -46,6 +46,9 @@ ARTIFACTS = {
     ),
     "bringup_package": "src/voice_nav_bringup/package.xml",
     "bringup_cmake": "src/voice_nav_bringup/CMakeLists.txt",
+    "open_convergence": (
+        "src/voice_nav_bringup/test/motion_gate_open_convergence.py"
+    ),
     "controller_config": "src/voice_nav_sim/config/controllers.yaml",
 }
 
@@ -815,8 +818,28 @@ def validate_core(header_path: Path, source_path: Path) -> None:
             "now >= prepare_deadline_",
             "!binding_provider",
             "binding_provider()",
+            "!binding.ready",
+            "binding.reason != Reason::None",
+            "gid_is_nonzero(binding.writer_gid)",
         ),
         "MotionGateCore::open pure validation before graph provider",
+    )
+    contradictory_ready = function_body(
+        open_body,
+        "if (binding.reason != Reason::None)",
+        "MotionGateCore::open contradictory ready binding",
+    )
+    validate_order(
+        contradictory_ready,
+        (
+            "force_fault(",
+            "Reason::InternalFailure",
+            "result_from_snapshot(",
+            "ResultCode::Faulted",
+            "remember(request, fault)",
+            "return fault",
+        ),
+        "MotionGateCore::open contradictory ready binding",
     )
     renew = function_body(
         source,
@@ -1760,6 +1783,138 @@ def validate_bringup_cmake(path: Path) -> None:
         )
 
 
+def validate_open_convergence(path: Path) -> None:
+    context = "MotionGate OPEN immediate post-attempt deadline"
+    try:
+        tree = ast.parse(read_text(path), filename=str(path))
+    except SyntaxError as error:
+        raise MotionGateContractError(
+            f"{path.name} is not valid Python: {error}"
+        ) from error
+
+    functions = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "converge_open"
+    ]
+    if len(functions) != 1:
+        raise MotionGateContractError(
+            f"{context} requires exactly one converge_open function"
+        )
+    loops = [
+        statement
+        for statement in functions[0].body
+        if isinstance(statement, ast.While)
+        and isinstance(statement.test, ast.Constant)
+        and statement.test.value is True
+    ]
+    if len(loops) != 1:
+        raise MotionGateContractError(
+            f"{context} requires exactly one top-level while True loop"
+        )
+    statements = loops[0].body
+
+    def simple_assignment(
+        statement: ast.stmt,
+        target_name: str,
+        value_text: str,
+    ) -> bool:
+        return (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+            and statement.targets[0].id == target_name
+            and ast.unparse(statement.value) == value_text
+        )
+
+    response_indices = [
+        index
+        for index, statement in enumerate(statements)
+        if simple_assignment(
+            statement,
+            "response",
+            "attempt(request_id, remaining)",
+        )
+    ]
+    if len(response_indices) != 1:
+        raise MotionGateContractError(
+            f"{context} requires one response = attempt(...) statement"
+        )
+    response_index = response_indices[0]
+    if response_index + 4 >= len(statements):
+        raise MotionGateContractError(
+            f"{context} check is missing after the attempt"
+        )
+
+    last_response = statements[response_index + 1]
+    attempts = statements[response_index + 2]
+    remaining = statements[response_index + 3]
+    deadline_check = statements[response_index + 4]
+    if not simple_assignment(last_response, "last_response", "response"):
+        raise MotionGateContractError(
+            f"{context} must record last_response first"
+        )
+    if not (
+        isinstance(attempts, ast.AugAssign)
+        and isinstance(attempts.target, ast.Name)
+        and attempts.target.id == "attempts"
+        and isinstance(attempts.op, ast.Add)
+        and isinstance(attempts.value, ast.Constant)
+        and attempts.value.value == 1
+    ):
+        raise MotionGateContractError(
+            f"{context} must increment attempts before checking time"
+        )
+    if not simple_assignment(remaining, "remaining", "deadline - now()"):
+        raise MotionGateContractError(
+            f"{context} must immediately recompute remaining time"
+        )
+    if not (
+        isinstance(deadline_check, ast.If)
+        and ast.unparse(deadline_check.test) == "remaining <= 0.0"
+        and len(deadline_check.body) == 1
+        and isinstance(deadline_check.body[0], ast.Raise)
+        and isinstance(deadline_check.body[0].exc, ast.Call)
+        and ast.unparse(deadline_check.body[0].exc)
+        == "OpenConvergenceTimeout(last_response, attempts)"
+    ):
+        raise MotionGateContractError(
+            f"{context} must immediately raise the typed timeout"
+        )
+
+    terminal_indices = [
+        index
+        for index, statement in enumerate(statements)
+        if isinstance(statement, ast.If)
+        and ast.unparse(statement.test)
+        == "not _is_writer_discovery_pending(response, protocol)"
+        and len(statement.body) == 1
+        and isinstance(statement.body[0], ast.Return)
+        and ast.unparse(statement.body[0].value) == "response"
+    ]
+    pending_validation_indices = [
+        index
+        for index, statement in enumerate(statements)
+        if isinstance(statement, ast.Expr)
+        and isinstance(statement.value, ast.Call)
+        and ast.unparse(statement.value)
+        == "_validate_pending_snapshot(response, expected, protocol)"
+    ]
+    if (
+        len(terminal_indices) != 1
+        or len(pending_validation_indices) != 1
+        or not (
+            response_index + 4
+            < terminal_indices[0]
+            < pending_validation_indices[0]
+        )
+    ):
+        raise MotionGateContractError(
+            f"{context} must precede terminal return and pending validation"
+        )
+
+
 def call_name(call: ast.Call) -> str:
     if isinstance(call.func, ast.Name):
         return call.func.id
@@ -2148,6 +2303,7 @@ def validate_contract(root: Path) -> None:
     validate_node(paths["node_source"])
     validate_mission_cmake(paths["mission_cmake"])
     validate_bringup_cmake(paths["bringup_cmake"])
+    validate_open_convergence(paths["open_convergence"])
     validate_product_launch(paths["product_launch"])
     validate_unique_final_publisher(root, paths["node_source"])
 
