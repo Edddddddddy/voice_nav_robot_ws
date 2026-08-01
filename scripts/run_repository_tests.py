@@ -45,6 +45,46 @@ REQUIRED_TEST_IDS: frozenset[str] = frozenset(
             "test_repository_simulation_contract_passes"
         ),
         (
+            "test_gazebo_pose_support.GazeboPoseSupportTest."
+            "test_adjacent_snapshots_use_the_latest_complete_document"
+        ),
+        (
+            "test_gazebo_pose_support.GazeboPoseSupportTest."
+            "test_excess_snapshot_documents_are_rejected"
+        ),
+        (
+            "test_gazebo_pose_support.GazeboPoseSupportTest."
+            "test_malformed_or_duplicate_model_payload_is_rejected"
+        ),
+        (
+            "test_gazebo_pose_support.GazeboPoseSupportTest."
+            "test_nonfinite_pose_is_rejected"
+        ),
+        (
+            "test_gazebo_pose_support.GazeboPoseSupportTest."
+            "test_nonzero_command_exit_is_not_retried"
+        ),
+        (
+            "test_gazebo_pose_support.GazeboPoseSupportTest."
+            "test_persistent_timeout_fails_after_two_attempts"
+        ),
+        (
+            "test_gazebo_pose_support.GazeboPoseSupportTest."
+            "test_single_snapshot_returns_finite_xyz_and_rpy"
+        ),
+        (
+            "test_gazebo_pose_support.GazeboPoseSupportTest."
+            "test_transient_timeout_is_retried_once"
+        ),
+        (
+            "test_gazebo_pose_support.GazeboPoseSupportTest."
+            "test_wrong_partition_fails_before_query"
+        ),
+        (
+            "test_gazebo_pose_support.GazeboPoseSupportTest."
+            "test_zero_norm_quaternion_is_rejected"
+        ),
+        (
             "test_gazebo_shutdown_support.GazeboShutdownSupportTest."
             "test_ack_does_not_hide_process_exit_barrier_failure"
         ),
