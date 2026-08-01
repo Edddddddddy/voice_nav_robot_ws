@@ -31,6 +31,7 @@ target_include_directories(
 add_executable(
   motion_gate_node
   src/motion_gate_node.cpp
+  src/writer_observation.cpp
 )
 target_compile_features(motion_gate_node PUBLIC cxx_std_17)
 target_include_directories(
@@ -70,6 +71,22 @@ if(BUILD_TESTING)
   target_compile_features(motion_gate_core_test PUBLIC cxx_std_17)
   target_link_libraries(
     motion_gate_core_test
+    motion_gate_core
+  )
+
+  ament_add_gtest(
+    writer_observation_test
+    test/writer_observation_test.cpp
+    src/writer_observation.cpp
+  )
+  target_compile_features(writer_observation_test PUBLIC cxx_std_17)
+  target_include_directories(
+    writer_observation_test
+    PRIVATE include src
+  )
+  ament_target_dependencies(writer_observation_test rmw)
+  target_link_libraries(
+    writer_observation_test
     motion_gate_core
   )
 
