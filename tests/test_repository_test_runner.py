@@ -144,6 +144,14 @@ class RepositoryTestRunnerTest(unittest.TestCase):
                 "test_positive_ack_is_followed_by_real_process_exit_barrier"
             ),
             (
+                "test_gazebo_pose_support.GazeboPoseSupportTest."
+                "test_adjacent_snapshots_use_the_latest_complete_document"
+            ),
+            (
+                "test_gazebo_pose_support.GazeboPoseSupportTest."
+                "test_zero_norm_quaternion_is_rejected"
+            ),
+            (
                 "test_gazebo_teardown_contract."
                 "GazeboTeardownMutationTest.test_repository_contract_passes"
             ),
