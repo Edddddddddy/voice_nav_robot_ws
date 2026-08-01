@@ -825,3 +825,18 @@ Pending
 Learner reflection:
 TBD
 ```
+
+## Corrective fixture note: VN-0010-C2
+
+A later repeated product run exposed a separate test-lifecycle defect: all
+MotionGate assertions passed, but launch eventually killed Gazebo and the
+strict post-shutdown check reported `-9`. The corrective work is tracked in
+[VN-0010-C2](../../docs/work-items/0010-corrective-gazebo-teardown.md) and
+[PIT-0012](../reference/engineering-pitfalls.md#pit-0012-no-residual-gazebo-process-is-not-a-clean-gazebo-exit).
+
+This note does not relabel the earlier Lesson 0009 evidence and does not count
+as Lesson 0010 crash-stop or pause evidence. The new fixture uses an isolated
+partition, structured server-stop ACK, a real launch-managed process-exit
+barrier, and the unchanged strict exit-code oracle. PIT-0012 remains
+`Known (guard planned)` until repeated exact-head and hosted-CI evidence is
+complete.

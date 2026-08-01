@@ -72,15 +72,15 @@ Give every launch test that starts Gazebo one explicit lifecycle contract:
 
 ## Acceptance criteria
 
-- [ ] A deterministic unit RED covers wrong/missing partition, CLI failure,
+- [x] A deterministic unit RED covers wrong/missing partition, CLI failure,
   timeout, false/malformed ACK, positive ACK, and failure after ACK to observe
   process exit.
-- [ ] A strict `voice_nav_sim` post-shutdown RED covers the historical seam
+- [x] A strict `voice_nav_sim` post-shutdown oracle covers the historical seam
   without MotionGate.
-- [ ] All three Gazebo launch tests register failure-safe structured cleanup.
-- [ ] The launch test seam defaults to normal product behavior and is disabled
+- [x] All three Gazebo launch tests register failure-safe structured cleanup.
+- [x] The launch test seam defaults to normal product behavior and is disabled
   only by the isolated tests.
-- [ ] Static mutation guards reject ACK-only cleanup, filtered exit codes,
+- [x] Static mutation guards reject ACK-only cleanup, filtered exit codes,
   fixed sleep, process-kill shortcuts, `shell=True`, missing partition
   isolation, and cleanup absent from a failure path.
 - [ ] The `voice_nav_sim` control test passes 20 serial fresh launches.
@@ -117,9 +117,11 @@ Give every launch test that starts Gazebo one explicit lifecycle contract:
 
 ## Tests-first trail
 
-- Pending: deterministic helper and static lifecycle RED.
-- Pending: structured stop implementation and launch seam GREEN.
-- Pending: mutation guards, repeat evidence, review, CI, and merge.
+- `841b7a7`: deterministic helper/static lifecycle RED and strict integration
+  exit oracles.
+- Pending commit: structured stop, default-on launch seam, cleanup ordering,
+  control-checker refinement, and mutation guards GREEN.
+- Pending: 20-run evidence, exact full gate, review, CI, and merge.
 
 ## Verification evidence
 

@@ -58,6 +58,7 @@ STATIONARY_ANGULAR_TOLERANCE = 0.02
 MOVING_LINEAR_TOLERANCE = 0.03
 MOVING_ANGULAR_TOLERANCE = 0.08
 OPEN_CONVERGENCE_BUDGET_SECONDS = 1.0
+PRODUCT_TEST_PARTITION = 'voice_nav_l0009_product_test'
 
 
 def load_open_convergence_support():
@@ -75,7 +76,25 @@ def load_open_convergence_support():
     return module
 
 
+def load_gazebo_shutdown_support():
+    support_path = (
+        Path(get_package_share_directory('voice_nav_sim'))
+        / 'test_support'
+        / 'gazebo_shutdown.py'
+    )
+    specification = importlib.util.spec_from_file_location(
+        'voice_nav_motion_gate_product_gazebo_shutdown',
+        support_path,
+    )
+    if specification is None or specification.loader is None:
+        raise RuntimeError('could not load Gazebo shutdown test support')
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
 open_convergence = load_open_convergence_support()
+gazebo_shutdown = load_gazebo_shutdown_support()
 OPEN_PROTOCOL = open_convergence.ProtocolValues(
     applied=InternalMotionGateControl.Response.APPLIED,
     rejected=InternalMotionGateControl.Response.REJECTED,
@@ -97,7 +116,10 @@ def generate_test_description():
         PythonLaunchDescriptionSource(
             f'{package_share}/launch/product_sim.launch.py'
         ),
-        launch_arguments={'headless': 'true'}.items(),
+        launch_arguments={
+            'headless': 'true',
+            'shutdown_on_gazebo_exit': 'false',
+        }.items(),
     )
     return LaunchDescription(
         [
@@ -123,7 +145,8 @@ def is_zero(message: TwistStamped) -> bool:
 
 
 class MotionGateProductTest(unittest.TestCase):
-    def setUp(self):
+    def setUp(self, proc_info):
+        self.addCleanup(self.cleanup_fixture, proc_info)
         rclpy.init()
         self.node = rclpy.create_node(
             'collision_monitor',
@@ -200,17 +223,42 @@ class MotionGateProductTest(unittest.TestCase):
         self.open_convergence_deadline = 0.0
         self.spin_thread.start()
 
-    def tearDown(self):
+    def cleanup_fixture(self, proc_info):
         self.best_effort_inhibit()
-        for publisher in tuple(self.candidate_publishers):
+        try:
+            gazebo_shutdown.structured_stop_gazebo(
+                proc_info,
+                expected_partition=PRODUCT_TEST_PARTITION,
+            )
+        finally:
+            self.destroy_ros_fixture()
+
+    def destroy_ros_fixture(self):
+        node = getattr(self, 'node', None)
+        for publisher in tuple(
+            getattr(self, 'candidate_publishers', ())
+        ):
             try:
-                self.node.destroy_publisher(publisher)
+                if node is not None:
+                    node.destroy_publisher(publisher)
             except Exception:
                 pass
-        self.executor.shutdown(timeout_sec=2.0)
-        self.spin_thread.join(timeout=2.0)
-        self.node.destroy_node()
-        rclpy.shutdown()
+        executor = getattr(self, 'executor', None)
+        if executor is not None:
+            try:
+                executor.shutdown(timeout_sec=2.0)
+            except Exception:
+                pass
+        spin_thread = getattr(self, 'spin_thread', None)
+        if spin_thread is not None:
+            spin_thread.join(timeout=2.0)
+        if node is not None:
+            try:
+                node.destroy_node()
+            except Exception:
+                pass
+        if rclpy.ok():
+            rclpy.shutdown()
 
     def append_sample(self, samples, message):
         with self.samples_lock:
@@ -399,10 +447,12 @@ class MotionGateProductTest(unittest.TestCase):
         return started, completed, response
 
     def best_effort_inhibit(self):
+        control_client = getattr(self, 'control_client', None)
         if (
             not rclpy.ok()
-            or not self.control_client.service_is_ready()
-            or not self.current_lease_id
+            or control_client is None
+            or not control_client.service_is_ready()
+            or not getattr(self, 'current_lease_id', '')
         ):
             return
         try:

@@ -82,6 +82,7 @@ install(
   DIRECTORY
     config
     launch
+    test_support
     urdf
     worlds
   DESTINATION share/${PROJECT_NAME}

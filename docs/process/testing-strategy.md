@@ -88,6 +88,30 @@ The test suite also proves that a rejected plan starts no downstream Adapter and
 
 Every automated motion test uses configured limits, a steady-clock deadline, zero output in success and cleanup paths, odometry-based stationarity checks, and bounded process cleanup. `Ctrl+C`, publisher exit, Action Result, or a single zero publication is not proof of stopping.
 
+### Gazebo launch-test lifecycle
+
+Tests that own a Gazebo server use a lifecycle oracle separate from their
+product assertions. Each test runs in a fixed non-empty `GZ_PARTITION`, first
+selects zero or inhibits MotionGate, sends `stop: true` to `/server_control`,
+requires a positive `gz.msgs.Boolean` acknowledgement, and then waits for the
+launch-managed `gazebo` process itself to exit. An ACK is request acceptance,
+not process completion. A post-shutdown test finally applies an unfiltered
+`assertExitCodes(proc_info)` to every launch-managed process.
+
+The product launch still defaults to shutting down when Gazebo exits. Tests
+disable only that immediate event handler while their failure-safe cleanup
+performs the structured stop and process join. Static mutation tests reject
+fixed sleeps, global process killing, shell execution, forced-exit allowlists,
+ACK-only cleanup, wrong partitions, and cleanup registration that can be
+skipped after an active assertion failure.
+
+This fixture contract proves deterministic test teardown. It does not prove
+the internal cause of a slow signal-only Gazebo shutdown, ordinary user
+`Ctrl+C` behavior, MotionGate crash-stop, controller deadman, or managed
+pause/resume semantics. See
+[VN-0010-C2](../work-items/0010-corrective-gazebo-teardown.md) and
+[PIT-0012](../../course/reference/engineering-pitfalls.md#pit-0012-no-residual-gazebo-process-is-not-a-clean-gazebo-exit).
+
 ### Lesson 0009 normal-running Gate slice
 
 VN-0010 / Lesson 0009 proves the independent Gate without claiming process

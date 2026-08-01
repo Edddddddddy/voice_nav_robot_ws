@@ -1,6 +1,7 @@
 from collections import deque
 import importlib.util
 import math
+from pathlib import Path
 import re
 import subprocess
 import threading
@@ -35,6 +36,27 @@ CONTROLLER_TIMEOUT_SECONDS = 0.35
 CONTROL_PERIOD_SECONDS = 0.01
 SIMULATION_STEP_EPSILON_SECONDS = 0.002
 CONTROLLER_STARTUP_SERVICE_RESPONSE_TIMEOUT_SECONDS = 15.0
+SIMULATION_TEST_PARTITION = 'voice_nav_l0008_sim_test'
+
+
+def load_gazebo_shutdown_support():
+    support_path = (
+        Path(get_package_share_directory('voice_nav_sim'))
+        / 'test_support'
+        / 'gazebo_shutdown.py'
+    )
+    specification = importlib.util.spec_from_file_location(
+        'voice_nav_simulation_control_gazebo_shutdown',
+        support_path,
+    )
+    if specification is None or specification.loader is None:
+        raise RuntimeError('could not load Gazebo shutdown test support')
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
+gazebo_shutdown = load_gazebo_shutdown_support()
 
 
 @pytest.mark.launch_test
@@ -45,7 +67,10 @@ def generate_test_description():
         PythonLaunchDescriptionSource(
             f'{package_share}/launch/simulation.launch.py'
         ),
-        launch_arguments={'headless': 'true'}.items(),
+        launch_arguments={
+            'headless': 'true',
+            'shutdown_on_gazebo_exit': 'false',
+        }.items(),
     )
     return LaunchDescription(
         [
@@ -117,7 +142,8 @@ class LaunchStartupPolicyTest(unittest.TestCase):
 
 
 class SimulationControlTest(unittest.TestCase):
-    def setUp(self):
+    def setUp(self, proc_info):
+        self.addCleanup(self.cleanup_fixture, proc_info)
         rclpy.init()
         self.node = rclpy.create_node(
             'voice_nav_simulation_control_test',
@@ -192,12 +218,42 @@ class SimulationControlTest(unittest.TestCase):
         )
         self.spin_thread.start()
 
-    def tearDown(self):
-        self.publish_for(0.0, 0.0, 0.15)
-        self.executor.shutdown(timeout_sec=2.0)
-        self.spin_thread.join(timeout=2.0)
-        self.node.destroy_node()
-        rclpy.shutdown()
+    def cleanup_fixture(self, proc_info):
+        if (
+            rclpy.ok()
+            and getattr(self, 'node', None) is not None
+            and getattr(self, 'command_publisher', None) is not None
+        ):
+            try:
+                self.publish_for(0.0, 0.0, 0.15)
+            except Exception:
+                pass
+        try:
+            gazebo_shutdown.structured_stop_gazebo(
+                proc_info,
+                expected_partition=SIMULATION_TEST_PARTITION,
+            )
+        finally:
+            self.destroy_ros_fixture()
+
+    def destroy_ros_fixture(self):
+        executor = getattr(self, 'executor', None)
+        if executor is not None:
+            try:
+                executor.shutdown(timeout_sec=2.0)
+            except Exception:
+                pass
+        spin_thread = getattr(self, 'spin_thread', None)
+        if spin_thread is not None:
+            spin_thread.join(timeout=2.0)
+        node = getattr(self, 'node', None)
+        if node is not None:
+            try:
+                node.destroy_node()
+            except Exception:
+                pass
+        if rclpy.ok():
+            rclpy.shutdown()
 
     def append_sample(self, samples, message):
         with self.samples_lock:
