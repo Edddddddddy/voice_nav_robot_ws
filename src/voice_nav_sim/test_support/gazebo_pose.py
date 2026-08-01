@@ -102,6 +102,10 @@ def _parse_snapshot(
     quaternion_norm = math.sqrt(x * x + y * y + z * z + w * w)
     if not math.isfinite(quaternion_norm) or quaternion_norm < 0.5:
         raise AssertionError('Gazebo pose quaternion is not finite and valid')
+    x /= quaternion_norm
+    y /= quaternion_norm
+    z /= quaternion_norm
+    w /= quaternion_norm
 
     roll = math.atan2(
         2.0 * (w * x + y * z),
