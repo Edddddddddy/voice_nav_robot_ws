@@ -26,6 +26,8 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0016 | A green report did not execute the intended contract | Do source inventory, generated CTest, and critical xUnit name the same tests with no unapproved skip? | Guarded |
 | PIT-0017 | Repeated WSL simulation fails while collecting Gazebo pose evidence | Is the server unhealthy, or did the bounded CLI query time out / emit a small JSON burst? | Guarded |
 | PIT-0018 | CTest prints a failure but the surrounding command returns zero | Did a later diagnostic command replace the gate's shell exit status? | Guarded |
+| PIT-0019 | Generated CTest passes with a wrong label, timeout, or working directory | Does the checker compare exact property values or only property names? | Guarded |
+| PIT-0020 | A scaled quaternion produces the wrong RPY and misleading movement evidence | Is the finite valid quaternion normalized before unit-quaternion formulas? | Guarded |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -403,3 +405,40 @@ script must combine them, test that script with a deliberately failing child
 and require the original non-zero status; do not improvise cross-shell `$?`
 capture in an acceptance command. Canonical `scripts/verify.sh` and the repeat
 commands follow this terminal-gate rule.
+
+## PIT-0019: A property-name allowlist does not validate property values
+
+**Symptom.** Generated CTest metadata contains all expected property names, so
+the checker passes even though `LABELS`, `TIMEOUT`, or `WORKING_DIRECTORY` has
+the wrong value. A changed label can escape a label-selected run, an inflated
+timeout weakens a bounded test, and a different directory changes relative
+resource resolution.
+
+**Cause.** Comparing only the set of property names constrains vocabulary, not
+semantics. A later CMake property assignment can replace a correct source
+registration, which is why source text is not final generated evidence.
+
+**Guardrail.** Validate `ctest --show-only=json-v1` against exact generated
+values: the single `launch_test` label, the reviewed per-test timeout, and the
+resolved `build/<package>` working directory, alongside the existing runner,
+source, environment, serialization, and closed property set. Required mutation
+tests independently replace `LABELS`, `TIMEOUT`, and `WORKING_DIRECTORY` and
+must prove that every replacement is rejected.
+
+## PIT-0020: Unit-quaternion formulas require a unit quaternion
+
+**Symptom.** A finite Gazebo quaternion has every component multiplied by the
+same scale, but the derived roll, pitch, or yaw changes. Ground-truth movement
+can then appear larger or differently directed and make a movement assertion
+false-green.
+
+**Cause.** Scaled non-zero quaternions represent the same rotation only after
+normalization. The usual RPY equations contain constant terms derived for a
+unit quaternion, so checking a finite valid norm and then applying those
+equations to the unnormalized components is not scale-invariant.
+
+**Guardrail.** Parse finite components, require a finite valid norm, divide all
+four components by that norm, and only then compute RPY. Keep zero, too-small,
+and non-finite norms fail-closed. A required regression supplies a deliberately
+scaled quaternion for a known rotation and proves it yields the same RPY as
+the equivalent unit quaternion.

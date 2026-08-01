@@ -718,11 +718,19 @@ rm -f -- "${residue_before}" "${residue_after}"
 
 三层验收不能合并成一条模糊的“integration passed”：
 
+两个 launch test 都必须通过 Jazzy 官方 `run_test_isolated.py` 运行。生成态
+CTest 必须清除继承的 `ROS_DOMAIN_ID` 和 `DISABLE_ROS_ISOLATION`；ROS domain
+由 runner 为每个测试进程分配，不写死 `91`、`92` 或任何其他固定 ID。
+
 1. Core GTest 只跨 Core Interface，用 manual clock，不启动 ROS；
-2. Node launch test 无 Gazebo、无 `/clock`，用 FastDDS、ROS domain 91、
-   localhost discovery、60 秒 timeout 与 serial execution；
-3. product launch test 用 FastDDS、ROS domain 92、localhost discovery、独立
-   Gazebo partition、180 秒 timeout 与 serial execution。
+2. Node launch test 无 Gazebo、无 `/clock`，用 FastDDS、localhost discovery、
+   每进程隔离 domain、60 秒 timeout 与 serial execution；
+3. product launch test 用 FastDDS、localhost discovery、每进程隔离 domain、
+   独立 Gazebo partition、180 秒 timeout 与 serial execution。
+
+配置完成后还要检查 `ctest --show-only=json-v1` 的生成态：除了属性名集合，
+还必须精确匹配每个测试的 `launch_test` label、timeout 和解析后的包构建工作
+目录。只检查“存在 `TIMEOUT`”无法证明它仍是受评审的边界。
 
 repository-static checker 是三层之前的 prerequisite，不是第四个 runtime
 layer。每条命令都分别记录 command、environment/active RMW、exit status、

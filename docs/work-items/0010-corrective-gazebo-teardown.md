@@ -100,9 +100,10 @@ Give every launch test that starts Gazebo one explicit lifecycle contract:
   `bash scripts/verify.sh` pass.
 - [x] Before/after process evidence has no newly introduced residual process;
   this remains supporting evidence rather than the clean-exit oracle.
-- [ ] Independent review has no unresolved P0-P2 finding.
+- [x] Independent review has no unresolved P0-P2 finding.
 - [ ] Required hosted CI passes on the final head.
-- [ ] PIT-0012 is changed from `Known (guard planned)` to `Guarded` only after
+- [ ] PIT-0012 is changed from
+  `Known (guard implemented; final evidence pending)` to `Guarded` only after
   all preceding gates pass.
 
 ## Risks and rollback
@@ -155,7 +156,12 @@ Give every launch test that starts Gazebo one explicit lifecycle contract:
   multi-document CLI burst RED/GREEN.
 - `00916cb`: removed the stale generated Agent copyright skip; the enabled
   package lint contract passes 3/3 and the result reporter sees zero skips.
-- Pending: exact full gate, final review, hosted CI, and merge.
+- `22b83ce`: exact local canonical gate GREEN after the skip correction.
+- `2d11d9e`: final-review RED/GREEN normalizes scaled quaternions before RPY,
+  validates exact generated CTest label/timeout/working-directory values, and
+  makes both regressions required repository contracts.
+- Two independent final rereviews: P0=0, P1=0, P2=0 after all findings closed.
+- Pending: exact full gate after `2d11d9e`, hosted CI, and merge.
 
 ## Verification evidence
 
@@ -170,19 +176,21 @@ Fresh launch 6 active MotionGate/product assertions: PASS
 Fresh launch 6 post-shutdown: gazebo exit -9; strict assertExitCodes failed
 ```
 
-Final documentation-head static-contract counts, full verification,
-independent review, hosted CI, PR, and merge evidence remain pending and must
-not be claimed early.
+The latest complete ancestor-head local verification is recorded below. A
+later review correction invalidated it as final-head evidence; exact full
+verification, final review, hosted CI, and merge remain pending and must not
+be claimed early.
 
 Repeated runtime evidence after the final implementation change:
 
 ```text
-Implementation head: 53f9568
+Ground-truth parser implementation head: 2d11d9e
 Command: ctest --test-dir build/voice_nav_sim --output-on-failure \
   --repeat until-fail:20 -R '^test_test_simulation_control.py$'
-Result: 20/20 PASS; 31.84-43.81 s per launch; CTest exit 0
-Total CTest time: 716.29 s
+Result: 20/20 PASS; 18.35-19.87 s per launch; CTest exit 0
+Total CTest time: 386.40 s
 
+Unchanged MotionGate product implementation head: 53f9568
 Command: ctest --test-dir build/voice_nav_bringup --output-on-failure \
   --repeat until-fail:20 -R '^test_test_motion_gate_product.py$'
 Result: 20/20 PASS; 19.58-28.41 s per launch; CTest exit 0
@@ -200,7 +208,29 @@ structured-stop CLI timeout, and `gz topic --num 1` returning two complete
 JSON documents. None was relabeled as a Gazebo clean-exit failure. The final
 pose helper uses the exact isolated partition, two bounded 10 s read-only
 attempts, at most four complete documents, the newest complete snapshot, a
-unique model pose, a valid finite quaternion, and finite XYZ/RPY fields.
+unique model pose, a valid finite quaternion normalized before RPY conversion,
+and finite XYZ/RPY fields. Review also exposed that a closed generated-property
+name set did not constrain its values; the checker now requires exact label,
+per-test timeout, and resolved working directory.
+
+Latest complete ancestor-head local canonical evidence:
+
+```text
+Head: 22b83ce
+Command: bash scripts/verify.sh
+Exit: 0
+Repository contracts: 277 tests, 0 failures
+ROS packages: 6 built successfully
+Package results: 177 tests, 0 errors, 0 failures, 10 skipped
+Skip classification: exact package-local cppcheck artifact/class allowlist
+Generated launch-test metadata: PASS
+Clean MotionGate install boundary: PASS
+Final line: VoiceNav Robot verification passed.
+Postcondition: no test-owned Gazebo/launch/control process remained;
+  pre-existing user-owned Gazebo PID 3631225 was preserved.
+Classification: ancestor evidence only after the `2d11d9e` review correction;
+  final exact-head canonical verification is pending.
+```
 
 Pre-final repository-contract evidence:
 

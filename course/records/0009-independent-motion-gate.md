@@ -1,6 +1,7 @@
 # Lesson 0009 学习记录：独立 MotionGate
 
-状态：Current local full gate GREEN / exact-head hosted CI and final review pending
+状态：Latest complete ancestor local gate GREEN / final review GREEN /
+current exact-head canonical and hosted CI pending
 （教师参考实现）
 
 学习者复现状态：Pending
@@ -844,13 +845,18 @@ if critical evidence is skipped. PIT-0012 remains
 `Known (guard implemented; final evidence pending)` until repeated exact-head
 and hosted-CI evidence is complete.
 
-Local corrective evidence on implementation head `53f9568` completed both
-fresh-launch stability gates: `voice_nav_sim` passed 20/20 launches in
-716.29 seconds and the MotionGate product passed 20/20 in 507.21 seconds.
+Local corrective evidence on implementation head `2d11d9e` completed the
+ground-truth parser's fresh-launch stability gate: `voice_nav_sim` passed
+20/20 launches in 386.40 seconds. The unchanged MotionGate product evidence
+on `53f9568` remains 20/20 in 507.21 seconds.
 After both commands, the only matching Gazebo/control process was the
 pre-existing user-owned PID `3631225`; no test-owned process remained. During
 the tests-first loop, bounded query timeout, structured-stop timeout, and a
 two-document `gz topic --num 1` burst were kept as separate evidence failures
 and corrected without weakening positive ACK, process-exit, or strict xUnit
-oracles. Full final-head verification and hosted CI are still pending, so this
-note does not close PIT-0012 or Lesson 0010.
+oracles. A complete local canonical gate passed on ancestor `22b83ce`: 277
+repository contracts and 177 package tests completed with zero failure/error;
+the 10 skips were the exact package-local cppcheck allowlist, and the clean
+MotionGate install audit passed. Final review then required the `2d11d9e`
+quaternion and generated-metadata corrections, so exact-head canonical and
+hosted CI remain pending. This note does not close PIT-0012 or Lesson 0010.
