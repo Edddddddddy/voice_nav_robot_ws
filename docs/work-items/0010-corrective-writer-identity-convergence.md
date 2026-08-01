@@ -237,7 +237,7 @@ Result: uint16 WRITER_METADATA_PENDING=19
 ```
 
 The bounded-diagnostic correction now has tests-first RED evidence, focused
-10/10 WriterObservationSession GREEN evidence, and 41/41 static/mutation
+10/10 WriterObservationSession GREEN evidence, and 45/45 static/mutation
 contract evidence. Its final commit hashes, exact full verification, hosted
 CI, independent rereview, PR identity, merge mapping, and Issue #14 closure
 remain pending and must not be claimed early.
