@@ -29,6 +29,15 @@ ARTIFACTS = {
     ),
     "core_source": "src/voice_nav_mission/src/motion_gate_core.cpp",
     "node_source": "src/voice_nav_mission/src/motion_gate_node.cpp",
+    "writer_observation_header": (
+        "src/voice_nav_mission/src/writer_observation.hpp"
+    ),
+    "writer_observation_source": (
+        "src/voice_nav_mission/src/writer_observation.cpp"
+    ),
+    "writer_observation_test": (
+        "src/voice_nav_mission/test/writer_observation_test.cpp"
+    ),
     "mission_package": "src/voice_nav_mission/package.xml",
     "mission_cmake": "src/voice_nav_mission/CMakeLists.txt",
     "gate_config": "src/voice_nav_bringup/config/motion_gate.yaml",
@@ -82,6 +91,7 @@ REASON_CONSTANTS = {
     "uint16 CONFIGURATION_INVALID=16",
     "uint16 PUBLISH_FAILED=17",
     "uint16 INTERNAL_FAILURE=18",
+    "uint16 WRITER_METADATA_PENDING=19",
 }
 
 CONTROL_RESPONSE_FIELDS = {
@@ -938,6 +948,239 @@ def parenthesized_call_bodies(
             )
 
 
+def validate_writer_observation(
+    header_path: Path,
+    source_path: Path,
+    test_path: Path,
+) -> None:
+    header = read_text(header_path)
+    source = read_text(source_path)
+    test = read_text(test_path)
+
+    require_source_tokens(
+        header,
+        (
+            "struct WriterEndpointObservation",
+            "std::string topic_type",
+            "std::string node_name",
+            "std::string node_namespace",
+            "rmw_endpoint_type_t endpoint_type",
+            "rmw_qos_profile_t qos",
+            "WriterGid writer_gid",
+            "struct WriterObservationPolicy",
+            "class WriterObservationSession",
+            "OpenBinding observe(",
+            "void reset() noexcept",
+            "std::optional<WriterGid> pinned_writer_gid_",
+            "bool identity_confirmed_",
+            "bool terminal_mismatch_",
+            "std::string terminal_detail_",
+        ),
+        "private WriterObservationSession header",
+    )
+    require_source_tokens(
+        source,
+        (
+            'include "writer_observation.hpp"',
+            "constexpr std::size_t kMaximumDetailLength = 160U",
+            'constexpr char kUnknownNodeName[] = "_NODE_NAME_UNKNOWN_"',
+            (
+                'constexpr char kUnknownNodeNamespace[] = '
+                '"_NODE_NAMESPACE_UNKNOWN_"'
+            ),
+            "detail.resize(kMaximumDetailLength)",
+            "std::all_of(",
+            "value == 0U",
+            "candidate_qos_is_compatible",
+            "normalized_namespace",
+            "node_name_is_unresolved",
+            "node_namespace_is_unresolved",
+            "fqn_namespace",
+            "fqn_name",
+            "observation_summary",
+            '"n=1 k="',
+            '" id="',
+            '" q="',
+            '" g="',
+            '" ms="',
+            '" t="',
+            "Reason::WriterMetadataPending",
+            "Reason::WriterMismatch",
+            "terminal_mismatch_ = true",
+            "identity_confirmed_ = true",
+            "pinned_writer_gid_ = endpoint.writer_gid",
+            "void WriterObservationSession::reset() noexcept",
+        ),
+        "private WriterObservationSession implementation",
+    )
+    if source.count("Reason::WriterMetadataPending") != 1:
+        raise MotionGateContractError(
+            "WriterObservationSession may classify only unresolved node "
+            "identity as WRITER_METADATA_PENDING"
+        )
+
+    unresolved_name = function_body(
+        source,
+        "bool node_name_is_unresolved",
+        "WriterObservationSession unresolved node-name classifier",
+    )
+    require_source_tokens(
+        unresolved_name,
+        (
+            "node_name.empty()",
+            "node_name == kUnknownNodeName",
+        ),
+        "WriterObservationSession unresolved node-name classifier",
+    )
+    if re.fullmatch(
+        r"\s*return\s+node_name\.empty\(\)\s*\|\|\s*"
+        r"node_name\s*==\s*kUnknownNodeName\s*;\s*",
+        unresolved_name,
+    ) is None:
+        raise MotionGateContractError(
+            "WriterObservationSession may treat only an empty node name or "
+            "the exact Jazzy unknown-name marker as unresolved"
+        )
+    unresolved_namespace = function_body(
+        source,
+        "bool node_namespace_is_unresolved",
+        "WriterObservationSession unresolved namespace classifier",
+    )
+    require_source_tokens(
+        unresolved_namespace,
+        ("node_namespace == kUnknownNodeNamespace",),
+        "WriterObservationSession unresolved namespace classifier",
+    )
+    if re.fullmatch(
+        r"\s*return\s+node_namespace\s*==\s*"
+        r"kUnknownNodeNamespace\s*;\s*",
+        unresolved_namespace,
+    ) is None:
+        raise MotionGateContractError(
+            "WriterObservationSession may treat only the exact Jazzy "
+            "unknown-namespace marker as unresolved"
+        )
+
+    observe = method_body(
+        source,
+        "WriterObservationSession",
+        "observe",
+        "private WriterObservationSession implementation",
+    )
+    validate_order(
+        observe,
+        (
+            "terminal_mismatch_",
+            "endpoints.empty()",
+            "endpoints.size() != 1U",
+            "endpoint.endpoint_type",
+            "endpoint.topic_type",
+            "candidate_qos_is_compatible(endpoint.qos)",
+            "gid_is_zero(endpoint.writer_gid)",
+            "*pinned_writer_gid_ != endpoint.writer_gid",
+            "node_name_is_unresolved(endpoint.node_name)",
+            "node_namespace_is_unresolved(endpoint.node_namespace)",
+            "fqn_namespace(policy_.expected_writer_fqn)",
+            "fqn_name(policy_.expected_writer_fqn)",
+            "!name_unresolved && endpoint.node_name != expected_name",
+            "!namespace_unresolved",
+            "observed_namespace != expected_namespace",
+            "name_unresolved || namespace_unresolved",
+            "endpoint_fqn(endpoint)",
+            "identity_confirmed_ = true",
+        ),
+        "WriterObservationSession fail-closed classification",
+    )
+    pending_branch = function_body(
+        observe,
+        "if (name_unresolved || namespace_unresolved)",
+        "WriterObservationSession unresolved node-identity branch",
+    )
+    require_source_tokens(
+        pending_branch,
+        (
+            "identity_confirmed_",
+            "true",
+            "Reason::None",
+            "!pinned_writer_gid_",
+            "pinned_writer_gid_ = endpoint.writer_gid",
+            "Reason::WriterMetadataPending",
+            "endpoint.writer_gid",
+            "summary",
+        ),
+        "WriterObservationSession unresolved node-identity branch",
+    )
+    validate_order(
+        pending_branch,
+        (
+            "identity_confirmed_",
+            "!pinned_writer_gid_",
+            "pinned_writer_gid_ = endpoint.writer_gid",
+            "Reason::WriterMetadataPending",
+            "summary",
+        ),
+        "WriterObservationSession node-identity convergence",
+    )
+
+    reject_mismatch = function_body(
+        observe,
+        "[this](std::string detail)",
+        "WriterObservationSession terminal mismatch closure",
+    )
+    require_source_tokens(
+        reject_mismatch,
+        (
+            "if (pinned_writer_gid_)",
+            "terminal_mismatch_ = true",
+            "terminal_detail_ = detail",
+            "return mismatch(",
+        ),
+        "WriterObservationSession terminal mismatch closure",
+    )
+
+    reset = method_body(
+        source,
+        "WriterObservationSession",
+        "reset",
+        "private WriterObservationSession implementation",
+    )
+    require_source_tokens(
+        reset,
+        (
+            "pinned_writer_gid_.reset()",
+            "identity_confirmed_ = false",
+            "terminal_mismatch_ = false",
+            "terminal_detail_.clear()",
+        ),
+        "WriterObservationSession generation reset",
+    )
+    require_source_tokens(
+        test,
+        (
+            '#include "writer_observation.hpp"',
+            "PinsUnresolvedIdentityUntilTheSameWriterResolves",
+            "ReplacementPoisonsPinnedGenerationUntilReset",
+            "ConfirmedSameGidSurvivesIdentityOnlyGraphRegression",
+            "KnownWrongNamespaceCannotEnterPending",
+            "ExactUnknownIdentityMarkersConvergeForPinnedGid",
+            "KnownPartialIdentityMustAgreeBeforePending",
+            '"_NODE_NAME_UNKNOWN_"',
+            '"_NODE_NAMESPACE_UNKNOWN_"',
+            "Reason::WriterMetadataPending",
+            "Reason::WriterMismatch",
+            "session.reset()",
+            "EXPECT_LE(pending.detail.size(), 160U)",
+            '"n=1"',
+            '"t="',
+            '"id="',
+            '"q="',
+            '"g="',
+            '"ms=7"',
+        ),
+        "writer_observation_test",
+    )
+
+
 def validate_node(path: Path) -> None:
     source = read_text(path)
     require_source_tokens(
@@ -959,6 +1202,7 @@ def validate_node(path: Path) -> None:
             "rclcpp::MessageInfo",
             "publisher_gid",
             "discover_unique_writer_gid_on_topic",
+            "WriterObservationSession writer_observation_session_",
             "SingleThreadedExecutor",
             "command.header.stamp",
             "get_clock()->now()",
@@ -1038,10 +1282,21 @@ def validate_node(path: Path) -> None:
         discovery,
         (
             "get_publishers_info_by_topic",
-            "endpoints.size() != 1",
+            "std::vector<WriterEndpointObservation> observations",
+            "observations.reserve(endpoints.size())",
+            "for (const auto & endpoint : endpoints)",
+            "endpoint.topic_type()",
+            "endpoint.node_name()",
+            "endpoint.node_namespace()",
+            "endpoint.endpoint_type()",
+            "endpoint.qos_profile().get_rmw_qos_profile()",
             "endpoint_gid()",
+            "std::copy(",
+            "writer_gid.begin()",
+            "writer_observation_started_at_",
+            "writer_observation_session_.observe(observations, elapsed)",
         ),
-        "MotionGate Gate-local writer discovery",
+        "MotionGate Gate-local TopicEndpointInfo adapter",
     )
 
     open_reader = method_body(
@@ -1055,6 +1310,19 @@ def validate_node(path: Path) -> None:
         raise MotionGateContractError(
             "MotionGate OPEN adapter must delegate admission to core_.open"
         )
+    provider = function_body(
+        open_reader,
+        "[this, &request, &expected_binding]()",
+        "MotionGate OPEN graph provider",
+    )
+    validate_order(
+        provider,
+        (
+            "final_controller_health_error()",
+            "discover_unique_writer_gid_on_topic",
+        ),
+        "MotionGate OPEN graph provider health-before-observation",
+    )
     graph_before_core = open_reader[:core_open_index]
     forbidden_graph_before_core = [
         token
@@ -1080,6 +1348,7 @@ def validate_node(path: Path) -> None:
         open_reader,
         (
             "core_.open(",
+            "final_controller_health_error()",
             "discover_unique_writer_gid_on_topic",
             "candidate_subscription_.reset()",
             "create_candidate_subscription",
@@ -1104,6 +1373,27 @@ def validate_node(path: Path) -> None:
             "MotionGate OPEN must build a discard reader inside the "
             "validated provider and an accepting reader only after APPLIED"
         )
+
+    prepare = method_body(
+        source,
+        "MotionGateNode",
+        "handle_prepare",
+        "motion_gate_node",
+    )
+    applied_prepare = function_body(
+        prepare,
+        "if (result.code == ResultCode::Applied)",
+        "MotionGate successful PREPARE adapter transition",
+    )
+    validate_order(
+        applied_prepare,
+        (
+            "writer_observation_session_.reset()",
+            "writer_observation_started_at_ = now",
+            "create_candidate_subscription",
+        ),
+        "MotionGate successful PREPARE writer-observation reset",
+    )
 
     candidate = method_body(
         source,
@@ -1333,6 +1623,11 @@ def validate_mission_cmake(path: Path) -> None:
 
     for body in cmake_call_bodies(source, "install"):
         arguments = cmake_arguments(body)
+        if any("writer_observation" in argument for argument in arguments):
+            raise MotionGateContractError(
+                "writer observation adapter and session must remain "
+                "package-private"
+            )
         if any("motion_gate_core" in argument for argument in arguments):
             if any(
                 argument.endswith("motion_gate_core.hpp")
@@ -1361,6 +1656,11 @@ def validate_mission_cmake(path: Path) -> None:
     ):
         for body in cmake_call_bodies(source, command):
             arguments = cmake_arguments(body)
+            if any("writer_observation" in argument for argument in arguments):
+                raise MotionGateContractError(
+                    "writer observation adapter and session must remain "
+                    "package-private"
+                )
             if any("motion_gate_core" in argument for argument in arguments):
                 raise MotionGateContractError(
                     "motion_gate_core must not be exported"
@@ -1376,6 +1676,38 @@ def validate_mission_cmake(path: Path) -> None:
                     "motion_gate_core.hpp must not be exported through the "
                     "package include directory"
                 )
+
+    node_executable_calls = [
+        cmake_arguments(body)
+        for body in cmake_call_bodies(source, "add_executable")
+        if cmake_arguments(body)[:1] == ["motion_gate_node"]
+    ]
+    expected_node_executable = [
+        "motion_gate_node",
+        "src/motion_gate_node.cpp",
+        "src/writer_observation.cpp",
+    ]
+    if node_executable_calls != [expected_node_executable]:
+        raise MotionGateContractError(
+            "motion_gate_node must compile the private "
+            "src/writer_observation.cpp adapter"
+        )
+
+    writer_test_calls = [
+        cmake_arguments(body)
+        for body in cmake_call_bodies(source, "ament_add_gtest")
+        if cmake_arguments(body)[:1] == ["writer_observation_test"]
+    ]
+    expected_writer_test = [
+        "writer_observation_test",
+        "test/writer_observation_test.cpp",
+        "src/writer_observation.cpp",
+    ]
+    if writer_test_calls != [expected_writer_test]:
+        raise MotionGateContractError(
+            "writer_observation_test must compile the same private "
+            "writer_observation.cpp implementation"
+        )
 
     target_patterns = {
         r"add_executable\s*\(\s*motion_gate_node\b": (
@@ -1808,6 +2140,11 @@ def validate_contract(root: Path) -> None:
         paths["controller_config"],
     )
     validate_core(paths["core_header"], paths["core_source"])
+    validate_writer_observation(
+        paths["writer_observation_header"],
+        paths["writer_observation_source"],
+        paths["writer_observation_test"],
+    )
     validate_node(paths["node_source"])
     validate_mission_cmake(paths["mission_cmake"])
     validate_bringup_cmake(paths["bringup_cmake"])
