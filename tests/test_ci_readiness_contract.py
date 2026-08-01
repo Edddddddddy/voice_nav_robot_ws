@@ -40,6 +40,9 @@ STARTUP_TIMEOUT_NAME = (
 GENERATED_CHECKER = (
     REPOSITORY_ROOT / "scripts" / "check_generated_launch_tests.py"
 )
+GENERATED_MISSION_WORKING_DIRECTORY = (
+    "/workspace/build/voice_nav_mission"
+)
 
 
 def load_generated_checker():
@@ -92,7 +95,10 @@ def generated_mission_payload():
                     {"name": "LABELS", "value": ["launch_test"]},
                     {"name": "RUN_SERIAL", "value": True},
                     {"name": "TIMEOUT", "value": 60.0},
-                    {"name": "WORKING_DIRECTORY", "value": "/workspace"},
+                    {
+                        "name": "WORKING_DIRECTORY",
+                        "value": GENERATED_MISSION_WORKING_DIRECTORY,
+                    },
                 ],
             },
         ],
@@ -323,6 +329,9 @@ class CiReadinessContractTest(unittest.TestCase):
         checker.validate_package_payload(
             "voice_nav_mission",
             generated_mission_payload(),
+            expected_working_directory=(
+                GENERATED_MISSION_WORKING_DIRECTORY
+            ),
         )
 
     def test_generated_metadata_rejects_isolation_override(self):
@@ -341,6 +350,9 @@ class CiReadinessContractTest(unittest.TestCase):
             checker.validate_package_payload(
                 "voice_nav_mission",
                 payload,
+                expected_working_directory=(
+                    GENERATED_MISSION_WORKING_DIRECTORY
+                ),
             )
 
     def test_generated_metadata_rejects_disabled_launch_test(self):
@@ -356,6 +368,9 @@ class CiReadinessContractTest(unittest.TestCase):
             checker.validate_package_payload(
                 "voice_nav_mission",
                 payload,
+                expected_working_directory=(
+                    GENERATED_MISSION_WORKING_DIRECTORY
+                ),
             )
 
     def test_generated_metadata_rejects_result_semantics_overrides(self):
@@ -378,6 +393,37 @@ class CiReadinessContractTest(unittest.TestCase):
                     checker.validate_package_payload(
                         "voice_nav_mission",
                         payload,
+                        expected_working_directory=(
+                            GENERATED_MISSION_WORKING_DIRECTORY
+                        ),
+                    )
+
+    def test_generated_metadata_rejects_wrong_execution_properties(self):
+        checker = load_generated_checker()
+        overrides = (
+            ("LABELS", ["not_launch_test"]),
+            ("TIMEOUT", 61.0),
+            ("WORKING_DIRECTORY", "/wrong/build/voice_nav_mission"),
+        )
+
+        for property_name, value in overrides:
+            with self.subTest(property_name=property_name):
+                payload = generated_mission_payload()
+                generated_property = next(
+                    prop
+                    for prop in payload["tests"][0]["properties"]
+                    if prop["name"] == property_name
+                )
+                generated_property["value"] = value
+                with self.assertRaises(
+                    checker.GeneratedLaunchTestContractError,
+                ):
+                    checker.validate_package_payload(
+                        "voice_nav_mission",
+                        payload,
+                        expected_working_directory=(
+                            GENERATED_MISSION_WORKING_DIRECTORY
+                        ),
                     )
 
     def test_ground_truth_pose_uses_bounded_pose_topic_snapshot(self):

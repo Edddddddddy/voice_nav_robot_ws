@@ -140,12 +140,20 @@ class RepositoryTestRunnerTest(unittest.TestCase):
         runner = load_runner()
         critical_ids = {
             (
+                "test_ci_readiness_contract.CiReadinessContractTest."
+                "test_generated_metadata_rejects_wrong_execution_properties"
+            ),
+            (
                 "test_gazebo_shutdown_support.GazeboShutdownSupportTest."
                 "test_positive_ack_is_followed_by_real_process_exit_barrier"
             ),
             (
                 "test_gazebo_pose_support.GazeboPoseSupportTest."
                 "test_adjacent_snapshots_use_the_latest_complete_document"
+            ),
+            (
+                "test_gazebo_pose_support.GazeboPoseSupportTest."
+                "test_scaled_quaternion_is_normalized_before_rpy"
             ),
             (
                 "test_gazebo_pose_support.GazeboPoseSupportTest."

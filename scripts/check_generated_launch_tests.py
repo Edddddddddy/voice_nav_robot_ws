@@ -13,17 +13,33 @@ from pathlib import Path
 
 EXPECTED_TESTS = {
     "voice_nav_mission": {
-        "test_test_motion_gate_node.py": "test_motion_gate_node.py",
+        "test_test_motion_gate_node.py": {
+            "source": "test_motion_gate_node.py",
+            "timeout": 60.0,
+        },
     },
     "voice_nav_sim": {
-        "test_test_simulation_control.py": "test_simulation_control.py",
-        "test_test_simulation_interfaces.py": "test_simulation_interfaces.py",
-        "test_test_tf_ownership_conflict.py": "test_tf_ownership_conflict.py",
+        "test_test_simulation_control.py": {
+            "source": "test_simulation_control.py",
+            "timeout": 120.0,
+        },
+        "test_test_simulation_interfaces.py": {
+            "source": "test_simulation_interfaces.py",
+            "timeout": 120.0,
+        },
+        "test_test_tf_ownership_conflict.py": {
+            "source": "test_tf_ownership_conflict.py",
+            "timeout": 30.0,
+        },
     },
     "voice_nav_bringup": {
-        "test_test_motion_gate_product.py": "test_motion_gate_product.py",
+        "test_test_motion_gate_product.py": {
+            "source": "test_motion_gate_product.py",
+            "timeout": 180.0,
+        },
     },
 }
+EXPECTED_LABELS = ["launch_test"]
 EXPECTED_ENVIRONMENT = [
     "RMW_IMPLEMENTATION=rmw_fastrtps_cpp",
     "ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST",
@@ -68,7 +84,12 @@ def _properties(test: dict, package_name: str) -> dict[str, object]:
     return properties
 
 
-def validate_package_payload(package_name: str, payload: object) -> None:
+def validate_package_payload(
+    package_name: str,
+    payload: object,
+    *,
+    expected_working_directory: str,
+) -> None:
     """Validate one package's generated `ctest --show-only` payload."""
     expected = EXPECTED_TESTS[package_name]
     if not isinstance(payload, dict) or payload.get("kind") != "ctestInfo":
@@ -96,6 +117,7 @@ def validate_package_payload(package_name: str, payload: object) -> None:
 
     for test in launch_tests:
         test_name = test["name"]
+        expected_test = expected[test_name]
         properties = _properties(test, package_name)
         if set(properties) != EXPECTED_PROPERTY_NAMES:
             raise GeneratedLaunchTestContractError(
@@ -105,6 +127,21 @@ def validate_package_payload(package_name: str, payload: object) -> None:
         if properties.get("RUN_SERIAL") is not True:
             raise GeneratedLaunchTestContractError(
                 f"{package_name}:{test_name} must be RUN_SERIAL"
+            )
+        if properties.get("LABELS") != EXPECTED_LABELS:
+            raise GeneratedLaunchTestContractError(
+                f"{package_name}:{test_name} has unexpected labels"
+            )
+        if properties.get("TIMEOUT") != expected_test["timeout"]:
+            raise GeneratedLaunchTestContractError(
+                f"{package_name}:{test_name} has unexpected timeout"
+            )
+        if (
+            properties.get("WORKING_DIRECTORY")
+            != expected_working_directory
+        ):
+            raise GeneratedLaunchTestContractError(
+                f"{package_name}:{test_name} runs from the wrong directory"
             )
         if properties.get("DISABLED") is True:
             raise GeneratedLaunchTestContractError(
@@ -140,7 +177,7 @@ def validate_package_payload(package_name: str, payload: object) -> None:
                 f"{package_name}:{test_name} bypasses the official runner"
             )
         expected_source_suffix = (
-            f"/src/{package_name}/test/{expected[test_name]}"
+            f"/src/{package_name}/test/{expected_test['source']}"
         )
         if not any(
             token.endswith(expected_source_suffix) for token in command
@@ -200,7 +237,11 @@ def main() -> int:
                 raise GeneratedLaunchTestContractError(
                     f"ctest metadata is not JSON for {package_name}"
                 ) from error
-            validate_package_payload(package_name, payload)
+            validate_package_payload(
+                package_name,
+                payload,
+                expected_working_directory=str(package_directory.resolve()),
+            )
     except (
         GeneratedLaunchTestContractError,
         OSError,

@@ -225,6 +225,28 @@ class GazeboPoseSupportTest(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "quaternion"):
             self.read_pose(SequenceRunner([completed(stdout=payload)]))
 
+    def test_scaled_quaternion_is_normalized_before_rpy(self):
+        yaw = 0.05
+        payload = json.dumps(
+            {
+                "pose": [
+                    {
+                        "name": MODEL_NAME,
+                        "position": {},
+                        "orientation": {
+                            "z": 2.0 * math.sin(yaw / 2.0),
+                            "w": 2.0 * math.cos(yaw / 2.0),
+                        },
+                    }
+                ]
+            }
+        )
+
+        pose = self.read_pose(SequenceRunner([completed(stdout=payload)]))
+
+        self.assertAlmostEqual(pose[5], yaw)
+        self.assertLess(pose[5], 0.10)
+
 
 if __name__ == "__main__":
     unittest.main()

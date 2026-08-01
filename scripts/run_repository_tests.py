@@ -22,6 +22,10 @@ REQUIRED_TEST_IDS: frozenset[str] = frozenset(
             "test_launch_tests_use_official_process_scoped_domain_leases"
         ),
         (
+            "test_ci_readiness_contract.CiReadinessContractTest."
+            "test_generated_metadata_rejects_wrong_execution_properties"
+        ),
+        (
             "test_control_contract.ControlContractTest."
             "test_repository_control_contract_passes"
         ),
@@ -67,6 +71,10 @@ REQUIRED_TEST_IDS: frozenset[str] = frozenset(
         (
             "test_gazebo_pose_support.GazeboPoseSupportTest."
             "test_persistent_timeout_fails_after_two_attempts"
+        ),
+        (
+            "test_gazebo_pose_support.GazeboPoseSupportTest."
+            "test_scaled_quaternion_is_normalized_before_rpy"
         ),
         (
             "test_gazebo_pose_support.GazeboPoseSupportTest."
