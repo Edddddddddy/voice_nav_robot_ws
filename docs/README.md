@@ -26,6 +26,7 @@ The versioned product specification is the detailed acceptance contract.
 - [Quality policy](process/quality-policy.md)
 - [Testing strategy](process/testing-strategy.md)
 - [Release policy and roadmap](process/release-policy.md)
+- [Problem learning and recurrence control](process/problem-learning.md)
 
 ## History and work
 
