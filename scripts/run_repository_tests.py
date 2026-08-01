@@ -295,6 +295,15 @@ def _source_test_inventory(
         except (OSError, UnicodeError, SyntaxError) as error:
             errors.append(f"cannot inventory {path.name}: {error}")
             continue
+        for statement in tree.body:
+            if isinstance(
+                statement,
+                (ast.FunctionDef, ast.AsyncFunctionDef),
+            ) and statement.name.startswith("test_"):
+                errors.append(
+                    f"{path.name}:{statement.name} is an unsupported "
+                    "module-level test function"
+                )
         module_bindings = []
         for statement in tree.body:
             if isinstance(

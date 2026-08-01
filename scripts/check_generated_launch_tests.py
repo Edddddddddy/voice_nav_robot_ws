@@ -32,6 +32,14 @@ EXPECTED_ENVIRONMENT_MODIFICATION = [
     "ROS_DOMAIN_ID=unset:",
     "DISABLE_ROS_ISOLATION=unset:",
 ]
+EXPECTED_PROPERTY_NAMES = {
+    "ENVIRONMENT",
+    "ENVIRONMENT_MODIFICATION",
+    "LABELS",
+    "RUN_SERIAL",
+    "TIMEOUT",
+    "WORKING_DIRECTORY",
+}
 PACKAGE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 
@@ -89,6 +97,11 @@ def validate_package_payload(package_name: str, payload: object) -> None:
     for test in launch_tests:
         test_name = test["name"]
         properties = _properties(test, package_name)
+        if set(properties) != EXPECTED_PROPERTY_NAMES:
+            raise GeneratedLaunchTestContractError(
+                f"{package_name}:{test_name} has unexpected result semantics: "
+                f"{sorted(set(properties) - EXPECTED_PROPERTY_NAMES)}"
+            )
         if properties.get("RUN_SERIAL") is not True:
             raise GeneratedLaunchTestContractError(
                 f"{package_name}:{test_name} must be RUN_SERIAL"

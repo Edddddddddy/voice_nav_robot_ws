@@ -82,7 +82,10 @@ def generated_mission_payload():
                             "DISABLE_ROS_ISOLATION=unset:",
                         ],
                     },
+                    {"name": "LABELS", "value": ["launch_test"]},
                     {"name": "RUN_SERIAL", "value": True},
+                    {"name": "TIMEOUT", "value": 60.0},
+                    {"name": "WORKING_DIRECTORY", "value": "/workspace"},
                 ],
             },
         ],
@@ -347,6 +350,37 @@ class CiReadinessContractTest(unittest.TestCase):
                 "voice_nav_mission",
                 payload,
             )
+
+    def test_generated_metadata_rejects_result_semantics_overrides(self):
+        checker = load_generated_checker()
+        overrides = (
+            ("WILL_FAIL", True),
+            ("PASS_REGULAR_EXPRESSION", "looks good"),
+            ("SKIP_REGULAR_EXPRESSION", "skip me"),
+        )
+
+        for property_name, value in overrides:
+            with self.subTest(property_name=property_name):
+                payload = generated_mission_payload()
+                payload["tests"][0]["properties"].append(
+                    {"name": property_name, "value": value}
+                )
+                with self.assertRaises(
+                    checker.GeneratedLaunchTestContractError,
+                ):
+                    checker.validate_package_payload(
+                        "voice_nav_mission",
+                        payload,
+                    )
+
+    def test_ground_truth_pose_uses_bounded_pose_topic_snapshot(self):
+        source = SIMULATION_CONTROL_TEST.read_text(encoding="utf-8")
+
+        self.assertIn("GAZEBO_POSE_TOPIC", source)
+        self.assertIn("'/world/voice_nav_test_world/pose/info'", source)
+        self.assertIn("'--json-output'", source)
+        self.assertIn("json.loads(completed.stdout)", source)
+        self.assertNotIn("'model',\n", source)
 
     def test_canonical_verify_checks_generated_metadata_after_build(self):
         verify = (REPOSITORY_ROOT / "scripts" / "verify.sh").read_text(
