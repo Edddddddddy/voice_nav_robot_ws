@@ -511,6 +511,33 @@ TEST(MotionGateCore, OpenRejectsMissingOrZeroWriterBinding)
   EXPECT_EQ(gate.snapshot().state, State::Prepared);
 }
 
+TEST(MotionGateCore, OpenFaultsClosedWhenReadyBindingCarriesNonNoneReason)
+{
+  MotionGateCore gate(MotionGateConfig{}, kGateId);
+  ASSERT_EQ(prepare_with(gate, 1U, at(0ms)).code, ResultCode::Applied);
+  const auto request = lease_request(
+    Operation::Open, 2U, gate.snapshot());
+
+  const auto result = gate.open(
+    request, at(1ms),
+    []() {
+      return OpenBinding{
+        true,
+        Reason::WriterMetadataPending,
+        writer_gid(),
+        "contradictory ready binding"};
+    });
+
+  EXPECT_EQ(result.code, ResultCode::Faulted);
+  EXPECT_EQ(result.reason, Reason::InternalFailure);
+  EXPECT_EQ(result.state, State::Faulted);
+  EXPECT_TRUE(result.motion_inhibited);
+  EXPECT_TRUE(result.zero_selected);
+  EXPECT_FALSE(result.writer_bound);
+  EXPECT_TRUE(result.lease_id.empty());
+  EXPECT_TRUE(gate.selected_command().is_zero());
+}
+
 TEST(MotionGateCore, OpenProviderExceptionFaultsClosed)
 {
   MotionGateCore gate(MotionGateConfig{}, kGateId);
