@@ -52,7 +52,6 @@ WORLD_BOX_FRONT_X = 1.75
 WORLD_BOX_HALF_WIDTH_Y = 0.50
 SCAN_COUNT = 360
 TF_AUDIT_TIMEOUT_SECONDS = 35.0
-SIMULATION_TEST_PARTITION = 'voice_nav_l0008_sim_test'
 
 TF_EXPECTATIONS = (
     ('/tf', 'odom', 'base_footprint', '/diff_drive_controller'),
@@ -107,6 +106,11 @@ def load_gazebo_shutdown_support():
 
 
 gazebo_shutdown = load_gazebo_shutdown_support()
+SIMULATION_TEST_PARTITION = (
+    gazebo_shutdown.claim_unique_test_partition(
+        'l0008_sim_interfaces'
+    )
+)
 
 
 @pytest.mark.launch_test

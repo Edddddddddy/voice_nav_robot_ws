@@ -24,7 +24,7 @@ if(BUILD_TESTING)
     test_test_motion_gate_product.py
     PROPERTIES
       ENVIRONMENT
-        "RMW_IMPLEMENTATION=rmw_fastrtps_cpp;ROS_DOMAIN_ID=92;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;GZ_PARTITION=voice_nav_l0009_product_test"
+        "RMW_IMPLEMENTATION=rmw_fastrtps_cpp;ROS_DOMAIN_ID=92;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
       RUN_SERIAL TRUE
   )
 endif()

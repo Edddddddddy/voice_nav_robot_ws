@@ -73,7 +73,7 @@ if(BUILD_TESTING)
     test_test_tf_ownership_conflict.py
     PROPERTIES
       ENVIRONMENT
-        "RMW_IMPLEMENTATION=rmw_fastrtps_cpp;ROS_DOMAIN_ID=93;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;GZ_PARTITION=voice_nav_l0008_sim_test"
+        "RMW_IMPLEMENTATION=rmw_fastrtps_cpp;ROS_DOMAIN_ID=93;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
       RUN_SERIAL TRUE
   )
 endif()

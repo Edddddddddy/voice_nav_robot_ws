@@ -17,6 +17,7 @@
 from collections.abc import Callable, Mapping
 import os
 import re
+import secrets
 import shutil
 import subprocess
 from typing import Any
@@ -28,6 +29,21 @@ SERVICE_TIMEOUT_MILLISECONDS = 5000
 SUBPROCESS_TIMEOUT_SECONDS = 7.0
 PROCESS_TIMEOUT_SECONDS = 10.0
 POSITIVE_ACK = re.compile(r'\s*data:\s*true\s*')
+TEST_PARTITION_SCOPE = re.compile(r'[a-z0-9][a-z0-9_]{0,31}')
+
+
+def claim_unique_test_partition(scope: str) -> str:
+    """Claim a fresh Gazebo partition for this launch-test process."""
+    if TEST_PARTITION_SCOPE.fullmatch(scope) is None:
+        raise ValueError(
+            'Gazebo test partition scope must be 1-32 lowercase '
+            'letters, digits, or underscores'
+        )
+    partition = (
+        f'voice_nav_{scope}_{os.getpid()}_{secrets.token_hex(16)}'
+    )
+    os.environ['GZ_PARTITION'] = partition
+    return partition
 
 
 def structured_stop_gazebo(
@@ -39,7 +55,9 @@ def structured_stop_gazebo(
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> None:
     """Stop and join the launch-managed Gazebo in one exact test partition."""
-    active_environment = os.environ if environment is None else environment
+    active_environment = dict(
+        os.environ if environment is None else environment
+    )
     actual_partition = active_environment.get('GZ_PARTITION', '')
     if not expected_partition or actual_partition != expected_partition:
         raise AssertionError(
@@ -84,6 +102,7 @@ def structured_stop_gazebo(
             timeout=SUBPROCESS_TIMEOUT_SECONDS,
             check=False,
             shell=False,
+            env=active_environment,
         )
     except subprocess.TimeoutExpired as error:
         raise AssertionError(
