@@ -238,7 +238,8 @@ ControlResult MotionGateCore::open(
       binding_reason != Reason::WriterUnavailable &&
       binding_reason != Reason::WriterAmbiguous &&
       binding_reason != Reason::WriterMismatch &&
-      binding_reason != Reason::WriterStillPresent)
+      binding_reason != Reason::WriterStillPresent &&
+      binding_reason != Reason::WriterMetadataPending)
     {
       binding_reason = Reason::WriterUnavailable;
     }
