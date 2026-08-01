@@ -37,7 +37,7 @@ TEST_POLICIES = {
         "class": "SimulationControlTest",
         "shutdown_class": "SimulationControlShutdownTest",
         "partition_name": "SIMULATION_TEST_PARTITION",
-        "partition": "voice_nav_l0008_sim_test",
+        "partition_scope": "l0008_sim_control",
         "pre_stop": "publish_for",
         "pre_stop_args": (0.0, 0.0, 0.15),
     },
@@ -45,7 +45,7 @@ TEST_POLICIES = {
         "class": "SimulationInterfacesTest",
         "shutdown_class": "SimulationInterfacesShutdownTest",
         "partition_name": "SIMULATION_TEST_PARTITION",
-        "partition": "voice_nav_l0008_sim_test",
+        "partition_scope": "l0008_sim_interfaces",
         "pre_stop": "publish_command_for",
         "pre_stop_args": (0.0, 0.0, 0.25),
     },
@@ -53,7 +53,7 @@ TEST_POLICIES = {
         "class": "MotionGateProductTest",
         "shutdown_class": "MotionGateProductShutdownTest",
         "partition_name": "PRODUCT_TEST_PARTITION",
-        "partition": "voice_nav_l0009_product_test",
+        "partition_scope": "l0009_motion_gate_product",
         "pre_stop": "best_effort_inhibit",
         "pre_stop_args": (),
     },
@@ -207,6 +207,8 @@ def validate_support(path: Path) -> None:
         "SERVICE_TIMEOUT_MILLISECONDS = 5000",
         "SUBPROCESS_TIMEOUT_SECONDS = 7.0",
         "PROCESS_TIMEOUT_SECONDS = 10.0",
+        "secrets.token_hex(16)",
+        "os.getpid()",
     )
     for token in required:
         if token not in source:
@@ -225,11 +227,19 @@ def validate_support(path: Path) -> None:
         )
     runner = runner_calls[0]
     shell = keyword_value(runner, "shell")
+    runner_environment = keyword_value(runner, "env")
     if not (
         isinstance(shell, ast.Constant) and shell.value is False
     ):
         raise GazeboTeardownContractError(
             "Gazebo structured stop runner must set shell=False"
+        )
+    if not (
+        isinstance(runner_environment, ast.Name)
+        and runner_environment.id == "active_environment"
+    ):
+        raise GazeboTeardownContractError(
+            "Gazebo RPC must use the checked environment snapshot"
         )
     if len(startup_calls) != 1:
         raise GazeboTeardownContractError(
@@ -525,15 +535,28 @@ def validate_test(path: Path, policy: dict[str, object]) -> None:
             f"{path.name} must load installed Gazebo shutdown support"
         )
     assignments = {
-        target.id: literal_string(node.value)
+        target.id: node.value
         for node in tree.body
         if isinstance(node, ast.Assign)
         for target in node.targets
         if isinstance(target, ast.Name)
     }
-    if assignments.get(policy["partition_name"]) != policy["partition"]:
+    partition_assignment = assignments.get(policy["partition_name"])
+    if not (
+        isinstance(partition_assignment, ast.Call)
+        and isinstance(partition_assignment.func, ast.Attribute)
+        and isinstance(partition_assignment.func.value, ast.Name)
+        and partition_assignment.func.value.id == "gazebo_shutdown"
+        and partition_assignment.func.attr
+        == "claim_unique_test_partition"
+        and len(partition_assignment.args) == 1
+        and literal_string(partition_assignment.args[0])
+        == policy["partition_scope"]
+        and not partition_assignment.keywords
+    ):
         raise GazeboTeardownContractError(
-            f"{path.name} must use exact partition {policy['partition']}"
+            f"{path.name} must claim exact runtime-unique partition scope "
+            f"{policy['partition_scope']}"
         )
     test_class = class_named(tree, policy["class"])
     validate_cleanup_registration(test_class)
@@ -557,14 +580,10 @@ def validate_cmake(simulation_path: Path, bringup_path: Path) -> None:
         raise GazeboTeardownContractError(
             "voice_nav_sim must install test_support"
         )
-    policies = (
-        (simulation, "voice_nav_l0008_sim_test"),
-        (bringup, "voice_nav_l0009_product_test"),
-    )
-    for cmake, partition in policies:
-        if f"GZ_PARTITION={partition}" not in cmake:
+    for cmake in (simulation, bringup):
+        if "GZ_PARTITION=" in cmake:
             raise GazeboTeardownContractError(
-                f"CMake must lock isolated partition {partition}"
+                "CMake must not reuse a fixed Gazebo test partition"
             )
         if "RUN_SERIAL TRUE" not in cmake:
             raise GazeboTeardownContractError(

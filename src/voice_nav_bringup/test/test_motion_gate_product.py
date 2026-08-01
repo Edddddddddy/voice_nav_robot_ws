@@ -58,7 +58,6 @@ STATIONARY_ANGULAR_TOLERANCE = 0.02
 MOVING_LINEAR_TOLERANCE = 0.03
 MOVING_ANGULAR_TOLERANCE = 0.08
 OPEN_CONVERGENCE_BUDGET_SECONDS = 1.0
-PRODUCT_TEST_PARTITION = 'voice_nav_l0009_product_test'
 
 
 def load_open_convergence_support():
@@ -95,6 +94,11 @@ def load_gazebo_shutdown_support():
 
 open_convergence = load_open_convergence_support()
 gazebo_shutdown = load_gazebo_shutdown_support()
+PRODUCT_TEST_PARTITION = (
+    gazebo_shutdown.claim_unique_test_partition(
+        'l0009_motion_gate_product'
+    )
+)
 OPEN_PROTOCOL = open_convergence.ProtocolValues(
     applied=InternalMotionGateControl.Response.APPLIED,
     rejected=InternalMotionGateControl.Response.REJECTED,

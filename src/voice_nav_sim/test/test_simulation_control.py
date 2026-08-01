@@ -36,7 +36,6 @@ CONTROLLER_TIMEOUT_SECONDS = 0.35
 CONTROL_PERIOD_SECONDS = 0.01
 SIMULATION_STEP_EPSILON_SECONDS = 0.002
 CONTROLLER_STARTUP_SERVICE_RESPONSE_TIMEOUT_SECONDS = 15.0
-SIMULATION_TEST_PARTITION = 'voice_nav_l0008_sim_test'
 
 
 def load_gazebo_shutdown_support():
@@ -57,6 +56,11 @@ def load_gazebo_shutdown_support():
 
 
 gazebo_shutdown = load_gazebo_shutdown_support()
+SIMULATION_TEST_PARTITION = (
+    gazebo_shutdown.claim_unique_test_partition(
+        'l0008_sim_control'
+    )
+)
 
 
 @pytest.mark.launch_test
