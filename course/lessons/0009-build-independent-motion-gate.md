@@ -202,6 +202,9 @@ force_fault(reason, detail)  # Adapter-only fault ingress
 `OpenBindingProvider` 是 Core implementation
 内部使用的两个 seam：production Adapter 提供 bounded graph fact，测试提供
 确定性 fake。它们不进入 ROS Interface，也不允许 Core 自己访问 graph。
+`OpenBinding` 还是一个封闭 tagged result：`ready=true` 时 reason 必须为
+`NONE`。Provider 若返回“ready 但仍是 pending/mismatch”的矛盾组合，Core 必须在
+绑定 GID 或进入 ARMED 前锁存 `INTERNAL_FAILURE` 并保持 zero。
 
 在 CMake 中把 Core 建成 package-internal `STATIC` target
 `motion_gate_core`。不要安装或 export 该 library/header；唯一安装的运行目标是
@@ -362,19 +365,22 @@ READY
   = unique + Publisher + exact type/FQN + compatible QoS + non-zero GID
 
 WRITER_METADATA_PENDING
-  = unique + kind/type/QoS/namespace valid + non-zero pinned GID
-    + only node name unresolved
+  = unique + kind/type/QoS valid + non-zero pinned GID
+    + only node-identity components unresolved
+    + every already-known name/namespace component agrees
 
 DEFINITIVE_MISMATCH
   = wrong kind/type/FQN/partial namespace/QoS, zero or duplicate GID,
     disappearance/replacement after pinning, or barrier-time writer change
 ```
 
-第一次合法的未决快照立即把非零 GID 临时绑定到当前 PREPARE generation；只有
-同一 GID 补齐 identity 才能 READY。GID 替换会把该 observation session 锁成
-terminal mismatch，直到下一次成功 PREPARE 重置。完整 identity 已经确认后，
-同一 GID 在后续 barrier 快照中仅丢失 node name，可以沿用已经确认的身份；任何
-非空矛盾字段仍然终止。
+这里“未解析”只包括空 node name，或 Jazzy 的精确
+`_NODE_NAME_UNKNOWN_` / `_NODE_NAMESPACE_UNKNOWN_` 标记；不能把任意占位字符串
+当成 pending。第一次合法的未决快照立即把非零 GID 临时绑定到当前 PREPARE
+generation；只有同一 GID 补齐 identity 才能 READY。GID 替换会把该
+observation session 锁成 terminal mismatch，直到下一次成功 PREPARE 重置。
+完整 identity 已经确认后，同一 GID 在后续 barrier 快照中仅退化为上述精确未解析
+表示时，可以沿用已经确认的身份；任何已知但矛盾的 name/namespace 仍然终止。
 
 Node 必须先确认 final controller health，再开始 candidate GID pinning，避免把
 controller 暂不可用误记为 candidate generation 身份。调用端只重试 typed reason
@@ -382,6 +388,8 @@ controller 暂不可用误记为 candidate generation 身份。调用端只重�
 request ID、同一个一秒 absolute steady deadline，并重新验证响应仍为
 `PREPARED`、unbound、selected/published zero。`detail` 只记录有界的 count、kind、
 type、node identity、QoS、GID 和 elapsed time，不能参与 reason 19 的控制判断。
+调用端在每个 RPC 前后都检查同一个 steady deadline；已经越过 deadline 的
+`APPLIED` 也必须报告 timeout，不能因为它是 terminal response 就绕过总预算。
 
 这个修正不增加 ROS 进程、Topic、公开 Interface 或第五个 MotionGate operation；
 也不改变三次 graph snapshot、reader A/B/C 或最终速度所有权。
