@@ -60,17 +60,17 @@ GAZEBO_TEST_CLASSES = {
     "test_simulation_control.py": (
         "SimulationControlTest",
         "test_stamped_drive_odometry_tf_and_consumer_timeout",
-        "best_effort_zero",
+        "publish_zero_for_cleanup",
     ),
     "test_simulation_interfaces.py": (
         "SimulationInterfacesTest",
         "test_perception_odom_tf_and_ownership_contract",
-        "best_effort_zero",
+        "publish_zero_for_cleanup",
     ),
     "test_motion_gate_product.py": (
         "MotionGateProductTest",
         "test_motion_gate_product_contract",
-        "best_effort_inhibit",
+        "inhibit_for_cleanup",
     ),
 }
 CONTRACT_FILES = (
@@ -190,16 +190,13 @@ class GazeboTeardownContractTest(unittest.TestCase):
                     source.index(stop_registration),
                     source.index(pre_stop_registration),
                 )
-                self.assertRegex(
+                self.assertIn(
+                    "gazebo_shutdown.join_started_thread(",
                     source,
-                    r"try:\n\s+spin_thread\.join\(timeout=2\.0\)\n"
-                    r"\s+except Exception:\n\s+pass",
                 )
-                self.assertRegex(
+                self.assertIn(
+                    "gazebo_shutdown.run_cleanup_steps(",
                     source,
-                    r"if rclpy\.ok\(\):\n\s+try:\n"
-                    r"\s+rclpy\.shutdown\(\)\n\s+except Exception:\n"
-                    r"\s+pass",
                 )
 
 
@@ -499,7 +496,7 @@ class GazeboTeardownMutationTest(unittest.TestCase):
                 "            proc_info,\n"
                 "            expected_partition=PRODUCT_TEST_PARTITION,\n"
                 "        )\n"
-                "        self.addCleanup(self.best_effort_inhibit)"
+                "        self.addCleanup(self.inhibit_for_cleanup)"
             ),
             (
                 "        self.addCleanup(\n"
@@ -508,7 +505,7 @@ class GazeboTeardownMutationTest(unittest.TestCase):
                 "            expected_partition=PRODUCT_TEST_PARTITION,\n"
                 "        )\n"
                 "        self.addCleanup(self.destroy_ros_fixture)\n"
-                "        self.addCleanup(self.best_effort_inhibit)"
+                "        self.addCleanup(self.inhibit_for_cleanup)"
             ),
             "register independent failure-path cleanups first",
         )

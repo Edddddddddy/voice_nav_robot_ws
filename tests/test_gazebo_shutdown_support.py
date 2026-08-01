@@ -2,6 +2,7 @@ import importlib.util
 import os
 import re
 import subprocess
+import threading
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -257,6 +258,64 @@ class GazeboShutdownSupportTest(unittest.TestCase):
             proc_info.shutdown_calls,
             [{"process": "gazebo", "timeout": 10.0}],
         )
+
+    def test_cleanup_steps_attempt_every_callback_before_raising(self):
+        events = []
+
+        def failing_step(label):
+            events.append(label)
+            raise RuntimeError(label)
+
+        with self.assertRaises(ExceptionGroup) as caught:
+            self.support.run_cleanup_steps(
+                "fixture destruction failed",
+                (
+                    ("first", lambda: failing_step("first")),
+                    ("middle", lambda: events.append("middle")),
+                    ("last", lambda: failing_step("last")),
+                ),
+            )
+
+        self.assertEqual(events, ["first", "middle", "last"])
+        self.assertEqual(len(caught.exception.exceptions), 2)
+        self.assertIn(
+            "cleanup step failed: first",
+            caught.exception.exceptions[0].__notes__,
+        )
+        self.assertIn(
+            "cleanup step failed: last",
+            caught.exception.exceptions[1].__notes__,
+        )
+
+    def test_never_started_thread_is_safe_to_cleanup(self):
+        thread = threading.Thread(target=lambda: None)
+
+        self.support.join_started_thread(thread, timeout_seconds=0.01)
+
+        self.assertIsNone(thread.ident)
+
+    def test_started_thread_timeout_is_reported(self):
+        class StillRunningThread:
+            ident = 7
+
+            def __init__(self):
+                self.join_calls = []
+
+            def join(self, *, timeout):
+                self.join_calls.append(timeout)
+
+            def is_alive(self):
+                return True
+
+        thread = StillRunningThread()
+
+        with self.assertRaisesRegex(TimeoutError, "did not stop"):
+            self.support.join_started_thread(
+                thread,
+                timeout_seconds=2.0,
+            )
+
+        self.assertEqual(thread.join_calls, [2.0])
 
 
 if __name__ == "__main__":
