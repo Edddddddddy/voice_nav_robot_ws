@@ -265,13 +265,12 @@ The barrier is required between consecutive Mission steps too, even when both
 steps use the same producer. Limits, timeouts, and queue bounds come from
 trusted configuration and are verified with deliberately delayed old commands.
 
-Lesson 0009 has a local-GREEN implementation of the normal-running Core,
-private seam, Gate-local binding, barriers, final ownership, and deadline
-expiry with a test authority/candidate harness. Its complete local gate and
-independent evidence review pass; PR, required CI, merge, and solution tag
-remain open. It does not claim the complete Runtime/smoother/Collision Monitor
-integration. Process-kill crash-stop, consumer-deadman proof, and
-managed/unmanaged Gazebo pause behavior are reserved for Lesson 0010 / VN-0011.
+Lesson 0009 publicly delivers the normal-running Core, private seam,
+Gate-local binding, barriers, final ownership, and deadline expiry with an
+in-process test authority/candidate harness. It does not claim the complete
+Runtime/smoother/Collision Monitor integration. Process-kill crash-stop,
+consumer-deadman proof, and managed/unmanaged Gazebo pause behavior are
+reserved for Lesson 0010 / VN-0011.
 
 ### Gazebo managed safe-pause and resume
 

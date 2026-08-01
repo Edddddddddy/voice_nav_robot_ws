@@ -1,15 +1,15 @@
 # Lesson 0009 学习记录：独立 MotionGate
 
-状态：VN-0010-C2 local/hosted gates GREEN and PR #16 rebase-merged
-（VN-0010-C2 corrective addendum；Lesson 0009 主账本 closure 仍由 PR #13 维护）
+状态：Completed reference solution / public closure recorded
 （教师参考实现）
 
 学习者复现状态：Pending
 
-本记录只填写已经发生且可查询的事实。PR 和 pre-remediation head 的 hosted CI
-已经发生；`8e022580` 的历史完整本地门禁和包含 `517339a` code head 的
-`ff06e6b` 当前本地完整门禁均已通过。final reviewed head 的 exact-head hosted
-CI、merge 与 solution tag 尚未发生，因此仍保持 Pending。
+本记录只填写已经发生且可查询的事实。历史失败/重跑、本地 hardening、final
+reviewed head 的 exact-head 本地门禁与 hosted CI、rebase merge、公共身份映射和
+不可变 solution tag 均保留。标签先于这份事后身份台账生成，因此 solution tag
+记录 reviewed implementation snapshot；台账闭环进入下一课的 start baseline，
+不以重写标签制造自引用。
 
 ## 变更身份
 
@@ -53,17 +53,25 @@ CI、merge 与 solution tag 尚未发生，因此仍保持 Pending。
   `8e022580a7add59a9c5d5a95973182322a0641c0`
 - Clean-count verification code head：
   `8e022580a7add59a9c5d5a95973182322a0641c0`
-- Scoped-evidence hardening head under review：
+- Scoped-evidence hardening head：
   `517339a3d313910a937fef973a9bdd635b457fc8`
 - Exact local full-gate verification head：
   `ff06e6b393f2c8d974afbcc6ebd1c6766f8de2d7`
+- Final reviewed feature head：
+  `956fde31841a8c2ded6b37e905a8352afd10cdce`
 - GitHub PR：
-  [#12](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/12)（Ready）
+  [#12](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/12)（Merged）
 - Remote PR head（remediation push 前）：
   `c8b9eefed5729a9a2ab2a60a9d8302e697beeb70`
-- Required exact-head CI on final reviewed head：Pending
-- Public merge identity：Pending
-- Solution tag object/peeled target：Pending
+- Required exact-head CI：run `30651076176`, success
+- Public rebase tip：
+  `c2d7631b57001a6e3e360f9bbdb558de6b7a85ed`
+- Reviewed/public tree：
+  `41b9dd6ed9a2c1f992e1c41adcbe5af1da0cb013`
+- Solution tag object：
+  `f31c559d30a5876f036991bacf357b00ea1ea128`
+- Solution tag peeled target：
+  `c2d7631b57001a6e3e360f9bbdb558de6b7a85ed`
 
 ## Immutable start checkpoint
 
@@ -682,6 +690,37 @@ the clean-prefix audit reported the existing workspace underlay override warning
 Neither warning weakened an assertion or exit-code requirement.
 ```
 
+### Final reviewed exact-head verification
+
+```text
+Verified head:
+956fde31841a8c2ded6b37e905a8352afd10cdce
+
+Command / result:
+bash scripts/verify.sh
+exit 0; wall time 328.6 s
+
+Repository static:
+168 tests passed
+
+ROS/package evidence:
+6 packages built
+148 scoped result records, 0 errors, 0 failures, 8 skipped
+Clean MotionGate install audit passed: Core private, node installed.
+VoiceNav Robot verification passed.
+
+Selected product metrics (milliseconds unless stated):
+bounded motion distance=0.099000 m
+clamp linear=0.400, angular=1.200 at Gate and controller
+authority expiry: Gate zero=258.316; controller after=9.497;
+  stationary=99.485; hold=219.949
+candidate expiry: Gate zero=157.476; controller after=7.687;
+  stationary=97.686; hold=201.597
+INHIBIT: ack=10.110; Gate zero=0.700; controller zero=4.996;
+  stationary=114.450; hold=200.027
+final command owner remained /motion_gate_node with a stable writer GID
+```
+
 ### Scoped clean-count canonical verification
 
 ```text
@@ -755,14 +794,14 @@ the scoped reporter rejects missing results and cannot traverse package paths
 - [x] evidence-review P2 已由 scoped reporting、三阶段 build-boundary guard 与
   干净 148-result 全量门禁关闭。
 - [x] scoped-evidence implementation head `517339a` 的 code/safety re-review 完成。
-- [ ] final documentation head 的 evidence re-review 完成。
+- [x] final documentation head 的 evidence re-review 完成且无 P0-P3 finding。
 - [x] PR diff 只包含 VN-0010 范围。
-- [ ] required hosted CI 在 exact head 通过。
-- [ ] review conversations 全部解决。
-- [ ] PR 以 rebase 方式合并。
-- [ ] record 写入 local-to-public identity map。
-- [ ] annotated `course/0009-solution` 指向 public reviewed solution。
-- [ ] start/solution tags 均未被重写。
+- [x] required hosted CI 在 exact head 通过。
+- [x] review conversations 全部解决（提交 review 与 thread 均为零）。
+- [x] PR 以 rebase 方式合并。
+- [x] record 写入完整 local-to-public identity map。
+- [x] annotated `course/0009-solution` 指向 public reviewed solution。
+- [x] start/solution tags 均未被重写。
 
 ```text
 Issue:
@@ -779,33 +818,105 @@ evidence review: P2 stale result aggregation found; historical full-gate
   evidence on 8e022580 closes the original contamination finding
 scoped-evidence code review on 517339a: no P0-P3 findings
 scoped-evidence safety review on 517339a: no P0-P3 findings
-remediation evidence review on final documentation head: Pending
+final code/safety/documentation review: no P0-P3 findings
 
 PR:
 https://github.com/Edddddddddy/voice_nav_robot_ws/pull/12
-state=OPEN; draft=false; base=main; head=feat/vn-0010-l0009-motion-gate
+state=MERGED; draft=false; base=main; head=feat/vn-0010-l0009-motion-gate
 creation head=fcf9af874df93438519e3d7472e5b3237fdd21f0
 remote head before remediation push=c8b9eefed5729a9a2ab2a60a9d8302e697beeb70
 local readiness-reviewed head=d5392d30efcc975cd280f8af6e1d7a433184d0ff
 local clean-count verified head=8e022580a7add59a9c5d5a95973182322a0641c0
 local scoped-evidence hardening head=517339a3d313910a937fef973a9bdd635b457fc8
-remediation pushed=false
+final reviewed feature head=956fde31841a8c2ded6b37e905a8352afd10cdce
+remediation pushed=true
 
 Hosted CI history on pre-remediation head:
 run 30625857309 attempt 1: failure, head=c8b9eefed5729a9a2ab2a60a9d8302e697beeb70
 run 30625857309 attempt 2: success rerun, same head, no code change
 
 Required exact-head CI:
-Pending on the final documentation/review head
+run=30651076176; head=956fde31841a8c2ded6b37e905a8352afd10cdce;
+job="required / ubuntu-24.04 / ros-jazzy"; conclusion=success
 
 Merge method/time:
-Pending
+rebase; 2026-08-01T04:22:41Z
 
-Public identity map:
-Pending
+Reviewed/public tree identity:
+local tree=41b9dd6ed9a2c1f992e1c41adcbe5af1da0cb013
+public tree=41b9dd6ed9a2c1f992e1c41adcbe5af1da0cb013
+range-diff=58 equal, 0 changed
 
 Solution tag object and peeled target:
-Pending
+object=f31c559d30a5876f036991bacf357b00ea1ea128
+peeled=c2d7631b57001a6e3e360f9bbdb558de6b7a85ed
+```
+
+### Local-to-public rebase identity map
+
+以下 58 行按提交顺序保存 reviewed feature commit 到 public `main` commit 的
+完整映射。`git range-diff` 对每一行均报告 `=`；相等 tree 的最终提交另在上方
+记录。该表是 VN-0010 的权威 public identity ledger。
+
+```text
+1d5abfbcb454bc41c22de7e9ec98b4b64f2b6323 c63a50aff27b339d7cf462f6322012b3543b1dce
+4e1318b1f4ba5e3a0e176bc051ce3890eb55035e 733b183e5b044834c3542c292e13e611e50879a6
+8e80dcc8a799f8f46d5dc23121535a7fdafa7f05 2814bd3aeb5aba69e56df0e9cfdbe787b0631473
+3cdd815433c15ff91043827c568c185bc39fff51 32fa975f0885d6a87b270700f3fdc286fd5c896c
+fcf9af874df93438519e3d7472e5b3237fdd21f0 2cecd907e53b15fd50fa1010ee166274dd8b2610
+a2463657875dffc32151cdaa991f6a9cca9575a6 984a4255b4d239fc087238a397bef0c6c1aa1580
+c8b9eefed5729a9a2ab2a60a9d8302e697beeb70 d702efb1c29021b8f74a6d1f0d994d05fb89fc4b
+b82cb736d358f1ce6374373efabc692a3426bd83 065d326348a8297e193eb41803ee0dfe0b315ac0
+3ce547f90b6bed000512cda81c99db3233d145f1 682ab45efce5751f66a870e2232ccf09005ffde3
+e86a07ddae17f65c0cd040fbdda3e05420346bbc 6c445503442bf0627514f7596474bb8114a2be1a
+e984433c80d9f9a2afa81011c8d606ccf8a3c79e 8afa862a753e6260e2aa0dda4a0691b8219bb3d0
+bf1f6ac9650222cecbdbd2e5777caf9f00748cca 80a22072ab3b490ccbea648dca1ca6a2b73663ea
+a5fb71e92560a0d9e7f5f5bd5ceb3794a8b1e5fd 43eac964d65866ef25250c3408b7ad3a261841fc
+d5392d30efcc975cd280f8af6e1d7a433184d0ff 95764c3b0ffd3583baf07490902671837a9bca2b
+caf5cd923cdd27f06e7ac7b7f8c1fbdfe25495f0 49a471b192afbe80f24b4f4e2c11c1a03a18dc72
+c5d88c24b8e2361bf1403e314fb04e7fd604629f b4f4bb9f30cfb746c5f259b24dc7f573376f897d
+9d968ae236325a19deb0236749ea715f4c05c42f be0f6b8ac74c389e013bf0300d0c775f7c5a7998
+8e022580a7add59a9c5d5a95973182322a0641c0 34f5fb814aeb9a2d1b384176f494987c42c49c92
+72abf2298f03939a0c3770f10fe69f1f4ee4779a 1c27b84480d152961528a7aee48a385c923907d8
+27ff84a89aa6f55107ca9206df426e395f6efc16 cc2d8ea7bd025c0f51a2aec5c6c0156ed3386d91
+74a05b8fde02456e26d995db6688f0f66dccfed2 7c37e646c9f0d2209aaa5957975b4435a588cb73
+4958b7c4c681d8a0344a4f46443079043505a448 6ef543130b90fe50207882a1512cfbc9d0938345
+ec13bb372d57aa19ea5e9c2b7d74dd77ed149a56 83a0a7a6a1c1345cb5e3ed6bbd323632296784a9
+527a0b5c6f04ec4a0a9a15e8cf55a065ba146fd3 f626a35f710fdef3ebcb5076b675acf597ce4c0d
+a1bd5b5e7ebaf294c4411afe79d6ac25f6dbb3da bebf84ad2a4949962877516985d58d5e09ba8033
+bf0c1fe738704c5db27ffe4d5baa08e7923355af ec5ef39bd2ebfd96d4de387a8dd778ded28a769c
+10ede88d0ad9dba479c9bb355d9003040b533d6f 468d833e2e46a6c11723d445a6b6c75c77b080ac
+5a16670d3836a26930362f81daa7dd405f4dfc48 2fc9bc7a4195182129dad20067148550dc9dab82
+516c8468f979d88f26c7f8f3d3e27b0db33df960 2ae877dcd5df06a005deab3e89e7cf8deb698f45
+afce5771ae1c8825d37be3b1868bb2478dd14256 5a4236fb32cc830c0f76da14525dba1c53996dc9
+19de986c554f93b5e5196655c6558a9405fa6605 f9ae7650d2d076fa03041ac5ee1430f5c4195950
+f8c5a88d71c23cffc22555f12609a5131867acbf bd889415d3e4e99ba669178d2ec85bdc3e5eabf7
+73fd263455d331e66bb23613017199c243fffdca 954f7d0a0e6df1d47df1edd8d12c34bcf5213d61
+9abd0c7f8d257a0763e8c62300bd3107a14e3879 b902dfd5b3dbd1a36ef4b50a82feac9e3cb83a48
+4bbd92d15b719e596e450a953f1dbac163cc08ab 82b9b0a46c9410c115cb47be59a03e5f180e4e8d
+108ddfa15782f9f8463d1fe1ee3b4640d13324fa f0b053afb7c72c70079b3549d3b2d3f22a6208e8
+ff44a87a97d01eb0d6040251cfa923c800b74529 67d5126a904660f1224c431be0fc9d594c073175
+34d900540fba94d36ddac4a9b1928d30637f7651 52376a44869bb4d8dece2b9ce7b87529da888c33
+953a14abb9df557b242bc3279a4be0ac6ea6d213 547cb91c156a36e707e70d7ca18b12080a5fbf50
+761730a58dcc42e38d42c873844f1b57bf52aa5c bd1414ed0e55599fbebc8f5edd82b9a80b89e23c
+c2954caa8807206471d65d89c6bf87cac63893ee 04bf11d9445541fbe8def40bec9b71118b601558
+5286b3635319dc6f402454eb39ee8f19ae6e26d3 9dc3533e2b098d0f8d987fc4afc64a9bddaefa43
+b1bd863decb287362f0f268ce97175a4a80cc52b cb9a667ecb71d415cbcc35d7382f3716113c6005
+0b385e17a008ccfad0186ab5d97ab9b241f6bcce 41f03b72cca5b3b7b3bd3ba7bffb610a27a001d4
+fe7b8449abf31d6a7a973913737987166b198d71 7082a4ddf0a5b6ac4485431b41be45a7d11e2bd9
+4f1cab00db8f2a9f3fa4e28d1dc6ac9b27d44370 ff5a9a1eb3193696bff8990cd0427060ea9121b1
+cc908fb2213d8aadafe1955a98594fce21fa7d1e 193d1969da1e65c9f083971ecb1f8a6d1a4b2ecc
+f50aa3a4d78aa63fe6f0ff46133a0111aa7d804d b79d223abb477a1b2bee1ef777457ebbfa9e8941
+7c2f9f304b60cce3dd82bb674654f30794f19b21 a17645f5dcbf87a0cc5d5958ca1493f635584972
+93d968e9c32cf4aa3378610361204acc8a9a23ec e1fbf0441ee577dbcb0d6cc04f73feed11a60311
+e4c10c093f557e2b18fecd34b121ddbd91a4d48c 9c2afa44f74ea8bc9f1494931ee463d1e81d6549
+061d88c0fc3c35a731a1a31b002e7dfbe017b1e4 466035cc1320ba87c30c43b5b0ecb3f65fd5da02
+3dc4fa36e9fb185c7a9d77e75331f22907f65319 a4d74893abc91aa225b9f15d3bbc7a2bfcfc1a92
+0b77d4a19c210d7babf1a28ef320911086ccfd7d f74161547033d3ead68bf187cb8dd2e074d03e02
+6e04af29a02dfe0f55cdaf8e43953bdc01b5a6cd 39cdb7ae3ebac4c297bcf90389a2b9796f1b6d2a
+517339a3d313910a937fef973a9bdd635b457fc8 910ec5f2d86b944b0c2522a079d4c29262ead516
+ff06e6b393f2c8d974afbcc6ebd1c6766f8de2d7 9377301efd04a1f2d4cf25c731c2fb30a84b76f5
+956fde31841a8c2ded6b37e905a8352afd10cdce c2d7631b57001a6e3e360f9bbdb558de6b7a85ed
 ```
 
 ## 复盘
