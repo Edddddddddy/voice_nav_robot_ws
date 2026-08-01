@@ -6,9 +6,11 @@ import argparse
 import inspect
 import sys
 import tempfile
+from collections import Counter
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
+from xml.etree import ElementTree
 
 from colcon_test_result.test_result import get_test_result_extensions
 from colcon_test_result.test_result import Result
@@ -19,6 +21,97 @@ from colcon_evidence import open_result_snapshot
 from colcon_evidence import PackageSnapshotIdentity
 from colcon_evidence import ResultFileIdentity
 from colcon_evidence import selected_package_directories
+
+
+CRITICAL_LAUNCH_CASES: dict[
+    str,
+    dict[Path, frozenset[tuple[str, str]]],
+] = {
+    "voice_nav_mission": {
+        Path(
+            "test_results/voice_nav_mission/"
+            "test_test_motion_gate_node.py.xunit.xml"
+        ): frozenset(
+            {
+                (
+                    "voice_nav_mission.MotionGateNodeTest",
+                    "test_steady_fail_closed_protocol_without_clock",
+                ),
+                (
+                    "voice_nav_mission.MotionGateNodeShutdownTest",
+                    "test_motion_gate_exits_cleanly",
+                ),
+            }
+        ),
+    },
+    "voice_nav_bringup": {
+        Path(
+            "test_results/voice_nav_bringup/"
+            "test_test_motion_gate_product.py.xunit.xml"
+        ): frozenset(
+            {
+                (
+                    "voice_nav_bringup.MotionGateProductTest",
+                    "test_motion_gate_product_contract",
+                ),
+                (
+                    "voice_nav_bringup.MotionGateProductShutdownTest",
+                    "test_all_launch_managed_processes_exit_cleanly",
+                ),
+            }
+        ),
+    },
+    "voice_nav_sim": {
+        Path(
+            "test_results/voice_nav_sim/"
+            "test_test_simulation_control.py.xunit.xml"
+        ): frozenset(
+            {
+                (
+                    "voice_nav_sim.LaunchStartupPolicyTest",
+                    "test_startup_handler_stops_after_failed_stage",
+                ),
+                (
+                    "voice_nav_sim.SimulationControlTest",
+                    "test_stamped_drive_odometry_tf_and_consumer_timeout",
+                ),
+                (
+                    "voice_nav_sim.SimulationControlShutdownTest",
+                    "test_all_launch_managed_processes_exit_cleanly",
+                ),
+            }
+        ),
+        Path(
+            "test_results/voice_nav_sim/"
+            "test_test_simulation_interfaces.py.xunit.xml"
+        ): frozenset(
+            {
+                (
+                    "voice_nav_sim.SimulationInterfacesTest",
+                    "test_perception_odom_tf_and_ownership_contract",
+                ),
+                (
+                    "voice_nav_sim.SimulationInterfacesShutdownTest",
+                    "test_all_launch_managed_processes_exit_cleanly",
+                ),
+            }
+        ),
+        Path(
+            "test_results/voice_nav_sim/"
+            "test_test_tf_ownership_conflict.py.xunit.xml"
+        ): frozenset(
+            {
+                (
+                    "voice_nav_sim.TfOwnershipConflictTest",
+                    (
+                        "test_normal_audit_rejects_and_sentinel_"
+                        "proves_the_conflict"
+                    ),
+                ),
+            }
+        ),
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -189,6 +282,236 @@ def _require_complete_xunit_evidence(
             )
 
 
+def _require_skip_policy(
+    sandbox_package: Path,
+    parsed: ParsedSandbox,
+) -> None:
+    allowed_path = Path(
+        "test_results",
+        sandbox_package.name,
+        "cppcheck.xunit.xml",
+    )
+    allowed_classname = f"{sandbox_package.name}.cppcheck"
+    for raw_path in sorted(parsed.xunit_files):
+        result_path = Path(raw_path)
+        try:
+            relative_path = result_path.relative_to(sandbox_package)
+        except ValueError as error:
+            raise ValueError(
+                f"xUnit skip policy escaped its sandbox: {result_path}"
+            ) from error
+        try:
+            root = ElementTree.parse(result_path).getroot()
+        except (ElementTree.ParseError, OSError) as error:
+            raise ValueError(
+                f"xUnit skip policy could not parse: {relative_path}"
+            ) from error
+
+        declared_skip = False
+        for suite in root.iter("testsuite"):
+            raw_count = suite.get("skipped")
+            if raw_count is None:
+                continue
+            try:
+                skip_count = int(raw_count)
+            except ValueError as error:
+                raise ValueError(
+                    "xUnit skip policy found an invalid skipped count: "
+                    f"{relative_path}"
+                ) from error
+            if skip_count < 0:
+                raise ValueError(
+                    "xUnit skip policy found an invalid skipped count: "
+                    f"{relative_path}"
+                )
+            declared_skip = declared_skip or skip_count > 0
+
+        skipped_cases = tuple(
+            case
+            for case in root.iter("testcase")
+            if case.find("skipped") is not None
+        )
+        if not declared_skip and not skipped_cases:
+            continue
+        if relative_path != allowed_path:
+            raise ValueError(
+                "skipped tests are not allowlisted: "
+                f"{relative_path}"
+            )
+        if not skipped_cases or any(
+            case.get("classname") != allowed_classname
+            for case in skipped_cases
+        ):
+            raise ValueError(
+                "cppcheck skip evidence is malformed: "
+                f"{relative_path}"
+            )
+
+
+def _xunit_count(element, attribute: str, result_path: Path) -> int:
+    value = element.get(attribute)
+    try:
+        count = int(value) if value is not None else -1
+    except ValueError as error:
+        raise ValueError(
+            "critical launch evidence has an invalid "
+            f"{attribute} count: {result_path}"
+        ) from error
+    if count < 0:
+        raise ValueError(
+            "critical launch evidence is missing a valid "
+            f"{attribute} count: {result_path}"
+        )
+    return count
+
+
+def _require_critical_launch_evidence(sandbox_package: Path) -> None:
+    required_results = CRITICAL_LAUNCH_CASES.get(sandbox_package.name)
+    if required_results is None:
+        return
+
+    for relative_path, required_cases in required_results.items():
+        result_path = sandbox_package / relative_path
+        if not result_path.is_file():
+            raise ValueError(
+                "critical launch evidence is missing: "
+                f"{relative_path}"
+            )
+        try:
+            root = ElementTree.parse(result_path).getroot()
+        except (ElementTree.ParseError, OSError) as error:
+            raise ValueError(
+                "critical launch evidence is not valid XML: "
+                f"{relative_path}"
+            ) from error
+
+        if root.tag == "testsuite":
+            suites = [root]
+            aggregate_root = None
+        elif root.tag == "testsuites":
+            suites = [
+                child for child in root if child.tag == "testsuite"
+            ]
+            aggregate_root = root
+        else:
+            raise ValueError(
+                "critical launch evidence has an invalid root: "
+                f"{relative_path}"
+            )
+        if not suites:
+            raise ValueError(
+                "critical launch evidence has no test suite: "
+                f"{relative_path}"
+            )
+        if aggregate_root is not None and any(
+            child.tag == "testcase" for child in aggregate_root
+        ):
+            raise ValueError(
+                "critical launch evidence has test cases outside a suite: "
+                f"{relative_path}"
+            )
+
+        case_elements = []
+        suite_totals = {
+            "tests": 0,
+            "errors": 0,
+            "failures": 0,
+            "skipped": 0,
+        }
+        for suite in suites:
+            if any(child.tag == "testsuite" for child in suite):
+                raise ValueError(
+                    "critical launch evidence has nested test suites: "
+                    f"{relative_path}"
+                )
+            suite_cases = [
+                child for child in suite if child.tag == "testcase"
+            ]
+            actual = {
+                "tests": len(suite_cases),
+                "errors": sum(
+                    case.find("error") is not None for case in suite_cases
+                ),
+                "failures": sum(
+                    case.find("failure") is not None for case in suite_cases
+                ),
+                "skipped": sum(
+                    case.find("skipped") is not None for case in suite_cases
+                ),
+            }
+            for attribute, actual_count in actual.items():
+                if _xunit_count(suite, attribute, relative_path) != actual_count:
+                    raise ValueError(
+                        "critical launch evidence has an inconsistent "
+                        f"{attribute} count: {relative_path}"
+                    )
+                suite_totals[attribute] += actual_count
+            if any(actual[outcome] for outcome in ("errors", "failures", "skipped")):
+                raise ValueError(
+                    "critical launch evidence contains a non-passing case: "
+                    f"{relative_path}"
+                )
+            case_elements.extend(suite_cases)
+
+        if aggregate_root is not None:
+            for attribute in ("tests", "errors", "failures"):
+                if (
+                    _xunit_count(
+                        aggregate_root,
+                        attribute,
+                        relative_path,
+                    )
+                    != suite_totals[attribute]
+                ):
+                    raise ValueError(
+                        "critical launch evidence has an inconsistent "
+                        f"aggregate {attribute} count: {relative_path}"
+                    )
+            if aggregate_root.get("skipped") is not None and (
+                _xunit_count(
+                    aggregate_root,
+                    "skipped",
+                    relative_path,
+                )
+                != suite_totals["skipped"]
+            ):
+                raise ValueError(
+                    "critical launch evidence has an inconsistent "
+                    f"aggregate skipped count: {relative_path}"
+                )
+
+        if not case_elements:
+            raise ValueError(
+                "critical launch evidence has no test cases: "
+                f"{relative_path}"
+            )
+        case_ids = tuple(
+            (case.get("classname", ""), case.get("name", ""))
+            for case in case_elements
+        )
+        if any(not classname or not name for classname, name in case_ids):
+            raise ValueError(
+                "critical launch evidence contains an unnamed test case: "
+                f"{relative_path}"
+            )
+        duplicate_cases = sorted(
+            case_id
+            for case_id, count in Counter(case_ids).items()
+            if count > 1
+        )
+        if duplicate_cases:
+            raise ValueError(
+                "critical launch evidence contains duplicate test cases: "
+                f"{relative_path}: {duplicate_cases}"
+            )
+        missing_cases = sorted(required_cases - set(case_ids))
+        if missing_cases:
+            raise ValueError(
+                "critical launch evidence inventory is incomplete: "
+                f"{relative_path}: missing={missing_cases}"
+            )
+
+
 def collect_package_evidence(
     package_directory: Path,
     *,
@@ -218,6 +541,9 @@ def collect_package_evidence(
                 "no test results found for selected package: "
                 f"{package_directory.name}"
             )
+        if require_results:
+            _require_critical_launch_evidence(sandbox_package)
+            _require_skip_policy(sandbox_package, parsed)
 
         mapped_files = tuple(
             sorted(

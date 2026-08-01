@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.22)
 project(voice_nav_sim)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -13,6 +13,7 @@ find_package(ament_cmake REQUIRED)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(ament_cmake_ros REQUIRED)
   find_package(ament_lint_auto REQUIRED)
   find_package(launch_testing_ament_cmake REQUIRED)
   find_package(rclcpp REQUIRED)
@@ -57,14 +58,17 @@ if(BUILD_TESTING)
   add_launch_test(
     test/test_simulation_control.py
     TIMEOUT 120
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
   )
   add_launch_test(
     test/test_simulation_interfaces.py
     TIMEOUT 120
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
   )
   add_launch_test(
     test/test_tf_ownership_conflict.py
     TIMEOUT 30
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
   )
 
   set_tests_properties(
@@ -73,8 +77,16 @@ if(BUILD_TESTING)
     test_test_tf_ownership_conflict.py
     PROPERTIES
       ENVIRONMENT
-        "RMW_IMPLEMENTATION=rmw_fastrtps_cpp;ROS_DOMAIN_ID=93;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
+        "RMW_IMPLEMENTATION=rmw_fastrtps_cpp;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
       RUN_SERIAL TRUE
+  )
+  set_tests_properties(
+    test_test_simulation_control.py
+    test_test_simulation_interfaces.py
+    test_test_tf_ownership_conflict.py
+    PROPERTIES
+      ENVIRONMENT_MODIFICATION
+        "ROS_DOMAIN_ID=unset:;DISABLE_ROS_ISOLATION=unset:"
   )
 endif()
 
