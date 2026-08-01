@@ -15,6 +15,7 @@
 #include "writer_observation.hpp"
 
 #include <algorithm>
+#include <array>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
@@ -26,6 +27,11 @@ namespace
 {
 
 constexpr std::size_t kMaximumDetailLength = 160U;
+constexpr std::size_t kDigestSuffixLength = 9U;
+constexpr std::size_t kSummaryFixedLength = 55U;
+constexpr std::size_t kSummaryValueCount = 5U;
+constexpr std::size_t kMinimumSummaryLength =
+  kSummaryFixedLength + kSummaryValueCount * kDigestSuffixLength;
 constexpr char kUnknownNodeName[] = "_NODE_NAME_UNKNOWN_";
 constexpr char kUnknownNodeNamespace[] = "_NODE_NAMESPACE_UNKNOWN_";
 
@@ -52,6 +58,34 @@ std::string gid_text(const WriterGid & gid)
     stream << std::setw(2) << static_cast<unsigned int>(byte);
   }
   return stream.str();
+}
+
+std::string digest_text(const std::string & value)
+{
+  std::uint32_t digest = 2166136261U;
+  for (const auto character : value) {
+    digest ^= static_cast<std::uint8_t>(character);
+    digest *= 16777619U;
+  }
+
+  std::ostringstream stream;
+  stream << std::hex << std::setfill('0') << std::setw(8) << digest;
+  return stream.str();
+}
+
+std::string compact_field(
+  const std::string & value,
+  std::size_t maximum_length)
+{
+  if (value.size() <= maximum_length) {
+    return value;
+  }
+
+  const auto suffix = "~" + digest_text(value);
+  if (maximum_length <= suffix.size()) {
+    return suffix.substr(suffix.size() - maximum_length);
+  }
+  return value.substr(0U, maximum_length - suffix.size()) + suffix;
 }
 
 std::string normalized_namespace(std::string node_namespace)
@@ -120,18 +154,71 @@ std::string observed_identity(
 
 std::string observation_summary(
   const WriterEndpointObservation & endpoint,
-  std::chrono::milliseconds elapsed)
+  std::chrono::milliseconds elapsed,
+  std::size_t maximum_length)
 {
-  return
-    "n=1 k=" + std::to_string(static_cast<int>(endpoint.endpoint_type)) +
-    " id=" + observed_identity(endpoint) +
-    " q=" + std::to_string(static_cast<int>(endpoint.qos.history)) +
+  if (maximum_length < kMinimumSummaryLength) {
+    throw std::logic_error("writer diagnostic summary budget is too small");
+  }
+
+  std::array<std::string, kSummaryValueCount> values{
+    std::to_string(static_cast<int>(endpoint.endpoint_type)),
+    observed_identity(endpoint),
+    std::to_string(static_cast<int>(endpoint.qos.history)) +
     "/" + std::to_string(endpoint.qos.depth) +
     "/" + std::to_string(static_cast<int>(endpoint.qos.reliability)) +
-    "/" + std::to_string(static_cast<int>(endpoint.qos.durability)) +
+    "/" + std::to_string(static_cast<int>(endpoint.qos.durability)),
+    std::to_string(elapsed.count()),
+    endpoint.topic_type};
+  std::array<std::size_t, kSummaryValueCount> budgets{};
+  std::size_t used = kSummaryFixedLength;
+  for (std::size_t index = 0U; index < values.size(); ++index) {
+    budgets[index] = std::min(values[index].size(), kDigestSuffixLength);
+    used += budgets[index];
+  }
+
+  auto remaining = maximum_length - used;
+  bool grew = true;
+  while (remaining > 0U && grew) {
+    grew = false;
+    for (std::size_t index = 0U; index < values.size(); ++index) {
+      if (remaining == 0U) {
+        break;
+      }
+      if (budgets[index] < values[index].size()) {
+        ++budgets[index];
+        --remaining;
+        grew = true;
+      }
+    }
+  }
+
+  const auto summary =
+    "n=1 k=" + compact_field(values[0], budgets[0]) +
+    " id=" + compact_field(values[1], budgets[1]) +
+    " q=" + compact_field(values[2], budgets[2]) +
     " g=" + gid_text(endpoint.writer_gid) +
-    " ms=" + std::to_string(elapsed.count()) +
-    " t=" + endpoint.topic_type;
+    " ms=" + compact_field(values[3], budgets[3]) +
+    " t=" + compact_field(values[4], budgets[4]);
+  if (summary.size() > maximum_length) {
+    throw std::logic_error("writer diagnostic summary exceeded its budget");
+  }
+  return summary;
+}
+
+std::string observation_detail(
+  std::string reason,
+  const WriterEndpointObservation & endpoint,
+  std::chrono::milliseconds elapsed)
+{
+  constexpr std::size_t separator_length = 2U;
+  constexpr std::size_t maximum_reason_length =
+    kMaximumDetailLength - separator_length - kMinimumSummaryLength;
+  reason = compact_field(reason, maximum_reason_length);
+  const auto summary = observation_summary(
+    endpoint, elapsed,
+    kMaximumDetailLength - reason.size() - separator_length);
+  return reason + "; " + summary;
 }
 
 bool candidate_qos_is_compatible(const rmw_qos_profile_t & qos)
@@ -182,8 +269,7 @@ OpenBinding WriterObservationSession::observe(
   std::chrono::milliseconds elapsed)
 {
   if (terminal_mismatch_) {
-    return mismatch(
-      "candidate writer observation is terminal: " + terminal_detail_);
+    return mismatch(terminal_detail_);
   }
 
   const auto reject_mismatch = [this](std::string detail) {
@@ -224,26 +310,27 @@ OpenBinding WriterObservationSession::observe(
   }
 
   const auto & endpoint = endpoints.front();
-  const auto summary = observation_summary(endpoint, elapsed);
+  const auto summary = [&endpoint, elapsed](std::string reason) {
+      return observation_detail(std::move(reason), endpoint, elapsed);
+    };
   if (endpoint.endpoint_type != RMW_ENDPOINT_PUBLISHER) {
-    return reject_mismatch("endpoint kind mismatch; " + summary);
+    return reject_mismatch(summary("endpoint kind mismatch"));
   }
   if (endpoint.topic_type != policy_.expected_topic_type) {
-    return reject_mismatch("writer type mismatch; " + summary);
+    return reject_mismatch(summary("writer type mismatch"));
   }
   if (!candidate_qos_is_compatible(endpoint.qos)) {
-    return reject_mismatch("writer QoS mismatch; " + summary);
+    return reject_mismatch(summary("writer QoS mismatch"));
   }
   if (gid_is_zero(endpoint.writer_gid)) {
-    return reject_mismatch("writer GID is all-zero; " + summary);
+    return reject_mismatch(summary("writer GID is all-zero"));
   }
   if (
     pinned_writer_gid_.has_value() &&
     *pinned_writer_gid_ != endpoint.writer_gid)
   {
     return reject_mismatch(
-      "writer replaced pin=" + gid_text(*pinned_writer_gid_) + "; " +
-      summary);
+      summary("writer replaced pin=" + gid_text(*pinned_writer_gid_)));
   }
 
   const bool name_unresolved =
@@ -255,14 +342,14 @@ OpenBinding WriterObservationSession::observe(
   const auto expected_name =
     fqn_name(policy_.expected_writer_fqn);
   if (!name_unresolved && endpoint.node_name != expected_name) {
-    return reject_mismatch("partial node name mismatch; " + summary);
+    return reject_mismatch(summary("partial node name mismatch"));
   }
   if (!namespace_unresolved) {
     const auto observed_namespace =
       normalized_namespace(endpoint.node_namespace);
     if (observed_namespace != expected_namespace) {
       return reject_mismatch(
-        "partial namespace mismatch; " + summary);
+        summary("partial namespace mismatch"));
     }
   }
   if (name_unresolved || namespace_unresolved) {
@@ -271,8 +358,7 @@ OpenBinding WriterObservationSession::observe(
         true,
         Reason::None,
         endpoint.writer_gid,
-        bounded_detail(
-          "confirmed identity retained; " + summary)};
+        summary("confirmed identity retained")};
     }
     if (!pinned_writer_gid_) {
       pinned_writer_gid_ = endpoint.writer_gid;
@@ -281,13 +367,12 @@ OpenBinding WriterObservationSession::observe(
       false,
       Reason::WriterMetadataPending,
       endpoint.writer_gid,
-      bounded_detail(
-        "identity unresolved; " + summary)};
+      summary("identity unresolved")};
   }
 
   const auto observed_fqn = endpoint_fqn(endpoint);
   if (observed_fqn != policy_.expected_writer_fqn) {
-    return reject_mismatch("writer FQN mismatch; " + summary);
+    return reject_mismatch(summary("writer FQN mismatch"));
   }
   if (!pinned_writer_gid_) {
     pinned_writer_gid_ = endpoint.writer_gid;
@@ -297,7 +382,7 @@ OpenBinding WriterObservationSession::observe(
     true,
     Reason::None,
     endpoint.writer_gid,
-    bounded_detail("writer ready; " + summary)};
+    summary("writer ready")};
 }
 
 void WriterObservationSession::reset() noexcept

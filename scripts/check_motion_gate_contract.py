@@ -686,6 +686,90 @@ def function_body(source: str, signature: str, context: str) -> str:
     )
 
 
+def strip_cpp_comments(source: str) -> str:
+    """Remove C++ comments while preserving strings and line structure."""
+    output: list[str] = []
+    index = 0
+    state = "code"
+    quote = ""
+    while index < len(source):
+        character = source[index]
+        following = source[index + 1] if index + 1 < len(source) else ""
+        if state == "code":
+            if character == "/" and following == "/":
+                output.extend((" ", " "))
+                index += 2
+                state = "line_comment"
+                continue
+            if character == "/" and following == "*":
+                output.extend((" ", " "))
+                index += 2
+                state = "block_comment"
+                continue
+            output.append(character)
+            if character in {'"', "'"}:
+                quote = character
+                state = "string"
+            index += 1
+            continue
+        if state == "string":
+            output.append(character)
+            if character == "\\" and index + 1 < len(source):
+                output.append(source[index + 1])
+                index += 2
+                continue
+            if character == quote:
+                state = "code"
+            index += 1
+            continue
+        if state == "line_comment":
+            output.append("\n" if character == "\n" else " ")
+            if character == "\n":
+                state = "code"
+            index += 1
+            continue
+        if character == "*" and following == "/":
+            output.extend((" ", " "))
+            index += 2
+            state = "code"
+            continue
+        output.append("\n" if character == "\n" else " ")
+        index += 1
+    return "".join(output)
+
+
+def active_gtest_body(
+    source: str,
+    suite: str,
+    name: str,
+    context: str,
+) -> str:
+    cleaned = strip_cpp_comments(source)
+    if re.search(r"^\s*#\s*define\s+TEST\b", cleaned, re.MULTILINE):
+        raise MotionGateContractError(
+            f"{context} must not redefine the TEST macro"
+        )
+    if re.search(r"^\s*#\s*if\s+0\b", cleaned, re.MULTILINE):
+        raise MotionGateContractError(
+            f"{context} must not hide regressions behind #if 0"
+        )
+    signature_pattern = re.compile(
+        rf"\bTEST\s*\(\s*{re.escape(suite)}\s*,\s*"
+        rf"{re.escape(name)}\s*\)"
+    )
+    matches = list(signature_pattern.finditer(cleaned))
+    if len(matches) != 1:
+        raise MotionGateContractError(
+            f"{context} must define exactly one active TEST({suite}, {name})"
+        )
+    body = function_body(cleaned, matches[0].group(0), context)
+    if "GTEST_SKIP(" in body or re.search(r"\breturn\s*;", body):
+        raise MotionGateContractError(
+            f"{context} must execute without skip or early return"
+        )
+    return body
+
+
 def method_body(
     source: str,
     class_name: str,
@@ -1006,12 +1090,20 @@ def validate_writer_observation(
         (
             'include "writer_observation.hpp"',
             "constexpr std::size_t kMaximumDetailLength = 160U",
+            "constexpr std::size_t kDigestSuffixLength = 9U",
+            "constexpr std::size_t kSummaryFixedLength = 55U",
+            "kMinimumSummaryLength",
             'constexpr char kUnknownNodeName[] = "_NODE_NAME_UNKNOWN_"',
             (
                 'constexpr char kUnknownNodeNamespace[] = '
                 '"_NODE_NAMESPACE_UNKNOWN_"'
             ),
             "detail.resize(kMaximumDetailLength)",
+            "digest_text",
+            "2166136261U",
+            "16777619U",
+            "compact_field",
+            "observation_detail",
             "std::all_of(",
             "value == 0U",
             "candidate_qos_is_compatible",
@@ -1032,6 +1124,7 @@ def validate_writer_observation(
             "terminal_mismatch_ = true",
             "identity_confirmed_ = true",
             "pinned_writer_gid_ = endpoint.writer_gid",
+            "return mismatch(terminal_detail_)",
             "void WriterObservationSession::reset() noexcept",
         ),
         "private WriterObservationSession implementation",
@@ -1201,6 +1294,69 @@ def validate_writer_observation(
             '"ms=7"',
         ),
         "writer_observation_test",
+    )
+
+    diagnostic_helper = function_body(
+        strip_cpp_comments(test),
+        "void expect_complete_bounded_diagnostic(",
+        "bounded writer diagnostic helper",
+    )
+    require_source_tokens(
+        diagnostic_helper,
+        (
+            "EXPECT_LE(observation.detail.size(), 160U)",
+            '"n=1"',
+            '" k="',
+            '" id="',
+            '" q="',
+            '" g="',
+            '" ms="',
+            '" t="',
+            "ASSERT_NE(positions[index], std::string::npos)",
+            "ASSERT_LT(positions[index - 1U], positions[index])",
+            "EXPECT_LT(value_start, value_end)",
+            "EXPECT_EQ(gid.size(), 32U)",
+            "std::isxdigit(character)",
+        ),
+        "bounded writer diagnostic helper",
+    )
+
+    long_fields = active_gtest_body(
+        test,
+        "WriterObservationSession",
+        "LongVariableFieldsPreserveEveryDiagnosticMarker",
+        "bounded writer diagnostic regression",
+    )
+    require_source_tokens(
+        long_fields,
+        (
+            "expect_complete_bounded_diagnostic(rejected)",
+            "std::string(240U, 'n')",
+            "std::string(240U, 's')",
+            "std::string(240U, 't')",
+            "first_name.back() = 'a'",
+            "second_name.back() = 'b'",
+            "EXPECT_NE(first.detail, second.detail)",
+        ),
+        "bounded writer diagnostic regression",
+    )
+
+    terminal_replay = active_gtest_body(
+        test,
+        "WriterObservationSession",
+        "PinnedReplacementAndTerminalReplayPreserveEveryDiagnosticMarker",
+        "writer terminal diagnostic replay regression",
+    )
+    require_source_tokens(
+        terminal_replay,
+        (
+            "Reason::WriterMetadataPending",
+            "Reason::WriterMismatch",
+            "expect_complete_bounded_diagnostic(replacement)",
+            "expect_complete_bounded_diagnostic(replayed)",
+            "EXPECT_EQ(replayed.detail, replacement.detail)",
+        ),
+        "writer terminal diagnostic replay regression",
     )
 
 
