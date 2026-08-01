@@ -45,6 +45,7 @@ uint16 SEQUENCE_EXHAUSTED=15
 uint16 CONFIGURATION_INVALID=16
 uint16 PUBLISH_FAILED=17
 uint16 INTERNAL_FAILURE=18
+uint16 WRITER_METADATA_PENDING=19
 
 uint16 code
 uint16 reason
@@ -90,6 +91,7 @@ uint16 SEQUENCE_EXHAUSTED=15
 uint16 CONFIGURATION_INVALID=16
 uint16 PUBLISH_FAILED=17
 uint16 INTERNAL_FAILURE=18
+uint16 WRITER_METADATA_PENDING=19
 
 string<=36 gate_instance_id
 uint64 state_seq
@@ -286,6 +288,268 @@ Command MotionGateCore::tick(SteadyTimePoint now)
 }  // namespace voice_nav_mission
 """
 
+WRITER_OBSERVATION_HEADER = """\
+#pragma once
+
+#include "voice_nav_mission/motion_gate_core.hpp"
+#include <rmw/types.h>
+#include <chrono>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace voice_nav_mission
+{
+struct WriterEndpointObservation
+{
+  std::string topic_type;
+  std::string node_name;
+  std::string node_namespace;
+  rmw_endpoint_type_t endpoint_type;
+  rmw_qos_profile_t qos;
+  WriterGid writer_gid;
+};
+
+struct WriterObservationPolicy
+{
+  std::string expected_topic_type;
+  std::string expected_writer_fqn;
+};
+
+class WriterObservationSession
+{
+public:
+  explicit WriterObservationSession(WriterObservationPolicy policy);
+  OpenBinding observe(
+    const std::vector<WriterEndpointObservation> & endpoints,
+    std::chrono::milliseconds elapsed);
+  void reset() noexcept;
+
+private:
+  WriterObservationPolicy policy_;
+  std::optional<WriterGid> pinned_writer_gid_;
+  bool identity_confirmed_{false};
+  bool terminal_mismatch_{false};
+  std::string terminal_detail_;
+};
+}  // namespace voice_nav_mission
+"""
+
+WRITER_OBSERVATION_SOURCE = """\
+#include "writer_observation.hpp"
+
+#include <algorithm>
+
+namespace voice_nav_mission
+{
+namespace
+{
+constexpr std::size_t kMaximumDetailLength = 160U;
+constexpr char kUnknownNodeName[] = "_NODE_NAME_UNKNOWN_";
+constexpr char kUnknownNodeNamespace[] = "_NODE_NAMESPACE_UNKNOWN_";
+
+std::string bounded_detail(std::string detail)
+{
+  if (detail.size() > kMaximumDetailLength) {
+    detail.resize(kMaximumDetailLength);
+  }
+  return detail;
+}
+
+bool gid_is_zero(const WriterGid & gid)
+{
+  return std::all_of(
+    gid.cbegin(), gid.cend(),
+    [](std::uint8_t value) {return value == 0U;});
+}
+
+bool candidate_qos_is_compatible(const rmw_qos_profile_t & qos)
+{
+  return qos.depth == 1U;
+}
+
+std::string normalized_namespace(std::string node_namespace)
+{
+  return node_namespace.empty() ? "/" : node_namespace;
+}
+
+bool node_name_is_unresolved(const std::string & node_name)
+{
+  return node_name.empty() || node_name == kUnknownNodeName;
+}
+
+bool node_namespace_is_unresolved(const std::string & node_namespace)
+{
+  return node_namespace == kUnknownNodeNamespace;
+}
+
+std::string endpoint_fqn(const WriterEndpointObservation & endpoint)
+{
+  return normalized_namespace(endpoint.node_namespace) + endpoint.node_name;
+}
+
+std::string fqn_namespace(const std::string & fqn)
+{
+  return fqn.substr(0U, fqn.rfind('/') + 1U);
+}
+
+std::string fqn_name(const std::string & fqn)
+{
+  return fqn.substr(fqn.rfind('/') + 1U);
+}
+
+std::string observation_summary(
+  const WriterEndpointObservation & endpoint,
+  std::chrono::milliseconds elapsed)
+{
+  return
+    "n=1 k=" + std::to_string(endpoint.endpoint_type) +
+    " id=" + endpoint.node_name +
+    " q=" + std::to_string(endpoint.qos.depth) +
+    " g=" + std::to_string(endpoint.writer_gid.back()) +
+    " ms=" + std::to_string(elapsed.count()) +
+    " t=" + endpoint.topic_type;
+}
+
+OpenBinding mismatch(std::string detail)
+{
+  return {false, Reason::WriterMismatch, {}, bounded_detail(detail)};
+}
+}  // namespace
+
+OpenBinding WriterObservationSession::observe(
+  const std::vector<WriterEndpointObservation> & endpoints,
+  std::chrono::milliseconds elapsed)
+{
+  if (terminal_mismatch_) {
+    return mismatch(terminal_detail_);
+  }
+  const auto reject_mismatch = [this](std::string detail) {
+      if (pinned_writer_gid_) {
+        terminal_mismatch_ = true;
+        terminal_detail_ = detail;
+      }
+      return mismatch(detail);
+    };
+  if (endpoints.empty()) {
+    return {false, Reason::WriterUnavailable, {}, "no writer"};
+  }
+  if (endpoints.size() != 1U) {
+    return {false, Reason::WriterAmbiguous, {}, "ambiguous"};
+  }
+  const auto & endpoint = endpoints.front();
+  const auto summary = observation_summary(endpoint, elapsed);
+  if (endpoint.endpoint_type != RMW_ENDPOINT_PUBLISHER) {
+    return reject_mismatch("wrong endpoint kind");
+  }
+  if (endpoint.topic_type != policy_.expected_topic_type) {
+    return reject_mismatch("wrong type");
+  }
+  if (!candidate_qos_is_compatible(endpoint.qos)) {
+    return reject_mismatch("wrong qos");
+  }
+  if (gid_is_zero(endpoint.writer_gid)) {
+    return reject_mismatch("zero gid");
+  }
+  if (pinned_writer_gid_ &&
+    *pinned_writer_gid_ != endpoint.writer_gid)
+  {
+    return reject_mismatch("replacement writer");
+  }
+  const bool name_unresolved =
+    node_name_is_unresolved(endpoint.node_name);
+  const bool namespace_unresolved =
+    node_namespace_is_unresolved(endpoint.node_namespace);
+  const auto expected_namespace =
+    fqn_namespace(policy_.expected_writer_fqn);
+  const auto expected_name =
+    fqn_name(policy_.expected_writer_fqn);
+  if (!name_unresolved && endpoint.node_name != expected_name) {
+    return reject_mismatch("partial node name mismatch; " + summary);
+  }
+  if (!namespace_unresolved) {
+    const auto observed_namespace =
+      normalized_namespace(endpoint.node_namespace);
+    if (observed_namespace != expected_namespace) {
+      return reject_mismatch("partial identity mismatch; " + summary);
+    }
+  }
+  if (name_unresolved || namespace_unresolved) {
+    if (identity_confirmed_) {
+      return {true, Reason::None, endpoint.writer_gid, "retained"};
+    }
+    if (!pinned_writer_gid_) {
+      pinned_writer_gid_ = endpoint.writer_gid;
+    }
+    return {
+      false,
+      Reason::WriterMetadataPending,
+      endpoint.writer_gid,
+      bounded_detail("identity unresolved; " + summary)};
+  }
+  const auto observed_fqn = endpoint_fqn(endpoint);
+  if (observed_fqn != policy_.expected_writer_fqn) {
+    return reject_mismatch("wrong fqn");
+  }
+  if (!pinned_writer_gid_) {
+    pinned_writer_gid_ = endpoint.writer_gid;
+  }
+  identity_confirmed_ = true;
+  return {true, Reason::None, endpoint.writer_gid, "ready"};
+}
+
+void WriterObservationSession::reset() noexcept
+{
+  pinned_writer_gid_.reset();
+  identity_confirmed_ = false;
+  terminal_mismatch_ = false;
+  terminal_detail_.clear();
+}
+}  // namespace voice_nav_mission
+"""
+
+WRITER_OBSERVATION_TEST = """\
+#include "writer_observation.hpp"
+#include <gtest/gtest.h>
+
+TEST(WriterObservationSession, PinsUnresolvedIdentityUntilTheSameWriterResolves)
+{
+  EXPECT_EQ(pending.reason, Reason::WriterMetadataPending);
+  EXPECT_LE(pending.detail.size(), 160U);
+  for (const auto * field : {"n=1", "t=", "id=", "q=", "g=", "ms=7"}) {
+    EXPECT_NE(pending.detail.find(field), std::string::npos);
+  }
+}
+
+TEST(WriterObservationSession, ReplacementPoisonsPinnedGenerationUntilReset)
+{
+  EXPECT_EQ(replacement.reason, Reason::WriterMismatch);
+  session.reset();
+}
+
+TEST(WriterObservationSession, ConfirmedSameGidSurvivesIdentityOnlyGraphRegression)
+{
+  EXPECT_TRUE(regressed.ready);
+}
+
+TEST(WriterObservationSession, KnownWrongNamespaceCannotEnterPending)
+{
+  EXPECT_EQ(result.reason, Reason::WriterMismatch);
+}
+
+TEST(WriterObservationSession, ExactUnknownIdentityMarkersConvergeForPinnedGid)
+{
+  const auto name = "_NODE_NAME_UNKNOWN_";
+  const auto ns = "_NODE_NAMESPACE_UNKNOWN_";
+  EXPECT_EQ(pending.reason, Reason::WriterMetadataPending);
+}
+
+TEST(WriterObservationSession, KnownPartialIdentityMustAgreeBeforePending)
+{
+  EXPECT_EQ(contradiction.reason, Reason::WriterMismatch);
+}
+"""
+
 NODE_SOURCE = """\
 #include <chrono>
 #include <mutex>
@@ -293,6 +557,7 @@ NODE_SOURCE = """\
 #include "geometry_msgs/msg/twist_stamped.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rmw/types.h"
+#include "writer_observation.hpp"
 
 using namespace std::chrono_literals;
 static_assert(RMW_GID_STORAGE_SIZE == 16u);
@@ -301,7 +566,10 @@ class MotionGateNode : public rclcpp::Node
 {
 public:
   MotionGateNode()
-  : Node("motion_gate_node")
+  : Node("motion_gate_node"),
+    writer_observation_session_({
+      "geometry_msgs/msg/TwistStamped",
+      "/collision_monitor"})
   {
     auto candidate_qos = rclcpp::QoS(rclcpp::KeepLast(1))
       .best_effort().durability_volatile();
@@ -338,14 +606,33 @@ public:
       });
   }
 
-  std::array<std::uint8_t, RMW_GID_STORAGE_SIZE>
+  OpenBinding
   discover_unique_writer_gid_on_topic(const std::string & topic)
   {
     const auto endpoints = get_publishers_info_by_topic(topic);
-    if (endpoints.size() != 1) {
-      throw std::runtime_error("candidate topic must have one writer");
+    std::vector<WriterEndpointObservation> observations;
+    observations.reserve(endpoints.size());
+    for (const auto & endpoint : endpoints) {
+      WriterGid writer_gid{};
+      const auto & endpoint_gid = endpoint.endpoint_gid();
+      std::copy(
+        endpoint_gid.cbegin(), endpoint_gid.cend(), writer_gid.begin());
+      observations.push_back(WriterEndpointObservation{
+        endpoint.topic_type(),
+        endpoint.node_name(),
+        endpoint.node_namespace(),
+        static_cast<rmw_endpoint_type_t>(endpoint.endpoint_type()),
+        endpoint.qos_profile().get_rmw_qos_profile(),
+        writer_gid});
     }
-    return endpoints.front().endpoint_gid();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - writer_observation_started_at_);
+    return writer_observation_session_.observe(observations, elapsed);
+  }
+
+  std::optional<std::string> final_controller_health_error() const
+  {
+    return std::nullopt;
   }
 
   void open_candidate_reader(
@@ -357,8 +644,15 @@ public:
       request,
       std::chrono::steady_clock::now(),
       [this, &request, &expected_binding]() {
+        if (const auto error = final_controller_health_error()) {
+          return OpenBinding{
+            false, Reason::WriterUnavailable, {}, *error};
+        }
         const auto first =
           discover_unique_writer_gid_on_topic(candidate_topic_);
+        if (!first.ready) {
+          return first;
+        }
         candidate_subscription_.reset();
         candidate_subscription_ =
           create_candidate_subscription(
@@ -383,6 +677,20 @@ public:
     (void)third;
     (void)expected_binding;
     response.code = response.APPLIED;
+  }
+
+  ControlResult handle_prepare(
+    const ControlRequest & request,
+    SteadyTimePoint now)
+  {
+    auto result = core_.prepare(request, now);
+    if (result.code == ResultCode::Applied) {
+      writer_observation_session_.reset();
+      writer_observation_started_at_ = now;
+      candidate_subscription_ = create_candidate_subscription(
+        result.candidate_topic, result.lease_id, true);
+    }
+    return result;
   }
 
   void on_candidate(
@@ -455,6 +763,8 @@ public:
 
 private:
   std::mutex publication_mutex_;
+  WriterObservationSession writer_observation_session_;
+  MotionGateCore::SteadyTimePoint writer_observation_started_at_{};
 };
 
 int main(int argc, char ** argv)
@@ -506,7 +816,11 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 )
 
 add_library(motion_gate_core STATIC src/motion_gate_core.cpp)
-add_executable(motion_gate_node src/motion_gate_node.cpp)
+add_executable(
+  motion_gate_node
+  src/motion_gate_node.cpp
+  src/writer_observation.cpp
+)
 rosidl_get_typesupport_target(
   motion_gate_typesupport
   ${PROJECT_NAME}
@@ -516,6 +830,11 @@ target_link_libraries(motion_gate_node motion_gate_core "${motion_gate_typesuppo
 
 if(BUILD_TESTING)
   ament_add_gtest(motion_gate_core_test test/motion_gate_core_test.cpp)
+  ament_add_gtest(
+    writer_observation_test
+    test/writer_observation_test.cpp
+    src/writer_observation.cpp
+  )
   add_launch_test(
     test/test_motion_gate_node.py
     TIMEOUT 60
@@ -658,6 +977,15 @@ FIXTURE_FILES = {
         "motion_gate_core.hpp"
     ): CORE_HEADER,
     "src/voice_nav_mission/src/motion_gate_core.cpp": CORE_SOURCE,
+    (
+        "src/voice_nav_mission/src/writer_observation.hpp"
+    ): WRITER_OBSERVATION_HEADER,
+    (
+        "src/voice_nav_mission/src/writer_observation.cpp"
+    ): WRITER_OBSERVATION_SOURCE,
+    (
+        "src/voice_nav_mission/test/writer_observation_test.cpp"
+    ): WRITER_OBSERVATION_TEST,
     "src/voice_nav_mission/src/motion_gate_node.cpp": NODE_SOURCE,
     "src/voice_nav_mission/package.xml": MISSION_PACKAGE,
     "src/voice_nav_mission/CMakeLists.txt": MISSION_CMAKE,
@@ -737,6 +1065,53 @@ class MotionGateContractTest(unittest.TestCase):
         )
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_node_must_delegate_gate_local_snapshot_to_observation_session(
+        self,
+    ) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_mission/src/motion_gate_node.cpp",
+                (
+                    "return writer_observation_session_.observe("
+                    "observations, elapsed);"
+                ),
+                "return OpenBinding{};",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("Gate-local TopicEndpointInfo adapter", completed.stderr)
+
+    def test_pending_identity_must_pin_the_nonzero_writer_gid(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_mission/src/writer_observation.cpp",
+                "pinned_writer_gid_ = endpoint.writer_gid;",
+                "// unresolved identity is not pinned",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("unresolved node-identity branch", completed.stderr)
+
+    def test_writer_mismatch_cannot_be_broadened_into_typed_pending(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_mission/src/writer_observation.cpp",
+                "Reason::WriterMismatch",
+                "Reason::WriterMetadataPending",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("WriterObservationSession implementation", completed.stderr)
 
     def test_core_target_is_static_and_never_installed_or_exported(self) -> None:
         mutations = (
