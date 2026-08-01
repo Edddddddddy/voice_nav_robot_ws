@@ -1,6 +1,6 @@
 # VN-0010-C2: Make launch-managed Gazebo teardown deterministic
 
-**Status:** In Progress
+**Status:** Done
 
 **GitHub Issue:**
 [Edddddddddy/voice_nav_robot_ws#15](https://github.com/Edddddddddy/voice_nav_robot_ws/issues/15)
@@ -107,6 +107,8 @@ Give every launch test that starts Gazebo one explicit lifecycle contract:
 - [x] PIT-0012 is changed from
   `Known (guard implemented; final evidence pending)` to `Guarded` only after
   all preceding gates pass.
+- [x] PR #16 passes required CI on its closure head, rebase-merges without
+  tree drift, and closes Issue #15 as completed.
 
 ## Risks and rollback
 
@@ -165,7 +167,9 @@ Give every launch test that starts Gazebo one explicit lifecycle contract:
 - Two independent final rereviews: P0=0, P1=0, P2=0 after all findings closed.
 - `1ddd970`: exact local canonical gate and first-attempt required hosted CI
   GREEN on the final reviewed implementation/documentation head.
-- Pending: required CI on this evidence-only closure commit and merge.
+- `66f6834`: evidence-only closure head passed required hosted CI on attempt 1.
+- `f31e3b7`: public rebase-merge head; reviewed/public trees are identical and
+  all 58 range-diff rows are `=`.
 
 ## Verification evidence
 
@@ -180,9 +184,8 @@ Fresh launch 6 active MotionGate/product assertions: PASS
 Fresh launch 6 post-shutdown: gazebo exit -9; strict assertExitCodes failed
 ```
 
-The final reviewed implementation/documentation local and hosted verification
-is recorded below. This evidence-only closure commit must receive the same
-required hosted job before merge; merge is not claimed early.
+The final reviewed implementation/documentation local and hosted verification,
+closure-head CI, and public merge identity are recorded below.
 
 Repeated runtime evidence after the final implementation change:
 
@@ -244,8 +247,25 @@ Required job: required / ubuntu-24.04 / ros-jazzy
 Conclusion: success
 Required job duration: 6m20s
 Canonical verification step: success
-Classification: no rerun; evidence-only closure commit CI remains required
-  before merge.
+Classification: no rerun; reviewed implementation/documentation evidence.
+```
+
+Closure hosted and public merge evidence:
+
+```text
+Closure workflow run: 30710678583
+Attempt: 1
+Closure head: 66f6834b6976ee4b83598eeb8f0cafb9c22a7451
+Required job: required / ubuntu-24.04 / ros-jazzy
+Conclusion: success
+Required job duration: 5m49s
+Canonical verification step: success
+PR: #16, MERGED by rebase at 2026-08-01T17:43:10Z
+Public main head: f31e3b7c2c8788ef3220203c0274e3e818908c9a
+Reviewed head tree: 4060bf0b39b1325cabbfe49f98c81f816c9f6aa6
+Public head tree: 4060bf0b39b1325cabbfe49f98c81f816c9f6aa6
+Range-diff: 58/58 rows `=`; 0 changed
+Issue #15: CLOSED / COMPLETED at 2026-08-01T17:43:11Z
 ```
 
 Pre-final repository-contract evidence:
