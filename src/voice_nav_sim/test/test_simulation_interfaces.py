@@ -13,7 +13,9 @@
 # limitations under the License.
 
 from collections import deque
+import importlib.util
 import math
+from pathlib import Path
 import threading
 import time
 import unittest
@@ -50,6 +52,7 @@ WORLD_BOX_FRONT_X = 1.75
 WORLD_BOX_HALF_WIDTH_Y = 0.50
 SCAN_COUNT = 360
 TF_AUDIT_TIMEOUT_SECONDS = 35.0
+SIMULATION_TEST_PARTITION = 'voice_nav_l0008_sim_test'
 
 TF_EXPECTATIONS = (
     ('/tf', 'odom', 'base_footprint', '/diff_drive_controller'),
@@ -86,6 +89,26 @@ TF_EXPECTATIONS = (
 )
 
 
+def load_gazebo_shutdown_support():
+    support_path = (
+        Path(get_package_share_directory('voice_nav_sim'))
+        / 'test_support'
+        / 'gazebo_shutdown.py'
+    )
+    specification = importlib.util.spec_from_file_location(
+        'voice_nav_simulation_interfaces_gazebo_shutdown',
+        support_path,
+    )
+    if specification is None or specification.loader is None:
+        raise RuntimeError('could not load Gazebo shutdown test support')
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
+gazebo_shutdown = load_gazebo_shutdown_support()
+
+
 @pytest.mark.launch_test
 @launch_testing.markers.keep_alive
 def generate_test_description():
@@ -94,7 +117,10 @@ def generate_test_description():
         PythonLaunchDescriptionSource(
             f'{package_share}/launch/simulation.launch.py'
         ),
-        launch_arguments={'headless': 'true'}.items(),
+        launch_arguments={
+            'headless': 'true',
+            'shutdown_on_gazebo_exit': 'false',
+        }.items(),
     )
 
     audit_arguments = []
@@ -190,7 +216,8 @@ def endpoint_identity(endpoint):
 
 class SimulationInterfacesTest(unittest.TestCase):
 
-    def setUp(self):
+    def setUp(self, proc_info):
+        self.addCleanup(self.cleanup_fixture, proc_info)
         rclpy.init()
         self.node = rclpy.create_node(
             'voice_nav_simulation_interfaces_test',
@@ -239,21 +266,48 @@ class SimulationInterfacesTest(unittest.TestCase):
         )
         self.spin_thread.start()
 
-    def tearDown(self):
-        try:
-            if rclpy.ok() and hasattr(self, 'command_publisher'):
+    def cleanup_fixture(self, proc_info):
+        if (
+            rclpy.ok()
+            and getattr(self, 'node', None) is not None
+            and getattr(self, 'command_publisher', None) is not None
+        ):
+            try:
                 self.publish_command_for(0.0, 0.0, 0.25)
+            except Exception:
+                pass
+        try:
+            gazebo_shutdown.structured_stop_gazebo(
+                proc_info,
+                expected_partition=SIMULATION_TEST_PARTITION,
+            )
         finally:
-            if hasattr(self, 'executor'):
-                self.executor.shutdown(timeout_sec=2.0)
-            if hasattr(self, 'spin_thread'):
-                self.spin_thread.join(timeout=2.0)
-            if hasattr(self, 'tf_listener'):
-                self.tf_listener.unregister()
-            if hasattr(self, 'node'):
-                self.node.destroy_node()
-            if rclpy.ok():
-                rclpy.shutdown()
+            self.destroy_ros_fixture()
+
+    def destroy_ros_fixture(self):
+        executor = getattr(self, 'executor', None)
+        if executor is not None:
+            try:
+                executor.shutdown(timeout_sec=2.0)
+            except Exception:
+                pass
+        spin_thread = getattr(self, 'spin_thread', None)
+        if spin_thread is not None:
+            spin_thread.join(timeout=2.0)
+        tf_listener = getattr(self, 'tf_listener', None)
+        if tf_listener is not None:
+            try:
+                tf_listener.unregister()
+            except Exception:
+                pass
+        node = getattr(self, 'node', None)
+        if node is not None:
+            try:
+                node.destroy_node()
+            except Exception:
+                pass
+        if rclpy.ok():
+            rclpy.shutdown()
 
     def append_sample(self, samples, message):
         with self.samples_lock:

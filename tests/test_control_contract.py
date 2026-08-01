@@ -211,6 +211,62 @@ def generate_launch_description():
 """
 
 
+def conditional_gazebo_exit_launch(default_value="true") -> str:
+    launch = VALID_LAUNCH.replace(
+        "ExecuteProcess, RegisterEventHandler, Shutdown",
+        (
+            "DeclareLaunchArgument, ExecuteProcess, "
+            "RegisterEventHandler, Shutdown"
+        ),
+    ).replace(
+        "from launch.event_handlers import OnProcessExit\n",
+        (
+            "from launch.conditions import IfCondition\n"
+            "from launch.event_handlers import OnProcessExit\n"
+        ),
+    ).replace(
+        "FindExecutable, PathJoinSubstitution",
+        "FindExecutable, LaunchConfiguration, PathJoinSubstitution",
+    ).replace(
+        "def generate_launch_description():\n",
+        (
+            "def generate_launch_description():\n"
+            "    shutdown_on_gazebo_exit = LaunchConfiguration(\n"
+            "        'shutdown_on_gazebo_exit'\n"
+            "    )\n"
+        ),
+    ).replace(
+        "        on_exit=Shutdown(),\n",
+        "",
+        1,
+    ).replace(
+        "    first = RegisterEventHandler(\n",
+        (
+            "    gazebo_exit = RegisterEventHandler(\n"
+            "        OnProcessExit(\n"
+            "            target_action=gazebo,\n"
+            "            on_exit=[Shutdown()],\n"
+            "        ),\n"
+            "        condition=IfCondition(shutdown_on_gazebo_exit),\n"
+            "    )\n"
+            "    first = RegisterEventHandler(\n"
+        ),
+    ).replace(
+        "    return LaunchDescription([\n        gazebo,\n",
+        (
+            "    return LaunchDescription([\n"
+            "        DeclareLaunchArgument(\n"
+            "            'shutdown_on_gazebo_exit',\n"
+            f"            default_value='{default_value}',\n"
+            "            choices=['true', 'false'],\n"
+            "        ),\n"
+            "        gazebo,\n"
+            "        gazebo_exit,\n"
+        ),
+    )
+    return launch
+
+
 class ControlContractTest(unittest.TestCase):
     def run_checker(
         self,
@@ -443,6 +499,26 @@ class ControlContractTest(unittest.TestCase):
 
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("shell execution must stay disabled", completed.stderr)
+
+    def test_default_on_conditional_gazebo_exit_handler_is_allowed(
+        self,
+    ) -> None:
+        completed = self.run_checker(
+            launch=conditional_gazebo_exit_launch()
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_conditional_gazebo_exit_handler_must_default_on(self) -> None:
+        completed = self.run_checker(
+            launch=conditional_gazebo_exit_launch("false")
+        )
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "shutdown_on_gazebo_exit must default to true",
+            completed.stderr,
+        )
 
     def test_sleep_ordered_controller_startup_is_rejected(self) -> None:
         launch = VALID_LAUNCH.replace(

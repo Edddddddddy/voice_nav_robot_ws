@@ -1,9 +1,14 @@
 import ast
+import shutil
+import subprocess
+import sys
+import tempfile
 import unittest
 from pathlib import Path
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+CHECKER = REPOSITORY_ROOT / "scripts" / "check_gazebo_teardown_contract.py"
 SIMULATION_LAUNCH = (
     REPOSITORY_ROOT
     / "src"
@@ -50,6 +55,17 @@ GAZEBO_TESTS = (
         / "test_motion_gate_product.py",
         "voice_nav_l0009_product_test",
     ),
+)
+CONTRACT_FILES = (
+    "src/voice_nav_sim/test_support/gazebo_shutdown.py",
+    "src/voice_nav_sim/launch/simulation.launch.py",
+    "src/voice_nav_bringup/launch/product_sim.launch.py",
+    "src/voice_nav_sim/test/test_simulation_control.py",
+    "src/voice_nav_sim/test/test_simulation_interfaces.py",
+    "src/voice_nav_bringup/test/test_motion_gate_product.py",
+    "src/voice_nav_sim/CMakeLists.txt",
+    "src/voice_nav_bringup/CMakeLists.txt",
+    "scripts/verify.sh",
 )
 
 
@@ -108,6 +124,159 @@ class GazeboTeardownContractTest(unittest.TestCase):
                 self.assertIn("assertExitCodes(proc_info)", source)
                 self.assertNotIn("allowable_exit_codes=[-9", source)
                 self.assertNotIn("allowable_exit_codes=[137", source)
+
+
+class GazeboTeardownMutationTest(unittest.TestCase):
+    def run_checker(self, mutation=None):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            for relative_path in CONTRACT_FILES:
+                source = REPOSITORY_ROOT / relative_path
+                destination = root / relative_path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source, destination)
+            if mutation is not None:
+                mutation(root)
+            return subprocess.run(
+                [sys.executable, str(CHECKER), "--root", str(root)],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+    def replace(self, root, relative_path, old, new):
+        path = root / relative_path
+        source = path.read_text(encoding="utf-8")
+        self.assertIn(old, source)
+        path.write_text(source.replace(old, new, 1), encoding="utf-8")
+
+    def assert_mutation_rejected(
+        self,
+        relative_path,
+        old,
+        new,
+        diagnostic,
+    ):
+        def mutation(root):
+            self.replace(root, relative_path, old, new)
+
+        completed = self.run_checker(mutation)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(diagnostic, completed.stderr)
+
+    def test_repository_contract_passes(self):
+        completed = self.run_checker()
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_ack_only_cleanup_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_sim/test_support/gazebo_shutdown.py",
+            "    proc_info.assertWaitForShutdown(\n"
+            "        process='gazebo',\n"
+            "        timeout=PROCESS_TIMEOUT_SECONDS,\n"
+            "    )",
+            "    # ACK is incorrectly treated as process completion",
+            "process-exit barrier",
+        )
+
+    def test_positive_ack_validation_is_required(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_sim/test_support/gazebo_shutdown.py",
+            "if POSITIVE_ACK.fullmatch(completed.stdout) is None:",
+            "if False:",
+            "positive ACK",
+        )
+
+    def test_shell_execution_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_sim/test_support/gazebo_shutdown.py",
+            "            shell=False,",
+            "            shell=True,",
+            "shell=True",
+        )
+
+    def test_fixed_sleep_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_sim/test_support/gazebo_shutdown.py",
+            "    arguments = [\n",
+            "    time.sleep(1.0)\n    arguments = [\n",
+            "fixed sleep",
+        )
+
+    def test_global_process_kill_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_sim/test_support/gazebo_shutdown.py",
+            "    arguments = [\n",
+            "    subprocess.run(['pkill', 'gz'])\n    arguments = [\n",
+            "global process kill",
+        )
+
+    def test_wrong_test_partition_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
+            "PRODUCT_TEST_PARTITION = 'voice_nav_l0009_product_test'",
+            "PRODUCT_TEST_PARTITION = 'default'",
+            "must use exact partition",
+        )
+
+    def test_failure_path_cleanup_registration_is_required(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_sim/test/test_simulation_control.py",
+            "        self.addCleanup(self.cleanup_fixture, proc_info)",
+            "        # cleanup omitted",
+            "register failure-path cleanup first",
+        )
+
+    def test_test_launch_must_disable_early_shutdown(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_sim/test/test_simulation_interfaces.py",
+            "'shutdown_on_gazebo_exit': 'false'",
+            "'shutdown_on_gazebo_exit': 'true'",
+            "structured test teardown seam",
+        )
+
+    def test_forced_exit_allowlist_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
+            "        assertExitCodes(proc_info)",
+            (
+                "        assertExitCodes(\n"
+                "            proc_info, allowable_exit_codes=[-9]\n"
+                "        )"
+            ),
+            "strictly check every process exit",
+        )
+
+    def test_product_exit_policy_must_default_on(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/launch/product_sim.launch.py",
+            (
+                "'shutdown_on_gazebo_exit',\n"
+                "                default_value='true'"
+            ),
+            (
+                "'shutdown_on_gazebo_exit',\n"
+                "                default_value='false'"
+            ),
+            "product shutdown_on_gazebo_exit must default to true",
+        )
+
+    def test_test_support_install_is_required(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_sim/CMakeLists.txt",
+            "    test_support\n",
+            "",
+            "must install test_support",
+        )
+
+    def test_canonical_verify_must_run_checker(self):
+        self.assert_mutation_rejected(
+            "scripts/verify.sh",
+            "python3 scripts/check_gazebo_teardown_contract.py --root .\n",
+            "",
+            "canonical verification",
+        )
 
 
 if __name__ == "__main__":

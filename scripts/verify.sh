@@ -29,6 +29,7 @@ export PYTHONDONTWRITEBYTECODE=1
 echo "[1/6] Checking repository and course contracts"
 python3 scripts/check_repository.py
 python3 scripts/check_motion_gate_contract.py --root .
+python3 scripts/check_gazebo_teardown_contract.py --root .
 python3 -m unittest discover -s tests -p "test_*.py" -v
 
 tracked_generated="$(

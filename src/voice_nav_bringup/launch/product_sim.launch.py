@@ -26,6 +26,9 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     headless = LaunchConfiguration('headless')
+    shutdown_on_gazebo_exit = LaunchConfiguration(
+        'shutdown_on_gazebo_exit'
+    )
     simulation = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution(
@@ -36,7 +39,10 @@ def generate_launch_description():
                 ]
             )
         ),
-        launch_arguments={'headless': headless}.items(),
+        launch_arguments={
+            'headless': headless,
+            'shutdown_on_gazebo_exit': shutdown_on_gazebo_exit,
+        }.items(),
     )
     gate_config = PathJoinSubstitution(
         [
@@ -63,6 +69,15 @@ def generate_launch_description():
                 'headless',
                 default_value='true',
                 description='Run Gazebo server-only when true.',
+                choices=['true', 'false'],
+            ),
+            DeclareLaunchArgument(
+                'shutdown_on_gazebo_exit',
+                default_value='true',
+                description=(
+                    'Shut down product bringup when Gazebo exits. Tests '
+                    'disable this while joining Gazebo explicitly.'
+                ),
                 choices=['true', 'false'],
             ),
             simulation,

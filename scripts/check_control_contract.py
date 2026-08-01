@@ -555,6 +555,109 @@ def node_package(call: ast.Call) -> str | None:
     return literal_string(keyword_value(call, "package"))
 
 
+def assigned_call_names(tree: ast.AST) -> dict[int, str]:
+    assignments = {}
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Call)
+        ):
+            assignments[id(node.value)] = node.targets[0].id
+    return assignments
+
+
+def returned_action_names(calls: list[ast.Call]) -> set[str]:
+    descriptions = [
+        call for call in calls if call_name(call) == "LaunchDescription"
+    ]
+    if len(descriptions) != 1 or len(descriptions[0].args) != 1:
+        return set()
+    actions = descriptions[0].args[0]
+    if not isinstance(actions, (ast.List, ast.Tuple)):
+        return set()
+    return {
+        action.id for action in actions.elts
+        if isinstance(action, ast.Name)
+    }
+
+
+def require_default_on_gazebo_exit_argument(calls: list[ast.Call]) -> None:
+    declarations = [
+        call
+        for call in calls
+        if call_name(call) == "DeclareLaunchArgument"
+        and call.args
+        and literal_string(call.args[0]) == "shutdown_on_gazebo_exit"
+    ]
+    if len(declarations) != 1:
+        raise ControlContractError(
+            "conditional Gazebo exit handling requires exactly one "
+            "shutdown_on_gazebo_exit launch argument"
+        )
+    declaration = declarations[0]
+    if literal_string(keyword_value(declaration, "default_value")) != "true":
+        raise ControlContractError(
+            "shutdown_on_gazebo_exit must default to true"
+        )
+    choices = keyword_value(declaration, "choices")
+    if not (
+        isinstance(choices, (ast.List, ast.Tuple))
+        and [literal_string(choice) for choice in choices.elts]
+        == ["true", "false"]
+    ):
+        raise ControlContractError(
+            "shutdown_on_gazebo_exit choices must be true and false"
+        )
+
+
+def has_conditional_shutdown_handler(
+    process_name: str,
+    calls: list[ast.Call],
+    assigned_names: dict[int, str],
+    returned_names: set[str],
+) -> bool:
+    for handler in calls:
+        if call_name(handler) != "RegisterEventHandler":
+            continue
+        if assigned_names.get(id(handler)) not in returned_names:
+            continue
+        if len(handler.args) != 1:
+            continue
+        process_exit = handler.args[0]
+        if not (
+            isinstance(process_exit, ast.Call)
+            and call_name(process_exit) == "OnProcessExit"
+        ):
+            continue
+        target = keyword_value(process_exit, "target_action")
+        if not (
+            isinstance(target, ast.Name)
+            and target.id == process_name
+        ):
+            continue
+        on_exit = keyword_value(process_exit, "on_exit")
+        if not (
+            isinstance(on_exit, (ast.List, ast.Tuple))
+            and len(on_exit.elts) == 1
+            and isinstance(on_exit.elts[0], ast.Call)
+            and call_name(on_exit.elts[0]) == "Shutdown"
+        ):
+            continue
+        condition = keyword_value(handler, "condition")
+        if not (
+            isinstance(condition, ast.Call)
+            and call_name(condition) == "IfCondition"
+            and len(condition.args) == 1
+            and isinstance(condition.args[0], ast.Name)
+            and condition.args[0].id == "shutdown_on_gazebo_exit"
+        ):
+            continue
+        return True
+    return False
+
+
 def validate_launch(path: Path) -> None:
     source = read_text(path)
     try:
@@ -576,6 +679,9 @@ def validate_launch(path: Path) -> None:
         raise ControlContractError(
             "launch must own Gazebo through ExecuteProcess"
         )
+    assigned_names = assigned_call_names(tree)
+    returned_names = returned_action_names(calls)
+    uses_conditional_exit_handler = False
     for process in execute_processes:
         shell = keyword_value(process, "shell")
         if shell is not None and not (
@@ -585,10 +691,24 @@ def validate_launch(path: Path) -> None:
                 "Gazebo shell execution must stay disabled because a shell "
                 "can exit without terminating its child process"
             )
-        if keyword_value(process, "on_exit") is None:
+        if keyword_value(process, "on_exit") is not None:
+            continue
+        process_name = assigned_names.get(id(process))
+        if (
+            process_name is None
+            or not has_conditional_shutdown_handler(
+                process_name,
+                calls,
+                assigned_names,
+                returned_names,
+            )
+        ):
             raise ControlContractError(
                 "every Gazebo ExecuteProcess must shut down the launch on exit"
             )
+        uses_conditional_exit_handler = True
+    if uses_conditional_exit_handler:
+        require_default_on_gazebo_exit_argument(calls)
 
     if any(call_name(call) == "TimerAction" for call in calls):
         raise ControlContractError(

@@ -39,6 +39,9 @@ def start_after_success(next_action, stage):
 
 def generate_launch_description():
     headless = LaunchConfiguration('headless')
+    shutdown_on_gazebo_exit = LaunchConfiguration(
+        'shutdown_on_gazebo_exit'
+    )
     package_share = FindPackageShare('voice_nav_sim')
     xacro_file = PathJoinSubstitution(
         [
@@ -129,7 +132,6 @@ def generate_launch_description():
         output='screen',
         additional_env=gazebo_environment,
         condition=IfCondition(headless),
-        on_exit=Shutdown(reason='Gazebo server exited.'),
         sigterm_timeout='10',
         sigkill_timeout='5',
     )
@@ -139,9 +141,22 @@ def generate_launch_description():
         output='screen',
         additional_env=gazebo_environment,
         condition=UnlessCondition(headless),
-        on_exit=Shutdown(reason='Gazebo exited.'),
         sigterm_timeout='10',
         sigkill_timeout='5',
+    )
+    stop_after_gazebo_server_exit = RegisterEventHandler(
+        OnProcessExit(
+            target_action=gazebo_server,
+            on_exit=[Shutdown(reason='Gazebo server exited.')],
+        ),
+        condition=IfCondition(shutdown_on_gazebo_exit),
+    )
+    stop_after_gazebo_gui_exit = RegisterEventHandler(
+        OnProcessExit(
+            target_action=gazebo_with_gui,
+            on_exit=[Shutdown(reason='Gazebo exited.')],
+        ),
+        condition=IfCondition(shutdown_on_gazebo_exit),
     )
 
     simulation_bridge = Node(
@@ -244,9 +259,20 @@ def generate_launch_description():
                 description='Run Gazebo server-only when true.',
                 choices=['true', 'false'],
             ),
+            DeclareLaunchArgument(
+                'shutdown_on_gazebo_exit',
+                default_value='true',
+                description=(
+                    'Shut down the whole launch when Gazebo exits. Tests '
+                    'disable this while joining Gazebo explicitly.'
+                ),
+                choices=['true', 'false'],
+            ),
             robot_state_publisher,
             gazebo_server,
             gazebo_with_gui,
+            stop_after_gazebo_server_exit,
+            stop_after_gazebo_gui_exit,
             simulation_bridge,
             spawn_robot,
             start_joint_state_broadcaster,
