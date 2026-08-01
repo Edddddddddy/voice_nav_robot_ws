@@ -275,6 +275,47 @@ class ScopedTestResultsTest(unittest.TestCase):
             self.assertEqual(completed.returncode, 2, completed.stdout)
             self.assertIn("critical launch evidence", completed.stderr)
 
+    def test_report_requires_tf_conflict_launch_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            results = (
+                build_base
+                / "voice_nav_sim"
+                / "test_results"
+                / "voice_nav_sim"
+            )
+            write_launch_xunit(
+                results / "test_test_simulation_control.py.xunit.xml",
+                (
+                    (
+                        "voice_nav_sim.SimulationControlTest",
+                        "test_stamped_drive_odometry_tf_and_consumer_timeout",
+                    ),
+                    (
+                        "voice_nav_sim.SimulationControlShutdownTest",
+                        "test_all_launch_managed_processes_exit_cleanly",
+                    ),
+                ),
+            )
+            write_launch_xunit(
+                results / "test_test_simulation_interfaces.py.xunit.xml",
+                (
+                    (
+                        "voice_nav_sim.SimulationInterfacesTest",
+                        "test_perception_odom_tf_and_ownership_contract",
+                    ),
+                    (
+                        "voice_nav_sim.SimulationInterfacesShutdownTest",
+                        "test_all_launch_managed_processes_exit_cleanly",
+                    ),
+                ),
+            )
+
+            completed = self.run_reporter(build_base, "voice_nav_sim")
+
+            self.assertEqual(completed.returncode, 2, completed.stdout)
+            self.assertIn("critical launch evidence", completed.stderr)
+
     def test_report_rejects_inconsistent_critical_launch_inventory(
         self,
     ) -> None:

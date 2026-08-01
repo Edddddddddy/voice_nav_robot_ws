@@ -287,6 +287,32 @@ class GazeboShutdownSupportTest(unittest.TestCase):
             caught.exception.exceptions[1].__notes__,
         )
 
+    def test_cleanup_annotation_failure_cannot_skip_later_steps(self):
+        events = []
+
+        class AnnotationFailure(RuntimeError):
+            def add_note(self, note):
+                raise RuntimeError(f"annotation rejected: {note}")
+
+        def fail_with_hostile_exception():
+            events.append("first")
+            raise AnnotationFailure("resource failure")
+
+        with self.assertRaises(ExceptionGroup) as caught:
+            self.support.run_cleanup_steps(
+                "fixture destruction failed",
+                (
+                    ("first", fail_with_hostile_exception),
+                    ("second", lambda: events.append("second")),
+                ),
+            )
+
+        self.assertEqual(events, ["first", "second"])
+        self.assertIsInstance(
+            caught.exception.exceptions[0],
+            AnnotationFailure,
+        )
+
     def test_never_started_thread_is_safe_to_cleanup(self):
         thread = threading.Thread(target=lambda: None)
 
