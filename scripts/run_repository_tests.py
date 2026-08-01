@@ -28,13 +28,28 @@ def run_suite(
     return 0 if result.wasSuccessful() else 1
 
 
+def discover_suite(repository_root: Path) -> unittest.TestSuite:
+    """Discover contract tests from the repository's non-package tests tree."""
+    repository_path = str(repository_root.resolve())
+    tests_path = str((repository_root / "tests").resolve())
+    if repository_path not in sys.path:
+        sys.path.insert(0, repository_path)
+
+    tests_path_was_present = tests_path in sys.path
+    try:
+        return unittest.TestLoader().discover(
+            tests_path,
+            pattern="test_*.py",
+        )
+    finally:
+        if not tests_path_was_present:
+            while tests_path in sys.path:
+                sys.path.remove(tests_path)
+
+
 def main() -> int:
     repository_root = Path(__file__).resolve().parents[1]
-    suite = unittest.defaultTestLoader.discover(
-        str(repository_root / "tests"),
-        pattern="test_*.py",
-        top_level_dir=str(repository_root),
-    )
+    suite = discover_suite(repository_root)
     return run_suite(suite, stream=sys.stderr)
 
 
