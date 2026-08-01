@@ -23,9 +23,9 @@ At the v0.1 checkpoint, the target ros2_control stack, 2D LiDAR bridge, SLAM,
 Nav2, Mission Runtime, Motion Gate, and local voice pipeline were not current
 claims.
 
-## Current v0.2 slice after Lesson 0008
+## Current v0.2 slice after Lesson 0009
 
-Verified by the Lesson 0007 and Lesson 0008 static and headless-Gazebo gates:
+Verified by the Lesson 0007–0009 static and headless-Gazebo gates:
 
 - the product model uses `gz_ros2_control/GazeboSimSystem`;
 - Jazzy's `diff_drive_controller` owns both wheel velocity commands;
@@ -41,17 +41,16 @@ Verified by the Lesson 0007 and Lesson 0008 static and headless-Gazebo gates:
   publisher GID, and fully qualified owner are exercised over a bounded
   observation window.
 
-SLAM, Nav2, Mission Runtime, Agent, and voice remain target claims. MotionGate
-is local GREEN but not yet merged public behavior. No `map → odom` owner exists
-yet. Controller timeout is not presented as Gate-death or physical-stop
-completion.
+SLAM, Nav2, Mission Runtime, Agent, and voice remain target claims. No
+`map → odom` owner exists yet. Controller timeout is configured but is not
+presented as Gate-death or physical-stop completion until Lesson 0010 executes
+the process-kill acceptance.
 
-## In-progress v0.2 slice: Lesson 0009
+## Completed v0.2 slice: Lesson 0009
 
-VN-0010 / Lesson 0009 now has a local-GREEN implementation of the first
-independent MotionGate vertical slice. Its full local gate and independent
-evidence review pass. It remains unmerged product behavior until the PR,
-required CI, rebase merge, and solution tag close:
+VN-0010 / Lesson 0009 publicly delivers the first independent MotionGate
+vertical slice after exact-head local verification, independent review,
+required CI, rebase merge, and an immutable solution checkpoint:
 
 - a pure, package-internal static `MotionGateCore` behind typed
   `prepare`/`open`/`renew`/`inhibit`/`accept_candidate`/`tick`/`snapshot`/

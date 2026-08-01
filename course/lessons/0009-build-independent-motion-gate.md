@@ -20,9 +20,9 @@ Collision Monitor 或进程崩溃验收。Lesson 0010 才 kill authority/Gate
 进程并完成 controller crash-stop 与 managed pause。正常 lease 过期不是
 Runtime crash；YAML 中已有 `cmd_vel_timeout` 也不是 Gate-death 证据。
 
-教师分支当前是 local-GREEN implementation，完整本地门禁与独立证据评审已经
-通过，PR #12 已进入 review。required CI、rebase merge 与
-`course/0009-solution` 未闭环前，本课不得标记 completed。
+教师 reference solution 已完成完整本地门禁、独立证据评审和 exact-head
+required CI，并由 PR #12 rebase 合并。不可变 `course/0009-solution` 已发布；
+公共提交和 local-to-public rebase map 记录在本课学习记录中。
 
 先阅读：
 
@@ -70,8 +70,19 @@ cd ../voice_nav_robot_lesson_0009
 git status --short
 ```
 
-最后一条命令必须无输出。`course/0009-solution` 只能在实现通过 reviewed
-PR、exact-head hosted CI 并 rebase merge 后创建；现在不能猜它的 hash。
+最后一条命令必须无输出。`course/0009-solution` 已在实现通过 reviewed PR、
+exact-head hosted CI 并 rebase merge 后创建：
+
+```text
+tag object:
+f31c559d30a5876f036991bacf357b00ea1ea128
+
+peeled target:
+c2d7631b57001a6e3e360f9bbdb558de6b7a85ed
+```
+
+该标签是 reviewed implementation snapshot；其后补写的公共身份台账属于下一课
+start baseline，不重写已经发布的 solution tag。
 
 ## 1. 先区分四种“停”
 

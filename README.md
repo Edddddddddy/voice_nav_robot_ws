@@ -9,17 +9,13 @@ VoiceNav Robot 是一套从零手写的 ROS 2 纯仿真学习项目：让普通�
 
 ## 当前状态
 
-Lesson 0001–0008 的 reference solution 已完成。Lesson 0008 已通过本地
-门禁、独立评审和 required CI，由
-[PR #9](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/9)
-rebase 合并，并发布不可变 `course/0008-solution` tag。Lesson 0009 /
-`VN-0010` 正在 [Issue #11](https://github.com/Edddddddddy/voice_nav_robot_ws/issues/11)
-上实现独立 MotionGate。当前 local-GREEN 分支已包含内部静态
-`MotionGateCore`、独立 `motion_gate_node`、per-lease writer binding、正常运行
-lease/freshness deadline 与唯一最终速度 owner；本地完整门禁与独立证据评审
-已通过，[PR #12](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/12)
-已创建；required CI、rebase merge 和 solution tag 尚未闭环。当前已在本地
-验证的 `v0.2` 切片包括：
+Lesson 0001–0009 的 reference solution 已完成。Lesson 0009 / `VN-0010`
+通过 exact-head 本地门禁、独立评审和 required CI，由
+[PR #12](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/12)
+rebase 合并，并发布不可变 `course/0009-solution` tag。当前公开的独立
+MotionGate 包含内部静态 `MotionGateCore`、独立 `motion_gate_node`、per-lease
+writer binding、steady-clock lease/freshness deadline 与唯一最终速度 owner。
+当前已验证的 `v0.2` 切片包括：
 
 - 六个职责明确的 ROS package；
 - 第一版 `MissionStep` 和 `ExecuteMission` 教学接口；
@@ -30,10 +26,10 @@ lease/freshness deadline 与唯一最终速度 owner；本地完整门禁与独�
   node FQN 验证的 TF 唯一所有权；
 - Work Item、质量门禁、变更记录和课程记录。
 
-原生 Gazebo DiffDrive 仅保留为历史教学 checkpoint。Lesson 0009 的
-local-GREEN implementation 仍不能写成已经公开交付的产品能力；进程 kill、
-消费端 crash-stop 以及 Gazebo pause/resume 明确留给 Lesson 0010。当前
-controller timeout 不能被误称为已经验收的完整安全链。
+原生 Gazebo DiffDrive 仅保留为历史教学 checkpoint。进程 kill、消费端
+crash-stop 以及 Gazebo pause/resume 明确留给 Lesson 0010；Lesson 0009 只证明
+正常运行 Gate 的独立 deadline 与 final ownership。已配置的 controller timeout
+仍不能被误称为已经验收的完整 crash-stop 链。
 
 实现状态与目标设计必须区分阅读：
 

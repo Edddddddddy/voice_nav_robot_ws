@@ -8,14 +8,15 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- Added the VN-0010 local-GREEN implementation for an independent,
+- Added the reviewed VN-0010 implementation for an independent,
   fail-closed MotionGate: package-private bounded ROS types, an internal
   non-installed static `MotionGateCore`, the installed `motion_gate_node`,
   trusted configuration, canonical product bringup, and Core/node/headless
   product test layers, plus a fresh-prefix install audit proving that the
-  internal Core header/library are not exported. The full local gate and
-  independent local evidence review pass; this does not claim hosted CI,
-  merge, release, or solution-tag closure.
+  internal Core header/library are not exported. Exact-head local verification,
+  independent code/safety/documentation review, required hosted CI, rebase
+  merge, and the immutable `course/0009-solution` checkpoint are complete.
+  Process-death and Gazebo pause/resume acceptance remain Lesson 0010 scope.
 - Added a packaged, self-contained Gazebo world with an analytic obstacle and
   a 360-degree single-layer GPU LiDAR on `laser_link`.
 - Added a headless perception integration gate that verifies `/scan` type,

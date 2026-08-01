@@ -1,20 +1,21 @@
 # VN-0010: Add fail-closed MotionGate authority
 
-**Status:** In Progress
+**Status:** Completed
 
 **GitHub Issue:**
 [#11](https://github.com/Edddddddddy/voice_nav_robot_ws/issues/11)
 
 **Branch:** `feat/vn-0010-l0009-motion-gate`
 
-**Implementation state:** the product baseline and historical clean-count head
-`8e022580` passed the full local gate and clean-prefix install audit. The
-current scoped-evidence hardening code head `517339a` and documentation head
-`ff06e6b` passed the exact-head full local gate; final documentation review is
-pending.
-PR #12 exists, but its visible hosted result is still for the pre-remediation
-head. Required hosted CI on the final reviewed head, rebase merge, and
-`course/0009-solution` do not yet exist.
+**Implementation state:** reviewed feature head
+`956fde31841a8c2ded6b37e905a8352afd10cdce` passed the exact-head local gate
+and required GitHub Actions run `30651076176`. PR #12 was rebase-merged on
+2026-08-01T04:22:41Z as public tip
+`c2d7631b57001a6e3e360f9bbdb558de6b7a85ed`; its tree is identical to the
+reviewed feature tree. Immutable annotated tag `course/0009-solution` has tag
+object `f31c559d30a5876f036991bacf357b00ea1ea128` and peels to that public tip.
+The authoritative 58-commit local-to-public map is in the
+[Lesson 0009 record](../../course/records/0009-independent-motion-gate.md).
 
 ## Goal
 
@@ -340,7 +341,7 @@ Gate-death evidence.
   test. Static repository guards are recorded separately as prerequisites.
 - [x] Lesson 0009, its evidence record, architecture/current-status documents,
   and `CHANGELOG.md` match the implemented slice.
-- [ ] A reviewed PR passes required hosted CI and is rebase-merged before
+- [x] A reviewed PR passes required hosted CI and is rebase-merged before
   annotated `course/0009-solution` is created.
 
 ## CI-readiness remediation
@@ -437,14 +438,13 @@ Review of the evidence boundary then drove a second tests-first hardening pass:
   `pivot-symlink/../expected` bypasses by comparing strict, actually resolved
   targets instead of lexically normalized paths.
 
-The canonical local verification of code head
+The historical canonical local verification of code head
 `8e022580a7add59a9c5d5a95973182322a0641c0` passed 140 repository tests,
 built all six packages in 32.8 seconds, passed 148 scoped ROS/package results
 with 0 errors, 0 failures, and 8 skips in 3 minutes 39 seconds, passed the
 fresh-prefix Core/node install audit, and printed
-`VoiceNav Robot verification passed.` Exact-head hosted CI remains pending
-until the evidence update is committed and the resulting reviewed head is
-pushed.
+`VoiceNav Robot verification passed.` It remains historical evidence rather
+than the final hosted gate.
 
 Focused checks on current hardening head
 `517339a3d313910a937fef973a9bdd635b457fc8` passed 41 scoped-evidence tests,
@@ -464,6 +464,19 @@ ack/Gate-zero/controller-zero latencies of 10.190/1.187/4.009 ms; and a stable
 sole final command owner. The SDF extension and existing workspace-underlay
 messages remained non-blocking diagnostics; no assertion or exit-code rule was
 relaxed.
+
+Final feature head `956fde31841a8c2ded6b37e905a8352afd10cdce`
+then passed `scripts/verify.sh` in 328.6 seconds: all 168 repository contracts,
+the six-package build, manifest-scoped `148/0/0/8`, the clean Core/node install
+audit, and the final success marker. Its product evidence recorded 0.099000 m
+bounded motion; Gate/controller clamps of 0.400 m/s and 1.200 rad/s; authority
+and candidate Gate-zero latencies of 258.316 ms and 157.476 ms; explicit
+INHIBIT ack/Gate-zero/controller-zero latencies of 10.110/0.700/4.996 ms; and
+the stable sole `/motion_gate_node` final owner. Required hosted run
+[`30651076176`](https://github.com/Edddddddddy/voice_nav_robot_ws/actions/runs/30651076176)
+passed that exact SHA. Independent code, safety, and documentation reviews had
+no remaining P0-P3 finding, and PR #12 had no unresolved review thread before
+its rebase merge.
 
 The evidence tool assumes the selected build tree and locked source-package
 layout are quiescent during clear/report. `src` and `src/<package>` must be
@@ -512,7 +525,7 @@ workspace; this is not an adversarial filesystem security boundary.
 - ADR required: no. This implements ADR-0002 and ADR-0003; a deviation from
   the separate Gate process or six-package topology requires a new ADR.
 
-Local-GREEN implementation paths under review:
+Reviewed implementation paths:
 
 ```text
 src/voice_nav_mission/
