@@ -552,7 +552,6 @@ WRITER_OBSERVATION_TEST = """\
 #include <gtest/gtest.h>
 
 #include <array>
-#include <cctype>
 
 void expect_complete_bounded_diagnostic(const OpenBinding & observation)
 {
@@ -577,11 +576,9 @@ void expect_complete_bounded_diagnostic(const OpenBinding & observation)
   const auto gid = observation.detail.substr(
     gid_start, positions[5] - gid_start);
   EXPECT_EQ(gid.size(), 32U);
-  bool gid_is_hex = true;
-  for (const unsigned char character : gid) {
-    gid_is_hex = gid_is_hex && std::isxdigit(character) != 0;
-  }
-  EXPECT_TRUE(gid_is_hex);
+  EXPECT_EQ(
+    gid.find_first_not_of("0123456789abcdefABCDEF"),
+    std::string::npos);
 }
 
 TEST(WriterObservationSession, PinsUnresolvedIdentityUntilTheSameWriterResolves)
@@ -639,11 +636,16 @@ TEST(WriterObservationSession, LongVariableFieldsPreserveEveryDiagnosticMarker)
   EXPECT_FALSE(long_namespace_rejected.ready);
   EXPECT_EQ(long_namespace_rejected.reason, Reason::WriterMismatch);
   expect_complete_bounded_diagnostic(long_namespace_rejected);
-  auto long_type = endpoint(writer_gid(0x68U), "collision_monitor");
-  long_type.topic_type = std::string(240U, 't');
   WriterObservationSession long_type_session(policy);
   const auto long_type_rejected = long_type_session.observe(
-    {std::move(long_type)}, 123456ms);
+    {WriterEndpointObservation{
+        std::string(240U, 't'),
+        "collision_monitor",
+        "/",
+        RMW_ENDPOINT_PUBLISHER,
+        candidate_qos(),
+        writer_gid(0x68U)}},
+    123456ms);
   EXPECT_FALSE(long_type_rejected.ready);
   EXPECT_EQ(long_type_rejected.reason, Reason::WriterMismatch);
   expect_complete_bounded_diagnostic(long_type_rejected);
@@ -1590,20 +1592,41 @@ class MotionGateContractTest(unittest.TestCase):
             (
                 (
                     "const auto long_type_rejected = long_type_session.observe(\n"
-                    "    {std::move(long_type)}, 123456ms);"
+                    "    {WriterEndpointObservation{\n"
+                    "        std::string(240U, 't'),\n"
+                    "        \"collision_monitor\",\n"
+                    "        \"/\",\n"
+                    "        RMW_ENDPOINT_PUBLISHER,\n"
+                    "        candidate_qos(),\n"
+                    "        writer_gid(0x68U)}},\n"
+                    "    123456ms);"
                 ),
                 "const auto long_type_rejected = OpenBinding{};",
             ),
             (
                 (
                     "const auto long_type_rejected = long_type_session.observe(\n"
-                    "    {std::move(long_type)}, 123456ms);"
+                    "    {WriterEndpointObservation{\n"
+                    "        std::string(240U, 't'),\n"
+                    "        \"collision_monitor\",\n"
+                    "        \"/\",\n"
+                    "        RMW_ENDPOINT_PUBLISHER,\n"
+                    "        candidate_qos(),\n"
+                    "        writer_gid(0x68U)}},\n"
+                    "    123456ms);"
                 ),
                 (
                     "if (false) {\n"
                     "    const auto long_type_rejected = "
                     "long_type_session.observe(\n"
-                    "      {std::move(long_type)}, 123456ms);\n"
+                    "      {WriterEndpointObservation{\n"
+                    "          std::string(240U, 't'),\n"
+                    "          \"collision_monitor\",\n"
+                    "          \"/\",\n"
+                    "          RMW_ENDPOINT_PUBLISHER,\n"
+                    "          candidate_qos(),\n"
+                    "          writer_gid(0x68U)}},\n"
+                    "      123456ms);\n"
                     "    (void)long_type_rejected;\n"
                     "  }\n"
                     "  const auto long_type_rejected = OpenBinding{};"
@@ -1626,6 +1649,15 @@ class MotionGateContractTest(unittest.TestCase):
                     "    observation.detail.substr(\n"
                     "    gid_start, positions[5] - gid_start);"
                 ),
+            ),
+            (
+                (
+                    "EXPECT_EQ(\n"
+                    "    gid.find_first_not_of("
+                    "\"0123456789abcdefABCDEF\"),\n"
+                    "    std::string::npos);"
+                ),
+                "EXPECT_EQ(std::string::npos, std::string::npos);",
             ),
         )
         for old, new in mutations:
@@ -1653,30 +1685,51 @@ class MotionGateContractTest(unittest.TestCase):
                     completed.stderr,
                 )
 
-    def test_long_writer_diagnostic_flow_is_ordered_and_rejected(
+    def test_long_writer_diagnostic_flow_is_direct_and_rejected(
         self,
     ) -> None:
         test_path = (
             "src/voice_nav_mission/test/writer_observation_test.cpp"
         )
 
-        def delayed_long_type_assignment(root: Path) -> None:
+        def detached_long_type_value(root: Path) -> None:
             path = root / test_path
             source = path.read_text(encoding="utf-8")
-            assignment = (
-                "  long_type.topic_type = std::string(240U, 't');\n"
+            direct_observation = (
+                "  const auto long_type_rejected = "
+                "long_type_session.observe(\n"
+                "    {WriterEndpointObservation{\n"
+                "        std::string(240U, 't'),\n"
+                "        \"collision_monitor\",\n"
+                "        \"/\",\n"
+                "        RMW_ENDPOINT_PUBLISHER,\n"
+                "        candidate_qos(),\n"
+                "        writer_gid(0x68U)}},\n"
+                "    123456ms);"
             )
-            self.assertEqual(source.count(assignment), 1)
-            source = source.replace(assignment, "", 1)
-            helper = (
-                "  expect_complete_bounded_diagnostic("
-                "long_type_rejected);\n"
+            detached_observation = (
+                "  const auto unused_long_type = std::string(240U, 't');\n"
+                "  const auto long_type_rejected = "
+                "long_type_session.observe(\n"
+                "    {WriterEndpointObservation{\n"
+                "        \"geometry_msgs/msg/TwistStamped\",\n"
+                "        \"collision_monitor\",\n"
+                "        \"/\",\n"
+                "        RMW_ENDPOINT_SUBSCRIPTION,\n"
+                "        candidate_qos(),\n"
+                "        writer_gid(0x68U)}},\n"
+                "    123456ms);\n"
+                "  (void)unused_long_type;"
             )
-            self.assertEqual(source.count(helper), 1)
-            source = source.replace(helper, helper + assignment, 1)
+            self.assertEqual(source.count(direct_observation), 1)
+            source = source.replace(
+                direct_observation,
+                detached_observation,
+                1,
+            )
             path.write_text(source, encoding="utf-8")
 
-        mutations = [delayed_long_type_assignment]
+        mutations = [detached_long_type_value]
         for result_name in (
             "long_name_rejected",
             "long_namespace_rejected",
