@@ -207,6 +207,17 @@ class GazeboTeardownMutationTest(unittest.TestCase):
             "positive ACK",
         )
 
+    def test_unreachable_positive_ack_validation_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_sim/test_support/gazebo_shutdown.py",
+            "if POSITIVE_ACK.fullmatch(completed.stdout) is None:",
+            (
+                "if False and "
+                "POSITIVE_ACK.fullmatch(completed.stdout) is None:"
+            ),
+            "positive ACK condition must be unconditional",
+        )
+
     def test_shell_execution_is_rejected(self):
         self.assert_mutation_rejected(
             "src/voice_nav_sim/test_support/gazebo_shutdown.py",
@@ -297,6 +308,45 @@ class GazeboTeardownMutationTest(unittest.TestCase):
             "single unconditional top-level assertion",
         )
 
+    def test_module_level_skip_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
+            "import pytest\n",
+            (
+                "import pytest\n"
+                "pytestmark = pytest.mark.skip(reason='disabled')\n"
+            ),
+            "must not disable or rebind critical teardown",
+        )
+
+    def test_assert_exit_codes_rebinding_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
+            "from launch_testing.asserts import assertExitCodes\n",
+            (
+                "from launch_testing.asserts import assertExitCodes\n"
+                "original_assert_exit_codes = assertExitCodes\n"
+                "def assertExitCodes(proc_info):\n"
+                "    original_assert_exit_codes(\n"
+                "        proc_info, allowable_exit_codes=[0, -3 * 3]\n"
+                "    )\n"
+            ),
+            "must not disable or rebind critical teardown",
+        )
+
+    def test_cleanup_runtime_rebinding_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
+            "        assertExitCodes(proc_info)\n",
+            (
+                "        assertExitCodes(proc_info)\n\n"
+                "MotionGateProductTest.cleanup_fixture = (\n"
+                "    lambda self, proc_info: None\n"
+                ")\n"
+            ),
+            "must not disable or rebind critical teardown",
+        )
+
     def test_early_return_from_cleanup_is_rejected(self):
         self.assert_mutation_rejected(
             "src/voice_nav_bringup/test/test_motion_gate_product.py",
@@ -310,6 +360,21 @@ class GazeboTeardownMutationTest(unittest.TestCase):
                 "        try:"
             ),
             "unconditional cleanup control flow",
+        )
+
+    def test_early_return_from_fixture_destroy_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
+            (
+                "    def destroy_ros_fixture(self):\n"
+                "        node = getattr(self, 'node', None)"
+            ),
+            (
+                "    def destroy_ros_fixture(self):\n"
+                "        return\n"
+                "        node = getattr(self, 'node', None)"
+            ),
+            "destroy_ros_fixture must not terminate early",
         )
 
     def test_product_exit_policy_must_default_on(self):
@@ -340,6 +405,14 @@ class GazeboTeardownMutationTest(unittest.TestCase):
             "python3 scripts/check_gazebo_teardown_contract.py --root .\n",
             "",
             "canonical verification",
+        )
+
+    def test_canonical_verify_must_fail_skipped_contracts(self):
+        self.assert_mutation_rejected(
+            "scripts/verify.sh",
+            "python3 scripts/run_repository_tests.py\n",
+            "",
+            "canonical verification must fail skipped repository tests",
         )
 
 
