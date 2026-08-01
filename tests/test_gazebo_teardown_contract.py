@@ -37,7 +37,7 @@ GAZEBO_TESTS = (
         / "voice_nav_sim"
         / "test"
         / "test_simulation_control.py",
-        "voice_nav_l0008_sim_test",
+        "l0008_sim_control",
     ),
     (
         REPOSITORY_ROOT
@@ -45,7 +45,7 @@ GAZEBO_TESTS = (
         / "voice_nav_sim"
         / "test"
         / "test_simulation_interfaces.py",
-        "voice_nav_l0008_sim_test",
+        "l0008_sim_interfaces",
     ),
     (
         REPOSITORY_ROOT
@@ -53,7 +53,7 @@ GAZEBO_TESTS = (
         / "voice_nav_bringup"
         / "test"
         / "test_motion_gate_product.py",
-        "voice_nav_l0009_product_test",
+        "l0009_motion_gate_product",
     ),
 )
 CONTRACT_FILES = (
@@ -106,7 +106,7 @@ class GazeboTeardownContractTest(unittest.TestCase):
         )
 
     def test_every_gazebo_test_uses_failure_safe_cleanup_and_strict_exit(self):
-        for path, partition in GAZEBO_TESTS:
+        for path, scope in GAZEBO_TESTS:
             with self.subTest(path=path):
                 source = path.read_text(encoding="utf-8")
                 self.assertIn(
@@ -116,7 +116,7 @@ class GazeboTeardownContractTest(unittest.TestCase):
                 self.assertIn("def setUp(self, proc_info):", source)
                 self.assertIn("self.addCleanup(", source)
                 self.assertIn("structured_stop_gazebo", source)
-                self.assertIn(partition, source)
+                self.assertIn(scope, source)
                 self.assertIn(
                     "@launch_testing.post_shutdown_test()",
                     source,
@@ -124,6 +124,25 @@ class GazeboTeardownContractTest(unittest.TestCase):
                 self.assertIn("assertExitCodes(proc_info)", source)
                 self.assertNotIn("allowable_exit_codes=[-9", source)
                 self.assertNotIn("allowable_exit_codes=[137", source)
+
+    def test_each_launch_test_claims_a_runtime_unique_partition(self):
+        for path, scope in GAZEBO_TESTS:
+            with self.subTest(path=path):
+                source = path.read_text(encoding="utf-8")
+                self.assertIn(
+                    "gazebo_shutdown.claim_unique_test_partition(",
+                    source,
+                )
+                self.assertIn(f"'{scope}'", source)
+
+        for relative_path in (
+            "src/voice_nav_sim/CMakeLists.txt",
+            "src/voice_nav_bringup/CMakeLists.txt",
+        ):
+            source = (REPOSITORY_ROOT / relative_path).read_text(
+                encoding="utf-8"
+            )
+            self.assertNotIn("GZ_PARTITION=", source)
 
 
 class GazeboTeardownMutationTest(unittest.TestCase):
@@ -215,9 +234,28 @@ class GazeboTeardownMutationTest(unittest.TestCase):
     def test_wrong_test_partition_is_rejected(self):
         self.assert_mutation_rejected(
             "src/voice_nav_bringup/test/test_motion_gate_product.py",
-            "PRODUCT_TEST_PARTITION = 'voice_nav_l0009_product_test'",
-            "PRODUCT_TEST_PARTITION = 'default'",
-            "must use exact partition",
+            "        'l0009_motion_gate_product'",
+            "        'default'",
+            "must claim exact runtime-unique partition scope",
+        )
+
+    def test_fixed_cmake_partition_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_sim/CMakeLists.txt",
+            "ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST\"",
+            (
+                "ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;"
+                "GZ_PARTITION=fixed\""
+            ),
+            "must not reuse a fixed Gazebo test partition",
+        )
+
+    def test_rpc_uses_the_checked_environment_snapshot(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_sim/test_support/gazebo_shutdown.py",
+            "            env=active_environment,\n",
+            "",
+            "must use the checked environment snapshot",
         )
 
     def test_failure_path_cleanup_registration_is_required(self):
