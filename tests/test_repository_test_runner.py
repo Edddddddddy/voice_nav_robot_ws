@@ -1,6 +1,7 @@
 import importlib.util
 import io
 from pathlib import Path
+import tempfile
 import unittest
 
 
@@ -63,6 +64,25 @@ class RepositoryTestRunnerTest(unittest.TestCase):
         )
 
         self.assertEqual(return_code, 0)
+
+    def test_discovers_tests_directory_without_package_marker(self):
+        runner = load_runner()
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository_root = Path(temporary_directory)
+            tests_directory = repository_root / "tests"
+            tests_directory.mkdir()
+            (tests_directory / "test_example.py").write_text(
+                "import unittest\n\n"
+                "class ExampleTest(unittest.TestCase):\n"
+                "    def test_example(self):\n"
+                "        self.assertTrue(True)\n",
+                encoding="utf-8",
+            )
+
+            suite = runner.discover_suite(repository_root)
+
+        self.assertEqual(suite.countTestCases(), 1)
 
 
 if __name__ == "__main__":
