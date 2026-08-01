@@ -81,6 +81,35 @@ std::string fqn_namespace(const std::string & fqn)
   return separator == 0U ? "/" : fqn.substr(0U, separator);
 }
 
+std::string observed_identity(
+  const WriterEndpointObservation & endpoint)
+{
+  if (!endpoint.node_name.empty()) {
+    return endpoint_fqn(endpoint);
+  }
+  const auto node_namespace =
+    normalized_namespace(endpoint.node_namespace);
+  return node_namespace == "/" ?
+         "/<unresolved>" :
+         node_namespace + "/<unresolved>";
+}
+
+std::string observation_summary(
+  const WriterEndpointObservation & endpoint,
+  std::chrono::milliseconds elapsed)
+{
+  return
+    "n=1 k=" + std::to_string(static_cast<int>(endpoint.endpoint_type)) +
+    " id=" + observed_identity(endpoint) +
+    " q=" + std::to_string(static_cast<int>(endpoint.qos.history)) +
+    "/" + std::to_string(endpoint.qos.depth) +
+    "/" + std::to_string(static_cast<int>(endpoint.qos.reliability)) +
+    "/" + std::to_string(static_cast<int>(endpoint.qos.durability)) +
+    " g=" + gid_text(endpoint.writer_gid) +
+    " ms=" + std::to_string(elapsed.count()) +
+    " t=" + endpoint.topic_type;
+}
+
 bool candidate_qos_is_compatible(const rmw_qos_profile_t & qos)
 {
   const bool history_compatible =
@@ -157,8 +186,9 @@ OpenBinding WriterObservationSession::observe(
   if (endpoints.size() != 1U) {
     if (pinned_writer_gid_) {
       return reject_mismatch(
-        "pinned candidate writer became ambiguous after " +
-        std::to_string(elapsed.count()) + "ms");
+        "writer ambiguous; n=" + std::to_string(endpoints.size()) +
+        " pin=" + gid_text(*pinned_writer_gid_) +
+        " ms=" + std::to_string(elapsed.count()));
     }
     return {
       false,
@@ -170,35 +200,26 @@ OpenBinding WriterObservationSession::observe(
   }
 
   const auto & endpoint = endpoints.front();
+  const auto summary = observation_summary(endpoint, elapsed);
   if (endpoint.endpoint_type != RMW_ENDPOINT_PUBLISHER) {
-    return reject_mismatch("candidate graph endpoint is not a publisher");
+    return reject_mismatch("endpoint kind mismatch; " + summary);
   }
   if (endpoint.topic_type != policy_.expected_topic_type) {
-    return reject_mismatch(
-      "candidate writer type mismatch: observed=" + endpoint.topic_type);
+    return reject_mismatch("writer type mismatch; " + summary);
   }
   if (!candidate_qos_is_compatible(endpoint.qos)) {
-    return reject_mismatch(
-      "candidate writer QoS mismatch: history=" +
-      std::to_string(static_cast<int>(endpoint.qos.history)) +
-      " depth=" + std::to_string(endpoint.qos.depth) +
-      " reliability=" +
-      std::to_string(static_cast<int>(endpoint.qos.reliability)) +
-      " durability=" +
-      std::to_string(static_cast<int>(endpoint.qos.durability)));
+    return reject_mismatch("writer QoS mismatch; " + summary);
   }
   if (gid_is_zero(endpoint.writer_gid)) {
-    return reject_mismatch(
-      "candidate graph endpoint has an all-zero GID");
+    return reject_mismatch("writer GID is all-zero; " + summary);
   }
   if (
     pinned_writer_gid_.has_value() &&
     *pinned_writer_gid_ != endpoint.writer_gid)
   {
     return reject_mismatch(
-      "candidate writer replaced: pinned=" +
-      gid_text(*pinned_writer_gid_) + " observed=" +
-      gid_text(endpoint.writer_gid));
+      "writer replaced pin=" + gid_text(*pinned_writer_gid_) + "; " +
+      summary);
   }
 
   if (endpoint.node_name.empty()) {
@@ -208,8 +229,7 @@ OpenBinding WriterObservationSession::observe(
       fqn_namespace(policy_.expected_writer_fqn);
     if (observed_namespace != expected_namespace) {
       return reject_mismatch(
-        "candidate writer namespace mismatch while name is unresolved: "
-        "observed=" + observed_namespace);
+        "partial namespace mismatch; " + summary);
     }
     if (identity_confirmed_) {
       return {
@@ -217,9 +237,7 @@ OpenBinding WriterObservationSession::observe(
         Reason::None,
         endpoint.writer_gid,
         bounded_detail(
-          "candidate writer identity retained for confirmed gid=" +
-          gid_text(endpoint.writer_gid) + " elapsed_ms=" +
-          std::to_string(elapsed.count()))};
+          "confirmed identity retained; " + summary)};
     }
     if (!pinned_writer_gid_) {
       pinned_writer_gid_ = endpoint.writer_gid;
@@ -229,15 +247,12 @@ OpenBinding WriterObservationSession::observe(
       Reason::WriterMetadataPending,
       endpoint.writer_gid,
       bounded_detail(
-        "candidate writer identity unresolved: count=1 type=" +
-        endpoint.topic_type + " gid=" + gid_text(endpoint.writer_gid) +
-        " elapsed_ms=" + std::to_string(elapsed.count()))};
+        "identity unresolved; " + summary)};
   }
 
   const auto observed_fqn = endpoint_fqn(endpoint);
   if (observed_fqn != policy_.expected_writer_fqn) {
-    return reject_mismatch(
-      "candidate writer FQN mismatch: observed=" + observed_fqn);
+    return reject_mismatch("writer FQN mismatch; " + summary);
   }
   if (!pinned_writer_gid_) {
     pinned_writer_gid_ = endpoint.writer_gid;
@@ -247,10 +262,7 @@ OpenBinding WriterObservationSession::observe(
     true,
     Reason::None,
     endpoint.writer_gid,
-    bounded_detail(
-      "candidate writer ready: fqn=" + observed_fqn +
-      " gid=" + gid_text(endpoint.writer_gid) +
-      " elapsed_ms=" + std::to_string(elapsed.count()))};
+    bounded_detail("writer ready; " + summary)};
 }
 
 void WriterObservationSession::reset() noexcept
