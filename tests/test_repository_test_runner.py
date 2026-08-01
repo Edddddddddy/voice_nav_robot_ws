@@ -1,0 +1,69 @@
+import importlib.util
+import io
+from pathlib import Path
+import unittest
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+RUNNER_PATH = REPOSITORY_ROOT / "scripts" / "run_repository_tests.py"
+
+
+def load_runner():
+    specification = importlib.util.spec_from_file_location(
+        "voice_nav_repository_test_runner",
+        RUNNER_PATH,
+    )
+    if specification is None or specification.loader is None:
+        raise AssertionError("could not load repository test runner")
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
+class RepositoryTestRunnerTest(unittest.TestCase):
+    def test_canonical_verify_uses_no_skip_runner(self):
+        source = (REPOSITORY_ROOT / "scripts" / "verify.sh").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("python3 scripts/run_repository_tests.py", source)
+        self.assertNotIn("python3 -m unittest discover", source)
+
+    def test_skipped_contract_test_fails_the_run(self):
+        runner = load_runner()
+
+        class SkippedContract(unittest.TestCase):
+            @unittest.skip("critical contract disabled")
+            def test_contract(self):
+                self.fail("unreachable")
+
+        stream = io.StringIO()
+        return_code = runner.run_suite(
+            unittest.defaultTestLoader.loadTestsFromTestCase(
+                SkippedContract
+            ),
+            stream=stream,
+        )
+
+        self.assertEqual(return_code, 1)
+        self.assertIn("forbids skipped tests", stream.getvalue())
+
+    def test_green_unskipped_contract_suite_succeeds(self):
+        runner = load_runner()
+
+        class PassingContract(unittest.TestCase):
+            def test_contract(self):
+                self.assertTrue(True)
+
+        return_code = runner.run_suite(
+            unittest.defaultTestLoader.loadTestsFromTestCase(
+                PassingContract
+            ),
+            stream=io.StringIO(),
+        )
+
+        self.assertEqual(return_code, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
