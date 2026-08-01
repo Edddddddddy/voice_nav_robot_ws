@@ -1,6 +1,7 @@
 # Lesson 0009 学习记录：独立 MotionGate
 
-状态：Completed reference solution / public closure recorded
+状态：Completed reference solution / PR #13 public-ledger closure pending
+VN-0010-C1 closure, exact-head CI, and merge
 （教师参考实现）
 
 学习者复现状态：Pending
