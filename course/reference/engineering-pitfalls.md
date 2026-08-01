@@ -358,15 +358,18 @@ and an aggregate skipped count with no matching allowed testcase.
    `<package>.cppcheck`; a global skipped total is never an exemption.
    A generated Python lint test with a stale `pytest.mark.skip` is fixed and
    enabled in source; it is never added to this allowlist.
-5. When a static contract requires an active C++ GTest, parse a same-length
-   lexical code view that masks comments plus ordinary, character, and raw
-   string literals. For a dedicated contract source, make the whole-file rule
-   explicit: conditional compilation is forbidden, and directive inspection
-   happens after C++ line-splice normalization. Reject skip macros, every
-   early return, and conditional or looping control flow in the required
-   linear tests. Prove that boundary values reach the tested call through
-   top-level statements and that assertions derive from the product result;
-   unreachable branches, ternary decoys, scattered tokens, or a string
+5. When a static contract requires an active C++ GTest, normalize first, then
+   parse paired same-length logical views that mask comments plus ordinary,
+   character, and raw string literals. For a dedicated contract source, make
+   the whole-file rule explicit: conditional compilation is forbidden. Apply
+   C++ translation phase-2 line-splice normalization before *all* lexical
+   classification, not only before directive inspection; a splice can also
+   form a comment or join
+   `GTEST_SKIP`. Reject skip macros, every early return, and conditional or
+   looping control flow in the required linear tests. Prove an ordered
+   top-level sequence from boundary-value setup through the tested call,
+   expected rejection state, and product-derived assertion. Unreachable or
+   reordered statements, ternary decoys, scattered tokens, or a string
    containing a decoy `TEST(...)` are not execution evidence.
 
 **Checker threat boundary.** These guards prevent ordinary and accidental
