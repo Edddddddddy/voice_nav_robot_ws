@@ -26,6 +26,8 @@ namespace
 {
 
 constexpr std::size_t kMaximumDetailLength = 160U;
+constexpr char kUnknownNodeName[] = "_NODE_NAME_UNKNOWN_";
+constexpr char kUnknownNodeNamespace[] = "_NODE_NAMESPACE_UNKNOWN_";
 
 bool gid_is_zero(const WriterGid & gid)
 {
@@ -66,6 +68,16 @@ std::string normalized_namespace(std::string node_namespace)
   return node_namespace;
 }
 
+bool node_name_is_unresolved(const std::string & node_name)
+{
+  return node_name.empty() || node_name == kUnknownNodeName;
+}
+
+bool node_namespace_is_unresolved(const std::string & node_namespace)
+{
+  return node_namespace == kUnknownNodeNamespace;
+}
+
 std::string endpoint_fqn(const WriterEndpointObservation & endpoint)
 {
   const auto node_namespace =
@@ -81,17 +93,29 @@ std::string fqn_namespace(const std::string & fqn)
   return separator == 0U ? "/" : fqn.substr(0U, separator);
 }
 
+std::string fqn_name(const std::string & fqn)
+{
+  return fqn.substr(fqn.rfind('/') + 1U);
+}
+
 std::string observed_identity(
   const WriterEndpointObservation & endpoint)
 {
-  if (!endpoint.node_name.empty()) {
+  const bool name_unresolved =
+    node_name_is_unresolved(endpoint.node_name);
+  const bool namespace_unresolved =
+    node_namespace_is_unresolved(endpoint.node_namespace);
+  if (!name_unresolved && !namespace_unresolved) {
     return endpoint_fqn(endpoint);
   }
-  const auto node_namespace =
+  const auto node_namespace = namespace_unresolved ?
+    std::string{"<unresolved-namespace>"} :
     normalized_namespace(endpoint.node_namespace);
+  const auto node_name = name_unresolved ?
+    std::string{"<unresolved>"} : endpoint.node_name;
   return node_namespace == "/" ?
-         "/<unresolved>" :
-         node_namespace + "/<unresolved>";
+         "/" + node_name :
+         node_namespace + "/" + node_name;
 }
 
 std::string observation_summary(
@@ -222,15 +246,26 @@ OpenBinding WriterObservationSession::observe(
       summary);
   }
 
-  if (endpoint.node_name.empty()) {
+  const bool name_unresolved =
+    node_name_is_unresolved(endpoint.node_name);
+  const bool namespace_unresolved =
+    node_namespace_is_unresolved(endpoint.node_namespace);
+  const auto expected_namespace =
+    fqn_namespace(policy_.expected_writer_fqn);
+  const auto expected_name =
+    fqn_name(policy_.expected_writer_fqn);
+  if (!name_unresolved && endpoint.node_name != expected_name) {
+    return reject_mismatch("partial node name mismatch; " + summary);
+  }
+  if (!namespace_unresolved) {
     const auto observed_namespace =
       normalized_namespace(endpoint.node_namespace);
-    const auto expected_namespace =
-      fqn_namespace(policy_.expected_writer_fqn);
     if (observed_namespace != expected_namespace) {
       return reject_mismatch(
         "partial namespace mismatch; " + summary);
     }
+  }
+  if (name_unresolved || namespace_unresolved) {
     if (identity_confirmed_) {
       return {
         true,
