@@ -52,11 +52,10 @@ std::string gid_text(const WriterGid & gid)
   return stream.str();
 }
 
-std::string endpoint_fqn(const WriterEndpointObservation & endpoint)
+std::string normalized_namespace(std::string node_namespace)
 {
-  std::string node_namespace = endpoint.node_namespace;
   if (node_namespace.empty() || node_namespace == "/") {
-    return "/" + endpoint.node_name;
+    return "/";
   }
   if (node_namespace.front() != '/') {
     node_namespace.insert(node_namespace.begin(), '/');
@@ -64,7 +63,22 @@ std::string endpoint_fqn(const WriterEndpointObservation & endpoint)
   if (node_namespace.back() == '/') {
     node_namespace.pop_back();
   }
-  return node_namespace + "/" + endpoint.node_name;
+  return node_namespace;
+}
+
+std::string endpoint_fqn(const WriterEndpointObservation & endpoint)
+{
+  const auto node_namespace =
+    normalized_namespace(endpoint.node_namespace);
+  return node_namespace == "/" ?
+         "/" + endpoint.node_name :
+         node_namespace + "/" + endpoint.node_name;
+}
+
+std::string fqn_namespace(const std::string & fqn)
+{
+  const auto separator = fqn.rfind('/');
+  return separator == 0U ? "/" : fqn.substr(0U, separator);
 }
 
 bool candidate_qos_is_compatible(const rmw_qos_profile_t & qos)
@@ -102,7 +116,8 @@ WriterObservationSession::WriterObservationSession(
   if (
     policy_.expected_topic_type.empty() ||
     policy_.expected_writer_fqn.empty() ||
-    policy_.expected_writer_fqn.front() != '/')
+    policy_.expected_writer_fqn.front() != '/' ||
+    policy_.expected_writer_fqn.back() == '/')
   {
     throw std::invalid_argument(
             "writer observation policy requires a type and absolute FQN");
@@ -187,6 +202,15 @@ OpenBinding WriterObservationSession::observe(
   }
 
   if (endpoint.node_name.empty()) {
+    const auto observed_namespace =
+      normalized_namespace(endpoint.node_namespace);
+    const auto expected_namespace =
+      fqn_namespace(policy_.expected_writer_fqn);
+    if (observed_namespace != expected_namespace) {
+      return reject_mismatch(
+        "candidate writer namespace mismatch while name is unresolved: "
+        "observed=" + observed_namespace);
+    }
     if (identity_confirmed_) {
       return {
         true,
