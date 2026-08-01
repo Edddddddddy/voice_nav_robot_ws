@@ -1,8 +1,8 @@
 from collections import deque
 import importlib.util
+import json
 import math
 from pathlib import Path
-import re
 import subprocess
 import threading
 import time
@@ -32,6 +32,7 @@ from tf2_msgs.msg import TFMessage
 COMMAND_TOPIC = '/diff_drive_controller/cmd_vel'
 LIMITED_COMMAND_TOPIC = '/diff_drive_controller/cmd_vel_out'
 ODOMETRY_TOPIC = '/odom'
+GAZEBO_POSE_TOPIC = '/world/voice_nav_test_world/pose/info'
 CONTROLLER_TIMEOUT_SECONDS = 0.35
 CONTROL_PERIOD_SECONDS = 0.01
 SIMULATION_STEP_EPSILON_SECONDS = 0.002
@@ -316,10 +317,13 @@ class SimulationControlTest(unittest.TestCase):
         completed = subprocess.run(
             [
                 'gz',
-                'model',
-                '--model',
-                'voice_nav_robot',
-                '--pose',
+                'topic',
+                '--echo',
+                '--topic',
+                GAZEBO_POSE_TOPIC,
+                '--num',
+                '1',
+                '--json-output',
             ],
             check=False,
             capture_output=True,
@@ -331,20 +335,49 @@ class SimulationControlTest(unittest.TestCase):
             0,
             completed.stdout + completed.stderr,
         )
-        match = re.search(
-            r'Pose \[ XYZ \(m\) \] \[ RPY \(rad\) \]:\s*'
-            r'\[([^\]]+)\]\s*\[([^\]]+)\]',
-            completed.stdout,
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            self.fail(
+                f'cannot parse Gazebo pose JSON: {error}: '
+                f'{completed.stdout}'
+            )
+        poses = [
+            pose
+            for pose in payload.get('pose', [])
+            if pose.get('name') == 'voice_nav_robot'
+        ]
+        self.assertEqual(
+            len(poses),
+            1,
+            f'expected one robot pose in: {completed.stdout}',
         )
-        self.assertIsNotNone(
-            match,
-            f'cannot parse Gazebo model pose:\n{completed.stdout}',
+        position = poses[0].get('position', {})
+        orientation = poses[0].get('orientation', {})
+        x = float(orientation.get('x', 0.0))
+        y = float(orientation.get('y', 0.0))
+        z = float(orientation.get('z', 0.0))
+        w = float(orientation.get('w', 0.0))
+        roll = math.atan2(
+            2.0 * (w * x + y * z),
+            1.0 - 2.0 * (x * x + y * y),
         )
-        position = tuple(float(value) for value in match.group(1).split())
-        rotation = tuple(float(value) for value in match.group(2).split())
-        self.assertEqual(len(position), 3)
-        self.assertEqual(len(rotation), 3)
-        return position + rotation
+        pitch_term = max(-1.0, min(1.0, 2.0 * (w * y - z * x)))
+        pitch = math.asin(pitch_term)
+        yaw = math.atan2(
+            2.0 * (w * z + x * y),
+            1.0 - 2.0 * (y * y + z * z),
+        )
+        pose = (
+            float(position.get('x', 0.0)),
+            float(position.get('y', 0.0)),
+            float(position.get('z', 0.0)),
+            roll,
+            pitch,
+            yaw,
+        )
+        self.assertTrue(all(math.isfinite(value) for value in pose))
+        return pose
 
     def publish_for(
         self,

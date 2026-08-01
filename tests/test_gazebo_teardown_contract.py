@@ -585,6 +585,15 @@ class GazeboTeardownMutationTest(unittest.TestCase):
             "must exhaust all cleanup steps",
         )
 
+    def test_fixture_destroy_steps_cannot_be_deleted(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
+            "        gazebo_shutdown.run_cleanup_steps(\n",
+            "        del steps[:]\n"
+            "        gazebo_shutdown.run_cleanup_steps(\n",
+            "must exhaust all cleanup steps",
+        )
+
     def test_unittest_cleanup_dispatch_cannot_be_overridden(self):
         self.assert_mutation_rejected(
             "src/voice_nav_bringup/test/test_motion_gate_product.py",
@@ -592,6 +601,15 @@ class GazeboTeardownMutationTest(unittest.TestCase):
             "    def doCleanups(self):\n"
             "        pass\n\n"
             "    def append_sample(self, samples, message):\n",
+            "independent registered cleanup",
+        )
+
+    def test_unittest_cleanup_dispatch_cannot_be_assigned(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
+            "class MotionGateProductTest(unittest.TestCase):\n",
+            "class MotionGateProductTest(unittest.TestCase):\n"
+            "    doCleanups = lambda self: None\n",
             "independent registered cleanup",
         )
 

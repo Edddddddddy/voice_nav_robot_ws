@@ -563,9 +563,9 @@ def validate_cleanup_registration(
             "failure-path cleanups first"
         )
     if any(
-        isinstance(node, ast.FunctionDef)
-        and node.name in {"tearDown", "cleanup_fixture", "doCleanups"}
-        for node in test_class.body
+        bound_names(statement)
+        & {"tearDown", "cleanup_fixture", "doCleanups"}
+        for statement in test_class.body
     ):
         raise GazeboTeardownContractError(
             f"{test_class.name} must not bypass independent registered cleanup"
@@ -757,6 +757,22 @@ def validate_destroy_control_flow(
         if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign))
         and "steps" in bound_names(node)
     ]
+    illegal_steps_targets = []
+    for node in ast.walk(destroy):
+        targets: list[ast.expr] = []
+        if isinstance(node, ast.Assign):
+            targets.extend(node.targets)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets.append(node.target)
+        elif isinstance(node, ast.Delete):
+            targets.extend(node.targets)
+        for target in targets:
+            if (
+                isinstance(target, ast.Subscript)
+                and isinstance(target.value, ast.Name)
+                and target.value.id == "steps"
+            ):
+                illegal_steps_targets.append(target)
     steps_initialization = (
         steps_bindings[0]
         if len(steps_bindings) == 1
@@ -824,6 +840,7 @@ def validate_destroy_control_flow(
         and len(join_calls) == 1
         and not direct_join_calls
         and isinstance(steps_initialization, ast.Assign)
+        and not illegal_steps_targets
         and append_calls
         and steps_method_calls == append_calls
         and all(

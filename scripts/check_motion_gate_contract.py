@@ -1605,7 +1605,13 @@ def validate_launch_test_registration(
     if any(
         forbidden in properties
         for properties in matching_properties
-        for forbidden in ("DISABLED", "SKIP_RETURN_CODE")
+        for forbidden in (
+            "DISABLED",
+            "PASS_REGULAR_EXPRESSION",
+            "SKIP_REGULAR_EXPRESSION",
+            "SKIP_RETURN_CODE",
+            "WILL_FAIL",
+        )
     ):
         raise MotionGateContractError(
             f"{package_name} launch test {generated_test_name} "
