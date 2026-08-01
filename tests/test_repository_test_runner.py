@@ -155,6 +155,58 @@ class RepositoryTestRunnerTest(unittest.TestCase):
 
         self.assertLessEqual(critical_ids, runner.REQUIRED_TEST_IDS)
 
+    def test_required_manifest_covers_every_repository_test_module(self):
+        runner = load_runner()
+        repository_modules = {
+            path.stem
+            for path in (REPOSITORY_ROOT / "tests").glob("test_*.py")
+        }
+        manifest_modules = {
+            test_id.split(".", 1)[0]
+            for test_id in runner.REQUIRED_TEST_IDS
+        }
+
+        self.assertLessEqual(repository_modules, manifest_modules)
+
+    def test_load_tests_cannot_hide_non_manifest_contract(self):
+        runner = load_runner()
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            repository_root = Path(temporary_directory)
+            tests_directory = repository_root / "tests"
+            tests_directory.mkdir()
+            test_module = "test_repository_runner_load_tests_fixture"
+            (tests_directory / f"{test_module}.py").write_text(
+                "import unittest\n\n"
+                "class ManifestAnchor(unittest.TestCase):\n"
+                "    def test_anchor(self):\n"
+                "        pass\n\n"
+                "class HiddenContract(unittest.TestCase):\n"
+                "    def test_must_execute(self):\n"
+                "        self.fail('load_tests hid this contract')\n\n"
+                "def load_tests(loader, tests, pattern):\n"
+                "    return loader.loadTestsFromTestCase(ManifestAnchor)\n",
+                encoding="utf-8",
+            )
+
+            repository_path = str(repository_root)
+            stream = io.StringIO()
+            try:
+                suite = runner.discover_suite(repository_root)
+                return_code = runner.run_suite(
+                    suite,
+                    stream=stream,
+                    required_test_ids={
+                        f"{test_module}.ManifestAnchor.test_anchor"
+                    },
+                )
+            finally:
+                while repository_path in sys.path:
+                    sys.path.remove(repository_path)
+                sys.modules.pop(test_module, None)
+
+        self.assertEqual(return_code, 1, stream.getvalue())
+
     def test_discovers_tests_directory_without_package_marker(self):
         runner = load_runner()
 

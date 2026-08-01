@@ -426,6 +426,18 @@ class GazeboTeardownMutationTest(unittest.TestCase):
             "active launch test method",
         )
 
+    def test_active_test_method_rebinding_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
+            "\n\n@launch_testing.post_shutdown_test()",
+            (
+                "\n\nMotionGateProductTest."
+                "test_motion_gate_product_contract = lambda self: None\n\n"
+                "@launch_testing.post_shutdown_test()"
+            ),
+            "must not disable or rebind critical teardown",
+        )
+
     def test_assert_exit_codes_rebinding_is_rejected(self):
         self.assert_mutation_rejected(
             "src/voice_nav_bringup/test/test_motion_gate_product.py",

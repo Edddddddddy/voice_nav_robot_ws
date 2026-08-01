@@ -252,6 +252,65 @@ class ScopedTestResultsTest(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertIn("Summary: 2 tests", completed.stdout)
 
+    def test_report_rejects_inconsistent_critical_launch_inventory(
+        self,
+    ) -> None:
+        critical_cases = (
+            '<testcase classname="voice_nav_bringup.MotionGateProductTest" '
+            'name="test_motion_gate_product_contract" />'
+            '<testcase classname="voice_nav_bringup.'
+            'MotionGateProductShutdownTest" '
+            'name="test_all_launch_managed_processes_exit_cleanly" />'
+        )
+        variants = {
+            "declared zero tests": (
+                '<testsuite name="launch" tests="0" errors="0" '
+                'failures="0" skipped="0">'
+                f"{critical_cases}</testsuite>"
+            ),
+            "required cases outside suite": (
+                '<testsuites tests="2" errors="0" failures="0">'
+                '<testsuite name="launch" tests="0" errors="0" '
+                'failures="0" skipped="0"></testsuite>'
+                f"{critical_cases}</testsuites>"
+            ),
+            "failed aggregate root": (
+                '<testsuites tests="2" errors="0" failures="1">'
+                '<testsuite name="launch" tests="2" errors="0" '
+                'failures="0" skipped="0">'
+                f"{critical_cases}</testsuite></testsuites>"
+            ),
+        }
+
+        for label, xml in variants.items():
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    build_base = Path(temporary_directory) / "build"
+                    result = (
+                        build_base
+                        / "voice_nav_bringup"
+                        / "test_results"
+                        / "voice_nav_bringup"
+                        / "test_test_motion_gate_product.py.xunit.xml"
+                    )
+                    result.parent.mkdir(parents=True)
+                    result.write_text(xml, encoding="utf-8")
+
+                    completed = self.run_reporter(
+                        build_base,
+                        "voice_nav_bringup",
+                    )
+
+                    self.assertEqual(
+                        completed.returncode,
+                        2,
+                        completed.stdout,
+                    )
+                    self.assertIn(
+                        "critical launch evidence",
+                        completed.stderr,
+                    )
+
     def test_clear_removes_only_selected_package_results(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             build_base = Path(temporary_directory) / "build"
