@@ -626,6 +626,8 @@ TEST(WriterObservationSession, LongVariableFieldsPreserveEveryDiagnosticMarker)
   WriterObservationSession long_name_session(policy);
   const auto long_name_rejected = long_name_session.observe(
     {endpoint(writer_gid(0x66U), std::string(240U, 'n'))}, 123456ms);
+  EXPECT_FALSE(long_name_rejected.ready);
+  EXPECT_EQ(long_name_rejected.reason, Reason::WriterMismatch);
   expect_complete_bounded_diagnostic(long_name_rejected);
   WriterObservationSession long_namespace_session(policy);
   const auto long_namespace_rejected = long_namespace_session.observe(
@@ -634,12 +636,16 @@ TEST(WriterObservationSession, LongVariableFieldsPreserveEveryDiagnosticMarker)
           writer_gid(0x67U), "collision_monitor",
           "/" + std::string(240U, 's'))},
     123456ms);
+  EXPECT_FALSE(long_namespace_rejected.ready);
+  EXPECT_EQ(long_namespace_rejected.reason, Reason::WriterMismatch);
   expect_complete_bounded_diagnostic(long_namespace_rejected);
   auto long_type = endpoint(writer_gid(0x68U), "collision_monitor");
   long_type.topic_type = std::string(240U, 't');
   WriterObservationSession long_type_session(policy);
   const auto long_type_rejected = long_type_session.observe(
     {std::move(long_type)}, 123456ms);
+  EXPECT_FALSE(long_type_rejected.ready);
+  EXPECT_EQ(long_type_rejected.reason, Reason::WriterMismatch);
   expect_complete_bounded_diagnostic(long_type_rejected);
   auto first_name = std::string(240U, 'p');
   auto second_name = first_name;
@@ -1342,6 +1348,17 @@ class MotionGateContractTest(unittest.TestCase):
                 test_signature + "\n{\n  GTEST_SKIP ();",
             )
 
+        def line_spliced_skip(root: Path) -> None:
+            self.replace(
+                root,
+                test_path,
+                test_signature + "\n{",
+                (
+                    test_signature + "\n{\n  "
+                    "GTEST_\\\nSKIP ();"
+                ),
+            )
+
         def nested_early_return(root: Path) -> None:
             self.replace(
                 root,
@@ -1376,6 +1393,29 @@ class MotionGateContractTest(unittest.TestCase):
             )
             path.write_text(source, encoding="utf-8")
 
+        def line_spliced_block_comment(root: Path) -> None:
+            path = root / test_path
+            source = path.read_text(encoding="utf-8")
+            source = source.replace(
+                test_signature,
+                "/\\\n*\n" + test_signature,
+                1,
+            )
+            source = source.replace(
+                (
+                    "\nTEST(\n"
+                    "  WriterObservationSession,\n"
+                    "  PinnedReplacementAndTerminalReplay"
+                ),
+                (
+                    "\n*\\\n/\n\nTEST(\n"
+                    "  WriterObservationSession,\n"
+                    "  PinnedReplacementAndTerminalReplay"
+                ),
+                1,
+            )
+            path.write_text(source, encoding="utf-8")
+
         def disabled_with_literal_decoy(root: Path) -> None:
             path = root / test_path
             source = path.read_text(encoding="utf-8")
@@ -1395,8 +1435,10 @@ class MotionGateContractTest(unittest.TestCase):
         for mutation in (
             conditionally_disabled,
             whitespace_skip,
+            line_spliced_skip,
             nested_early_return,
             line_spliced_conditional,
+            line_spliced_block_comment,
             disabled_with_literal_decoy,
         ):
             with self.subTest(mutation=mutation.__name__):
@@ -1430,6 +1472,24 @@ class MotionGateContractTest(unittest.TestCase):
         completed = self.run_checker(mutation)
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_conditional_policy_error_names_the_whole_file_rule(self) -> None:
+        def mutation(root: Path) -> None:
+            path = (
+                root
+                / "src/voice_nav_mission/test/writer_observation_test.cpp"
+            )
+            source = path.read_text(encoding="utf-8")
+            source += "\n#if defined(UNRELATED_PLATFORM_HELPER)\n#endif\n"
+            path.write_text(source, encoding="utf-8")
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "dedicated test source forbids all conditional compilation",
+            completed.stderr,
+        )
 
     def test_diagnostic_helper_cannot_skip_or_return_early(self) -> None:
         signature = (
@@ -1590,6 +1650,74 @@ class MotionGateContractTest(unittest.TestCase):
                 self.assertNotEqual(completed.returncode, 0)
                 self.assertTrue(
                     "bounded writer diagnostic" in completed.stderr,
+                    completed.stderr,
+                )
+
+    def test_long_writer_diagnostic_flow_is_ordered_and_rejected(
+        self,
+    ) -> None:
+        test_path = (
+            "src/voice_nav_mission/test/writer_observation_test.cpp"
+        )
+
+        def delayed_long_type_assignment(root: Path) -> None:
+            path = root / test_path
+            source = path.read_text(encoding="utf-8")
+            assignment = (
+                "  long_type.topic_type = std::string(240U, 't');\n"
+            )
+            self.assertEqual(source.count(assignment), 1)
+            source = source.replace(assignment, "", 1)
+            helper = (
+                "  expect_complete_bounded_diagnostic("
+                "long_type_rejected);\n"
+            )
+            self.assertEqual(source.count(helper), 1)
+            source = source.replace(helper, helper + assignment, 1)
+            path.write_text(source, encoding="utf-8")
+
+        mutations = [delayed_long_type_assignment]
+        for result_name in (
+            "long_name_rejected",
+            "long_namespace_rejected",
+            "long_type_rejected",
+        ):
+            def accepts_ready_result(
+                root: Path,
+                name: str = result_name,
+            ) -> None:
+                self.replace(
+                    root,
+                    test_path,
+                    f"EXPECT_FALSE({name}.ready);",
+                    f"EXPECT_TRUE({name}.ready);",
+                )
+
+            def accepts_non_mismatch_reason(
+                root: Path,
+                name: str = result_name,
+            ) -> None:
+                self.replace(
+                    root,
+                    test_path,
+                    (
+                        f"EXPECT_EQ({name}.reason, "
+                        "Reason::WriterMismatch);"
+                    ),
+                    f"EXPECT_EQ({name}.reason, Reason::None);",
+                )
+
+            mutations.extend(
+                (accepts_ready_result, accepts_non_mismatch_reason)
+            )
+
+        for mutation in mutations:
+            with self.subTest(mutation=mutation.__name__):
+                completed = self.run_checker(mutation)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(
+                    "bounded writer diagnostic",
                     completed.stderr,
                 )
 

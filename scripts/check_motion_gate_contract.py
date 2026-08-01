@@ -661,8 +661,14 @@ def require_source_tokens(
         )
 
 
+def _cpp_translation_phase2(source: str) -> str:
+    """Remove physical backslash-newline pairs before C++ tokenization."""
+    return re.sub(r"\\(?:\r\n|\n|\r)", "", source)
+
+
 def _cpp_lexical_views(source: str) -> tuple[str, str]:
-    """Return same-length comment-free and code-only C++ lexical views."""
+    """Return same-length views of the phase-2 logical C++ source."""
+    source = _cpp_translation_phase2(source)
     comment_free: list[str] = []
     code_only: list[str] = []
 
@@ -832,6 +838,36 @@ def require_top_level_source_snippets(
         )
 
 
+def require_top_level_source_sequence(
+    source: str,
+    snippets: tuple[str, ...],
+    context: str,
+) -> None:
+    comment_free, code_only = _cpp_lexical_views(source)
+    search_start = 0
+    for snippet in snippets:
+        words = re.split(r"\s+", snippet.strip())
+        pattern = re.compile(r"\s+".join(re.escape(word) for word in words))
+        matching_position = None
+        for match in pattern.finditer(comment_free, search_start):
+            first_word = words[0]
+            first_word_in_code = code_only[
+                match.start() : match.start() + len(first_word)
+            ]
+            if first_word_in_code != first_word:
+                continue
+            prefix = code_only[: match.start()]
+            if prefix.count("{") == prefix.count("}"):
+                matching_position = match.end()
+                break
+        if matching_position is None:
+            raise MotionGateContractError(
+                f"{context} must execute ordered top-level statement: "
+                + snippet
+            )
+        search_start = matching_position
+
+
 def active_gtest_body(
     source: str,
     suite: str,
@@ -845,15 +881,16 @@ def active_gtest_body(
         )
     # This dedicated safety-regression source is intentionally free of all
     # conditional compilation, so a required TEST cannot be hidden by a
-    # platform branch. C++ translation phase 2 removes spliced newlines first.
-    directive_view = re.sub(r"\\\r?\n", "", code_only)
+    # platform branch. The lexical view has already applied translation
+    # phase 2, including removal of spliced physical newlines.
     if re.search(
         r"^\s*#\s*(?:if|ifdef|ifndef|elif)\b",
-        directive_view,
+        code_only,
         re.MULTILINE,
     ):
         raise MotionGateContractError(
-            f"{context} must be unconditional, not preprocessor-guarded"
+            f"{context}: dedicated test source forbids all conditional "
+            "compilation"
         )
     signature_pattern = re.compile(
         rf"\bTEST\s*\(\s*{re.escape(suite)}\s*,\s*"
@@ -1429,7 +1466,7 @@ def validate_writer_observation(
         ),
         "bounded writer diagnostic helper",
     )
-    require_top_level_source_snippets(
+    require_top_level_source_sequence(
         diagnostic_helper,
         (
             "const auto gid_start = positions[4] + 3U;",
@@ -1438,6 +1475,12 @@ def validate_writer_observation(
                 "gid_start, positions[5] - gid_start);"
             ),
             "EXPECT_EQ(gid.size(), 32U);",
+            "bool gid_is_hex = true;",
+            (
+                "for (const unsigned char character : gid) { "
+                "gid_is_hex = gid_is_hex && "
+                "std::isxdigit(character) != 0; }"
+            ),
             "EXPECT_TRUE(gid_is_hex);",
         ),
         "bounded writer diagnostic helper",
@@ -1464,7 +1507,7 @@ def validate_writer_observation(
         ),
         "bounded writer diagnostic regression",
     )
-    require_top_level_source_snippets(
+    require_top_level_source_sequence(
         long_fields,
         (
             (
@@ -1472,19 +1515,37 @@ def validate_writer_observation(
                 "{endpoint(writer_gid(0x66U), std::string(240U, 'n'))}, "
                 "123456ms);"
             ),
+            "EXPECT_FALSE(long_name_rejected.ready);",
+            (
+                "EXPECT_EQ(long_name_rejected.reason, "
+                "Reason::WriterMismatch);"
+            ),
+            "expect_complete_bounded_diagnostic(long_name_rejected);",
             (
                 "const auto long_namespace_rejected = "
                 "long_namespace_session.observe( { endpoint( "
                 "writer_gid(0x67U), \"collision_monitor\", \"/\" + "
                 "std::string(240U, 's'))}, 123456ms);"
             ),
+            "EXPECT_FALSE(long_namespace_rejected.ready);",
+            (
+                "EXPECT_EQ(long_namespace_rejected.reason, "
+                "Reason::WriterMismatch);"
+            ),
+            (
+                "expect_complete_bounded_diagnostic("
+                "long_namespace_rejected);"
+            ),
             "long_type.topic_type = std::string(240U, 't');",
             (
                 "const auto long_type_rejected = long_type_session.observe( "
                 "{std::move(long_type)}, 123456ms);"
             ),
-            "expect_complete_bounded_diagnostic(long_name_rejected);",
-            "expect_complete_bounded_diagnostic(long_namespace_rejected);",
+            "EXPECT_FALSE(long_type_rejected.ready);",
+            (
+                "EXPECT_EQ(long_type_rejected.reason, "
+                "Reason::WriterMismatch);"
+            ),
             "expect_complete_bounded_diagnostic(long_type_rejected);",
         ),
         "bounded writer diagnostic observation flow",
