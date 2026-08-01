@@ -147,6 +147,21 @@ class GazeboPoseSupportTest(unittest.TestCase):
         self.assertEqual(len(runner.calls), 2)
         self.assertAlmostEqual(pose[0], 0.25)
 
+    def test_adjacent_snapshots_use_the_latest_complete_document(self):
+        output = f"{pose_payload(x=0.1)}\n{pose_payload(x=0.3)}\n"
+
+        pose = self.read_pose(
+            SequenceRunner([completed(stdout=output)])
+        )
+
+        self.assertAlmostEqual(pose[0], 0.3)
+
+    def test_excess_snapshot_documents_are_rejected(self):
+        output = "\n".join(pose_payload(x=index / 10) for index in range(5))
+
+        with self.assertRaisesRegex(AssertionError, "too many"):
+            self.read_pose(SequenceRunner([completed(stdout=output)]))
+
     def test_persistent_timeout_fails_after_two_attempts(self):
         runner = SequenceRunner(
             [
