@@ -56,6 +56,23 @@ GAZEBO_TESTS = (
         "l0009_motion_gate_product",
     ),
 )
+GAZEBO_TEST_CLASSES = {
+    "test_simulation_control.py": (
+        "SimulationControlTest",
+        "test_stamped_drive_odometry_tf_and_consumer_timeout",
+        "best_effort_zero",
+    ),
+    "test_simulation_interfaces.py": (
+        "SimulationInterfacesTest",
+        "test_perception_odom_tf_and_ownership_contract",
+        "best_effort_zero",
+    ),
+    "test_motion_gate_product.py": (
+        "MotionGateProductTest",
+        "test_motion_gate_product_contract",
+        "best_effort_inhibit",
+    ),
+}
 CONTRACT_FILES = (
     "src/voice_nav_sim/test_support/gazebo_shutdown.py",
     "src/voice_nav_sim/launch/simulation.launch.py",
@@ -144,6 +161,47 @@ class GazeboTeardownContractTest(unittest.TestCase):
             )
             self.assertNotIn("GZ_PARTITION=", source)
 
+    def test_cleanup_phases_are_independent_and_destroy_is_exception_safe(
+        self,
+    ):
+        for path, _ in GAZEBO_TESTS:
+            with self.subTest(path=path):
+                source = path.read_text(encoding="utf-8")
+                _, _, pre_stop_cleanup = GAZEBO_TEST_CLASSES[path.name]
+                self.assertNotIn("def cleanup_fixture(", source)
+                destroy_registration = (
+                    "        self.addCleanup(self.destroy_ros_fixture)"
+                )
+                stop_registration = (
+                    "        self.addCleanup(\n"
+                    "            gazebo_shutdown.structured_stop_gazebo,"
+                )
+                pre_stop_registration = (
+                    f"        self.addCleanup(self.{pre_stop_cleanup})"
+                )
+                self.assertIn(destroy_registration, source)
+                self.assertIn(stop_registration, source)
+                self.assertIn(pre_stop_registration, source)
+                self.assertLess(
+                    source.index(destroy_registration),
+                    source.index(stop_registration),
+                )
+                self.assertLess(
+                    source.index(stop_registration),
+                    source.index(pre_stop_registration),
+                )
+                self.assertRegex(
+                    source,
+                    r"try:\n\s+spin_thread\.join\(timeout=2\.0\)\n"
+                    r"\s+except Exception:\n\s+pass",
+                )
+                self.assertRegex(
+                    source,
+                    r"if rclpy\.ok\(\):\n\s+try:\n"
+                    r"\s+rclpy\.shutdown\(\)\n\s+except Exception:\n"
+                    r"\s+pass",
+                )
+
 
 class GazeboTeardownMutationTest(unittest.TestCase):
     def run_checker(self, mutation=None):
@@ -197,6 +255,21 @@ class GazeboTeardownMutationTest(unittest.TestCase):
             "    )",
             "    # ACK is incorrectly treated as process completion",
             "process-exit barrier",
+        )
+
+    def test_unreachable_process_exit_barrier_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_sim/test_support/gazebo_shutdown.py",
+            "    proc_info.assertWaitForShutdown(\n"
+            "        process='gazebo',\n"
+            "        timeout=PROCESS_TIMEOUT_SECONDS,\n"
+            "    )",
+            "    if False:\n"
+            "        proc_info.assertWaitForShutdown(\n"
+            "            process='gazebo',\n"
+            "            timeout=PROCESS_TIMEOUT_SECONDS,\n"
+            "        )",
+            "process-exit barrier must be unconditional",
         )
 
     def test_positive_ack_validation_is_required(self):
@@ -272,9 +345,9 @@ class GazeboTeardownMutationTest(unittest.TestCase):
     def test_failure_path_cleanup_registration_is_required(self):
         self.assert_mutation_rejected(
             "src/voice_nav_sim/test/test_simulation_control.py",
-            "        self.addCleanup(self.cleanup_fixture, proc_info)",
+            "        self.addCleanup(self.destroy_ros_fixture)",
             "        # cleanup omitted",
-            "register failure-path cleanup first",
+            "register independent failure-path cleanups first",
         )
 
     def test_test_launch_must_disable_early_shutdown(self):
@@ -319,6 +392,43 @@ class GazeboTeardownMutationTest(unittest.TestCase):
             "must not disable or rebind critical teardown",
         )
 
+    def test_active_class_skip_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
+            "class MotionGateProductTest(unittest.TestCase):",
+            "@unittest.skip('disabled')\n"
+            "class MotionGateProductTest(unittest.TestCase):",
+            "active launch test class",
+        )
+
+    def test_active_class_collection_disable_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
+            "class MotionGateProductTest(unittest.TestCase):\n",
+            "class MotionGateProductTest(unittest.TestCase):\n"
+            "    __test__ = False\n",
+            "active launch test class",
+        )
+
+    def test_module_load_tests_hook_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
+            "class MotionGateProductTest(unittest.TestCase):",
+            "def load_tests(loader, tests, pattern):\n"
+            "    return unittest.TestSuite()\n\n\n"
+            "class MotionGateProductTest(unittest.TestCase):",
+            "must not control critical test collection",
+        )
+
+    def test_active_test_expected_failure_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
+            "    def test_motion_gate_product_contract(self):",
+            "    @unittest.expectedFailure\n"
+            "    def test_motion_gate_product_contract(self):",
+            "active launch test method",
+        )
+
     def test_assert_exit_codes_rebinding_is_rejected(self):
         self.assert_mutation_rejected(
             "src/voice_nav_bringup/test/test_motion_gate_product.py",
@@ -331,6 +441,38 @@ class GazeboTeardownMutationTest(unittest.TestCase):
                 "        proc_info, allowable_exit_codes=[0, -3 * 3]\n"
                 "    )\n"
             ),
+            "must not disable or rebind critical teardown",
+        )
+
+    def test_assert_exit_codes_import_rebinding_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
+            "from launch_testing.asserts import assertExitCodes\n",
+            "from launch_testing.asserts import assertExitCodes\n"
+            "from unittest.mock import Mock as assertExitCodes\n",
+            "must not disable or rebind critical teardown",
+        )
+
+    def test_gazebo_shutdown_owner_rebinding_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
+            "PRODUCT_TEST_PARTITION = (\n",
+            "from unittest.mock import Mock\n"
+            "gazebo_shutdown = Mock()\n"
+            "PRODUCT_TEST_PARTITION = (\n",
+            "must not disable or rebind critical teardown",
+        )
+
+    def test_post_shutdown_decorator_rebinding_is_rejected(self):
+        self.assert_mutation_rejected(
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
+            "@launch_testing.post_shutdown_test()\n"
+            "class MotionGateProductShutdownTest",
+            "launch_testing.post_shutdown_test = (\n"
+            "    lambda: unittest.skip('disabled')\n"
+            ")\n"
+            "@launch_testing.post_shutdown_test()\n"
+            "class MotionGateProductShutdownTest",
             "must not disable or rebind critical teardown",
         )
 
@@ -347,19 +489,28 @@ class GazeboTeardownMutationTest(unittest.TestCase):
             "must not disable or rebind critical teardown",
         )
 
-    def test_early_return_from_cleanup_is_rejected(self):
+    def test_cleanup_phase_registration_order_is_rejected(self):
         self.assert_mutation_rejected(
             "src/voice_nav_bringup/test/test_motion_gate_product.py",
             (
-                "    def cleanup_fixture(self, proc_info):\n"
-                "        try:"
+                "        self.addCleanup(self.destroy_ros_fixture)\n"
+                "        self.addCleanup(\n"
+                "            gazebo_shutdown.structured_stop_gazebo,\n"
+                "            proc_info,\n"
+                "            expected_partition=PRODUCT_TEST_PARTITION,\n"
+                "        )\n"
+                "        self.addCleanup(self.best_effort_inhibit)"
             ),
             (
-                "    def cleanup_fixture(self, proc_info):\n"
-                "        return\n"
-                "        try:"
+                "        self.addCleanup(\n"
+                "            gazebo_shutdown.structured_stop_gazebo,\n"
+                "            proc_info,\n"
+                "            expected_partition=PRODUCT_TEST_PARTITION,\n"
+                "        )\n"
+                "        self.addCleanup(self.destroy_ros_fixture)\n"
+                "        self.addCleanup(self.best_effort_inhibit)"
             ),
-            "unconditional cleanup control flow",
+            "register independent failure-path cleanups first",
         )
 
     def test_early_return_from_fixture_destroy_is_rejected(self):

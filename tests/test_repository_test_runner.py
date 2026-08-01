@@ -66,6 +66,95 @@ class RepositoryTestRunnerTest(unittest.TestCase):
 
         self.assertEqual(return_code, 0)
 
+    def test_empty_contract_suite_fails_the_run(self):
+        runner = load_runner()
+
+        return_code = runner.run_suite(
+            unittest.TestSuite(),
+            stream=io.StringIO(),
+        )
+
+        self.assertEqual(return_code, 1)
+
+    def test_expected_failure_contract_fails_the_run(self):
+        runner = load_runner()
+
+        class ExpectedFailureContract(unittest.TestCase):
+            @unittest.expectedFailure
+            def test_contract(self):
+                self.fail("critical contract disabled")
+
+        stream = io.StringIO()
+        return_code = runner.run_suite(
+            unittest.defaultTestLoader.loadTestsFromTestCase(
+                ExpectedFailureContract
+            ),
+            stream=stream,
+        )
+
+        self.assertEqual(return_code, 1)
+        self.assertIn("expected failures", stream.getvalue())
+
+    def test_missing_required_test_id_fails_the_run(self):
+        runner = load_runner()
+
+        class PassingContract(unittest.TestCase):
+            def test_contract(self):
+                self.assertTrue(True)
+
+        stream = io.StringIO()
+        return_code = runner.run_suite(
+            unittest.defaultTestLoader.loadTestsFromTestCase(
+                PassingContract
+            ),
+            stream=stream,
+            required_test_ids={"required.module.Contract.test_guard"},
+        )
+
+        self.assertEqual(return_code, 1)
+        self.assertIn("required repository contracts", stream.getvalue())
+
+    def test_executed_count_must_equal_discovery_snapshot(self):
+        runner = load_runner()
+
+        class NonExecutingContract(unittest.TestCase):
+            def test_contract(self):
+                self.fail("run() should be replaced by the fixture")
+
+            def run(self, result=None):
+                return result
+
+        stream = io.StringIO()
+        return_code = runner.run_suite(
+            unittest.defaultTestLoader.loadTestsFromTestCase(
+                NonExecutingContract
+            ),
+            stream=stream,
+            required_test_ids=set(),
+        )
+
+        self.assertEqual(return_code, 1)
+        self.assertIn("executed test count", stream.getvalue())
+
+    def test_required_manifest_contains_critical_contract_ids(self):
+        runner = load_runner()
+        critical_ids = {
+            (
+                "test_gazebo_shutdown_support.GazeboShutdownSupportTest."
+                "test_positive_ack_is_followed_by_real_process_exit_barrier"
+            ),
+            (
+                "test_gazebo_teardown_contract."
+                "GazeboTeardownMutationTest.test_repository_contract_passes"
+            ),
+            (
+                "test_repository_test_runner.RepositoryTestRunnerTest."
+                "test_empty_contract_suite_fails_the_run"
+            ),
+        }
+
+        self.assertLessEqual(critical_ids, runner.REQUIRED_TEST_IDS)
+
     def test_discovers_tests_directory_without_package_marker(self):
         runner = load_runner()
 

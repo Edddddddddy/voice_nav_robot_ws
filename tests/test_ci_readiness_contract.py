@@ -21,6 +21,11 @@ BRINGUP_CMAKE = (
 MISSION_CMAKE = (
     REPOSITORY_ROOT / "src" / "voice_nav_mission" / "CMakeLists.txt"
 )
+PACKAGE_MANIFESTS = (
+    REPOSITORY_ROOT / "src" / "voice_nav_sim" / "package.xml",
+    REPOSITORY_ROOT / "src" / "voice_nav_mission" / "package.xml",
+    REPOSITORY_ROOT / "src" / "voice_nav_bringup" / "package.xml",
+)
 STARTUP_TIMEOUT_NAME = (
     "CONTROLLER_STARTUP_SERVICE_RESPONSE_TIMEOUT_SECONDS"
 )
@@ -181,18 +186,54 @@ class CiReadinessContractTest(unittest.TestCase):
                 "LOCALHOST",
             )
 
-        domains = {
-            name: environment["ROS_DOMAIN_ID"]
-            for name, environment in environments.items()
-        }
-        self.assertEqual(domains, {
-            "sim": "93",
-            "mission": "91",
-            "bringup": "92",
-        })
-        self.assertEqual(len(set(domains.values())), len(domains))
+        for environment in environments.values():
+            self.assertNotIn("ROS_DOMAIN_ID", environment)
         self.assertNotIn("GZ_PARTITION", sim_environment)
         self.assertNotIn("GZ_PARTITION", bringup_environment)
+
+    def test_launch_tests_use_official_process_scoped_domain_leases(self):
+        expected_launch_test_counts = {
+            SIMULATION_CMAKE: 3,
+            MISSION_CMAKE: 1,
+            BRINGUP_CMAKE: 1,
+        }
+        isolated_runner = (
+            'RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"'
+        )
+        environment_reset = (
+            '"ROS_DOMAIN_ID=unset:;DISABLE_ROS_ISOLATION=unset:"'
+        )
+
+        for cmake_path, expected_count in expected_launch_test_counts.items():
+            with self.subTest(cmake=cmake_path):
+                cmake = cmake_path.read_text(encoding="utf-8")
+                minimum = re.search(
+                    r"cmake_minimum_required\(VERSION\s+([0-9.]+)\)",
+                    cmake,
+                )
+                self.assertIsNotNone(minimum)
+                self.assertGreaterEqual(
+                    tuple(int(part) for part in minimum.group(1).split(".")),
+                    (3, 22),
+                )
+                self.assertIn(
+                    "find_package(ament_cmake_ros REQUIRED)",
+                    cmake,
+                )
+                self.assertEqual(cmake.count(isolated_runner), expected_count)
+                self.assertIn("ENVIRONMENT_MODIFICATION", cmake)
+                self.assertIn(environment_reset, cmake)
+                self.assertNotIn("ROS_DOMAIN_ID=91", cmake)
+                self.assertNotIn("ROS_DOMAIN_ID=92", cmake)
+                self.assertNotIn("ROS_DOMAIN_ID=93", cmake)
+
+        for package_manifest in PACKAGE_MANIFESTS:
+            with self.subTest(package=package_manifest):
+                package = package_manifest.read_text(encoding="utf-8")
+                self.assertIn(
+                    "<test_depend>ament_cmake_ros</test_depend>",
+                    package,
+                )
 
     def test_convergence_unit_test_allows_runner_teardown_headroom(self):
         cmake = BRINGUP_CMAKE.read_text(encoding="utf-8")
