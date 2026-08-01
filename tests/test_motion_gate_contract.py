@@ -574,7 +574,9 @@ void expect_complete_bounded_diagnostic(const OpenBinding & observation)
       positions[index + 1U] : observation.detail.size();
     EXPECT_LT(value_start, value_end);
   }
-  const auto gid = observation.detail.substr(0U, 32U);
+  const auto gid_start = positions[4] + 3U;
+  const auto gid = observation.detail.substr(
+    gid_start, positions[5] - gid_start);
   EXPECT_EQ(gid.size(), 32U);
   EXPECT_TRUE(std::all_of(
       gid.cbegin(), gid.cend(),
@@ -620,12 +622,24 @@ TEST(WriterObservationSession, KnownPartialIdentityMustAgreeBeforePending)
 
 TEST(WriterObservationSession, LongVariableFieldsPreserveEveryDiagnosticMarker)
 {
-  expect_complete_bounded_diagnostic(rejected);
-  const auto long_name = std::string(240U, 'n');
-  const auto long_namespace = std::string(240U, 's');
-  const auto long_type = std::string(240U, 't');
-  auto first_name = long_name;
-  auto second_name = long_name;
+  const auto observe_mismatch = [](
+    WriterEndpointObservation invalid)
+    {
+      const auto rejected = observe(std::move(invalid));
+      expect_complete_bounded_diagnostic(rejected);
+      return rejected;
+    };
+  (void)observe_mismatch(
+    endpoint(writer_gid(0x66U), std::string(240U, 'n')));
+  (void)observe_mismatch(
+    endpoint(
+      writer_gid(0x67U), "collision_monitor",
+      "/" + std::string(240U, 's')));
+  auto long_type = endpoint(writer_gid(0x68U), "collision_monitor");
+  long_type.topic_type = std::string(240U, 't');
+  (void)observe_mismatch(std::move(long_type));
+  auto first_name = std::string(240U, 'p');
+  auto second_name = first_name;
   first_name.back() = 'a';
   second_name.back() = 'b';
   EXPECT_NE(first.detail, second.detail);
@@ -1283,6 +1297,128 @@ class MotionGateContractTest(unittest.TestCase):
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("bounded writer diagnostic regression", completed.stderr)
 
+    def test_required_gtest_rejects_inactive_and_literal_decoys(self) -> None:
+        test_path = (
+            "src/voice_nav_mission/test/writer_observation_test.cpp"
+        )
+        test_signature = (
+            "TEST(WriterObservationSession, "
+            "LongVariableFieldsPreserveEveryDiagnosticMarker)"
+        )
+
+        def conditionally_disabled(root: Path) -> None:
+            path = root / test_path
+            source = path.read_text(encoding="utf-8")
+            source = source.replace(
+                test_signature,
+                "#if false\n" + test_signature,
+                1,
+            )
+            source = source.replace(
+                (
+                    "\nTEST(\n"
+                    "  WriterObservationSession,\n"
+                    "  PinnedReplacementAndTerminalReplay"
+                ),
+                (
+                    "\n#endif\n\nTEST(\n"
+                    "  WriterObservationSession,\n"
+                    "  PinnedReplacementAndTerminalReplay"
+                ),
+                1,
+            )
+            path.write_text(source, encoding="utf-8")
+
+        def whitespace_skip(root: Path) -> None:
+            self.replace(
+                root,
+                test_path,
+                test_signature + "\n{",
+                test_signature + "\n{\n  GTEST_SKIP ();",
+            )
+
+        def disabled_with_literal_decoy(root: Path) -> None:
+            path = root / test_path
+            source = path.read_text(encoding="utf-8")
+            source = source.replace(
+                test_signature,
+                (
+                    'const char * decoy = "' + test_signature + '";\n'
+                    + test_signature.replace(
+                        "LongVariableFields",
+                        "DISABLED_LongVariableFields",
+                    )
+                ),
+                1,
+            )
+            path.write_text(source, encoding="utf-8")
+
+        for mutation in (
+            conditionally_disabled,
+            whitespace_skip,
+            disabled_with_literal_decoy,
+        ):
+            with self.subTest(mutation=mutation.__name__):
+                completed = self.run_checker(mutation)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(
+                    "bounded writer diagnostic regression",
+                    completed.stderr,
+                )
+
+    def test_active_gtest_parser_ignores_literal_braces(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_mission/test/writer_observation_test.cpp",
+                (
+                    "TEST(WriterObservationSession, "
+                    "LongVariableFieldsPreserveEveryDiagnosticMarker)\n{"
+                ),
+                (
+                    "TEST(WriterObservationSession, "
+                    "LongVariableFieldsPreserveEveryDiagnosticMarker)\n{\n"
+                    '  const auto brace = "}";\n'
+                    '  const auto raw_braces = R"tag({})tag";\n'
+                    "  (void)brace;\n"
+                    "  (void)raw_braces;"
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_diagnostic_helper_cannot_skip_or_return_early(self) -> None:
+        signature = (
+            "void expect_complete_bounded_diagnostic("
+            "const OpenBinding & observation)\n{"
+        )
+        for short_circuit in ("GTEST_SKIP ();", "return void();"):
+            with self.subTest(short_circuit=short_circuit):
+                def mutation(
+                    root: Path,
+                    statement: str = short_circuit,
+                ) -> None:
+                    self.replace(
+                        root,
+                        (
+                            "src/voice_nav_mission/test/"
+                            "writer_observation_test.cpp"
+                        ),
+                        signature,
+                        signature + "\n  " + statement,
+                    )
+
+                completed = self.run_checker(mutation)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(
+                    "bounded writer diagnostic helper",
+                    completed.stderr,
+                )
+
     def test_long_writer_diagnostic_regression_covers_all_fields(self) -> None:
         mutations = (
             ("std::string(240U, 'n')", "std::string(24U, 'n')"),
@@ -1292,6 +1428,67 @@ class MotionGateContractTest(unittest.TestCase):
             (
                 "EXPECT_NE(first.detail, second.detail);",
                 "EXPECT_EQ(first.detail, second.detail);",
+            ),
+        )
+        for old, new in mutations:
+            with self.subTest(mutation=old):
+                def mutation(
+                    root: Path,
+                    old_value: str = old,
+                    new_value: str = new,
+                ) -> None:
+                    self.replace(
+                        root,
+                        (
+                            "src/voice_nav_mission/test/"
+                            "writer_observation_test.cpp"
+                        ),
+                        old_value,
+                        new_value,
+                    )
+
+                completed = self.run_checker(mutation)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertTrue(
+                    "bounded writer diagnostic" in completed.stderr,
+                    completed.stderr,
+                )
+
+    def test_long_values_must_flow_into_observation_and_gid_is_parsed(
+        self,
+    ) -> None:
+        mutations = (
+            (
+                (
+                    "(void)observe_mismatch(\n"
+                    "    endpoint(writer_gid(0x66U), "
+                    "std::string(240U, 'n')));"
+                ),
+                "const auto unused_long_name = std::string(240U, 'n');",
+            ),
+            (
+                (
+                    "(void)observe_mismatch(\n"
+                    "    endpoint(\n"
+                    "      writer_gid(0x67U), \"collision_monitor\",\n"
+                    "      \"/\" + std::string(240U, 's')));"
+                ),
+                (
+                    "const auto unused_long_namespace = "
+                    "std::string(240U, 's');"
+                ),
+            ),
+            (
+                "(void)observe_mismatch(std::move(long_type));",
+                "(void)long_type;",
+            ),
+            (
+                (
+                    "const auto gid = observation.detail.substr(\n"
+                    "    gid_start, positions[5] - gid_start);"
+                ),
+                "const auto gid = std::string(32U, '0');",
             ),
         )
         for old, new in mutations:

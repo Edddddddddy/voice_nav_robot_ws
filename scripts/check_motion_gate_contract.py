@@ -661,81 +661,139 @@ def require_source_tokens(
         )
 
 
+def _cpp_lexical_views(source: str) -> tuple[str, str]:
+    """Return same-length comment-free and code-only C++ lexical views."""
+    comment_free: list[str] = []
+    code_only: list[str] = []
+
+    def append_masked(fragment: str, preserve_literal: bool) -> None:
+        if preserve_literal:
+            comment_free.extend(fragment)
+        else:
+            comment_free.extend(
+                "\n" if character == "\n" else " "
+                for character in fragment
+            )
+        code_only.extend(
+            "\n" if character == "\n" else " "
+            for character in fragment
+        )
+
+    index = 0
+    while index < len(source):
+        following = source[index + 1] if index + 1 < len(source) else ""
+        if source[index] == "/" and following == "/":
+            end = source.find("\n", index + 2)
+            end = len(source) if end < 0 else end
+            append_masked(source[index:end], preserve_literal=False)
+            index = end
+            continue
+        if source[index] == "/" and following == "*":
+            closing = source.find("*/", index + 2)
+            end = len(source) if closing < 0 else closing + 2
+            append_masked(source[index:end], preserve_literal=False)
+            index = end
+            continue
+
+        raw_match = re.match(r'(?:u8|u|U|L)?R"', source[index:])
+        previous_is_identifier = index > 0 and (
+            source[index - 1].isalnum() or source[index - 1] == "_"
+        )
+        if raw_match is not None and not previous_is_identifier:
+            delimiter_start = index + len(raw_match.group(0))
+            opening = source.find("(", delimiter_start, delimiter_start + 17)
+            if opening >= 0:
+                delimiter = source[delimiter_start:opening]
+                delimiter_is_valid = not any(
+                    character.isspace() or character in "()\\"
+                    for character in delimiter
+                )
+                if delimiter_is_valid:
+                    terminator = ")" + delimiter + '"'
+                    closing = source.find(terminator, opening + 1)
+                    end = (
+                        len(source) if closing < 0
+                        else closing + len(terminator)
+                    )
+                    append_masked(
+                        source[index:end], preserve_literal=True
+                    )
+                    index = end
+                    continue
+
+        if source[index] in {'"', "'"}:
+            quote = source[index]
+            end = index + 1
+            while end < len(source):
+                if source[end] == "\\" and end + 1 < len(source):
+                    end += 2
+                    continue
+                end += 1
+                if source[end - 1] == quote:
+                    break
+            append_masked(source[index:end], preserve_literal=True)
+            index = end
+            continue
+
+        comment_free.append(source[index])
+        code_only.append(source[index])
+        index += 1
+
+    return "".join(comment_free), "".join(code_only)
+
+
+def strip_cpp_comments(source: str) -> str:
+    """Remove C++ comments while preserving literals and source offsets."""
+    return _cpp_lexical_views(source)[0]
+
+
+def cpp_code_mask(source: str) -> str:
+    """Mask C++ comments and literals while preserving code source offsets."""
+    return _cpp_lexical_views(source)[1]
+
+
 def function_body(source: str, signature: str, context: str) -> str:
-    signature_index = source.find(signature)
+    comment_free, code_only = _cpp_lexical_views(source)
+    signature_index = code_only.find(signature)
     if signature_index < 0:
         raise MotionGateContractError(
             f"{context} must define {signature}"
         )
-    opening = source.find("{", signature_index)
+    opening = code_only.find("{", signature_index)
     if opening < 0:
         raise MotionGateContractError(
             f"{context} has no body for {signature}"
         )
     depth = 0
-    for index in range(opening, len(source)):
-        character = source[index]
+    for index in range(opening, len(code_only)):
+        character = code_only[index]
         if character == "{":
             depth += 1
         elif character == "}":
             depth -= 1
             if depth == 0:
-                return source[opening + 1 : index]
+                return comment_free[opening + 1 : index]
     raise MotionGateContractError(
         f"{context} has an unterminated body for {signature}"
     )
 
 
-def strip_cpp_comments(source: str) -> str:
-    """Remove C++ comments while preserving strings and line structure."""
-    output: list[str] = []
-    index = 0
-    state = "code"
-    quote = ""
-    while index < len(source):
-        character = source[index]
-        following = source[index + 1] if index + 1 < len(source) else ""
-        if state == "code":
-            if character == "/" and following == "/":
-                output.extend((" ", " "))
-                index += 2
-                state = "line_comment"
-                continue
-            if character == "/" and following == "*":
-                output.extend((" ", " "))
-                index += 2
-                state = "block_comment"
-                continue
-            output.append(character)
-            if character in {'"', "'"}:
-                quote = character
-                state = "string"
-            index += 1
-            continue
-        if state == "string":
-            output.append(character)
-            if character == "\\" and index + 1 < len(source):
-                output.append(source[index + 1])
-                index += 2
-                continue
-            if character == quote:
-                state = "code"
-            index += 1
-            continue
-        if state == "line_comment":
-            output.append("\n" if character == "\n" else " ")
-            if character == "\n":
-                state = "code"
-            index += 1
-            continue
-        if character == "*" and following == "/":
-            output.extend((" ", " "))
-            index += 2
-            state = "code"
-            continue
-        output.append("\n" if character == "\n" else " ")
-        index += 1
-    return "".join(output)
+def reject_test_short_circuit(body: str, context: str) -> None:
+    body_code = cpp_code_mask(body)
+    if re.search(r"\bGTEST_SKIP\s*\(", body_code):
+        raise MotionGateContractError(
+            f"{context} must execute without skip or early return"
+        )
+    depth = 0
+    for token in re.finditer(r"[{}]|\breturn\b", body_code):
+        if token.group(0) == "{":
+            depth += 1
+        elif token.group(0) == "}":
+            depth -= 1
+        elif depth == 0:
+            raise MotionGateContractError(
+                f"{context} must execute without skip or early return"
+            )
 
 
 def active_gtest_body(
@@ -744,29 +802,30 @@ def active_gtest_body(
     name: str,
     context: str,
 ) -> str:
-    cleaned = strip_cpp_comments(source)
-    if re.search(r"^\s*#\s*define\s+TEST\b", cleaned, re.MULTILINE):
+    cleaned, code_only = _cpp_lexical_views(source)
+    if re.search(r"^\s*#\s*define\s+TEST\b", code_only, re.MULTILINE):
         raise MotionGateContractError(
             f"{context} must not redefine the TEST macro"
         )
-    if re.search(r"^\s*#\s*if\s+0\b", cleaned, re.MULTILINE):
+    if re.search(
+        r"^\s*#\s*(?:if|ifdef|ifndef|elif)\b",
+        code_only,
+        re.MULTILINE,
+    ):
         raise MotionGateContractError(
-            f"{context} must not hide regressions behind #if 0"
+            f"{context} must be unconditional, not preprocessor-guarded"
         )
     signature_pattern = re.compile(
         rf"\bTEST\s*\(\s*{re.escape(suite)}\s*,\s*"
         rf"{re.escape(name)}\s*\)"
     )
-    matches = list(signature_pattern.finditer(cleaned))
+    matches = list(signature_pattern.finditer(code_only))
     if len(matches) != 1:
         raise MotionGateContractError(
             f"{context} must define exactly one active TEST({suite}, {name})"
         )
     body = function_body(cleaned, matches[0].group(0), context)
-    if "GTEST_SKIP(" in body or re.search(r"\breturn\s*;", body):
-        raise MotionGateContractError(
-            f"{context} must execute without skip or early return"
-        )
+    reject_test_short_circuit(body, context)
     return body
 
 
@@ -1301,6 +1360,10 @@ def validate_writer_observation(
         "void expect_complete_bounded_diagnostic(",
         "bounded writer diagnostic helper",
     )
+    reject_test_short_circuit(
+        diagnostic_helper,
+        "bounded writer diagnostic helper",
+    )
     require_source_tokens(
         diagnostic_helper,
         (
@@ -1315,6 +1378,9 @@ def validate_writer_observation(
             "ASSERT_NE(positions[index], std::string::npos)",
             "ASSERT_LT(positions[index - 1U], positions[index])",
             "EXPECT_LT(value_start, value_end)",
+            "const auto gid_start = positions[4] + 3U",
+            "observation.detail.substr(",
+            "gid_start, positions[5] - gid_start",
             "EXPECT_EQ(gid.size(), 32U)",
             "std::isxdigit(character)",
         ),
@@ -1339,6 +1405,24 @@ def validate_writer_observation(
             "EXPECT_NE(first.detail, second.detail)",
         ),
         "bounded writer diagnostic regression",
+    )
+    normalized_long_fields = re.sub(r"\s+", " ", long_fields)
+    require_source_tokens(
+        normalized_long_fields,
+        (
+            (
+                "observe_mismatch( endpoint(writer_gid(0x66U), "
+                "std::string(240U, 'n')))"
+            ),
+            (
+                "observe_mismatch( endpoint( writer_gid(0x67U), "
+                '"collision_monitor", "/" + '
+                "std::string(240U, 's')))"
+            ),
+            "long_type.topic_type = std::string(240U, 't')",
+            "observe_mismatch(std::move(long_type))",
+        ),
+        "bounded writer diagnostic observation flow",
     )
 
     terminal_replay = active_gtest_body(
