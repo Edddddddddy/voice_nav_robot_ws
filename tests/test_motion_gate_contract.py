@@ -551,7 +551,6 @@ WRITER_OBSERVATION_TEST = """\
 #include "writer_observation.hpp"
 #include <gtest/gtest.h>
 
-#include <algorithm>
 #include <array>
 #include <cctype>
 
@@ -578,9 +577,11 @@ void expect_complete_bounded_diagnostic(const OpenBinding & observation)
   const auto gid = observation.detail.substr(
     gid_start, positions[5] - gid_start);
   EXPECT_EQ(gid.size(), 32U);
-  EXPECT_TRUE(std::all_of(
-      gid.cbegin(), gid.cend(),
-      [](unsigned char character) {return std::isxdigit(character) != 0;}));
+  bool gid_is_hex = true;
+  for (const unsigned char character : gid) {
+    gid_is_hex = gid_is_hex && std::isxdigit(character) != 0;
+  }
+  EXPECT_TRUE(gid_is_hex);
 }
 
 TEST(WriterObservationSession, PinsUnresolvedIdentityUntilTheSameWriterResolves)
@@ -622,26 +623,30 @@ TEST(WriterObservationSession, KnownPartialIdentityMustAgreeBeforePending)
 
 TEST(WriterObservationSession, LongVariableFieldsPreserveEveryDiagnosticMarker)
 {
-  const auto observe_mismatch = [](
-    WriterEndpointObservation invalid)
-    {
-      const auto rejected = observe(std::move(invalid));
-      expect_complete_bounded_diagnostic(rejected);
-      return rejected;
-    };
-  (void)observe_mismatch(
-    endpoint(writer_gid(0x66U), std::string(240U, 'n')));
-  (void)observe_mismatch(
-    endpoint(
-      writer_gid(0x67U), "collision_monitor",
-      "/" + std::string(240U, 's')));
+  WriterObservationSession long_name_session(policy);
+  const auto long_name_rejected = long_name_session.observe(
+    {endpoint(writer_gid(0x66U), std::string(240U, 'n'))}, 123456ms);
+  expect_complete_bounded_diagnostic(long_name_rejected);
+  WriterObservationSession long_namespace_session(policy);
+  const auto long_namespace_rejected = long_namespace_session.observe(
+      {
+        endpoint(
+          writer_gid(0x67U), "collision_monitor",
+          "/" + std::string(240U, 's'))},
+    123456ms);
+  expect_complete_bounded_diagnostic(long_namespace_rejected);
   auto long_type = endpoint(writer_gid(0x68U), "collision_monitor");
   long_type.topic_type = std::string(240U, 't');
-  (void)observe_mismatch(std::move(long_type));
+  WriterObservationSession long_type_session(policy);
+  const auto long_type_rejected = long_type_session.observe(
+    {std::move(long_type)}, 123456ms);
+  expect_complete_bounded_diagnostic(long_type_rejected);
   auto first_name = std::string(240U, 'p');
   auto second_name = first_name;
   first_name.back() = 'a';
   second_name.back() = 'b';
+  const auto first = observe(first_name);
+  const auto second = observe(second_name);
   EXPECT_NE(first.detail, second.detail);
 }
 
@@ -1337,6 +1342,40 @@ class MotionGateContractTest(unittest.TestCase):
                 test_signature + "\n{\n  GTEST_SKIP ();",
             )
 
+        def nested_early_return(root: Path) -> None:
+            self.replace(
+                root,
+                test_path,
+                test_signature + "\n{",
+                (
+                    test_signature + "\n{\n"
+                    "  if (true) { return void(); }"
+                ),
+            )
+
+        def line_spliced_conditional(root: Path) -> None:
+            path = root / test_path
+            source = path.read_text(encoding="utf-8")
+            source = source.replace(
+                test_signature,
+                "#\\\nif false\n" + test_signature,
+                1,
+            )
+            source = source.replace(
+                (
+                    "\nTEST(\n"
+                    "  WriterObservationSession,\n"
+                    "  PinnedReplacementAndTerminalReplay"
+                ),
+                (
+                    "\n#endif\n\nTEST(\n"
+                    "  WriterObservationSession,\n"
+                    "  PinnedReplacementAndTerminalReplay"
+                ),
+                1,
+            )
+            path.write_text(source, encoding="utf-8")
+
         def disabled_with_literal_decoy(root: Path) -> None:
             path = root / test_path
             source = path.read_text(encoding="utf-8")
@@ -1356,6 +1395,8 @@ class MotionGateContractTest(unittest.TestCase):
         for mutation in (
             conditionally_disabled,
             whitespace_skip,
+            nested_early_return,
+            line_spliced_conditional,
             disabled_with_literal_decoy,
         ):
             with self.subTest(mutation=mutation.__name__):
@@ -1461,27 +1502,52 @@ class MotionGateContractTest(unittest.TestCase):
         mutations = (
             (
                 (
-                    "(void)observe_mismatch(\n"
-                    "    endpoint(writer_gid(0x66U), "
-                    "std::string(240U, 'n')));"
+                    "const auto long_name_rejected = long_name_session.observe(\n"
+                    "    {endpoint(writer_gid(0x66U), "
+                    "std::string(240U, 'n'))}, 123456ms);"
                 ),
-                "const auto unused_long_name = std::string(240U, 'n');",
+                (
+                    "const auto unused_long_name = std::string(240U, 'n');\n"
+                    "  const auto long_name_rejected = OpenBinding{};"
+                ),
             ),
             (
                 (
-                    "(void)observe_mismatch(\n"
-                    "    endpoint(\n"
-                    "      writer_gid(0x67U), \"collision_monitor\",\n"
-                    "      \"/\" + std::string(240U, 's')));"
+                    "const auto long_namespace_rejected = "
+                    "long_namespace_session.observe(\n"
+                    "      {\n"
+                    "        endpoint(\n"
+                    "          writer_gid(0x67U), \"collision_monitor\",\n"
+                    "          \"/\" + std::string(240U, 's'))},\n"
+                    "    123456ms);"
                 ),
                 (
                     "const auto unused_long_namespace = "
-                    "std::string(240U, 's');"
+                    "std::string(240U, 's');\n"
+                    "  const auto long_namespace_rejected = OpenBinding{};"
                 ),
             ),
             (
-                "(void)observe_mismatch(std::move(long_type));",
-                "(void)long_type;",
+                (
+                    "const auto long_type_rejected = long_type_session.observe(\n"
+                    "    {std::move(long_type)}, 123456ms);"
+                ),
+                "const auto long_type_rejected = OpenBinding{};",
+            ),
+            (
+                (
+                    "const auto long_type_rejected = long_type_session.observe(\n"
+                    "    {std::move(long_type)}, 123456ms);"
+                ),
+                (
+                    "if (false) {\n"
+                    "    const auto long_type_rejected = "
+                    "long_type_session.observe(\n"
+                    "      {std::move(long_type)}, 123456ms);\n"
+                    "    (void)long_type_rejected;\n"
+                    "  }\n"
+                    "  const auto long_type_rejected = OpenBinding{};"
+                ),
             ),
             (
                 (
@@ -1489,6 +1555,17 @@ class MotionGateContractTest(unittest.TestCase):
                     "    gid_start, positions[5] - gid_start);"
                 ),
                 "const auto gid = std::string(32U, '0');",
+            ),
+            (
+                (
+                    "const auto gid = observation.detail.substr(\n"
+                    "    gid_start, positions[5] - gid_start);"
+                ),
+                (
+                    "const auto gid = true ? std::string(32U, '0') :\n"
+                    "    observation.detail.substr(\n"
+                    "    gid_start, positions[5] - gid_start);"
+                ),
             ),
         )
         for old, new in mutations:

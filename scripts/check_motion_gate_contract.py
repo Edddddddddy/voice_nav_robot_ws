@@ -778,22 +778,58 @@ def function_body(source: str, signature: str, context: str) -> str:
     )
 
 
-def reject_test_short_circuit(body: str, context: str) -> None:
+def reject_test_short_circuit(
+    body: str,
+    context: str,
+    *,
+    require_linear: bool = False,
+) -> None:
     body_code = cpp_code_mask(body)
-    if re.search(r"\bGTEST_SKIP\s*\(", body_code):
+    if (
+        re.search(r"\bGTEST_SKIP\s*\(", body_code)
+        or re.search(r"\breturn\b", body_code)
+    ):
         raise MotionGateContractError(
             f"{context} must execute without skip or early return"
         )
-    depth = 0
-    for token in re.finditer(r"[{}]|\breturn\b", body_code):
-        if token.group(0) == "{":
-            depth += 1
-        elif token.group(0) == "}":
-            depth -= 1
-        elif depth == 0:
-            raise MotionGateContractError(
-                f"{context} must execute without skip or early return"
-            )
+    if require_linear and re.search(
+        r"\b(?:if|else|for|while|do|switch|goto|try|catch)\b",
+        body_code,
+    ):
+        raise MotionGateContractError(
+            f"{context} must remain a linear, unconditionally executed test"
+        )
+
+
+def require_top_level_source_snippets(
+    source: str,
+    snippets: tuple[str, ...],
+    context: str,
+) -> None:
+    comment_free, code_only = _cpp_lexical_views(source)
+    missing: list[str] = []
+    for snippet in snippets:
+        words = re.split(r"\s+", snippet.strip())
+        pattern = re.compile(r"\s+".join(re.escape(word) for word in words))
+        matched_at_top_level = False
+        for match in pattern.finditer(comment_free):
+            first_word = words[0]
+            first_word_in_code = code_only[
+                match.start() : match.start() + len(first_word)
+            ]
+            if first_word_in_code != first_word:
+                continue
+            prefix = code_only[: match.start()]
+            if prefix.count("{") == prefix.count("}"):
+                matched_at_top_level = True
+                break
+        if not matched_at_top_level:
+            missing.append(snippet)
+    if missing:
+        raise MotionGateContractError(
+            f"{context} must execute top-level statement(s): "
+            + ", ".join(missing)
+        )
 
 
 def active_gtest_body(
@@ -807,9 +843,13 @@ def active_gtest_body(
         raise MotionGateContractError(
             f"{context} must not redefine the TEST macro"
         )
+    # This dedicated safety-regression source is intentionally free of all
+    # conditional compilation, so a required TEST cannot be hidden by a
+    # platform branch. C++ translation phase 2 removes spliced newlines first.
+    directive_view = re.sub(r"\\\r?\n", "", code_only)
     if re.search(
         r"^\s*#\s*(?:if|ifdef|ifndef|elif)\b",
-        code_only,
+        directive_view,
         re.MULTILINE,
     ):
         raise MotionGateContractError(
@@ -825,7 +865,7 @@ def active_gtest_body(
             f"{context} must define exactly one active TEST({suite}, {name})"
         )
     body = function_body(cleaned, matches[0].group(0), context)
-    reject_test_short_circuit(body, context)
+    reject_test_short_circuit(body, context, require_linear=True)
     return body
 
 
@@ -1382,7 +1422,23 @@ def validate_writer_observation(
             "observation.detail.substr(",
             "gid_start, positions[5] - gid_start",
             "EXPECT_EQ(gid.size(), 32U)",
+            "bool gid_is_hex = true",
+            "gid_is_hex = gid_is_hex && std::isxdigit(character) != 0",
+            "EXPECT_TRUE(gid_is_hex)",
             "std::isxdigit(character)",
+        ),
+        "bounded writer diagnostic helper",
+    )
+    require_top_level_source_snippets(
+        diagnostic_helper,
+        (
+            "const auto gid_start = positions[4] + 3U;",
+            (
+                "const auto gid = observation.detail.substr( "
+                "gid_start, positions[5] - gid_start);"
+            ),
+            "EXPECT_EQ(gid.size(), 32U);",
+            "EXPECT_TRUE(gid_is_hex);",
         ),
         "bounded writer diagnostic helper",
     )
@@ -1396,31 +1452,40 @@ def validate_writer_observation(
     require_source_tokens(
         long_fields,
         (
-            "expect_complete_bounded_diagnostic(rejected)",
             "std::string(240U, 'n')",
             "std::string(240U, 's')",
             "std::string(240U, 't')",
+            "expect_complete_bounded_diagnostic(long_name_rejected)",
+            "expect_complete_bounded_diagnostic(long_namespace_rejected)",
+            "expect_complete_bounded_diagnostic(long_type_rejected)",
             "first_name.back() = 'a'",
             "second_name.back() = 'b'",
             "EXPECT_NE(first.detail, second.detail)",
         ),
         "bounded writer diagnostic regression",
     )
-    normalized_long_fields = re.sub(r"\s+", " ", long_fields)
-    require_source_tokens(
-        normalized_long_fields,
+    require_top_level_source_snippets(
+        long_fields,
         (
             (
-                "observe_mismatch( endpoint(writer_gid(0x66U), "
-                "std::string(240U, 'n')))"
+                "const auto long_name_rejected = long_name_session.observe( "
+                "{endpoint(writer_gid(0x66U), std::string(240U, 'n'))}, "
+                "123456ms);"
             ),
             (
-                "observe_mismatch( endpoint( writer_gid(0x67U), "
-                '"collision_monitor", "/" + '
-                "std::string(240U, 's')))"
+                "const auto long_namespace_rejected = "
+                "long_namespace_session.observe( { endpoint( "
+                "writer_gid(0x67U), \"collision_monitor\", \"/\" + "
+                "std::string(240U, 's'))}, 123456ms);"
             ),
-            "long_type.topic_type = std::string(240U, 't')",
-            "observe_mismatch(std::move(long_type))",
+            "long_type.topic_type = std::string(240U, 't');",
+            (
+                "const auto long_type_rejected = long_type_session.observe( "
+                "{std::move(long_type)}, 123456ms);"
+            ),
+            "expect_complete_bounded_diagnostic(long_name_rejected);",
+            "expect_complete_bounded_diagnostic(long_namespace_rejected);",
+            "expect_complete_bounded_diagnostic(long_type_rejected);",
         ),
         "bounded writer diagnostic observation flow",
     )

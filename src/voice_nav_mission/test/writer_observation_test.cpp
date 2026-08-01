@@ -18,7 +18,6 @@
 
 #include <rmw/qos_profiles.h>
 
-#include <algorithm>
 #include <array>
 #include <cctype>
 #include <chrono>
@@ -98,9 +97,11 @@ void expect_complete_bounded_diagnostic(const OpenBinding & observation)
   const auto gid = observation.detail.substr(
     gid_start, positions[5] - gid_start);
   EXPECT_EQ(gid.size(), 32U);
-  EXPECT_TRUE(std::all_of(
-      gid.cbegin(), gid.cend(),
-      [](unsigned char character) {return std::isxdigit(character) != 0;}));
+  bool gid_is_hex = true;
+  for (const unsigned char character : gid) {
+    gid_is_hex = gid_is_hex && std::isxdigit(character) != 0;
+  }
+  EXPECT_TRUE(gid_is_hex);
 }
 
 TEST(WriterObservationSession, PinsUnresolvedIdentityUntilTheSameWriterResolves)
@@ -287,38 +288,55 @@ TEST(WriterObservationSession, DefinitivePolicyViolationsNeverEnterPending)
 
 TEST(WriterObservationSession, LongVariableFieldsPreserveEveryDiagnosticMarker)
 {
-  const auto observe_mismatch = [](
-    WriterEndpointObservation invalid)
-    {
-      WriterObservationSession session({
-          "geometry_msgs/msg/TwistStamped",
-          "/collision_monitor"});
-      const auto rejected = session.observe({std::move(invalid)}, 123456ms);
-      EXPECT_FALSE(rejected.ready);
-      EXPECT_EQ(rejected.reason, Reason::WriterMismatch);
-      expect_complete_bounded_diagnostic(rejected);
-      return rejected;
-    };
+  WriterObservationSession long_name_session({
+        "geometry_msgs/msg/TwistStamped",
+        "/collision_monitor"});
+  const auto long_name_rejected = long_name_session.observe(
+    {endpoint(writer_gid(0x66U), std::string(240U, 'n'))}, 123456ms);
+  EXPECT_FALSE(long_name_rejected.ready);
+  EXPECT_EQ(long_name_rejected.reason, Reason::WriterMismatch);
+  expect_complete_bounded_diagnostic(long_name_rejected);
 
-  (void)observe_mismatch(
-    endpoint(writer_gid(0x66U), std::string(240U, 'n')));
-  (void)observe_mismatch(
-    endpoint(
-      writer_gid(0x67U), "collision_monitor",
-      "/" + std::string(240U, 's')));
+  WriterObservationSession long_namespace_session({
+        "geometry_msgs/msg/TwistStamped",
+        "/collision_monitor"});
+  const auto long_namespace_rejected = long_namespace_session.observe(
+      {
+        endpoint(
+          writer_gid(0x67U), "collision_monitor",
+          "/" + std::string(240U, 's'))},
+    123456ms);
+  EXPECT_FALSE(long_namespace_rejected.ready);
+  EXPECT_EQ(long_namespace_rejected.reason, Reason::WriterMismatch);
+  expect_complete_bounded_diagnostic(long_namespace_rejected);
 
   auto long_type = endpoint(writer_gid(0x68U), "collision_monitor");
   long_type.topic_type = std::string(240U, 't');
-  (void)observe_mismatch(std::move(long_type));
+  WriterObservationSession long_type_session({
+        "geometry_msgs/msg/TwistStamped",
+        "/collision_monitor"});
+  const auto long_type_rejected = long_type_session.observe(
+    {std::move(long_type)}, 123456ms);
+  EXPECT_FALSE(long_type_rejected.ready);
+  EXPECT_EQ(long_type_rejected.reason, Reason::WriterMismatch);
+  expect_complete_bounded_diagnostic(long_type_rejected);
 
   auto first_name = std::string(240U, 'p');
   auto second_name = first_name;
   first_name.back() = 'a';
   second_name.back() = 'b';
-  const auto first = observe_mismatch(
-    endpoint(writer_gid(0x69U), first_name));
-  const auto second = observe_mismatch(
-    endpoint(writer_gid(0x69U), second_name));
+  WriterObservationSession first_session({
+        "geometry_msgs/msg/TwistStamped",
+        "/collision_monitor"});
+  WriterObservationSession second_session({
+        "geometry_msgs/msg/TwistStamped",
+        "/collision_monitor"});
+  const auto first = first_session.observe(
+    {endpoint(writer_gid(0x69U), first_name)}, 123456ms);
+  const auto second = second_session.observe(
+    {endpoint(writer_gid(0x69U), second_name)}, 123456ms);
+  expect_complete_bounded_diagnostic(first);
+  expect_complete_bounded_diagnostic(second);
   EXPECT_NE(first.detail, second.detail)
     << "the compact value must digest bytes beyond the visible prefix";
 }
