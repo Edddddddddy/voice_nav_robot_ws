@@ -1,8 +1,8 @@
 # VN-0010-C1: Converge Gate-local writer identity safely
 
-**Status:** In Progress — the original technical delivery merged through
-combined PR #16; the bounded-diagnostic correction, exact-head closure CI,
-and Issue #14 closure remain pending.
+**Status:** Done — the original technical delivery merged through combined
+PR #16; the bounded-diagnostic correction merged through PR #18 with exact
+local/hosted gates, and Issue #14 is closed.
 
 **GitHub Issue:**
 [#14](https://github.com/Edddddddddy/voice_nav_robot_ws/issues/14)
@@ -124,7 +124,7 @@ is never a control discriminator for reason 19.
   PR #16 is not represented as a C1-only PR.
 - [x] No rebased replacement head for PR #13 was published before C1 technical
   delivery; PR #13 remains a separate public-ledger change.
-- [ ] The C1 bounded-diagnostic correction passes exact-head local and hosted
+- [x] The C1 bounded-diagnostic correction passes exact-head local and hosted
   gates, merges, and Issue #14 closes as completed.
 
 ## Risks and rollback
@@ -311,5 +311,31 @@ Clean MotionGate install-boundary audit: passed.
 The learner-owned Gazebo server PID `3631225` remained alive with PPID 1 after
 the gate, so acceptance did not obtain a false clean state by killing an
 unowned process. The closure-evidence documentation commit is rerun locally
-and by hosted CI; hosted CI, closure-PR identity, merge mapping, and Issue #14
-closure remain pending and must not be claimed early.
+and by hosted CI.
+
+### Hosted closure and public mapping
+
+```text
+Closure PR: #18
+Local/PR head: 69a665f544c4c5c7d524c9930c5e03c6c0ad498f
+Required CI run: 30715135281
+Required job: 91409332001
+Result: success; 7m42s
+
+Rebase-merged public head:
+a884b1f2fdcb91be55855e04be1b0a71aaf553fa
+
+Local and public tree:
+c3abed592d3846b4ddceb8465218f868ccc53f4c
+
+Commit count from public baseline 086055c: 13 local / 13 public
+git range-diff 086055c..69a665f 086055c..a884b1f
+Result: 13/13 rows `=`; 0 changed, dropped, or added
+
+PR #18 merged: 2026-08-01T19:44:48Z
+Issue #14 closed: 2026-08-01T19:44:49Z
+```
+
+The post-merge closure record changes documentation only. It does not rewrite
+PR #16 as a dedicated C1 delivery or substitute PR #18's exact-head CI with a
+later unrelated run.
