@@ -96,13 +96,15 @@ Give every launch test that starts Gazebo one explicit lifecycle contract:
   layout and fails the gate if any contract test is skipped.
 - [x] The `voice_nav_sim` control test passes 20 serial fresh launches.
 - [x] The complete MotionGate product test passes 20 serial fresh launches.
-- [ ] Exact-head package tests, clean-install audit, and
+- [x] Exact-head package tests, clean-install audit, and
   `bash scripts/verify.sh` pass.
 - [x] Before/after process evidence has no newly introduced residual process;
   this remains supporting evidence rather than the clean-exit oracle.
 - [x] Independent review has no unresolved P0-P2 finding.
-- [ ] Required hosted CI passes on the final head.
-- [ ] PIT-0012 is changed from
+- [x] Required hosted CI passes on the final reviewed implementation and
+  documentation head; the evidence-only closure commit must pass the same job
+  before merge.
+- [x] PIT-0012 is changed from
   `Known (guard implemented; final evidence pending)` to `Guarded` only after
   all preceding gates pass.
 
@@ -161,7 +163,9 @@ Give every launch test that starts Gazebo one explicit lifecycle contract:
   validates exact generated CTest label/timeout/working-directory values, and
   makes both regressions required repository contracts.
 - Two independent final rereviews: P0=0, P1=0, P2=0 after all findings closed.
-- Pending: exact full gate after `2d11d9e`, hosted CI, and merge.
+- `1ddd970`: exact local canonical gate and first-attempt required hosted CI
+  GREEN on the final reviewed implementation/documentation head.
+- Pending: required CI on this evidence-only closure commit and merge.
 
 ## Verification evidence
 
@@ -176,10 +180,9 @@ Fresh launch 6 active MotionGate/product assertions: PASS
 Fresh launch 6 post-shutdown: gazebo exit -9; strict assertExitCodes failed
 ```
 
-The latest complete ancestor-head local verification is recorded below. A
-later review correction invalidated it as final-head evidence; exact full
-verification, final review, hosted CI, and merge remain pending and must not
-be claimed early.
+The final reviewed implementation/documentation local and hosted verification
+is recorded below. This evidence-only closure commit must receive the same
+required hosted job before merge; merge is not claimed early.
 
 Repeated runtime evidence after the final implementation change:
 
@@ -213,13 +216,13 @@ and finite XYZ/RPY fields. Review also exposed that a closed generated-property
 name set did not constrain its values; the checker now requires exact label,
 per-test timeout, and resolved working directory.
 
-Latest complete ancestor-head local canonical evidence:
+Final reviewed implementation/documentation local canonical evidence:
 
 ```text
-Head: 22b83ce
+Head: 1ddd9706c2cdd62877011ff11b760cdc9678b846
 Command: bash scripts/verify.sh
 Exit: 0
-Repository contracts: 277 tests, 0 failures
+Repository contracts: 279 tests, 0 failures
 ROS packages: 6 built successfully
 Package results: 177 tests, 0 errors, 0 failures, 10 skipped
 Skip classification: exact package-local cppcheck artifact/class allowlist
@@ -228,8 +231,21 @@ Clean MotionGate install boundary: PASS
 Final line: VoiceNav Robot verification passed.
 Postcondition: no test-owned Gazebo/launch/control process remained;
   pre-existing user-owned Gazebo PID 3631225 was preserved.
-Classification: ancestor evidence only after the `2d11d9e` review correction;
-  final exact-head canonical verification is pending.
+```
+
+Final reviewed implementation/documentation hosted evidence:
+
+```text
+PR: #16
+Workflow run: 30710167163
+Attempt: 1
+Head: 1ddd9706c2cdd62877011ff11b760cdc9678b846
+Required job: required / ubuntu-24.04 / ros-jazzy
+Conclusion: success
+Required job duration: 6m20s
+Canonical verification step: success
+Classification: no rerun; evidence-only closure commit CI remains required
+  before merge.
 ```
 
 Pre-final repository-contract evidence:
