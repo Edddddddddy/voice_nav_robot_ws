@@ -345,6 +345,8 @@ and an aggregate skipped count with no matching allowed testcase.
    classname. The current exception is the package's own
    `test_results/<package>/cppcheck.xunit.xml` with classname
    `<package>.cppcheck`; a global skipped total is never an exemption.
+   A generated Python lint test with a stale `pytest.mark.skip` is fixed and
+   enabled in source; it is never added to this allowlist.
 
 **Checker threat boundary.** These guards prevent ordinary and accidental
 source, CMake, discovery, and report regressions in a cooperative repository.
