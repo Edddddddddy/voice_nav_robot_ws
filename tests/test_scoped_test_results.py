@@ -252,6 +252,29 @@ class ScopedTestResultsTest(unittest.TestCase):
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertIn("Summary: 2 tests", completed.stdout)
 
+    def test_report_requires_motion_gate_node_launch_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            result = (
+                build_base
+                / "voice_nav_mission"
+                / "test_results"
+                / "voice_nav_mission"
+                / "test_test_motion_gate_node.py.xunit.xml"
+            )
+            write_launch_xunit(
+                result,
+                (("voice_nav_mission.UnrelatedTest", "test_unrelated"),),
+            )
+
+            completed = self.run_reporter(
+                build_base,
+                "voice_nav_mission",
+            )
+
+            self.assertEqual(completed.returncode, 2, completed.stdout)
+            self.assertIn("critical launch evidence", completed.stderr)
+
     def test_report_rejects_inconsistent_critical_launch_inventory(
         self,
     ) -> None:
