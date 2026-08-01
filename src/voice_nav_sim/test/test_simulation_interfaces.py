@@ -696,3 +696,10 @@ class SimulationInterfacesTest(unittest.TestCase):
             process=tf_ownership_auditor,
             allowable_exit_codes=[0],
         )
+
+
+@launch_testing.post_shutdown_test()
+class SimulationInterfacesShutdownTest(unittest.TestCase):
+
+    def test_all_launch_managed_processes_exit_cleanly(self, proc_info):
+        assertExitCodes(proc_info)

@@ -17,6 +17,7 @@ from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 import launch_testing
 import launch_testing.actions
+from launch_testing.asserts import assertExitCodes
 import launch_testing.markers
 from nav_msgs.msg import Odometry
 import pytest
@@ -624,3 +625,10 @@ class SimulationControlTest(unittest.TestCase):
             'physical_stationarity='
             'linear_abs_lt_0.02,angular_abs_lt_0.02'
         )
+
+
+@launch_testing.post_shutdown_test()
+class SimulationControlShutdownTest(unittest.TestCase):
+
+    def test_all_launch_managed_processes_exit_cleanly(self, proc_info):
+        assertExitCodes(proc_info)

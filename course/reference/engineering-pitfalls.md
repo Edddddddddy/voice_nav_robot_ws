@@ -19,6 +19,7 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0009 | Code/tests support a case that the lesson still forbids | Do prose, tests, and implementation describe the same closed set? | Guarded |
 | PIT-0010 | A bounded RPC returns success after its total budget | Is the deadline checked again immediately after the RPC? | Guarded |
 | PIT-0011 | Every ament CTest fails to import `ament_cmake_test` | Were ROS and the workspace overlay sourced in that shell? | Guarded |
+| PIT-0012 | Product assertions pass, but Gazebo exits `-9` during CTest teardown | Did failure occur in the active test or the strict post-shutdown exit check? | Known (guard planned) |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -193,3 +194,39 @@ ctest --test-dir build/voice_nav_mission --output-on-failure
 
 If all targets fail at the same import, fix the invocation before diagnosing
 product code. Canonical `scripts/verify.sh` already sources both environments.
+
+## PIT-0012: No residual Gazebo process is not a clean Gazebo exit
+
+**Symptom.** Headless product behavior and MotionGate assertions pass, but
+launch escalates Gazebo teardown through SIGINT and SIGTERM to SIGKILL. The
+strict post-shutdown `assertExitCodes(proc_info)` then reports exit `-9`.
+
+**Supported cause and uncertainty.** The narrow supported cause is that the
+launch-managed Gazebo process did not exit inside the cumulative graceful
+shutdown window. A historical `voice_nav_sim` occurrence did not include
+MotionGate, so the evidence does not attribute the failure to the Gate. The
+current launcher already uses direct argv, not the old shell-wrapper pattern.
+No evidence yet identifies which Gazebo, `gz_ros2_control`, controller, or
+thread prevents timely exit. Finding no newly introduced residual process is
+useful supporting evidence, but `-9` still violates the clean-exit contract.
+
+**Safe diagnostic path.** First separate an active-test assertion failure from
+the strict post-shutdown process failure. Record the exact head, repeat index,
+exit code, and signal escalation. Reproduce at the smaller
+`voice_nav_sim`/controller seam inside its fixed `GZ_PARTITION`, and compare
+the before/after process set without stopping any pre-existing user process.
+A successful rerun demonstrates low frequency; it is not remediation.
+
+**Planned guardrail.** A failure-safe test cleanup will issue direct-argv
+`/server_control` `stop: true` only in the exact isolated test partition,
+require a positive Boolean ACK, and then wait for the launch-managed Gazebo
+process itself to exit. ACK is not process completion. The final global
+`assertExitCodes(proc_info)` remains unchanged. Fixed sleeps, unbounded timeout
+extensions, `-9` allowlists, deleted assertions, and global process killing are
+forbidden. See
+[VN-0010-C2](../../docs/work-items/0010-corrective-gazebo-teardown.md).
+
+**Scope.** This is a test/process-lifecycle correction. It is not Lesson 0010
+Runtime/Gate process-death, controller consumer-deadman, managed safe-pause, or
+first-resume-zero evidence. Keep this entry `Known (guard planned)` until the
+unit, integration, repeated, full-gate, review, and hosted-CI evidence passes.
