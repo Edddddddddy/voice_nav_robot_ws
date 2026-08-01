@@ -1,9 +1,7 @@
 from collections import deque
 import importlib.util
-import json
 import math
 from pathlib import Path
-import subprocess
 import threading
 import time
 from types import SimpleNamespace
@@ -56,7 +54,25 @@ def load_gazebo_shutdown_support():
     return module
 
 
+def load_gazebo_pose_support():
+    support_path = (
+        Path(get_package_share_directory('voice_nav_sim'))
+        / 'test_support'
+        / 'gazebo_pose.py'
+    )
+    specification = importlib.util.spec_from_file_location(
+        'voice_nav_simulation_control_gazebo_pose',
+        support_path,
+    )
+    if specification is None or specification.loader is None:
+        raise RuntimeError('could not load Gazebo pose test support')
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
 gazebo_shutdown = load_gazebo_shutdown_support()
+gazebo_pose_support = load_gazebo_pose_support()
 SIMULATION_TEST_PARTITION = (
     gazebo_shutdown.claim_unique_test_partition(
         'l0008_sim_control'
@@ -314,70 +330,11 @@ class SimulationControlTest(unittest.TestCase):
         return self.node.get_clock().now().nanoseconds
 
     def gazebo_pose(self) -> tuple[float, float, float, float, float, float]:
-        completed = subprocess.run(
-            [
-                'gz',
-                'topic',
-                '--echo',
-                '--topic',
-                GAZEBO_POSE_TOPIC,
-                '--num',
-                '1',
-                '--json-output',
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5.0,
+        return gazebo_pose_support.read_model_pose(
+            GAZEBO_POSE_TOPIC,
+            'voice_nav_robot',
+            expected_partition=SIMULATION_TEST_PARTITION,
         )
-        self.assertEqual(
-            completed.returncode,
-            0,
-            completed.stdout + completed.stderr,
-        )
-        try:
-            payload = json.loads(completed.stdout)
-        except json.JSONDecodeError as error:
-            self.fail(
-                f'cannot parse Gazebo pose JSON: {error}: '
-                f'{completed.stdout}'
-            )
-        poses = [
-            pose
-            for pose in payload.get('pose', [])
-            if pose.get('name') == 'voice_nav_robot'
-        ]
-        self.assertEqual(
-            len(poses),
-            1,
-            f'expected one robot pose in: {completed.stdout}',
-        )
-        position = poses[0].get('position', {})
-        orientation = poses[0].get('orientation', {})
-        x = float(orientation.get('x', 0.0))
-        y = float(orientation.get('y', 0.0))
-        z = float(orientation.get('z', 0.0))
-        w = float(orientation.get('w', 0.0))
-        roll = math.atan2(
-            2.0 * (w * x + y * z),
-            1.0 - 2.0 * (x * x + y * y),
-        )
-        pitch_term = max(-1.0, min(1.0, 2.0 * (w * y - z * x)))
-        pitch = math.asin(pitch_term)
-        yaw = math.atan2(
-            2.0 * (w * z + x * y),
-            1.0 - 2.0 * (y * y + z * z),
-        )
-        pose = (
-            float(position.get('x', 0.0)),
-            float(position.get('y', 0.0)),
-            float(position.get('z', 0.0)),
-            roll,
-            pitch,
-            yaw,
-        )
-        self.assertTrue(all(math.isfinite(value) for value in pose))
-        return pose
 
     def publish_for(
         self,

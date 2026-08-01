@@ -16,6 +16,13 @@ SIMULATION_CONTROL_TEST = (
 SIMULATION_CMAKE = (
     REPOSITORY_ROOT / "src" / "voice_nav_sim" / "CMakeLists.txt"
 )
+GAZEBO_POSE_SUPPORT = (
+    REPOSITORY_ROOT
+    / "src"
+    / "voice_nav_sim"
+    / "test_support"
+    / "gazebo_pose.py"
+)
 BRINGUP_CMAKE = (
     REPOSITORY_ROOT / "src" / "voice_nav_bringup" / "CMakeLists.txt"
 )
@@ -375,11 +382,20 @@ class CiReadinessContractTest(unittest.TestCase):
 
     def test_ground_truth_pose_uses_bounded_pose_topic_snapshot(self):
         source = SIMULATION_CONTROL_TEST.read_text(encoding="utf-8")
+        support = GAZEBO_POSE_SUPPORT.read_text(encoding="utf-8")
 
         self.assertIn("GAZEBO_POSE_TOPIC", source)
         self.assertIn("'/world/voice_nav_test_world/pose/info'", source)
-        self.assertIn("'--json-output'", source)
-        self.assertIn("json.loads(completed.stdout)", source)
+        self.assertIn("gazebo_pose_support.read_model_pose(", source)
+        self.assertIn(
+            "expected_partition=SIMULATION_TEST_PARTITION",
+            source,
+        )
+        self.assertIn("QUERY_TIMEOUT_SECONDS = 10.0", support)
+        self.assertIn("QUERY_ATTEMPTS = 2", support)
+        self.assertIn("'--json-output'", support)
+        self.assertIn("json.loads(output)", support)
+        self.assertIn("subprocess.TimeoutExpired", support)
         self.assertNotIn("'model',\n", source)
 
     def test_canonical_verify_checks_generated_metadata_after_build(self):
