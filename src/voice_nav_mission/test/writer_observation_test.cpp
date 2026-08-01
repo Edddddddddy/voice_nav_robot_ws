@@ -74,6 +74,11 @@ TEST(WriterObservationSession, PinsUnresolvedIdentityUntilTheSameWriterResolves)
   ASSERT_FALSE(pending.ready);
   EXPECT_EQ(pending.reason, Reason::WriterMetadataPending);
   EXPECT_EQ(pending.writer_gid, first_gid);
+  EXPECT_LE(pending.detail.size(), 160U);
+  for (const auto * field : {"n=1", "t=", "id=", "q=", "g=", "ms=7"}) {
+    EXPECT_NE(pending.detail.find(field), std::string::npos)
+      << "missing diagnostic field " << field;
+  }
 
   const auto resolved = session.observe(
     {endpoint(first_gid, "collision_monitor")}, 19ms);
