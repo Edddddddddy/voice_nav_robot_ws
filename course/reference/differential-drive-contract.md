@@ -54,11 +54,11 @@ Nav2 / 相对运动候选速度
 
 Mission、Agent 和 Voice 不知道 Gazebo topic，也不能直接控制轮关节。`nav2_velocity_smoother` 只调速，Collision Monitor 只做防碰撞保护，独立 MotionGate 是最终速度裁决者，`diff_drive_controller.cmd_vel_timeout` 是消费端第二道 deadman。
 
-Lesson 0008 已验证到 LiDAR、controller、odom 与 TF 所有权。Lesson 0009 /
-VN-0010 已有 test authority/candidate harness 与独立 MotionGate 的
-local-GREEN implementation；本地门禁已通过，但在 PR/CI/merge 前不是已公开
-交付能力。进程 kill、consumer crash-stop 和 Gazebo pause/resume 留给
-Lesson 0010。
+Lesson 0008 已验证 LiDAR、controller、odom 与 TF 所有权。Lesson 0009 /
+VN-0010 的 test authority/candidate harness 与独立 MotionGate 已通过
+exact-head 本地门禁、required CI 和 rebase merge，并发布不可变
+`course/0009-solution`。进程 kill、consumer crash-stop 和 Gazebo
+pause/resume 仍留给 Lesson 0010。
 MissionRuntime、smoother、Collision Monitor 的完整串接属于后续纵向切片。
 
 ## Topic 与 frame 所有权
