@@ -117,7 +117,7 @@ is never a control discriminator for reason 19.
   runtime tree `04db928c` during C2 verification, not an exact-head C1-only
   gate.
 - [ ] Canonical `scripts/verify.sh` passes on the exact final head.
-- [ ] Independent safety/code review has no unresolved P0-P2 finding.
+- [x] Independent safety/code review has no unresolved P0-P2 finding.
 - [x] Combined PR #16 contains the complete original C1 stack, passes required
   hosted CI on closure head `66f6834`, and rebase-merges without C1 tree drift.
 - [x] The deviation from the planned dedicated C1 PR is explicitly recorded;
@@ -166,6 +166,18 @@ is never a control discriminator for reason 19.
 - `064efd7` / `7845667`: require Core to fault a contradictory READY binding.
 - `9f62f55` / `beb865e`: enforce the absolute OPEN deadline after every RPC.
 - `cf077a8`: lock both safety invariants with static mutation tests.
+
+### Bounded-diagnostic correction trail
+
+- `480af65`: compact every variable diagnostic field independently and replay
+  the stored terminal record without a second truncation pass.
+- `9b7ab7f`, `a5759e5`, `a808b37`, and `5e75bb0`: progressively close false
+  evidence seams in the active-GTest checker, including lexical decoys,
+  conditional compilation, C++ line splicing, unreachable or reordered
+  statements, and mutable boundary values.
+- `28fb027`, `fc940e9`, `d3f0276`, `3908a2a`, and `f43a725`: preserve the
+  delivery deviation, review findings, and recurrence controls in the Work
+  Item and PIT-0016/PIT-0021.
 
 ## Verification evidence
 
@@ -236,8 +248,38 @@ ros2 interface show voice_nav_mission/srv/InternalMotionGateControl \
 Result: uint16 WRITER_METADATA_PENDING=19
 ```
 
-The bounded-diagnostic correction now has tests-first RED evidence, focused
-10/10 WriterObservationSession GREEN evidence, and 45/45 static/mutation
-contract evidence. Its final commit hashes, exact full verification, hosted
-CI, independent rereview, PR identity, merge mapping, and Issue #14 closure
-remain pending and must not be claimed early.
+### Bounded-diagnostic closure candidate
+
+```text
+Reviewed candidate head:
+f43a725a0bff0d499182705d3512908e1db70554
+tree=7698d9b5ae88816b47f46a43a0d274dc9303d97a
+
+ctest --test-dir build/voice_nav_mission --output-on-failure
+Result: 11/11 CTest targets passed, including 10/10
+WriterObservationSession GTest cases and all package linters.
+
+python3 tests/test_motion_gate_contract.py
+Result: 47/47 tests passed; direct long-field flow, product-derived GID
+validation, translation-phase line splicing, whole-file conditional policy,
+and mutation rejection are executable evidence.
+
+python3 scripts/check_motion_gate_contract.py --root .
+Result: MotionGate contract passed.
+
+python3 scripts/check_repository.py --root .
+Result: Repository contract passed.
+```
+
+The repository-wide no-skip runner also passed 288/288 tests in 211.749 s on
+pre-final checker head `3908a2a`. It is supporting evidence only because the
+immutable-evidence refinement followed it; canonical verification will rerun
+that inventory on the closure-document head.
+
+Independent final-candidate reviews at `f43a725` report:
+
+- product diagnostic implementation and C++ regression: P0=0, P1=0, P2=0;
+- static/mutation contract and cooperative bypass review: P0=0, P1=0, P2=0.
+
+Exact full verification, hosted CI, closure-PR identity, merge mapping, and
+Issue #14 closure remain pending and must not be claimed early.
