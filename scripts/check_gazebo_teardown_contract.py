@@ -39,6 +39,7 @@ TEST_POLICIES = {
         "partition_name": "SIMULATION_TEST_PARTITION",
         "partition": "voice_nav_l0008_sim_test",
         "pre_stop": "publish_for",
+        "pre_stop_args": (0.0, 0.0, 0.15),
     },
     "simulation_interfaces": {
         "class": "SimulationInterfacesTest",
@@ -46,6 +47,7 @@ TEST_POLICIES = {
         "partition_name": "SIMULATION_TEST_PARTITION",
         "partition": "voice_nav_l0008_sim_test",
         "pre_stop": "publish_command_for",
+        "pre_stop_args": (0.0, 0.0, 0.25),
     },
     "product_test": {
         "class": "MotionGateProductTest",
@@ -53,6 +55,7 @@ TEST_POLICIES = {
         "partition_name": "PRODUCT_TEST_PARTITION",
         "partition": "voice_nav_l0009_product_test",
         "pre_stop": "best_effort_inhibit",
+        "pre_stop_args": (),
     },
 }
 
@@ -129,6 +132,54 @@ def method_calls(function: ast.FunctionDef, name: str) -> list[ast.Call]:
         for node in ast.walk(function)
         if isinstance(node, ast.Call) and call_name(node) == name
     ]
+
+
+def exact_attribute_call(
+    statement: ast.stmt,
+    owner: str,
+    name: str,
+) -> ast.Call | None:
+    if not (
+        isinstance(statement, ast.Expr)
+        and isinstance(statement.value, ast.Call)
+        and isinstance(statement.value.func, ast.Attribute)
+        and isinstance(statement.value.func.value, ast.Name)
+        and statement.value.func.value.id == owner
+        and statement.value.func.attr == name
+    ):
+        return None
+    return statement.value
+
+
+def has_plain_arguments(
+    function: ast.FunctionDef,
+    expected: list[str],
+) -> bool:
+    arguments = function.args
+    return (
+        not function.decorator_list
+        and not arguments.posonlyargs
+        and [argument.arg for argument in arguments.args] == expected
+        and arguments.vararg is None
+        and not arguments.kwonlyargs
+        and arguments.kwarg is None
+        and not arguments.defaults
+        and not arguments.kw_defaults
+    )
+
+
+def has_exact_literal_arguments(
+    call: ast.Call,
+    expected: tuple[float, ...],
+) -> bool:
+    if len(call.args) != len(expected) or call.keywords:
+        return False
+    return all(
+        isinstance(argument, ast.Constant)
+        and type(argument.value) is type(value)
+        and argument.value == value
+        for argument, value in zip(call.args, expected)
+    )
 
 
 def validate_support(path: Path) -> None:
@@ -309,37 +360,158 @@ def validate_cleanup_registration(
         )
 
 
+def validate_cleanup_control_flow(
+    cleanup: ast.FunctionDef,
+    policy: dict[str, object],
+    path: Path,
+) -> None:
+    outer = cleanup.body[0] if len(cleanup.body) == 1 else None
+    pre_stop_try = (
+        outer.body[0]
+        if isinstance(outer, ast.Try) and len(outer.body) == 1
+        else None
+    )
+    stop_try = (
+        outer.finalbody[0]
+        if isinstance(outer, ast.Try) and len(outer.finalbody) == 1
+        else None
+    )
+    pre_stop_call = (
+        exact_attribute_call(
+            pre_stop_try.body[0],
+            "self",
+            str(policy["pre_stop"]),
+        )
+        if isinstance(pre_stop_try, ast.Try)
+        and len(pre_stop_try.body) == 1
+        else None
+    )
+    handler = (
+        pre_stop_try.handlers[0]
+        if isinstance(pre_stop_try, ast.Try)
+        and len(pre_stop_try.handlers) == 1
+        else None
+    )
+    stop_call = (
+        exact_attribute_call(
+            stop_try.body[0],
+            "gazebo_shutdown",
+            "structured_stop_gazebo",
+        )
+        if isinstance(stop_try, ast.Try) and len(stop_try.body) == 1
+        else None
+    )
+    destroy_call = (
+        exact_attribute_call(
+            stop_try.finalbody[0],
+            "self",
+            "destroy_ros_fixture",
+        )
+        if isinstance(stop_try, ast.Try)
+        and len(stop_try.finalbody) == 1
+        else None
+    )
+    expected_pre_stop_args = tuple(policy["pre_stop_args"])
+    expected_partition = (
+        keyword_value(stop_call, "expected_partition")
+        if isinstance(stop_call, ast.Call)
+        else None
+    )
+    if not (
+        has_plain_arguments(cleanup, ["self", "proc_info"])
+        and isinstance(outer, ast.Try)
+        and not outer.handlers
+        and not outer.orelse
+        and isinstance(pre_stop_try, ast.Try)
+        and not pre_stop_try.orelse
+        and not pre_stop_try.finalbody
+        and isinstance(pre_stop_call, ast.Call)
+        and has_exact_literal_arguments(
+            pre_stop_call,
+            expected_pre_stop_args,
+        )
+        and isinstance(handler, ast.ExceptHandler)
+        and isinstance(handler.type, ast.Name)
+        and handler.type.id == "Exception"
+        and handler.name is None
+        and len(handler.body) == 1
+        and isinstance(handler.body[0], ast.Pass)
+        and isinstance(stop_try, ast.Try)
+        and not stop_try.handlers
+        and not stop_try.orelse
+        and isinstance(stop_call, ast.Call)
+        and len(stop_call.args) == 1
+        and isinstance(stop_call.args[0], ast.Name)
+        and stop_call.args[0].id == "proc_info"
+        and len(stop_call.keywords) == 1
+        and isinstance(expected_partition, ast.Name)
+        and expected_partition.id == policy["partition_name"]
+        and isinstance(destroy_call, ast.Call)
+        and not destroy_call.args
+        and not destroy_call.keywords
+    ):
+        raise GazeboTeardownContractError(
+            f"{path.name} must use unconditional cleanup control flow: "
+            "best-effort zero/inhibit, structured stop, then destroy"
+        )
+
+
 def validate_shutdown_assertion(
     tree: ast.Module,
     shutdown_class_name: str,
 ) -> None:
     shutdown_class = class_named(tree, shutdown_class_name)
-    decorated = any(
-        isinstance(decorator, ast.Call)
-        and call_name(decorator) == "post_shutdown_test"
-        for decorator in shutdown_class.decorator_list
-    )
-    if not decorated:
-        raise GazeboTeardownContractError(
-            f"{shutdown_class_name} must be a post-shutdown test"
-        )
-    calls = [
-        node for node in ast.walk(shutdown_class)
-        if isinstance(node, ast.Call) and call_name(node) == "assertExitCodes"
-    ]
     if not (
-        len(calls) == 1
-        and len(calls[0].args) == 1
-        and isinstance(calls[0].args[0], ast.Name)
-        and calls[0].args[0].id == "proc_info"
-        and not calls[0].keywords
+        len(shutdown_class.decorator_list) == 1
+        and isinstance(shutdown_class.decorator_list[0], ast.Call)
+        and call_name(shutdown_class.decorator_list[0])
+        == "post_shutdown_test"
+        and not shutdown_class.decorator_list[0].args
+        and not shutdown_class.decorator_list[0].keywords
     ):
         raise GazeboTeardownContractError(
-            f"{shutdown_class_name} must strictly check every process exit"
+            f"{shutdown_class_name} must be only a post-shutdown test"
+        )
+
+    method = function_named(
+        shutdown_class,
+        "test_all_launch_managed_processes_exit_cleanly",
+    )
+    arguments = method.args
+    statement = method.body[0] if len(method.body) == 1 else None
+    call = (
+        statement.value
+        if isinstance(statement, ast.Expr)
+        and isinstance(statement.value, ast.Call)
+        else None
+    )
+    if not (
+        len(shutdown_class.body) == 1
+        and shutdown_class.body[0] is method
+        and not method.decorator_list
+        and not arguments.posonlyargs
+        and [argument.arg for argument in arguments.args]
+        == ["self", "proc_info"]
+        and arguments.vararg is None
+        and not arguments.kwonlyargs
+        and arguments.kwarg is None
+        and not arguments.defaults
+        and not arguments.kw_defaults
+        and isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id == "assertExitCodes"
+        and len(call.args) == 1
+        and isinstance(call.args[0], ast.Name)
+        and call.args[0].id == "proc_info"
+        and not call.keywords
+    ):
+        raise GazeboTeardownContractError(
+            f"{shutdown_class_name} must use a single unconditional "
+            "top-level assertion to strictly check every process exit"
         )
 
 
-def validate_test(path: Path, policy: dict[str, str]) -> None:
+def validate_test(path: Path, policy: dict[str, object]) -> None:
     source, tree = parse_python(path)
     if "'shutdown_on_gazebo_exit': 'false'" not in source:
         raise GazeboTeardownContractError(
@@ -366,31 +538,7 @@ def validate_test(path: Path, policy: dict[str, str]) -> None:
     test_class = class_named(tree, policy["class"])
     validate_cleanup_registration(test_class)
     cleanup = function_named(test_class, "cleanup_fixture")
-    pre_stop = method_calls(cleanup, policy["pre_stop"])
-    stop_calls = method_calls(cleanup, "structured_stop_gazebo")
-    destroy_calls = method_calls(cleanup, "destroy_ros_fixture")
-    if not (
-        len(pre_stop) == 1
-        and len(stop_calls) == 1
-        and len(destroy_calls) == 1
-        and pre_stop[0].lineno
-        < stop_calls[0].lineno
-        < destroy_calls[0].lineno
-    ):
-        raise GazeboTeardownContractError(
-            f"{path.name} cleanup must zero/inhibit, stop, then destroy"
-        )
-    expected_partition = keyword_value(
-        stop_calls[0],
-        "expected_partition",
-    )
-    if not (
-        isinstance(expected_partition, ast.Name)
-        and expected_partition.id == policy["partition_name"]
-    ):
-        raise GazeboTeardownContractError(
-            f"{path.name} structured stop must receive its locked partition"
-        )
+    validate_cleanup_control_flow(cleanup, policy, path)
     validate_shutdown_assertion(tree, policy["shutdown_class"])
     if re.search(r"allowable_exit_codes\s*=\s*\[[^]]*(?:-9|137)", source):
         raise GazeboTeardownContractError(

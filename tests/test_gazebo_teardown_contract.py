@@ -264,12 +264,12 @@ class GazeboTeardownMutationTest(unittest.TestCase):
             "src/voice_nav_bringup/test/test_motion_gate_product.py",
             (
                 "    def cleanup_fixture(self, proc_info):\n"
-                "        self.best_effort_inhibit()"
+                "        try:"
             ),
             (
                 "    def cleanup_fixture(self, proc_info):\n"
                 "        return\n"
-                "        self.best_effort_inhibit()"
+                "        try:"
             ),
             "unconditional cleanup control flow",
         )
