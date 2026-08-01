@@ -64,6 +64,13 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Prevented a DDS-matched candidate writer from being terminally rejected
+  solely because its Gate-local ROS node identity snapshot had not converged.
+  MotionGate now types only that narrow state as
+  `WRITER_METADATA_PENDING`, provisionally pins the non-zero GID, keeps the
+  prepared generation at published zero, and retries within the original
+  absolute deadline. Wrong type, FQN, partial namespace, QoS, endpoint kind,
+  duplicate/zero/replaced GID, and barrier changes remain terminal.
 - Prevented a runtime `use_sim_time=false` change or a disabled ROS-time
   override from emitting future system-time-stamped motion that could defeat
   the controller consumer timeout. The Gate rejects parameter mutation and
