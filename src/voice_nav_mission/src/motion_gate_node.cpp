@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "voice_nav_mission/motion_gate_core.hpp"
+#include "writer_observation.hpp"
 
 #include <rmw/qos_profiles.h>
 #include <rmw/rmw.h>
@@ -154,7 +155,10 @@ public:
       create_callback_group(
         rclcpp::CallbackGroupType::MutuallyExclusive)),
     node_config_(load_node_config()),
-    core_(node_config_.core, make_gate_instance_id())
+    core_(node_config_.core, make_gate_instance_id()),
+    writer_observation_session_({
+      kCandidateType,
+      node_config_.expected_candidate_writer_fqn})
   {
     const auto * rmw_identifier = rmw_get_implementation_identifier();
     if (
@@ -403,82 +407,30 @@ private:
     const std::string & topic)
   {
     const auto endpoints = get_publishers_info_by_topic(topic);
-    if (endpoints.empty()) {
-      return {
-        false,
-        Reason::WriterUnavailable,
-        {},
-        "candidate topic has no writer"};
-    }
-    if (endpoints.size() != 1U) {
-      return {
-        false,
-        Reason::WriterAmbiguous,
-        {},
-        "candidate topic does not have exactly one writer"};
-    }
-
-    const auto & endpoint = endpoints.front();
-    if (
-      endpoint.topic_type() != kCandidateType ||
-      endpoint_fqn(endpoint) !=
-      node_config_.expected_candidate_writer_fqn)
-    {
-      return {
-        false,
-        Reason::WriterMismatch,
-        {},
-        "candidate writer type or FQN does not match policy"};
+    std::vector<WriterEndpointObservation> observations;
+    observations.reserve(endpoints.size());
+    for (const auto & endpoint : endpoints) {
+      WriterGid writer_gid{};
+      const auto & endpoint_gid = endpoint.endpoint_gid();
+      std::copy(
+        endpoint_gid.cbegin(),
+        endpoint_gid.cend(),
+        writer_gid.begin());
+      observations.push_back(WriterEndpointObservation{
+        endpoint.topic_type(),
+        endpoint.node_name(),
+        endpoint.node_namespace(),
+        static_cast<rmw_endpoint_type_t>(endpoint.endpoint_type()),
+        endpoint.qos_profile().get_rmw_qos_profile(),
+        writer_gid});
     }
 
-    const auto & qos =
-      endpoint.qos_profile().get_rmw_qos_profile();
-    const bool history_compatible =
-      qos.history == RMW_QOS_POLICY_HISTORY_KEEP_LAST ||
-      qos.history == RMW_QOS_POLICY_HISTORY_UNKNOWN;
-    const bool depth_compatible =
-      qos.depth == 1U ||
-      (
-      qos.depth == 0U &&
-      qos.history == RMW_QOS_POLICY_HISTORY_UNKNOWN);
-    if (
-      !history_compatible ||
-      !depth_compatible ||
-      qos.reliability != RMW_QOS_POLICY_RELIABILITY_BEST_EFFORT ||
-      qos.durability != RMW_QOS_POLICY_DURABILITY_VOLATILE)
-    {
-      return {
-        false,
-        Reason::WriterMismatch,
-        {},
-        "candidate writer QoS mismatch: history=" +
-        std::to_string(static_cast<int>(qos.history)) +
-        " depth=" + std::to_string(qos.depth) +
-        " reliability=" +
-        std::to_string(static_cast<int>(qos.reliability)) +
-        " durability=" +
-        std::to_string(static_cast<int>(qos.durability))};
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - writer_observation_started_at_);
+    if (elapsed < 0ms) {
+      elapsed = 0ms;
     }
-
-    WriterGid writer_gid{};
-    const auto & endpoint_gid = endpoint.endpoint_gid();
-    std::copy(
-      endpoint_gid.cbegin(),
-      endpoint_gid.cend(),
-      writer_gid.begin());
-    if (gid_is_zero(writer_gid)) {
-      return {
-        false,
-        Reason::WriterMismatch,
-        {},
-        "candidate graph endpoint has an all-zero GID"};
-    }
-
-    return {
-      true,
-      Reason::None,
-      writer_gid,
-      "unique candidate writer discovered"};
+    return writer_observation_session_.observe(observations, elapsed);
   }
 
   std::optional<std::string> final_controller_health_error() const
@@ -538,18 +490,17 @@ private:
       request,
       now,
       [this, &request, &expected_binding]() {
-        auto first =
+        if (const auto error = final_controller_health_error()) {
+          return OpenBinding{
+            false,
+            Reason::WriterUnavailable,
+            {},
+            *error};
+        }
+
+        const auto first =
         discover_unique_writer_gid_on_topic(
           core_.snapshot().candidate_topic);
-        if (first.ready) {
-          if (const auto error = final_controller_health_error()) {
-            first = {
-              false,
-              Reason::WriterUnavailable,
-              {},
-              *error};
-          }
-        }
         if (!first.ready) {
           return first;
         }
@@ -566,10 +517,10 @@ private:
         const auto second =
         discover_unique_writer_gid_on_topic(
           core_.snapshot().candidate_topic);
-        if (
-          !second.ready ||
-          second.writer_gid != first.writer_gid)
-        {
+        if (!second.ready) {
+          return second;
+        }
+        if (second.writer_gid != first.writer_gid) {
           return OpenBinding{
           false,
           Reason::WriterMismatch,
@@ -975,6 +926,8 @@ private:
     reconcile_adapter_transition(before, after);
     if (result.code == ResultCode::Applied) {
       const auto prepared = after;
+      writer_observation_session_.reset();
+      writer_observation_started_at_ = now;
       try {
         candidate_subscription_ =
           create_candidate_subscription(
@@ -1132,6 +1085,8 @@ private:
     use_sim_time_guard_;
   NodeConfig node_config_;
   MotionGateCore core_;
+  WriterObservationSession writer_observation_session_;
+  MotionGateCore::SteadyTimePoint writer_observation_started_at_{};
   rclcpp::Publisher<TwistStamped>::SharedPtr
     final_command_publisher_;
   rclcpp::Publisher<StateMessage>::SharedPtr state_publisher_;

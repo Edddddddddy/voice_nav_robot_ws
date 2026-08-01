@@ -82,6 +82,9 @@ OPEN_PROTOCOL = open_convergence.ProtocolValues(
     writer_unavailable=(
         InternalMotionGateControl.Response.WRITER_UNAVAILABLE
     ),
+    writer_metadata_pending=(
+        InternalMotionGateControl.Response.WRITER_METADATA_PENDING
+    ),
     prepared=InternalMotionGateState.PREPARED,
 )
 
