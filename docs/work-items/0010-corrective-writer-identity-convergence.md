@@ -47,14 +47,16 @@ definitive policy violation must remain terminal.
 response is legal only when all of these facts hold:
 
 - one publisher endpoint is visible;
-- endpoint kind, topic type, compatible candidate QoS, and the already-known
-  namespace agree with policy;
+- endpoint kind, topic type, and compatible candidate QoS agree with policy;
 - the endpoint GID is non-zero and is pinned to this PREPARE generation;
-- only the ROS node name remains unresolved;
+- only node-identity components remain unresolved: an empty node name or the
+  exact Jazzy `_NODE_NAME_UNKNOWN_` / `_NODE_NAMESPACE_UNKNOWN_` sentinels;
+- every node-name or namespace component that is already known agrees with
+  policy;
 - Core remains `PREPARED`, does not expose a bound GID, selects zero, and the
   Node publishes zero before responding.
 
-Wrong non-empty type/FQN, contradictory partial namespace, wrong QoS, wrong
+Wrong non-empty type/FQN, any contradictory known identity component, wrong QoS, wrong
 endpoint kind, zero GID, duplicate endpoints, disappearance or replacement
 after pinning, and barrier-time writer changes are definitive mismatch. A
 pinned-generation mismatch latches until the next successful PREPARE.
@@ -85,8 +87,12 @@ is never a control discriminator for reason 19.
   definitive mismatch.
 - [x] Wrong kind/type/FQN/partial namespace/QoS, zero GID, duplicate writers,
   disappearance, replacement, and GID change remain fail-closed.
+- [x] A contradictory provider result (`ready=true`, non-`NONE` reason) faults
+  Core closed before GID binding or ARMED side effects.
 - [x] Only typed metadata pending and the legacy exact no-writer observation
   are retried with fresh request IDs and the original deadline.
+- [x] The absolute steady deadline is checked both before and immediately after
+  every RPC; a late APPLIED response is a timeout, not success.
 - [x] Unique endpoint diagnostics are bounded to 160 characters and record
   endpoint count, kind, type, node identity, QoS, GID, and steady elapsed time.
 - [x] Focused Core, observation, convergence, and Node tests pass locally.
@@ -100,8 +106,9 @@ is never a control discriminator for reason 19.
 ## Risks and rollback
 
 - A too-broad pending classifier could admit the wrong writer. The classifier
-  therefore permits only missing node name after all other fields and a
-  non-zero GID pass, and latches post-pin changes terminally.
+  therefore permits only exact unresolved identity representations after all
+  other fields, all known identity components, and a non-zero GID pass; it
+  latches post-pin changes terminally.
 - A session accidentally reused across leases could carry authority forward.
   Only an applied PREPARE resets the session and observation clock.
 - A caller could misread diagnostic text. Control flow uses the typed reason;
@@ -129,6 +136,12 @@ is never a control discriminator for reason 19.
 - `2696f2d` / `44b2d27`: reject contradictory partial namespaces.
 - `23302d0`: cover definitive kind/type/FQN/QoS/GID/count failures.
 - `f93b001` / `5225c39`: require and implement bounded field diagnostics.
+- `f031b4d` / `eb78ba8`: classify exact Jazzy unknown identity sentinels while
+  rejecting contradictory known components.
+- `b184c2a`: govern the private observation seam with static mutation tests.
+- `064efd7` / `7845667`: require Core to fault a contradictory READY binding.
+- `9f62f55` / `beb865e`: enforce the absolute OPEN deadline after every RPC.
+- `cf077a8`: lock both safety invariants with static mutation tests.
 
 ## Verification evidence
 
@@ -141,7 +154,8 @@ Result: 2 packages finished
 ctest --test-dir build/voice_nav_mission --output-on-failure \
   -R 'motion_gate_core_test|writer_observation_test|test_test_motion_gate_node.py'
 Result: 3/3 CTest targets passed
-Inner coverage: 42 Core cases; 6 observation cases; Node launch matrix passed
+Inner coverage at that pre-final head: 42 Core cases; 6 observation cases;
+Node launch matrix passed
 
 python3 -m unittest \
   src/voice_nav_bringup/test/test_motion_gate_open_convergence.py
