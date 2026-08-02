@@ -564,7 +564,7 @@ def call_transformer(
     try:
         transformed = transform(
             product_urdf,
-            "/voice_nav_contract_fixture",
+            "/voice_nav_hardware_0011223344556677",
             "0123456789abcdef0123456789abcdef",
         )
     except Exception as error:
@@ -626,7 +626,7 @@ def validate_robot_transformer(path: Path) -> None:
         )
     hardware = hardware_nodes[0]
     expected_parameters = {
-        "journal_name": "/voice_nav_contract_fixture",
+        "journal_name": "/voice_nav_hardware_0011223344556677",
         "journal_nonce": "0123456789abcdef0123456789abcdef",
     }
     journal_parameters = [
@@ -672,7 +672,7 @@ def validate_robot_transformer(path: Path) -> None:
             assert callable(transform)
             transform(
                 invalid_fixture,
-                "/voice_nav_contract_fixture",
+                "/voice_nav_hardware_0011223344556677",
                 "0123456789abcdef0123456789abcdef",
             )
         except Exception:

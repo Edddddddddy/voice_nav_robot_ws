@@ -28,11 +28,11 @@ class CrashRobotDescriptionError(ValueError):
 
 def _validate_journal_identity(journal_name, journal_nonce):
     if not isinstance(journal_name, str) or re.fullmatch(
-        r'/[A-Za-z0-9][A-Za-z0-9_.-]{0,253}',
+        r'/voice_nav_hardware_[0-9a-f]{16}',
         journal_name,
     ) is None:
         raise CrashRobotDescriptionError(
-            'journal name must be one bounded POSIX shared-memory component',
+            'journal name must be /voice_nav_hardware_<16-lower-hex>',
         )
     if (
         not isinstance(journal_nonce, str)

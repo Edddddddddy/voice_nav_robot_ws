@@ -186,7 +186,7 @@ class CrashRobotDescriptionTest(unittest.TestCase):
                 ):
                     crash_robot_description.transform_product_urdf(
                         description,
-                        '/voice_nav_contract_fixture',
+                        '/voice_nav_hardware_0011223344556677',
                         '00112233445566778899aabbccddeeff',
                     )
 
