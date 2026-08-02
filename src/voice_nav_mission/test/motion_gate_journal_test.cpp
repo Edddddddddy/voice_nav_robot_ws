@@ -600,6 +600,76 @@ TEST(MotionGateJournal, ExplicitInhibitCommitsLeaseRetirementAtOneFence)
   EXPECT_EQ(slot.commit_checksum, gate_event_journal_commit_checksum(slot));
 }
 
+TEST(MotionGateJournal, TerminalCauseFlowsIntoTheFirstZeroOutputIntent)
+{
+  JournalRegion<3U> region;
+  const auto identity = initialize_region(region);
+  FakeClock clock;
+  GateEventJournal journal(
+    &region,
+    sizeof(region),
+    identity,
+    GateEventJournalClock{&FakeClock::read, &clock});
+  MotionGateCore gate(
+    MotionGateConfig{}, kGateId, 0U,
+    journal.claim_transition_binding());
+  const auto now = MotionGateCore::SteadyTimePoint{};
+  ASSERT_EQ(
+    gate.prepare(
+      ControlRequest{
+        Operation::Prepare,
+        "00000000000000000000000000000001",
+        kGateId,
+        0U,
+        ""},
+      now).code,
+    ResultCode::Applied);
+  const auto prepared = gate.snapshot();
+  ASSERT_EQ(
+    gate.inhibit(
+      ControlRequest{
+        Operation::Inhibit,
+        "00000000000000000000000000000002",
+        kGateId,
+        prepared.control_seq,
+        prepared.lease_id},
+      now).code,
+    ResultCode::Applied);
+  const auto inhibited = gate.snapshot();
+  ASSERT_EQ(inhibited.output_cause_transition_journal_seq, 2U);
+
+  const auto output = journal.publish_output(
+    GateOutputIntent{
+      41U,
+      static_cast<std::uint64_t>(Reason::None),
+      1U,
+      1U,
+      0U,
+      0U,
+      0U,
+      0U,
+      UINT64_C(0x0123456789abcdef),
+      UINT64_C(0x0123456789abcdef),
+      inhibited.output_cause_transition_journal_seq,
+      0U},
+    []() noexcept {});
+
+  EXPECT_EQ(output.journal_seq, 3U);
+  EXPECT_EQ(output.slot_index, 2U);
+  const auto & slot = region.slots[2U];
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(slot.phase),
+    VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_COMMITTED);
+  EXPECT_EQ(
+    slot.record_kind,
+    VOICE_NAV_GATE_EVENT_JOURNAL_KIND_OUTPUT_ATTEMPT);
+  EXPECT_EQ(slot.linear_x_bits, 0U);
+  EXPECT_EQ(slot.angular_z_bits, 0U);
+  EXPECT_EQ(slot.cause_transition_journal_seq, 2U);
+  EXPECT_EQ(slot.intent_checksum, gate_event_journal_intent_checksum(slot));
+  EXPECT_EQ(slot.commit_checksum, gate_event_journal_commit_checksum(slot));
+}
+
 TEST(MotionGateJournal, ForceFaultCommitsOneTerminalTransition)
 {
   JournalRegion<1U> region;
