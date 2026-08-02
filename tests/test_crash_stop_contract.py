@@ -588,6 +588,25 @@ class CrashStopContractTest(unittest.TestCase):
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("changed XML outside", completed.stderr)
 
+    def test_transformer_license_url_is_not_a_machine_path(self) -> None:
+        def mutation(root: Path) -> None:
+            path = (
+                root
+                / "src/voice_nav_sim/test_support/"
+                "crash_robot_description.py"
+            )
+            source = path.read_text(encoding="utf-8")
+            path.write_text(
+                "# See http://www.apache.org/licenses/LICENSE-2.0\n"
+                + source,
+                encoding="utf-8",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("Crash-stop contract passed", completed.stdout)
+
     def test_adapter_requires_direct_statistics_dependency(self) -> None:
         def mutation(root: Path) -> None:
             self.replace(
