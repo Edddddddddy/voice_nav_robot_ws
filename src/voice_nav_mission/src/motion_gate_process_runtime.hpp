@@ -55,6 +55,15 @@ struct FinalOutputPublisher
   void * context{nullptr};
 };
 
+struct FinalOutputFaultTestAdapter
+{
+  using Function = void(
+    void *, MotionGateCore &, Reason, const char *);
+
+  Function * apply{nullptr};
+  void * context{nullptr};
+};
+
 enum class FinalOutputFailure : std::uint8_t
 {
   None = 0,
@@ -93,7 +102,8 @@ public:
   MotionGateProcessRuntime(
     MotionGateConfig config,
     std::string gate_instance_id,
-    GateEventJournalTestParameters journal_parameters);
+    GateEventJournalTestParameters journal_parameters,
+    FinalOutputFaultTestAdapter fault_test_adapter = {});
 
   ~MotionGateProcessRuntime();
 
@@ -142,6 +152,7 @@ private:
 
   std::unique_ptr<AttachedGateEventJournal> attached_journal_;
   std::unique_ptr<MotionGateCore> core_;
+  FinalOutputFaultTestAdapter fault_test_adapter_{};
   mutable std::mutex output_mutex_;
   OutputJournalMode output_journal_mode_{OutputJournalMode::Disabled};
   FinalOutputFailure retired_failure_{FinalOutputFailure::None};

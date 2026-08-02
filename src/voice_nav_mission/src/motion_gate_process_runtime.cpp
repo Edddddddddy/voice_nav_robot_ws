@@ -262,7 +262,9 @@ parse_gate_event_journal_test_parameters(
 MotionGateProcessRuntime::MotionGateProcessRuntime(
   MotionGateConfig config,
   std::string gate_instance_id,
-  GateEventJournalTestParameters journal_parameters)
+  GateEventJournalTestParameters journal_parameters,
+  FinalOutputFaultTestAdapter fault_test_adapter)
+: fault_test_adapter_(fault_test_adapter)
 {
   auto attachment_config =
     parse_gate_event_journal_test_parameters(journal_parameters);
@@ -308,7 +310,12 @@ bool MotionGateProcessRuntime::try_force_fault(
   const char * detail) noexcept
 {
   try {
-    core_->force_fault(reason, detail);
+    if (fault_test_adapter_.apply != nullptr) {
+      fault_test_adapter_.apply(
+        fault_test_adapter_.context, *core_, reason, detail);
+    } else {
+      core_->force_fault(reason, detail);
+    }
     return true;
   } catch (...) {
     return false;
