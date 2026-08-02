@@ -265,6 +265,157 @@ def test_arm_linearizes_before_first_write(probe):
             close_owned_process_pipes(process)
 
 
+def test_arm_excludes_prior_write_and_preserves_multiple_records(probe):
+    """Prove a nonzero ARM fence and lossless multi-write evidence."""
+    with HardwareWriteLedgerRegionOwner(
+        generation=75,
+        segment_capacity=4,
+        page_segment_limit=2,
+    ) as owner:
+        process = spawn_probe(probe, owner)
+        try:
+            require(
+                owner.wait_for_writer(process.pid) == process.pid,
+                'multi-write probe Writer PID mismatch',
+            )
+            require(
+                read_owned_line(process, 'READY') == 'READY',
+                'multi-write probe did not publish READY',
+            )
+            owner.unlink_name()
+
+            process.stdin.write('BEGIN 500000\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 1',
+                'unarmed write did not receive sequence one',
+            )
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 1',
+                'unarmed write did not finish sequence one',
+            )
+            require(
+                owner.wait_completed_write(1) == 1,
+                'unarmed write did not publish completion one',
+            )
+
+            request_ticket = owner.post_arm(
+                interval_id=92,
+                segment_budget=3,
+                invocation_budget=4,
+                require_zero_commands=True,
+            )
+            process.stdin.write('BEGIN 1000000\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 2',
+                'first included write did not receive sequence two',
+            )
+            response = owner.wait_response(request_ticket)
+            require(
+                response[9] == CONTROL_RESPONSE_OK,
+                f'nonzero-fence ARM response code was {response[9]}',
+            )
+            require(response[10] == 0, 'nonzero-fence ARM selected wrong bank')
+            require(response[11] == 1, 'nonzero-fence ARM epoch changed')
+            require(response[12] == 1, 'ARM included the prior write')
+            require(
+                owner.snapshot_bank(0)[9:13] == (0, 0, 0, 0),
+                'ARM response was delayed until finish or exposed a record',
+            )
+
+            process.stdin.write('FINISH 0 0 0 9223372036854775808\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 2',
+                'first included write did not finish sequence two',
+            )
+            require(
+                owner.wait_completed_write(2) == 2,
+                'first included write did not publish completion two',
+            )
+
+            process.stdin.write('BEGIN 2000000\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 3',
+                'second included write did not receive sequence three',
+            )
+            process.stdin.write('FINISH 1 0 9223372036854775808 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 3',
+                'second included write did not finish sequence three',
+            )
+            require(
+                owner.wait_completed_write(3) == 3,
+                'second included write did not publish completion three',
+            )
+
+            bank = owner.snapshot_bank(0)
+            require(
+                bank == (
+                    BANK_STATE_ACTIVE,
+                    1,
+                    92,
+                    1,
+                    0,
+                    3,
+                    4,
+                    CONTROL_FLAG_ZERO_REQUIRED,
+                    0,
+                    2,
+                    2,
+                    2,
+                    3,
+                    0,
+                    0,
+                    0,
+                ),
+                f'multi-write bank mismatch: {bank!r}',
+            )
+            require(
+                owner.snapshot_segment(0, 0) == (
+                    75,
+                    2,
+                    2,
+                    1,
+                    1000000,
+                    0,
+                    0,
+                    9223372036854775808,
+                ),
+                'second write overwrote the first included segment',
+            )
+            require(
+                owner.snapshot_segment(0, 1) == (
+                    75,
+                    3,
+                    3,
+                    1,
+                    2000000,
+                    1,
+                    9223372036854775808,
+                    0,
+                ),
+                'second included segment was not appended exactly',
+            )
+
+            process.stdin.write('EXIT\n')
+            process.stdin.flush()
+            return_code = process.wait(timeout=3.0)
+            stderr = process.stderr.read()
+            require(
+                return_code == 0,
+                f'multi-write probe exited {return_code}: {stderr}',
+            )
+        finally:
+            terminate_owned_process(process)
+            close_owned_process_pipes(process)
+
+
 def main():
     """Run the bounded cross-process ledger behavior slices."""
     if len(sys.argv) != 2:
@@ -273,6 +424,7 @@ def main():
     test_corrupt_header_is_rejected_before_claim(probe)
     test_exec_attach_survives_unlink(probe)
     test_arm_linearizes_before_first_write(probe)
+    test_arm_excludes_prior_write_and_preserves_multiple_records(probe)
 
 
 if __name__ == '__main__':

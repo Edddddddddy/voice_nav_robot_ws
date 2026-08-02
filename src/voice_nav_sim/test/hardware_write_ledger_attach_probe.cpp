@@ -37,15 +37,68 @@ std::uint64_t parse_word(const char * text)
 
 int execute_command(
   voice_nav_sim::AttachedHardwareWriteLedger & ledger,
-  const std::string & command)
+  const std::string & command,
+  voice_nav_sim::HardwareWriteTicket & pending_ticket,
+  bool & has_pending_ticket,
+  bool & keep_running)
 {
   if (command == "CHECK") {
+    keep_running = false;
     return ledger.claimed_writer_pid() ==
            static_cast<std::uint64_t>(getpid()) ? 0 : 66;
+  }
+  if (command == "EXIT") {
+    keep_running = false;
+    return has_pending_ticket ? 68 : 0;
   }
 
   std::istringstream input{command};
   std::string operation;
+  input >> operation;
+  if (operation == "BEGIN") {
+    std::int64_t sim_stamp_ns{0};
+    std::string trailing;
+    if (
+      has_pending_ticket || !(input >> sim_stamp_ns) ||
+      (input >> trailing))
+    {
+      return 69;
+    }
+    pending_ticket = ledger.writer().begin_write(sim_stamp_ns);
+    has_pending_ticket = true;
+    keep_running = true;
+    std::cout << "BEGAN " << pending_ticket.write_seq << std::endl;
+    return 0;
+  }
+
+  if (operation == "FINISH") {
+    std::uint64_t delegated_result{0U};
+    std::uint64_t observation_status{0U};
+    std::uint64_t left_command_bits{0U};
+    std::uint64_t right_command_bits{0U};
+    std::string trailing;
+    if (
+      !has_pending_ticket ||
+      !(input >> delegated_result >> observation_status >>
+      left_command_bits >> right_command_bits) ||
+      (input >> trailing))
+    {
+      return 70;
+    }
+    ledger.writer().finish_write(
+      pending_ticket,
+      delegated_result,
+      voice_nav_sim::HardwareWriteWheelObservation{
+        static_cast<voice_nav_sim::HardwareWriteObservationStatus>(
+          observation_status),
+        left_command_bits,
+        right_command_bits});
+    std::cout << "FINISHED " << pending_ticket.write_seq << std::endl;
+    has_pending_ticket = false;
+    keep_running = true;
+    return 0;
+  }
+
   std::int64_t sim_stamp_ns{0};
   std::uint64_t delegated_result{0U};
   std::uint64_t observation_status{0U};
@@ -53,7 +106,7 @@ int execute_command(
   std::uint64_t right_command_bits{0U};
   std::string trailing;
   if (
-    !(input >> operation >> sim_stamp_ns >> delegated_result >>
+    !(input >> sim_stamp_ns >> delegated_result >>
     observation_status >> left_command_bits >> right_command_bits) ||
     operation != "WRITE" || (input >> trailing))
   {
@@ -71,6 +124,7 @@ int execute_command(
       left_command_bits,
       right_command_bits});
   std::cout << "WROTE " << ticket.write_seq << std::endl;
+  keep_running = false;
   return 0;
 }
 
@@ -96,11 +150,22 @@ int main(int argc, char ** argv)
         parse_word(argv[7])}});
 
     std::cout << "READY" << std::endl;
+    voice_nav_sim::HardwareWriteTicket pending_ticket{};
+    bool has_pending_ticket{false};
     std::string command;
-    if (!std::getline(std::cin, command)) {
-      return 65;
+    while (std::getline(std::cin, command)) {
+      bool keep_running{false};
+      const auto result = execute_command(
+        ledger,
+        command,
+        pending_ticket,
+        has_pending_ticket,
+        keep_running);
+      if (result != 0 || !keep_running) {
+        return result;
+      }
     }
-    return execute_command(ledger, command);
+    return 65;
   } catch (const std::exception & error) {
     std::cerr << error.what() << '\n';
     return 1;
