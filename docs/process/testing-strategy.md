@@ -242,8 +242,9 @@ already complete:
   and a recent non-zero Gate commit, its final Gate receipt is <=20 ms old at
   signal dispatch, independently advancing/non-zero simulation surfaces are
   <=30 ms old in simulation time, and a parent-owned Gate event journal proves
-  the terminal retirement plus bound zero-publication commit occur no earlier
-  than exact `ProcessExited`; the first matching same-instance state has an
+  the terminal transition-linearization and bound-zero pre-publish fences
+  occur no earlier than exact `ProcessExited`; later commits prove completion.
+  The first matching same-instance state has an
   empty retired lease, the journaled terminal `control_seq`, and newly
   advanced/equal zero/output publish sequences;
 - killing the candidate producer still expires candidate freshness within
@@ -309,8 +310,9 @@ must be within 1.2 s of that point. All controller/wheel/odom windows use
 strictly increasing simulation stamps. Gate process-death latency uses the
 observer's steady receipt of exact `ProcessExited`; the same host's
 `CLOCK_MONOTONIC` timestamps in the Gate journal prove that the terminal
-transition and zero commit did not precede it. DDS receipt order is not that
-proof. Wall time is only the outer test watchdog.
+transition-linearization and zero-output pre-call fences did not precede it.
+Later commit timestamps alone are not that proof, and neither is DDS receipt
+order. Wall time is only the outer test watchdog.
 
 The candidate helper emits finite safe marker tuples whose spacing exceeds the
 comparison tolerance. The decisive Gate-kill marker is new to its generation,

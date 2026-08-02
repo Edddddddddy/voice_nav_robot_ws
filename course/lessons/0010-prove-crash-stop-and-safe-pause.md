@@ -145,8 +145,11 @@ Slice A 使用三个 fault case，每个 case 都创建新的 Gate generation：
    严格递增且相对 Gate input 不旧于 30 ms simulation time；不能把低 RTF 混入
    steady deadline，期间也不能插入 zero/invalid；
 4. authority 死亡时，candidate 继续；parent-owned Gate event journal 用同一主机
-   `CLOCK_MONOTONIC` 证明 terminal retirement 与绑定 zero COMMIT 不早于 exact
-   ProcessExited。该 journal 还记录 signal/exit 在途期间接受的 control transition；
+   `CLOCK_MONOTONIC` 证明 terminal transition 的显式 linearization fence 与绑定
+   zero output 的 publish-call 前 INTENT 不早于 exact ProcessExited；更晚的 COMMIT
+   只证明操作完成，不能倒推因果顺序。Core 的唯一 transition wrapper 记录
+   signal/exit 在途期间接受的全部 control transition；禁止把 journal 调用散落到
+   Node callbacks；
    terminal `control_seq` 必须是最后一个已提交前驱的非回绕 `+1`。随后收到的 state
    保持同一 Gate instance、清空 lease、匹配 journal sequence，zero/output publish
    seq 产生新且相等的 zero，并以 `AUTHORITY_EXPIRED` 在 300 ms steady time 内到达；
@@ -284,8 +287,9 @@ Lesson 0010 完成时至少满足：
 - exact action、exact signal、exact exit 与 exhaustive ledger 全部通过；
 - authority/candidate Gate-zero 分别不超过 300/200 ms steady time；
 - 每次 fault 的 <=40 ms steady arming、<=20 ms Gate receipt 与 <=30 ms
-  simulation-sample age 均成立；Gate journal 的 terminal transition 和 zero COMMIT
-  不早于 `ProcessExited`，不能拿 DDS 接收顺序替代；
+  simulation-sample age 均成立；Gate journal 的 terminal transition-linearization
+  fence 与 bound-zero pre-publish INTENT 不早于 `ProcessExited`，later COMMITTED
+  只证明完成，不能拿它或 DDS 接收顺序替代因果证据；
 - terminal state 必须同一 Gate instance、空 lease，`control_seq` 匹配 journal 中
   最后已提交 control predecessor 的非回绕 `+1`，并使用新
   `zero_publish_seq == output_publish_seq`；不能漏记合法 RENEW 或接受陈旧 zero；

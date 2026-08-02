@@ -170,23 +170,79 @@ not tests-first RED. Repeating the same runner after
 error. [PIT-0011](../reference/engineering-pitfalls.md#pit-0011-ctest-needs-the-ros-environment-not-only-a-build-directory)
 now covers both CTest wrappers and direct ROS-aware repository support imports.
 
-- [ ] Pure valid fixtures pass.
-- [ ] Negative/mutation fixtures fail for their expected reasons.
-- [ ] Repository assertion alone fails because crash-stop artifacts are absent.
-- [ ] RED commit identity is captured after the run.
+The static-RED verification then reproduced
+[PIT-0001](../reference/engineering-pitfalls.md#pit-0001-windows-to-wsl-quoting-is-a-two-shell-contract)
+three more times before any intended test body ran: a spaced pytest `-k`
+expression arrived as only `-k not`, an Awk `$0` program was expanded by the
+outer shell, and a `$(git rev-parse HEAD)` guard lost its quote boundary. None
+was accepted as RED. The permanent command pattern now reads HEAD in a separate
+native Git call, uses pytest's no-space `--deselect=<node-id>`, and performs
+line inspection in PowerShell rather than nesting another language inside
+`bash -lc`.
+
+- [x] Pure valid fixtures pass.
+- [x] Negative/mutation fixtures fail for their expected reasons.
+- [x] Repository assertion alone fails because crash-stop artifacts are absent.
+- [x] RED commit identity is captured after the run.
 
 ```text
-Command: Not yet captured
-Exit status: Not yet captured
-Executed tests: Not yet captured
-Expected repository failure: Not yet captured
+RED commit: b04b23f78442f0691a53f82c9e3b8612edf80fa3
+
+Focused command:
+python3 -m pytest -q tests/test_crash_stop_contract.py \
+  --deselect=tests/test_crash_stop_contract.py::\
+CrashStopContractTest::test_repository_crash_stop_contract_passes
+
+Focused result: 17 passed, 1 deselected
+
+Canonical command on the exact RED commit:
+source /opt/ros/jazzy/setup.bash
+python3 scripts/run_repository_tests.py
+
+Exit status: 1
+Executed tests: 306
+Expected repository failure: exactly one
+test_repository_crash_stop_contract_passes
+-> missing src/voice_nav_sim/test_support/
+   journaled_gazebo_sim_system_adapter.hpp
 ```
+
+The static checker is deliberately a topology contract. It rejects the
+concrete PImpl subclass, missing upstream override-surface forwarding calls,
+fabricated per-write iteration, omitted test generation, product seam leaks,
+extra hardware plugins, XML changes outside the one Adapter replacement and
+two journal parameters, wrong plugin type, missing CMake export/install/link,
+and absent direct package dependencies. It does not claim that source-token
+presence proves unchanged runtime forwarding. A separately registered C++
+fake-upstream test and actual pluginlib load smoke remain mandatory before the
+repository assertion may turn GREEN.
+
+### Architecture correction: record the transition fence, not a later snapshot
+
+A second seam review found that a timestamp written only after the Core had
+mutated state could be later than `ProcessExited` even when the mutation was
+earlier. That post-hoc commit would manufacture the desired causal order under
+preemption. The accepted protocol therefore distinguishes:
+
+- `transition_linearization_ns`, sampled immediately before the one bounded
+  Core-owned mutation;
+- output `INTENT` time, sampled before the DDS publish call;
+- later `COMMITTED` time, which proves completion but not ordering.
+
+All PREPARE/OPEN/RENEW/INHIBIT, automatic retirement, invalid-input retirement,
+fault, and sequence-exhaustion paths must pass through one private Core
+transition wrapper. `reconcile_adapter_transition()` remains subscription
+cleanup, and Node callbacks do not independently journal Core transitions.
+This correction is preserved as
+[PIT-0039](../reference/engineering-pitfalls.md#pit-0039-post-hoc-commit-time-is-not-transition-linearization-time)
+and
+[PIT-0040](../reference/engineering-pitfalls.md#pit-0040-scattered-callback-journals-create-partial-evidence).
 
 ## VN-0011A observed crash evidence
 
 | Case | Expected threshold | Observed result |
 | --- | --- | --- |
-| Authority SIGKILL | <=40 ms steady valid/recent-nonzero-Gate-commit barrier; Gate receipt <=20 ms; advancing non-zero simulation surfaces <=30 ms simulation age; exact `-SIGKILL`; Gate-journal terminal/zero commits are not earlier than ProcessExited; state has empty lease, journaled predecessor-plus-one `control_seq`, new/equal zero-output seq, `AUTHORITY_EXPIRED`; <=300 ms steady | Not yet captured |
+| Authority SIGKILL | <=40 ms steady valid/recent-nonzero-Gate-commit barrier; Gate receipt <=20 ms; advancing non-zero simulation surfaces <=30 ms simulation age; exact `-SIGKILL`; Gate-journal terminal transition-linearization and bound-zero pre-publish fences are not earlier than ProcessExited, while later commits prove completion; state has empty lease, journaled predecessor-plus-one `control_seq`, new/equal zero-output seq, `AUTHORITY_EXPIRED`; <=300 ms steady | Not yet captured |
 | Candidate SIGKILL | same bounded arming/Gate-journal rules; exact `-SIGKILL`; authority RENEWs remain live and are journaled; terminal sequence follows the last committed predecessor; `CANDIDATE_EXPIRED`; event-to-state <=200 ms steady | Not yet captured |
 | MotionGate SIGKILL | exact `-SIGKILL`; Gazebo/controller live; no injected zero; a marker new to the generation is COMMITTED exactly once, ACKed by non-zero controller output before the next 20 ms repeat, and remains the final Gate output record after death; any repeat retries the generation; first controller zero satisfies `0.35 s < delta_sim <= 0.36 s + epsilon`; graph quiet is cleanup only | Not yet captured |
 | Wheel command/state | compatible BEST_EFFORT introspection remains mandatory corroboration; delegated hardware ledger accounts for each invocation through contiguous `write_seq` range/count segments, nondecreasing simulation stamp, and no overflow/gap/nonzero violation; World Statistics separately owns iteration; together they prove first both-wheel zero plus no regression | Not yet captured |
@@ -201,7 +257,8 @@ Expected repository failure: Not yet captured
 - [ ] Broad exit allowlist or skipped case is rejected.
 - [ ] Wrong timeout/update rate/clock is rejected.
 - [ ] Missing wheel command/state/odom surface is rejected.
-- [ ] Stale/delayed arming, terminal/zero journal commit before ProcessExited,
+- [ ] Stale/delayed arming, terminal transition or bound-zero pre-call fence
+  before ProcessExited, post-hoc commit time substituted for linearization,
   DDS receipt ordering used as causal proof, omitted intervening RENEW, queued
   late Gate input, reused/repeated/unmatched final marker, absent/trailing
   Gate-output commit,

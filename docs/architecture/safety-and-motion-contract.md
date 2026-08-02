@@ -359,9 +359,13 @@ generation. Only that single committed input can define the consumer timeout
 origin. For
 authority/candidate death, the same journal includes every accepted
 intervening RENEW; terminal retirement advances exactly once from its final
-committed predecessor, and same-host monotonic timestamps prove retirement and
-the bound zero commit did not precede exact `ProcessExited`. DDS receipt order
-cannot provide that causal proof. Wheel states and
+committed predecessor. One Core-owned wrapper samples its same-host monotonic
+transition-linearization fence immediately before the bounded state mutation;
+the bound zero output records its pre-publish `INTENT` timestamp. Both must be
+no earlier than exact `ProcessExited`, while later `COMMITTED` times prove
+completion only. Scattering records through Node callbacks or comparing only
+post-hoc commit times is not causal proof. DDS receipt order cannot provide
+that proof either. Wheel states and
 odometry must remain stationary for a shared final window of at least 0.20 s
 simulation time.
 

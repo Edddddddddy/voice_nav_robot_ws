@@ -100,8 +100,8 @@ the real package-private Gate protocol but are not product nodes.
 
 | Case | Fault linearization | Live counter-evidence | Required terminal evidence |
 | --- | --- | --- | --- |
-| Authority | exact authority `ProcessExited` with `-SIGKILL`, recorded on the observer monotonic clock | the fault-arming barrier proves `authority_live=true`, candidate fresh, and every command surface non-zero | Gate reason `AUTHORITY_EXPIRED`; journaled terminal retirement and bound zero commit do not precede ProcessExited; the matching state is observed no later than 300 ms steady time afterwards |
-| Candidate | exact candidate `ProcessExited` with `-SIGKILL`, recorded on the observer monotonic clock | the fault-arming barrier proves `candidate_fresh=true`, authority live, and every command surface non-zero | Gate reason `CANDIDATE_EXPIRED`; journaled intervening RENEWs lead to one terminal predecessor-plus-one retirement after ProcessExited; the matching state is observed no later than 200 ms steady time afterwards |
+| Authority | exact authority `ProcessExited` with `-SIGKILL`, recorded on the observer monotonic clock | the fault-arming barrier proves `authority_live=true`, candidate fresh, and every command surface non-zero | Gate reason `AUTHORITY_EXPIRED`; journaled terminal transition and bound-zero output pre-call fences do not precede ProcessExited, and later commits prove completion; the matching state is observed no later than 300 ms steady time afterwards |
+| Candidate | exact candidate `ProcessExited` with `-SIGKILL`, recorded on the observer monotonic clock | the fault-arming barrier proves `candidate_fresh=true`, authority live, and every command surface non-zero | Gate reason `CANDIDATE_EXPIRED`; journaled intervening RENEWs lead to one terminal predecessor-plus-one retirement whose transition/output fences follow ProcessExited; the matching state is observed no later than 200 ms steady time afterwards |
 | MotionGate | exact Gate `ProcessExited` with `-SIGKILL` | the fault-arming barrier proves Gate authority/candidate validity and every command surface non-zero; Gazebo, controller manager, and controller stay live; test publishes no zero | a previously unseen final marker is COMMITTED exactly once by the Gate journal, ACKed by non-zero controller output, and followed immediately by exact Gate SIGKILL; a second periodic publish before death invalidates the attempt and requires a fresh generation. After exit there is no later INTENT/COMMITTED output record. First controller-output zero satisfies `0.35 s < delta_sim <= 0.36 s + step_epsilon` from that one input stamp; the lossless hardware-write journal separately proves both wheel commands reach zero and never regress; downstream stationarity also passes |
 
 Each case starts a new Gate lease generation. The Gate case runs last because
@@ -127,9 +127,11 @@ simulation time older than the final Gate-input stamp. They are not forced
 into the <=40 ms steady window, so a low real-time factor does not change the
 contract. The exact matching `ProcessExited` observer receipt is timestamped
 with Linux `CLOCK_MONOTONIC`. The Gate event journal must prove that the
-terminal retirement and its zero-publication `COMMITTED` record occurred no
-earlier than that timestamp; DDS state/command receipt order alone is not a
-causal ordering proof. If zero or invalidation wins before that event, the
+terminal transition linearization fence and the bound zero output's pre-call
+`INTENT` timestamp occurred no earlier than that timestamp; the later
+`COMMITTED` records prove completion, not causal order. DDS state/command
+receipt order alone is not a causal ordering proof. If zero or invalidation
+wins before that event, the
 generation is not crash evidence and the case must retry from a fresh
 generation or fail its bounded outer wall-time budget. Delaying SIGKILL,
 reusing a stale baseline, or substituting cross-topic receipt order is a
@@ -146,9 +148,11 @@ signal or process-exit event is in flight. Expiry retires and clears the lease.
 The journal must contain exactly one expected terminal retirement whose
 predecessor is the last committed control transition, whose non-wrapping
 `after_control_seq == predecessor_after_control_seq + 1`, and whose monotonic
-commit time is no earlier than the exact producer `ProcessExited` observer
-time. After that proof, the latency endpoint is the observer steady receipt of
-the first matching state with:
+`transition_linearization_ns` sampled immediately before its bounded mutation
+is no earlier than the exact producer `ProcessExited` observer time. A later
+commit timestamp cannot substitute for that fence. After that proof, the
+latency endpoint is the observer steady receipt of the first matching state
+with:
 
 - the same `gate_instance_id`;
 - `control_seq` equal to the journaled terminal `after_control_seq`;
@@ -161,9 +165,11 @@ the first matching state with:
 
 MotionGate publishes this state only after the serialized final-command
 publish succeeds. The event journal binds the terminal transition to that
-zero-publication `COMMITTED` record and `output_publish_seq`; both commits use
-the same monotonic clock and must be ordered after `ProcessExited`. The test
-separately requires a final-command zero receipt and no subsequent non-zero,
+zero-publication `COMMITTED` record and `output_publish_seq`. The transition
+linearization fence and the output record's pre-publish `INTENT` timestamp use
+the same monotonic clock and must be ordered after `ProcessExited`; their later
+commit timestamps only prove successful completion. The test separately
+requires a final-command zero receipt and no subsequent non-zero,
 but cross-topic receipt order is neither substituted for the journal ordering
 nor for the steady latency endpoint. A stale zero sequence or internal reason
 without a newly published zero cannot complete the case.
@@ -176,7 +182,7 @@ The test must preserve these as distinct observations:
 | --- | --- | --- |
 | `/motion_gate/internal/state` | pre-fault live/fresh snapshot, Gate decision, and typed expiry reason | steady observer receipt latency; ROS stamp is not the deadline clock |
 | `/diff_drive_controller/cmd_vel` | MotionGate's periodic controller inputs; the final crash marker is new to the generation and must occur exactly once before Gate death | strictly increasing simulation stamp |
-| default-off Gate event journal | applied control/terminal transitions plus crash-resilient two-phase INTENT/COMMITTED records for attempted final publishes; final records survive exact SIGKILL | same-host monotonic commit time and journal sequence; output records also carry simulation stamp |
+| default-off Gate event journal | applied control/terminal transitions plus crash-resilient two-phase INTENT/COMMITTED records for attempted final publishes; final records survive exact SIGKILL | same-host monotonic transition-linearization and output-intent times, later commit time, and journal sequence; output records also carry simulation stamp |
 | `/diff_drive_controller/cmd_vel_out` | controller-limited body command; a marker match ACKs that the journaled input affected an actual controller update | strictly increasing simulation stamp |
 | `/controller_manager/introspection_data/full` (`pal_statistics_msgs/msg/Statistics`) | command-interface values that the next synchronous hardware write will consume, plus matching state-interface values; not a Gazebo execution acknowledgement | strictly increasing simulation stamp |
 | default-off test hardware-write ledger | every delegated left/right command write, its test generation, simulation stamp, exact value bits, and upstream return result; identical consecutive calls may use a count-preserving segment | contiguous `write_seq`; simulation stamp is nondecreasing and may repeat while paused; World Statistics owns iteration evidence |
@@ -228,8 +234,12 @@ The Gate's default-off, parent-owned event journal has one non-wrapping global
 `journal_seq`, a generation, checksum, and Linux `CLOCK_MONOTONIC` timestamp
 for every record. Its control lane records applied control transitions and
 automatic terminal retirement with before/after `control_seq`, reason, and
-lease identity. Its output lane atomically appends an `INTENT` before each
-final command publish containing non-wrapping `publish_seq`, intended output
+lease identity. One Core-owned transition wrapper writes `INTENT`, samples the
+explicit linearization time immediately before the bounded non-blocking state
+mutation, captures its after-image, and then marks the slot `COMMITTED`; Node
+callbacks never duplicate that protocol. Its output lane atomically appends an
+`INTENT` with a same-host monotonic pre-call timestamp before each final
+command publish containing non-wrapping `publish_seq`, intended output
 sequence, header stamp, marker, and checksum. Only after the DDS publish call
 succeeds does that same slot become `COMMITTED`; journal writes use release
 stores, and the parent reads them with acquire ordering only after
@@ -314,7 +324,8 @@ Tests must reject at least:
 - a terminal state that reuses the retired lease, has the wrong Gate instance,
   does not equal the journaled terminal sequence, whose terminal transition is
   not exactly one non-wrapping step after the last committed intervening
-  control transition, or reuses an armed zero/output sequence;
+  control transition, substitutes a post-hoc commit time for the transition
+  linearization fence, or reuses an armed zero/output sequence;
 - a test-supplied zero after MotionGate death;
 - Gate respawn or Gate exit shutting down Gazebo;
 - broad forced-exit allowlists or unclassified launch actions;
@@ -338,8 +349,10 @@ Tests must reject at least:
   steady barrier longer than 40 ms, a Gate state older than 20 ms at signal
   dispatch, a simulation surface older than
   30 ms simulation time, stalled simulation, delayed SIGKILL, a Gate journal
-  that omits an intervening accepted RENEW, or terminal transition/zero commit
-  timestamped before `ProcessExited`; DDS receipt order alone must also fail;
+  that omits an intervening accepted RENEW, a terminal transition fence or
+  zero-output pre-call `INTENT` timestamped before `ProcessExited`, or a
+  journal protocol scattered across Node callbacks; DDS receipt order alone
+  must also fail;
 - a ledger without monotonic sequence/fences, bounded capacity proof,
   overflow/overwrite fault, immutable paged snapshot, checksum, or contiguous
   sequence/generation validation, or one that fabricates hardware-record

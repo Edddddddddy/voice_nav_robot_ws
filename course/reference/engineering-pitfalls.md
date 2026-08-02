@@ -40,12 +40,14 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0030 | A steady-time arming deadline flakes when simulation RTF falls | Were steady Gate freshness and simulation-sample freshness constrained on separate clocks? | Specified |
 | PIT-0031 | A “lossless” write log silently overwrites or omits records | Are sequence fences, capacity, overflow, and snapshot continuity executable invariants? | Specified |
 | PIT-0032 | A correct producer-death test fails while authority RENEWs continue | Is terminal `control_seq` compared with the final committed predecessor instead of the arming snapshot? | Specified |
-| PIT-0033 | Delayed DDS delivery makes a pre-death zero look post-death | Does a same-host monotonic Gate journal order the terminal commit after `ProcessExited`? | Specified |
+| PIT-0033 | Delayed DDS delivery makes a pre-death zero look post-death | Do same-host transition/output pre-call fences occur after `ProcessExited`? | Specified |
 | PIT-0034 | A dynamically loaded test-support module fails while decorating a dataclass | Does the loader register the module, or does the support type avoid that hidden dependency? | Guarded |
 | PIT-0035 | A concrete plugin class looks inheritable but an external subclass does not compile | Is the documented plugin Interface the real extension seam? | Specified |
 | PIT-0036 | A hardware journal claims a Gazebo iteration it cannot observe | Does the callback actually receive that field, or must World Statistics own it? | Specified |
 | PIT-0037 | A value-matched controller ACK may correspond to a periodic repeat | Was the final marker committed exactly once and ACKed before the next Gate period? | Specified |
 | PIT-0038 | “No allocation in the write seam” accidentally includes upstream code | Is the real-time claim scoped to added instrumentation only? | Specified |
+| PIT-0039 | A late journal commit makes an earlier transition look post-crash | Is the recorded time the transition linearization fence or only a later snapshot? | Specified |
+| PIT-0040 | Some Gate transitions have evidence while equivalent paths do not | Is journaling owned by one Core transition seam or scattered through Node callbacks? | Specified |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -79,7 +81,11 @@ mutation. For a ROS compiler-feasibility probe with transitive include/link
 requirements, prefer a tiny explicit CMake target in an owned temporary source
 directory over nested PowerShell/Bash command substitution that synthesizes
 `-I` flags. Remove the probe after preserving the compiler result and inspect
-`git status`.
+`git status`. Do not embed pytest `-k` expressions containing spaces, Awk
+programs containing `$0`, or `$(git ...)` identity guards inside a
+PowerShell-to-`bash -lc` string. Read Git identity in a separate native command;
+use pytest's no-space `--deselect=<node-id>` form and PowerShell-native text
+inspection when either shell can consume the inner syntax.
 
 ## PIT-0002: WSL transport warnings are not the command result
 
@@ -680,9 +686,10 @@ final Gate receipt is <=20 ms old at signal dispatch. Marker uniqueness is an
 additional narrow requirement only for the MotionGate-death case. Independently, strictly
 advancing non-zero simulation surfaces are <=30 ms old in simulation time.
 No invalid/zero event intervenes. A parent-owned Gate event journal uses the
-same host's monotonic clock to prove terminal retirement and its bound zero
-commit do not precede exact `ProcessExited`; DDS receipt order is not used as
-that proof. The matching state keeps the Gate instance but intentionally
+same host's monotonic clock to prove the terminal transition-linearization and
+bound-zero pre-publish fences do not precede exact `ProcessExited`; later
+commits prove completion, while DDS receipt order is not used as causal proof.
+The matching state keeps the Gate instance but intentionally
 clears the retired lease, matches the journaled terminal `control_seq`, and
 advances `zero_publish_seq == output_publish_seq`; requiring the old lease or
 accepting a stale zero are both errors. Stale-baseline, delayed-kill,
@@ -810,12 +817,14 @@ it earlier and DDS delivered it late.
 not establish causal order between a launch event and separate DDS topics.
 Observer receipt timestamps can therefore invert the actual Gate commit order.
 
-**Diagnostic and planned guardrail.** Timestamp exact `ProcessExited` receipt
-and Gate terminal/output commits with Linux `CLOCK_MONOTONIC` on the same host.
-The crash-resilient Gate event journal binds the retirement, resulting output
-sequence, and zero `COMMITTED` record; both commits must be no earlier than the
-process-exit timestamp. DDS state receipt remains the latency endpoint, not the
-ordering oracle. Pre-death commit with post-death receipt and receipt-only
+**Diagnostic and planned guardrail.** Timestamp exact `ProcessExited` receipt,
+the Gate transition linearization fence, and the zero output's pre-publish
+`INTENT` with Linux `CLOCK_MONOTONIC` on the same host. The crash-resilient Gate
+event journal binds those fences to the retirement, resulting output sequence,
+and later zero `COMMITTED` record. Both pre-operation fences must be no earlier
+than the process-exit timestamp; a later commit alone cannot prove that order.
+DDS state receipt remains the latency endpoint, not the ordering oracle.
+Pre-death transition/output intent with post-death receipt and receipt-only
 mutations must fail. See
 [VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md).
 
@@ -927,3 +936,44 @@ lock-free atomic operations, and no filesystem, logging, ROS, or transport
 calls. Preserve upstream behavior through delegation rather than copying it.
 Static wording tests and implementation review must reject broader claims.
 See [the motion safety contract](../../docs/architecture/safety-and-motion-contract.md).
+
+## PIT-0039: Post-hoc commit time is not transition linearization time
+
+**Symptom.** Crash evidence compares `ProcessExited` with a timestamp written
+after reading the new Gate snapshot and concludes that expiry happened after
+the process died, even though the state mutation may have occurred earlier and
+the executor was descheduled before the journal commit.
+
+**Cause.** A post-transition snapshot and its durability commit bound when the
+observer recorded the outcome, not when the state and `control_seq` changed.
+Preemption between mutation and timestamping can manufacture the desired
+causal order.
+
+**Diagnostic and planned guardrail.** Give MotionGate Core one transition
+wrapper. It appends `INTENT`, samples `CLOCK_MONOTONIC` immediately before a
+bounded non-blocking mutation, records that sample as the explicit
+`transition_linearization_ns`, captures the after-image, and only then marks
+the slot `COMMITTED`. Crash analysis compares exact `ProcessExited` with the
+linearization field; commit time remains a durability fact. A fake-clock unit
+test must fail if an implementation substitutes the later commit time. See
+[VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md).
+
+## PIT-0040: Scattered callback journals create partial evidence
+
+**Symptom.** PREPARE and service-driven INHIBIT are journaled, but automatic
+expiry, invalid-candidate retirement, writer mismatch, or sequence-exhaustion
+fault has no record or produces duplicate records.
+
+**Cause.** Node callbacks are transport adapters, not the owner of Gate state
+transitions. The same Core mutation can be reached from a service, timer,
+candidate callback, or hidden helper. Adding before/after calls to each ROS
+handler creates a shallow protocol whose completeness depends on every caller.
+
+**Diagnostic and planned guardrail.** Journal transitions once at a private
+Core-owned `apply_control_transition` seam covering PREPARE, OPEN, RENEW,
+INHIBIT, automatic retirement, invalid input, fault, and sequence exhaustion.
+The Node owns only the final DDS output seam. Coverage/mutation tests enumerate
+every transition kind and reject both missing and duplicate journal sequence
+values. Do not extend `reconcile_adapter_transition()` into a recorder; it runs
+after mutation and only owns subscription cleanup. See
+[VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md).
