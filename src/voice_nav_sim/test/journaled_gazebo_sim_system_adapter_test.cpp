@@ -156,10 +156,18 @@ public:
       auto * right_command =
         write_entity_component_manager->Component<
         gz::sim::components::JointVelocityCmd>(write_right_entity);
-      if (left_command != nullptr && !left_command->Data().empty()) {
+      if (left_command == nullptr) {
+        (void)write_entity_component_manager->CreateComponent(
+          write_left_entity,
+          gz::sim::components::JointVelocityCmd({delegated_left_command}));
+      } else if (!left_command->Data().empty()) {
         left_command->Data()[0] = delegated_left_command;
       }
-      if (right_command != nullptr && !right_command->Data().empty()) {
+      if (right_command == nullptr) {
+        (void)write_entity_component_manager->CreateComponent(
+          write_right_entity,
+          gz::sim::components::JointVelocityCmd({delegated_right_command}));
+      } else if (!right_command->Data().empty()) {
         right_command->Data()[0] = delegated_right_command;
       }
     }
@@ -356,16 +364,6 @@ TEST(
   gz::sim::EntityComponentManager entity_component_manager;
   const auto left_entity = entity_component_manager.CreateEntity();
   const auto right_entity = entity_component_manager.CreateEntity();
-  ASSERT_NE(
-    entity_component_manager.CreateComponent(
-      left_entity,
-      gz::sim::components::JointVelocityCmd({0.0})),
-    nullptr);
-  ASSERT_NE(
-    entity_component_manager.CreateComponent(
-      right_entity,
-      gz::sim::components::JointVelocityCmd({0.0})),
-    nullptr);
   std::map<std::string, gz::sim::Entity> joints{
     {"left_wheel_joint", left_entity},
     {"right_wheel_joint", right_entity}};
