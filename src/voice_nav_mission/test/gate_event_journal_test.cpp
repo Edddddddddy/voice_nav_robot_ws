@@ -149,12 +149,16 @@ GateOutputIntent make_output_intent()
   return {
     41U,
     9U,
+    11U,
+    12U,
     17U,
     18U,
     23U,
     456789123U,
     0x3fd0000000000000U,
     0xbfc0000000000000U,
+    0x9999aaaabbbbccccU,
+    0xddddeeeeffff0001U,
     0x1111222233334444U,
     0x5555666677778888U,
     3U,
@@ -258,12 +262,16 @@ TEST(
   EXPECT_EQ(region.slot.commit_monotonic_ns, 200U);
   EXPECT_EQ(region.slot.event_code, intent.event_code);
   EXPECT_EQ(region.slot.reason, intent.reason);
+  EXPECT_EQ(region.slot.before_state_seq, intent.before_state_seq);
+  EXPECT_EQ(region.slot.before_control_seq, intent.before_control_seq);
   EXPECT_EQ(region.slot.output_attempt_seq, intent.output_attempt_seq);
   EXPECT_EQ(region.slot.intended_output_seq, intent.intended_output_seq);
   EXPECT_EQ(region.slot.ros_stamp_sec_bits, intent.ros_stamp_sec_bits);
   EXPECT_EQ(region.slot.ros_stamp_nanosec, intent.ros_stamp_nanosec);
   EXPECT_EQ(region.slot.linear_x_bits, intent.linear_x_bits);
   EXPECT_EQ(region.slot.angular_z_bits, intent.angular_z_bits);
+  EXPECT_EQ(region.slot.before_lease_hi, intent.before_lease_hi);
+  EXPECT_EQ(region.slot.before_lease_lo, intent.before_lease_lo);
   EXPECT_EQ(region.slot.gate_instance_hi, intent.gate_instance_hi);
   EXPECT_EQ(region.slot.gate_instance_lo, intent.gate_instance_lo);
   EXPECT_EQ(
