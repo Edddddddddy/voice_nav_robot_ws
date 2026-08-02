@@ -10,13 +10,13 @@
 
 **Branch:** `feat/vn-0011a-l0010-crash-stop`
 
-**Capability state:** In progress. The exact-action/exact-exit CrashLedger has
-completed two reviewable RED/GREEN microcycles and is registered through the
-real ament/CTest path. The Gate event journal has completed its first
-output-transaction GREEN plus independent C ABI/checksum contract hardening.
-Transition journaling, POSIX shared-memory ownership, Node integration,
-evidence analysis, repository GREEN, product crash runs, the final local gate,
-PR, and CI remain open.
+**Capability state:** In progress. The exact-action/exact-exit CrashLedger, Gate
+output transaction, Core-owned transition matrix, one-shot transition
+capability, same-process POSIX attachment checks, and real parent/child
+shared-memory publication/lifetime guard are complete. The current
+`voice_nav_mission` package gate is 16/16 GREEN. Node composition and final
+publisher integration, evidence analysis, the Gazebo Adapter, repository
+GREEN, product crash runs, the final local gate, PR, and CI remain open.
 
 ## Immutable base
 
@@ -290,8 +290,12 @@ one, and exact size, and maps it. It reads no ordinary Header field before
 `GateEventJournal` acquire-loads `READY`; only after the complete ABI,
 identity, capacity, checksum, and empty-slot validation does it atomically
 claim `writer_pid`. It never creates, truncates, unlinks, or clears the parent
-object. Same-process tests are Layer 1 only; a real parent/child probe is the
-required Layer-2 publication and lifetime evidence.
+object. Same-process tests are Layer 1. The permanent Layer-2 guard uses a
+Python parent that creates the object directly through libc, initializes the
+ABI, and release-publishes `READY`; a separately executed C++ child attaches,
+claims its real PID, waits while the parent unlinks the name, and then commits
+through the surviving mapping. The parent acquire-loads `COMMITTED` and checks
+the complete record with an independent CRC64 implementation after child exit.
 
 Each successful terminal transition exposes its committed `journal_seq` in
 the Core snapshot as `output_cause_transition_journal_seq`; Prepared/Armed
@@ -480,6 +484,10 @@ pre-existing user-owned Gazebo process.
   fences/gaps/repeated simulation stamps plus World-Statistics correlation,
   marker ACK correlation, and
   simulation-window evidence analysis.
+- Cross-process contract: parent-owned POSIX object, release/acquire `READY`,
+  exact child PID claim, parent-only unlink, post-unlink child commit,
+  post-exit parent validation through the existing mapping, independent CRC64,
+  and idempotent cleanup with no `/dev/shm` residue.
 - Contract: product launch topology, helper separation, clocks, controller
   parameters, evidence surfaces, generated test inventory, and mutation
   resistance.
@@ -499,7 +507,29 @@ pre-existing user-owned Gazebo process.
 
 ## Verification evidence
 
-Not yet captured. This section will receive only observed RED/GREEN and
-repository-acceptance facts that exist before the tree containing them. Exact
-final local/pushed HEAD, its gate result, PR, CI, rebase/public tree, and Issue
-closure identities are recorded externally under the delivery identity policy.
+- `2e052e1` is the isolated Layer-2 RED. In
+  `/tmp/vn-cross-red-20260802-001`, the exact registered CTest executed and
+  failed 1/1 because the required attach-probe executable did not exist. Shell
+  wrapper failures observed before that invocation are not product RED.
+- `8dd79a3` is the Layer-2 GREEN. The exact cross-process CTest passed five
+  consecutive executions. It proved that `writer_pid` equals the real child
+  PID, parent unlink followed by `ENOENT`, a child COMMITTED record after
+  unlink, complete parent validation after child exit, and independent
+  header/INTENT/COMMITTED CRC64 checks. A post-test
+  `/dev/shm/voice_nav_gate_*` inventory was empty.
+- `63a5ee2`, `825c662`, and review correction `0034c9d` close the Core journal
+  transition matrix. The 21-test GTest suite proves all four automatic
+  retirement reasons, full-journal admission-versus-safety policy, a live
+  candidate at 249 ms followed by authority expiry at 250 ms, preservation of
+  a selected non-zero command when an unrecordable RENEW is rejected, one
+  COMMITTED provider-fault record with no replay duplication, and a repeated
+  `force_fault()` that changes neither Snapshot nor overflow state.
+- With both `/opt/ros/jazzy/setup.bash` and the workspace overlay sourced, the
+  complete `voice_nav_mission` CTest gate passed 16/16, including launch, C ABI,
+  cross-process, static-analysis, formatting, and XML/Python checks.
+
+These are component and Layer-2 contract facts, not observed product crash
+evidence. The repository topology contract remains deliberately RED until Node
+composition and the Gazebo Adapter exist. Exact final local/pushed HEAD, PR,
+CI, rebase/public tree, and Issue closure identities remain pending under the
+delivery identity policy.

@@ -295,10 +295,11 @@ WSL/file epochs and rerunning the same target produced a clean zero exit with
 no warning, so the transient mounted-filesystem case is retained as
 [PIT-0042](../reference/engineering-pitfalls.md#pit-0042-mounted-filesystem-clock-skew-needs-a-bounded-rerun).
 
-This is not VN-0011A completion. The journal is still an uninstalled static
-module. POSIX shared-memory ownership, Node attachment/configuration, the
-Gazebo hardware Adapter, and real crash evidence remain open; the
-repository-level topology test therefore remains deliberately RED.
+At checkpoint `774d525`, this was not VN-0011A completion: the journal was
+still an uninstalled static module, and POSIX ownership, Node composition, the
+Gazebo hardware Adapter, and real crash evidence were all open. Later sections
+record the completed ownership layers without changing the still-RED product
+topology boundary.
 
 ### Core-owned transition integration
 
@@ -316,10 +317,12 @@ Each successful transition records an exact before-image, an INTENT and
 linearization sample immediately before the Core-owned mutation, an exact
 after-image, and a COMMITTED checksum. Stable event codes are `1..6` for
 PREPARE, OPEN, RENEW, explicit INHIBIT, automatic retirement, and FAULT.
-`MotionGateCore` is now non-copyable and non-movable so two state machines
-cannot alias the journal's single writer. Fence callbacks are compile-time
-required to be `noexcept`; strings are prepared outside the fence and swapped
-inside it.
+The first integration made `MotionGateCore` non-copyable and non-movable and
+initially treated that object trait as the single-writer proof. A later P1
+counterexample invalidated that assumption: two distinct Core objects could
+still alias one raw journal pointer. The final proof is the one-shot capability
+recorded below. Fence callbacks remain compile-time `noexcept`; strings are
+prepared outside the fence and swapped inside it.
 
 Independent review of the first PREPARE slice reported P0=0 and P1=0. Its two
 P2 findings became executable corrections: commits `e471dd9`/`0887c35` lock
@@ -386,10 +389,34 @@ capacity, size, mode, and name fail before `writer_pid` claim. This is recorded
 as [PIT-0045](../reference/engineering-pitfalls.md#pit-0045-acquire-must-precede-every-ordinary-shared-memory-read).
 
 Independent Attached review reported P0=0, P1=0 and one P2 acceptance gap:
-the current seven tests use one process. A Python parent plus blocking C++
-child remains required to prove real child PID claim, cross-process
-release/acquire, parent-only unlink, and post-exit mapping evidence. Therefore
-POSIX attachment is not yet marked complete.
+the seven same-process tests could not prove real publication and mapping
+lifetime. That gap became a separate TDD slice:
+
+```text
+2e052e1 RED  -> 8dd79a3 GREEN  real parent/child journal attachment
+```
+
+The RED used the exact registered CTest in
+`/tmp/vn-cross-red-20260802-001`; it executed and failed because the required
+probe binary did not exist. The GREEN uses a direct-libc Python owner and an
+executed C++ child. It proves the real child PID claim, release/acquire `READY`,
+parent-only unlink followed by `ENOENT`, child COMMITTED publication through
+the surviving mapping, post-exit parent validation with an independent
+CRC64-ECMA oracle, and no residual `/dev/shm/voice_nav_gate_*` object. An
+independent review reported P0=0, P1=0, and P2=0.
+
+The transition-matrix review was then closed without changing production
+semantics:
+
+- `63a5ee2` covered event 5 for `PrepareExpired`, `AuthorityExpired`,
+  `WriterMismatch`, and `InvalidCandidate`, plus full-journal and provider-fault
+  branches.
+- `825c662` made exact capacity/overflow, safety-state sequence advancement,
+  preserved non-zero RENEW command, COMMITTED event 6 checksums/cause, and
+  complete repeated-fault Snapshot invariants explicit.
+- Review correction `0034c9d` proves the candidate is still selected at
+  249 ms before authority expires at 250 ms, and proves a repeated
+  `force_fault()` does not even latch a new overflow.
 
 ```text
 Checkpoint 41b44ba package gate:
@@ -397,6 +424,11 @@ Checkpoint 41b44ba package gate:
 
 Independent Attached temporary-build gate on cb94da4:
 7 tests, 0 errors, 0 failures, 0 skipped
+
+Current component gate after 0034c9d:
+motion_gate_journal_test: 21 tests passed
+cross-process exact CTest: 5 consecutive executions passed
+voice_nav_mission package: 16/16 CTest tests passed
 ```
 
 One full CTest run sourced `/opt/ros/jazzy/setup.bash` but omitted
@@ -408,6 +440,19 @@ a quoted `|` filter into Bash pipelines. During the Attached loop, guessed
 ament test names produced `No tests found`; `ctest -N` followed by literal
 registered names corrected the evidence, reinforcing PIT-0016's rule that a
 zero exit is not proof the intended test ran.
+
+The Layer-2 loop also reproduced two coupled wrapper defects. PowerShell
+consumed a Bash `tmpdir=$(mktemp ...)` expression, leaving an empty target that
+degenerated to `/build` and `/log`; a later successful diagnostic then hid the
+earlier failure behind exit zero. No product test ran and the repository did
+not change, so these are PIT-0001 and PIT-0018 recurrences, not the TDD RED.
+The valid RED used the explicit temporary directory above and made CTest the
+terminal command. A later grouped regex again failed at `(` before build, and
+enabling `set -u` before sourcing ROS failed on
+`AMENT_TRACE_SETUP_FILES`; separate literal tests and source-before-strict-mode
+restored the intended gate. Finally, the first incremental probe build emitted
+sub-second clock-skew warnings; the focused rebuild was warning-free and all
+five cross-process repetitions passed, closing the bounded PIT-0042 rerun.
 
 ## VN-0011A observed crash evidence
 

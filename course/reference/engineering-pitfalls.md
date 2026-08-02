@@ -104,6 +104,15 @@ separate literal `ctest -R <name>` invocations. This recurrence confirms that
 the safe template, not another layer of escaping, is the permanent process
 guardrail.
 
+During the Layer-2 journal slice, PowerShell also consumed a Bash
+`tmpdir=$(mktemp ...)` expression before the Linux shell received it. The empty
+value degraded later paths to `/build` and `/log`, which failed with permission
+errors before any product test ran. The valid RED used the explicit path
+`/tmp/vn-cross-red-20260802-001`. A later grouped CTest regex again reached
+Bash as syntax near `(`; separate literal test names remained the repair. In
+both cases `git status` confirmed that the wrapper failure had not mutated the
+repository, and neither event was counted as product RED.
+
 ## PIT-0002: WSL transport warnings are not the command result
 
 **Symptom.** WSL emits a localhost/NAT warning, sometimes with garbled Windows
@@ -268,6 +277,14 @@ turns environment initialization into a false product failure.
 
 If all targets fail at the same import, fix the invocation before diagnosing
 product code. Canonical `scripts/verify.sh` already sources both environments.
+
+**Recurrence evidence.** VN-0011A once sourced only the base installation; the
+package's launch test alone failed to import `voice_nav_mission`, while the
+same 15-test gate passed after sourcing the overlay. The Layer-2 verification
+also enabled `set -u` before sourcing ROS and stopped on the intentionally
+unset `AMENT_TRACE_SETUP_FILES`. Sourcing first, then enabling strict mode,
+allowed the complete 16/16 package gate to run. Neither invocation failure was
+accepted as a code RED.
 
 ## PIT-0012: No residual Gazebo process is not a clean Gazebo exit
 
@@ -441,6 +458,13 @@ They are correctness checks, not a security sandbox. They do not claim to
 resist a malicious same-UID process or deliberately hostile Python dynamic
 metaprogramming that mutates files, imported objects, or runtime test IDs.
 
+**Recurrence evidence.** During the VN-0011A Attached loop, guessed ament test
+names returned `No tests found` with exit zero. `ctest -N` exposed the actual
+registration, and a literal
+`ctest -R '^gate_event_journal_cross_process_test$'` run supplied the real
+evidence. The zero-test command was discarded rather than reported as a GREEN
+gate.
+
 ## PIT-0017: A Gazebo query timeout is not a teardown diagnosis
 
 **Symptom.** During repeated WSL launch tests, the general
@@ -490,6 +514,14 @@ script must combine them, test that script with a deliberately failing child
 and require the original non-zero status; do not improvise cross-shell `$?`
 capture in an acceptance command. Canonical `scripts/verify.sh` and the repeat
 commands follow this terminal-gate rule.
+
+**Recurrence evidence.** The first Layer-2 RED attempt combined a broken
+cross-shell temporary-directory expression with trailing diagnostics. The
+permission failure appeared in output, but the successful final diagnostic
+made the wrapper return zero. The corrected invocation used a fixed owned
+`/tmp` path and ended with the exact CTest, which then returned the genuine 1/1
+missing-probe RED. The wrapper incident remains evidence-tooling failure, not a
+product or TDD result.
 
 ## PIT-0019: A property-name allowlist does not validate property values
 
@@ -1037,6 +1069,13 @@ the warning repeats, stop and inspect host/guest clock divergence and
 concurrent writers; do not use `touch`, delete build metadata, or suppress the
 warning to manufacture green evidence.
 
+**Recurrence evidence.** The first incremental build of the Layer-2 attach
+probe reported several dependency files less than one second in the future.
+The same focused targets rebuilt without the warning after the boundary had
+passed, the cross-process CTest then passed five consecutive executions, and
+the complete package gate passed 16/16. Only the warning-free focused rerun and
+tests were retained as acceptance evidence.
+
 ## PIT-0043: Evidence failure must not veto a safety mutation
 
 **Symptom.** MotionGate has an active lease, but `INHIBIT`, automatic expiry,
@@ -1104,5 +1143,10 @@ That constructor acquire-loads `READY` before reading any ordinary Header or
 slot field and claims `writer_pid` only after every validation succeeds.
 Wrong generation, nonce, capacity, mode, name, and size must fail before the
 claim. Same-process tests protect ordering in code review; a real parent/child
-probe remains mandatory evidence for cross-process publication semantics. See
+probe is now the permanent Layer-2 guard: the parent directly initializes and
+release-publishes `READY`, the separately executed child claims its real PID,
+the parent unlinks the name, and the child still commits through its mapping;
+after child exit the parent acquire-loads `COMMITTED` and validates all CRCs
+with an independent implementation. Keep that test registered; do not regress
+the contract back to same-process evidence. See
 [VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md).
