@@ -18,7 +18,7 @@ ADAPTER_HEADER = """\
 #include <gz_ros2_control/gz_system_interface.hpp>
 #include <pluginlib/class_loader.hpp>
 
-#include "hardware_write_sink.hpp"
+#include "hardware_write_ledger_writer.hpp"
 
 namespace voice_nav_sim
 {
@@ -43,26 +43,44 @@ private:
     gz_ros2_control::GazeboSimSystemInterface> upstream_loader_;
   std::shared_ptr<
     gz_ros2_control::GazeboSimSystemInterface> upstream_;
+  std::shared_ptr<HardwareWriteJournal> write_journal_;
 };
 }  // namespace voice_nav_sim
 """
 
 
-WRITE_SINK_HEADER = """\
+WRITE_JOURNAL_HEADER = """\
 #pragma once
 
 #include <cstdint>
 
 namespace voice_nav_sim
 {
-struct HardwareWriteRecord
+struct HardwareWriteTicket
 {
-  std::uint64_t generation;
   std::uint64_t write_seq;
   std::int64_t sim_stamp_ns;
-  std::uint8_t delegated_result;
+  std::uint64_t bank_index;
+  std::uint64_t bank_epoch;
+  bool included;
+};
+
+struct HardwareWriteWheelObservation
+{
+  std::uint64_t status;
   std::uint64_t left_command_bits;
   std::uint64_t right_command_bits;
+};
+
+class HardwareWriteJournal
+{
+public:
+  virtual HardwareWriteTicket begin_write(
+    std::int64_t sim_stamp_ns) noexcept = 0;
+  virtual void finish_write(
+    HardwareWriteTicket ticket,
+    std::uint64_t delegated_result,
+    HardwareWriteWheelObservation observation) noexcept = 0;
 };
 }  // namespace voice_nav_sim
 """
@@ -133,9 +151,10 @@ Return JournaledGazeboSimSystemAdapter::read()
 
 Return JournaledGazeboSimSystemAdapter::write()
 {
+  const auto ticket = write_journal_->begin_write(time.nanoseconds());
   const auto delegated_result = upstream_->write(time, period);
-  journal_after_delegated_write(
-    time, delegated_result, left_joint, right_joint);
+  write_journal_->finish_write(
+    ticket, static_cast<std::uint64_t>(delegated_result), observation);
   return delegated_result;
 }
 }  // namespace voice_nav_sim
@@ -175,7 +194,17 @@ TEST(
 {}
 TEST(
   JournaledGazeboSimSystemAdapter,
-  DoesNotObserveFromBindingBeforeFailedReinitialization)
+  ReportsMissingEntityAfterFailedReinitialization)
+{}
+TEST(
+  JournaledGazeboSimSystemAdapter,
+  ReportsMissingWheelCommandComponent)
+{}
+TEST(JournaledGazeboSimSystemAdapter, ReportsRemovedWheelEntity) {}
+TEST(JournaledGazeboSimSystemAdapter, ReportsEmptyWheelCommandComponent) {}
+TEST(
+  JournaledGazeboSimSystemAdapter,
+  FinishesJournalCycleWhenDelegatedWriteThrows)
 {}
 """
 
@@ -356,8 +385,8 @@ motion_gate_node:
 
 FIXTURE_FILES = {
     (
-        "src/voice_nav_sim/test_support/hardware_write_sink.hpp"
-    ): WRITE_SINK_HEADER,
+        "src/voice_nav_sim/test_support/hardware_write_ledger_writer.hpp"
+    ): WRITE_JOURNAL_HEADER,
     (
         "src/voice_nav_sim/test_support/"
         "journaled_gazebo_sim_system_adapter.hpp"
@@ -502,42 +531,110 @@ class CrashStopContractTest(unittest.TestCase):
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("exact owned Adapter type", completed.stderr)
 
-    def test_hardware_record_cannot_invent_per_write_iteration(self) -> None:
+    def test_adapter_cannot_own_write_sequence(self) -> None:
         def mutation(root: Path) -> None:
             self.replace(
                 root,
                 (
                     "src/voice_nav_sim/test_support/"
-                    "hardware_write_sink.hpp"
+                    "journaled_gazebo_sim_system_adapter.hpp"
                 ),
-                "  std::uint64_t write_seq;",
+                "  std::shared_ptr<HardwareWriteJournal> write_journal_;",
                 (
-                    "  std::uint64_t write_seq;\n"
-                    "  std::uint64_t iteration;"
+                    "  std::shared_ptr<HardwareWriteJournal> write_journal_;\n"
+                    "  std::uint64_t next_write_seq_;"
                 ),
             )
 
         completed = self.run_checker(mutation)
 
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("must not claim per-write Gazebo iteration", completed.stderr)
+        self.assertIn("must not own Writer sequence", completed.stderr)
 
-    def test_hardware_record_cannot_omit_test_generation(self) -> None:
+    def test_adapter_cannot_construct_legacy_write_records(self) -> None:
         def mutation(root: Path) -> None:
             self.replace(
                 root,
                 (
                     "src/voice_nav_sim/test_support/"
-                    "hardware_write_sink.hpp"
+                    "journaled_gazebo_sim_system_adapter.cpp"
                 ),
-                "  std::uint64_t generation;\n",
+                "  const auto ticket =",
+                "  HardwareWriteRecord record{};\n  const auto ticket =",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("must not use legacy sink or record", completed.stderr)
+
+    def test_journal_ticket_cannot_omit_write_sequence(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                (
+                    "src/voice_nav_sim/test_support/"
+                    "hardware_write_ledger_writer.hpp"
+                ),
+                "  std::uint64_t write_seq;\n",
                 "",
             )
 
         completed = self.run_checker(mutation)
 
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("missing observable write facts: generation", completed.stderr)
+        self.assertIn("ticket is missing Writer-owned facts: write_seq", completed.stderr)
+
+    def test_journal_interface_requires_finish_write(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                (
+                    "src/voice_nav_sim/test_support/"
+                    "hardware_write_ledger_writer.hpp"
+                ),
+                "virtual void finish_write(",
+                "virtual void disabled_finish_write(",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("must define begin_write and finish_write", completed.stderr)
+
+    def test_adapter_must_begin_before_delegated_write(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                (
+                    "src/voice_nav_sim/test_support/"
+                    "journaled_gazebo_sim_system_adapter.cpp"
+                ),
+                "write_journal_->begin_write(",
+                "write_journal_->disabled_begin_write(",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("begin before the delegated upstream write", completed.stderr)
+
+    def test_adapter_must_finish_after_delegated_write(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                (
+                    "src/voice_nav_sim/test_support/"
+                    "journaled_gazebo_sim_system_adapter.cpp"
+                ),
+                "write_journal_->finish_write(",
+                "write_journal_->disabled_finish_write(",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("finish after the delegated upstream write", completed.stderr)
 
     def test_adapter_cannot_drop_upstream_lifecycle_delegation(self) -> None:
         def mutation(root: Path) -> None:
