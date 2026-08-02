@@ -332,6 +332,11 @@ if(BUILD_TESTING)
     RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
   )
   add_launch_test(
+    test/test_journaled_gazebo_hardware_write.py
+    TIMEOUT 180
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
+  )
+  add_launch_test(
     test/test_simulation_interfaces.py
     TIMEOUT 120
     RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
@@ -344,6 +349,7 @@ if(BUILD_TESTING)
 
   set_tests_properties(
     test_test_simulation_control.py
+    test_test_journaled_gazebo_hardware_write.py
     test_test_simulation_interfaces.py
     test_test_tf_ownership_conflict.py
     PROPERTIES
@@ -353,6 +359,7 @@ if(BUILD_TESTING)
   )
   set_tests_properties(
     test_test_simulation_control.py
+    test_test_journaled_gazebo_hardware_write.py
     test_test_simulation_interfaces.py
     test_test_tf_ownership_conflict.py
     PROPERTIES
