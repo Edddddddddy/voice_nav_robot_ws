@@ -285,13 +285,13 @@ TEST(
     gate_event_journal_intent_checksum(region.slot));
   EXPECT_EQ(
     region.slot.intent_checksum,
-    UINT64_C(0x1ab28ffd4e031df7));
+    UINT64_C(0xd4fa035ee65f6e49));
   EXPECT_EQ(
     region.slot.commit_checksum,
     gate_event_journal_commit_checksum(region.slot));
   EXPECT_EQ(
     region.slot.commit_checksum,
-    UINT64_C(0x24237a46d3cccb33));
+    UINT64_C(0x7616a59a93cbbd63));
 }
 
 TEST(GateEventJournal, PublisherFailureLeavesTrailingIntent)

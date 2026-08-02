@@ -240,9 +240,10 @@ TEST(AttachedGateEventJournal, ExistingMappingSurvivesOwnerUnlink)
 
   const auto outcome = attached.journal().publish_output(
     GateOutputIntent{
-        41U, 9U, 17U, 18U, 23U, 456U,
+        41U, 9U, 0U, 0U, 17U, 18U, 23U, 456U,
         UINT64_C(0x3fd0000000000000),
         UINT64_C(0xbfc0000000000000),
+        0U, 0U,
         UINT64_C(0x1111222233334444),
         UINT64_C(0x5555666677778888),
         3U, 0xa5U},

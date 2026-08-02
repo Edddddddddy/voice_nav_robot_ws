@@ -65,12 +65,16 @@ struct GateOutputIntent
 {
   std::uint64_t event_code;
   std::uint64_t reason;
+  std::uint64_t before_state_seq;
+  std::uint64_t before_control_seq;
   std::uint64_t output_attempt_seq;
   std::uint64_t intended_output_seq;
   std::uint64_t ros_stamp_sec_bits;
   std::uint64_t ros_stamp_nanosec;
   std::uint64_t linear_x_bits;
   std::uint64_t angular_z_bits;
+  std::uint64_t before_lease_hi;
+  std::uint64_t before_lease_lo;
   std::uint64_t gate_instance_hi;
   std::uint64_t gate_instance_lo;
   std::uint64_t cause_transition_journal_seq;
@@ -166,7 +170,8 @@ private:
 
   Reservation reserve_slot();
   Reservation begin_output(const GateOutputIntent & intent);
-  GateOutputOutcome commit_output(const Reservation & reservation);
+  GateOutputOutcome commit_output(
+    const Reservation & reservation) noexcept;
   template<typename Transition>
   GateTransitionOutcome apply_transition(
     const GateTransitionIntent & intent,

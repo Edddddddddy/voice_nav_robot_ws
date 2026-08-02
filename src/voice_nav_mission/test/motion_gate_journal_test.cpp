@@ -540,7 +540,8 @@ TEST(MotionGateJournal, ReservationFailureLeavesPrepareFailClosedAndUnchanged)
     GateEventJournalClock{&FakeClock::read, &clock});
   (void)journal.publish_output(
     GateOutputIntent{
-        99U, 0U, 1U, 1U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U},
+        99U, 0U, 0U, 0U, 1U, 1U, 0U, 0U,
+        0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U},
     []() noexcept {});
   MotionGateCore gate(
     MotionGateConfig{}, kGateId, 0U,
@@ -873,8 +874,12 @@ TEST(MotionGateJournal, TerminalCauseFlowsIntoTheFirstZeroOutputIntent)
     GateOutputIntent{
         41U,
         static_cast<std::uint64_t>(Reason::None),
+        inhibited.state_seq,
+        inhibited.control_seq,
         1U,
         1U,
+        0U,
+        0U,
         0U,
         0U,
         0U,
@@ -896,6 +901,10 @@ TEST(MotionGateJournal, TerminalCauseFlowsIntoTheFirstZeroOutputIntent)
     VOICE_NAV_GATE_EVENT_JOURNAL_KIND_OUTPUT_ATTEMPT);
   EXPECT_EQ(slot.linear_x_bits, 0U);
   EXPECT_EQ(slot.angular_z_bits, 0U);
+  EXPECT_EQ(slot.before_state_seq, inhibited.state_seq);
+  EXPECT_EQ(slot.before_control_seq, inhibited.control_seq);
+  EXPECT_EQ(slot.before_lease_hi, 0U);
+  EXPECT_EQ(slot.before_lease_lo, 0U);
   EXPECT_EQ(slot.cause_transition_journal_seq, 2U);
   EXPECT_EQ(slot.intent_checksum, gate_event_journal_intent_checksum(slot));
   EXPECT_EQ(slot.commit_checksum, gate_event_journal_commit_checksum(slot));
@@ -1527,7 +1536,8 @@ TEST(MotionGateJournal, FullJournalCannotPreventForceFault)
     GateEventJournalClock{&FakeClock::read, &clock});
   (void)journal.publish_output(
     GateOutputIntent{
-        99U, 0U, 1U, 1U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U},
+        99U, 0U, 0U, 0U, 1U, 1U, 0U, 0U,
+        0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U},
     []() noexcept {});
   MotionGateCore gate(
     MotionGateConfig{}, kGateId, 0U,

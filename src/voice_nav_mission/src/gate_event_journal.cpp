@@ -339,12 +339,16 @@ GateEventJournal::Reservation GateEventJournal::begin_output(
   slot.intent_monotonic_ns = clock_.read(clock_.context);
   slot.event_code = intent.event_code;
   slot.reason = intent.reason;
+  slot.before_state_seq = intent.before_state_seq;
+  slot.before_control_seq = intent.before_control_seq;
   slot.output_attempt_seq = intent.output_attempt_seq;
   slot.intended_output_seq = intent.intended_output_seq;
   slot.ros_stamp_sec_bits = intent.ros_stamp_sec_bits;
   slot.ros_stamp_nanosec = intent.ros_stamp_nanosec;
   slot.linear_x_bits = intent.linear_x_bits;
   slot.angular_z_bits = intent.angular_z_bits;
+  slot.before_lease_hi = intent.before_lease_hi;
+  slot.before_lease_lo = intent.before_lease_lo;
   slot.gate_instance_hi = intent.gate_instance_hi;
   slot.gate_instance_lo = intent.gate_instance_lo;
   slot.cause_transition_journal_seq = intent.cause_transition_journal_seq;
@@ -358,7 +362,7 @@ GateEventJournal::Reservation GateEventJournal::begin_output(
 }
 
 GateOutputOutcome GateEventJournal::commit_output(
-  const Reservation & reservation)
+  const Reservation & reservation) noexcept
 {
   reservation.slot->commit_monotonic_ns = clock_.read(clock_.context);
   reservation.slot->commit_checksum =
