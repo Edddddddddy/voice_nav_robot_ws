@@ -225,38 +225,66 @@ std::optional<HardwareWriteSnapshotPage> HardwareWriteLedger::snapshot_page(
   std::uint64_t page_index) const
 {
   if (
-    !impl_->sealed.load(std::memory_order_acquire) || page_index != 0U ||
+    !impl_->sealed.load(std::memory_order_acquire) ||
     impl_->finalized_segment_count == 0U)
   {
     return std::nullopt;
   }
 
-  HardwareWriteSnapshotPage page{
-    impl_->config.generation,
-    impl_->config.interval_id,
-    impl_->config.arm_fence_write_seq,
-    impl_->seal_fence_write_seq,
-    0U,
-    1U,
-    impl_->finalized_segment_count,
-    impl_->total_invocation_count,
-    impl_->finalized_segment_count,
-    impl_->total_invocation_count,
-    impl_->finalized_segments[0U].first_write_seq,
-    impl_->finalized_segments[impl_->finalized_segment_count - 1U].last_write_seq,
-    0U,
-    0U,
-    0U,
-    {}};
-  page.segments.reserve(impl_->finalized_segment_count);
-  for (std::size_t index = 0U;
-    index < impl_->finalized_segment_count;
-    ++index)
-  {
-    page.segments.push_back(impl_->finalized_segments[index]);
+  const auto page_limit = impl_->config.snapshot_page_segment_limit;
+  const auto page_count =
+    impl_->finalized_segment_count / page_limit +
+    (impl_->finalized_segment_count % page_limit == 0U ? 0U : 1U);
+  if (page_index >= static_cast<std::uint64_t>(page_count)) {
+    return std::nullopt;
   }
-  page.page_checksum = page_checksum(page);
-  return page;
+
+  std::uint64_t previous_checksum = 0U;
+  for (std::size_t current_page_index = 0U;
+    current_page_index <= static_cast<std::size_t>(page_index);
+    ++current_page_index)
+  {
+    const auto first_segment_index = current_page_index * page_limit;
+    const auto remaining_segments =
+      impl_->finalized_segment_count - first_segment_index;
+    const auto segment_count = std::min(page_limit, remaining_segments);
+    const auto final_segment_index =
+      first_segment_index + segment_count - 1U;
+    std::uint64_t page_invocation_count = 0U;
+    for (std::size_t offset = 0U; offset < segment_count; ++offset) {
+      page_invocation_count +=
+        impl_->finalized_segments[first_segment_index + offset].invocation_count;
+    }
+
+    HardwareWriteSnapshotPage page{
+      impl_->config.generation,
+      impl_->config.interval_id,
+      impl_->config.arm_fence_write_seq,
+      impl_->seal_fence_write_seq,
+      current_page_index,
+      page_count,
+      impl_->finalized_segment_count,
+      impl_->total_invocation_count,
+      segment_count,
+      page_invocation_count,
+      impl_->finalized_segments[first_segment_index].first_write_seq,
+      impl_->finalized_segments[final_segment_index].last_write_seq,
+      previous_checksum,
+      0U,
+      0U,
+      {}};
+    page.segments.reserve(segment_count);
+    for (std::size_t offset = 0U; offset < segment_count; ++offset) {
+      page.segments.push_back(
+        impl_->finalized_segments[first_segment_index + offset]);
+    }
+    page.page_checksum = page_checksum(page);
+    if (current_page_index == static_cast<std::size_t>(page_index)) {
+      return page;
+    }
+    previous_checksum = page.page_checksum;
+  }
+  return std::nullopt;
 }
 
 }  // namespace voice_nav_sim
