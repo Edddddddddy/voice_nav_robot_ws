@@ -815,7 +815,6 @@ struct HardwareWriteLedgerWriter::Impl
         faults |= VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_CAPACITY;
       }
 
-      bool record_appended{false};
       if (
         sequence_is_contiguous &&
         active_bank->invocation_count < active_bank->invocation_budget)
@@ -832,7 +831,6 @@ struct HardwareWriteLedgerWriter::Impl
             observation.left_command_bits,
             observation.right_command_bits};
           active_bank->segment_count = 1U;
-          record_appended = true;
         } else {
           auto * last_segment = segment(
             ticket.bank_index, active_bank->segment_count - 1U);
@@ -863,7 +861,6 @@ struct HardwareWriteLedgerWriter::Impl
             {
               last_segment->last_write_seq = ticket.write_seq;
               ++last_segment->invocation_count;
-              record_appended = true;
             } else if (
               active_bank->segment_count < active_bank->segment_budget &&
               active_bank->segment_count <
@@ -881,7 +878,6 @@ struct HardwareWriteLedgerWriter::Impl
                 observation.left_command_bits,
                 observation.right_command_bits};
               ++active_bank->segment_count;
-              record_appended = true;
             } else {
               faults |= VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_CAPACITY;
             }
@@ -889,12 +885,19 @@ struct HardwareWriteLedgerWriter::Impl
         }
       }
 
-      if (record_appended) {
+      if (sequence_is_contiguous) {
         if (active_bank->invocation_count == 0U) {
           active_bank->first_write_seq = ticket.write_seq;
         }
-        ++active_bank->invocation_count;
-        active_bank->last_write_seq = ticket.write_seq;
+        if (
+          active_bank->invocation_count ==
+          std::numeric_limits<std::uint64_t>::max())
+        {
+          faults |= VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_SEQUENCE;
+        } else {
+          ++active_bank->invocation_count;
+          active_bank->last_write_seq = ticket.write_seq;
+        }
       }
       active_bank->oracle_faults |= faults;
       if (faults != 0U) {
