@@ -60,6 +60,7 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0050 | A static checker rejects the correct implementation after a field refactor | Do both the synthetic fixture and real-repository positive controls use the current semantic token? | Guarded |
 | PIT-0051 | One launch test intentionally starts both valid and invalid processes | Are exit codes asserted per exact launch action instead of globally? | Guarded |
 | PIT-0052 | An evidence/DDS failure prevents the direct safety-zero fallback | Can fault recording itself throw before the zero publisher is called? | Guarded |
+| PIT-0053 | Jazzy rejects `rclcpp::Time::to_msg()` while wiring a message stamp | Was an API from another ROS distribution assumed instead of compiling the target? | Guarded |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -1288,6 +1289,15 @@ cases pass. The repository-root checker remains separately RED for the
 not-yet-implemented Gazebo Adapter and was not counted as this correction's
 failure.
 
+**Second recurrence.** The final-output checker updated its synthetic Node to
+the Runtime-owned Adapter and nine new focused tests passed, but one older
+`use_sim_time` mutation still searched for a statement removed by that same
+fixture refactor. Running the complete contract file, excluding only the
+deliberately RED real-repository case, exposed the drift as 1 failure among 55
+tests. The fixture was corrected and the full 55-test sibling set became the
+handoff gate; a newly added focused subset alone is never enough evidence that
+an edited shared fixture is valid.
+
 ## PIT-0051: Mixed-outcome launch tests need per-action exit assertions
 
 **Symptom.** A launch test deliberately starts one valid process and malformed
@@ -1326,3 +1336,19 @@ Armed with its old non-zero selection while Runtime still publishes zero and
 permanently routes every later output through the direct-zero path. The
 Adapter is a unit-test seam and canonical product composition must leave it
 empty.
+
+## PIT-0053: ROS distribution APIs must be proved by the target compiler
+
+**Symptom.** The Runtime-owned output Adapter was logically correct, but the
+Jazzy build failed because `rclcpp::Time` has no `to_msg()` member.
+
+**Cause.** A familiar conversion API from another ROS type or distribution was
+used from memory. Static source contracts could verify clock ownership and
+field mapping, but they could not prove that the selected Jazzy C++ API exists.
+
+**Guardrail.** Compile the smallest affected package immediately after wiring
+a ROS Adapter. On Jazzy, explicitly convert with
+`const builtin_interfaces::msg::Time stamp = get_clock()->now();`, then copy
+its integer `sec` and `nanosec` fields; do not reconstruct the stamp through
+floating-point seconds. The corrected package build, Node launch tests, and
+format/static-analysis gate must all pass before the Adapter is committed.

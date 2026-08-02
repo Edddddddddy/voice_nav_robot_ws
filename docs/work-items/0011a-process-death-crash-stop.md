@@ -574,6 +574,16 @@ pre-existing user-owned Gazebo process.
 - With both `/opt/ros/jazzy/setup.bash` and the workspace overlay sourced, the
   complete `voice_nav_mission` CTest gate passed 16/16, including launch, C ABI,
   cross-process, static-analysis, formatting, and XML/Python checks.
+- `fb42e9d` and `011beb6` preserve the real-Node output-journal and static
+  Runtime-ownership REDs. `c58b6fb` delegates final publication through the
+  package-private Runtime transaction and removes the Node-owned publication
+  mutex, counters, selected-command argument, and duplicate DDS-failure
+  fallback. On that exact implementation tree, the repository MotionGate
+  contract passed 56/56, the focused Runtime/cross-process/two-Node-launch set
+  passed 4/4, the package built, and all 18 `voice_nav_mission` CTests passed.
+  The valid journal launch observed an independently checksummed COMMITTED
+  zero-output record from the exact child PID; both partial configurations
+  remained unclaimed and exited 1 as designed.
 
 These are component and Layer-2 contract facts, not observed product crash
 evidence. The repository topology contract remains deliberately RED until Node

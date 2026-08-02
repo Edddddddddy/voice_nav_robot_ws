@@ -454,6 +454,55 @@ restored the intended gate. Finally, the first incremental probe build emitted
 sub-second clock-skew warnings; the focused rebuild was warning-free and all
 five cross-process repetitions passed, closing the bounded PIT-0042 rerun.
 
+### Runtime-owned Node final-output composition checkpoint
+
+The final-output transaction was next composed into the real ROS Node through
+two independent RED controls:
+
+```text
+fb42e9d  launch RED: no committed GateOutput event_code=1 appeared
+011beb6  static RED: Node bypassed runtime_.publish_final_command
+c58b6fb  GREEN: thin ROS time/DDS Adapter delegates to the Runtime
+```
+
+`MotionGateProcessRuntime` now selects the current Core command, owns the
+serialized `INTENT -> DDS -> COMMITTED` transaction, the successful-output and
+zero-output counters, terminal-cause consumption, sequence exhaustion, and the
+single direct-zero fallback. `motion_gate_node` supplies only ROS time and the
+DDS Publisher Adapter. Candidate and timer callbacks issue exactly one Runtime
+transaction; state publication failure remains a distinct new fault and may
+request one later Runtime transaction. State messages and control responses
+map the Runtime-owned counters instead of maintaining parallel Node state.
+
+The launch acceptance uses a parent-owned POSIX journal and scans every claimed
+slot rather than assuming output is slot zero. It proves the launched Node PID,
+generation, `COMMITTED` output kind/event, zero ROS stamp without `/clock`, zero
+linear/angular bit patterns, and independent INTENT/COMMIT CRC64 values. Both
+partial parameter configurations still exit 1 without claiming a slot, while
+the valid process exits 0 after exact-action SIGINT and leaves the parent
+mapping readable.
+
+The first compile reached the intended Adapter and rejected
+`rclcpp::Time::to_msg()` on Jazzy. The corrected explicit conversion to
+`builtin_interfaces::msg::Time` is recorded as
+[PIT-0053](../reference/engineering-pitfalls.md#pit-0053-ros-distribution-apis-must-be-proved-by-the-target-compiler).
+One shared synthetic fixture also left an old mutation anchor behind; the full
+contract-file rerun caught what the nine new focused cases missed, adding a
+second recurrence to PIT-0050.
+
+```text
+Exact c58b6fb implementation gate:
+motion-gate repository contract: 56/56 passed
+focused Runtime/cross-process/two Node launch CTests: 4/4 passed
+voice_nav_mission package build: passed
+voice_nav_mission package CTest: 18/18 passed
+```
+
+This closes only the Node/Runtime output composition micro-slice. It does not
+make the root crash-stop contract green: the Gazebo hardware Adapter, crash
+policy/composition, three real SIGKILL cases, wheel ledger, physical-stop
+evidence, repetitions, PR, and CI remain open.
+
 ## VN-0011A observed crash evidence
 
 | Case | Expected threshold | Observed result |
