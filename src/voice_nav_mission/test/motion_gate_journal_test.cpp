@@ -409,6 +409,9 @@ TEST(MotionGateJournal, FullJournalCannotPreventExplicitInhibit)
   EXPECT_TRUE(result.zero_selected);
   EXPECT_TRUE(gate.selected_command().is_zero());
   EXPECT_EQ(
+    gate.snapshot().output_cause_transition_journal_seq,
+    0U);
+  EXPECT_EQ(
     gate_event_journal_load_acquire(region.header.claimed_slots),
     2U);
   EXPECT_EQ(
@@ -561,6 +564,9 @@ TEST(MotionGateJournal, ExplicitInhibitCommitsLeaseRetirementAtOneFence)
   EXPECT_TRUE(result.lease_id.empty());
   EXPECT_TRUE(result.motion_inhibited);
   EXPECT_TRUE(result.zero_selected);
+  EXPECT_EQ(
+    gate.snapshot().output_cause_transition_journal_seq,
+    3U);
   EXPECT_EQ(clock.samples, 9U);
   EXPECT_EQ(
     gate_event_journal_load_acquire(region.header.claimed_slots),
@@ -618,6 +624,7 @@ TEST(MotionGateJournal, ForceFaultCommitsOneTerminalTransition)
   EXPECT_TRUE(state.lease_id.empty());
   EXPECT_TRUE(state.motion_inhibited);
   EXPECT_TRUE(state.zero_selected);
+  EXPECT_EQ(state.output_cause_transition_journal_seq, 1U);
   EXPECT_EQ(clock.samples, 3U);
   EXPECT_EQ(
     gate_event_journal_load_acquire(region.header.claimed_slots),
@@ -704,6 +711,7 @@ TEST(MotionGateJournal, CandidateExpiryCommitsAutomaticRetirement)
   EXPECT_EQ(state.control_seq, 3U);
   EXPECT_EQ(state.reason, Reason::CandidateExpired);
   EXPECT_TRUE(state.lease_id.empty());
+  EXPECT_EQ(state.output_cause_transition_journal_seq, 3U);
   const auto & slot = region.slots[2U];
   EXPECT_EQ(
     gate_event_journal_load_acquire(slot.phase),
@@ -756,6 +764,9 @@ TEST(MotionGateJournal, SequenceExhaustionFaultIsJournaledWithoutWrap)
   EXPECT_EQ(result.state, State::Faulted);
   EXPECT_EQ(result.reason, Reason::SequenceExhausted);
   EXPECT_EQ(result.control_seq, UINT64_MAX);
+  EXPECT_EQ(
+    gate.snapshot().output_cause_transition_journal_seq,
+    1U);
   EXPECT_EQ(clock.samples, 3U);
   const auto & slot = region.slots.front();
   EXPECT_EQ(
@@ -832,6 +843,9 @@ TEST(MotionGateJournal, InhibitAtMaximumSequenceReturnsTheFaultItCommitted)
   EXPECT_TRUE(result.lease_id.empty());
   EXPECT_TRUE(result.motion_inhibited);
   EXPECT_TRUE(result.zero_selected);
+  EXPECT_EQ(
+    gate.snapshot().output_cause_transition_journal_seq,
+    3U);
   EXPECT_EQ(retry.code, result.code);
   EXPECT_EQ(retry.reason, result.reason);
   EXPECT_EQ(retry.state, result.state);
@@ -885,6 +899,7 @@ TEST(MotionGateJournal, FullJournalCannotPreventForceFault)
   EXPECT_EQ(state.reason, Reason::PublishFailed);
   EXPECT_TRUE(state.motion_inhibited);
   EXPECT_TRUE(state.zero_selected);
+  EXPECT_EQ(state.output_cause_transition_journal_seq, 0U);
   EXPECT_EQ(
     gate_event_journal_load_acquire(region.header.claimed_slots),
     1U);
