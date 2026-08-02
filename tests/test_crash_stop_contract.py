@@ -22,6 +22,13 @@ ADAPTER_HEADER = """\
 
 namespace voice_nav_sim
 {
+class HardwareWriteJournalAttachment
+{
+public:
+  virtual std::shared_ptr<HardwareWriteJournal> attach(
+    const std::string & name, const std::string & nonce) = 0;
+};
+
 class JournaledGazeboSimSystemAdapter final : public
   gz_ros2_control::GazeboSimSystemInterface
 {
@@ -43,6 +50,7 @@ private:
     gz_ros2_control::GazeboSimSystemInterface> upstream_loader_;
   std::shared_ptr<
     gz_ros2_control::GazeboSimSystemInterface> upstream_;
+  std::shared_ptr<HardwareWriteJournalAttachment> write_journal_attachment_;
   std::shared_ptr<HardwareWriteJournal> write_journal_;
 };
 }  // namespace voice_nav_sim
@@ -87,16 +95,31 @@ public:
 
 
 ADAPTER_SOURCE = """\
+#include "attached_hardware_write_ledger.hpp"
 #include "journaled_gazebo_sim_system_adapter.hpp"
 
 namespace voice_nav_sim
 {
+class PosixHardwareWriteJournalAttachment final
+  : public HardwareWriteJournalAttachment
+{
+public:
+  std::shared_ptr<HardwareWriteJournal> attach(
+    const std::string & name, const std::string & nonce) override
+  {
+    return std::make_shared<AttachedHardwareWriteLedger>(
+      HardwareWriteLedgerDiscoveryConfig{name, nonce});
+  }
+};
+
 JournaledGazeboSimSystemAdapter::JournaledGazeboSimSystemAdapter()
 : upstream_loader_(
     "gz_ros2_control",
     "gz_ros2_control::GazeboSimSystemInterface"),
   upstream_(upstream_loader_.createSharedInstance(
-      "gz_ros2_control/GazeboSimSystem"))
+      "gz_ros2_control/GazeboSimSystem")),
+  write_journal_attachment_(
+    std::make_shared<PosixHardwareWriteJournalAttachment>())
 {}
 
 bool JournaledGazeboSimSystemAdapter::initSim()
@@ -206,6 +229,18 @@ TEST(
   JournaledGazeboSimSystemAdapter,
   FinishesJournalCycleWhenDelegatedWriteThrows)
 {}
+TEST(
+  JournaledGazeboSimSystemAdapter,
+  AttachesJournalIdentityBeforeFirstWrite)
+{}
+TEST(
+  JournaledGazeboSimSystemAdapter,
+  RejectsIncompleteJournalIdentityWithoutAttaching)
+{}
+TEST(
+  JournaledGazeboSimSystemAdapter,
+  RejectsJournalAttachmentFailure)
+{}
 """
 
 
@@ -226,6 +261,12 @@ if(BUILD_TESTING)
   find_package(rclcpp_lifecycle REQUIRED)
 
   add_library(
+    voice_nav_sim_hardware_write_ledger_posix STATIC
+    test_support/attached_hardware_write_ledger.cpp
+    test_support/hardware_write_ledger_writer.cpp
+  )
+
+  add_library(
     voice_nav_sim_journaled_gazebo_sim_system_adapter SHARED
     test_support/journaled_gazebo_sim_system_adapter.cpp
   )
@@ -240,6 +281,7 @@ if(BUILD_TESTING)
   target_link_libraries(
     voice_nav_sim_journaled_gazebo_sim_system_adapter PRIVATE
     gz-sim8::gz-sim8
+    voice_nav_sim_hardware_write_ledger_posix
   )
   pluginlib_export_plugin_description_file(
     gz_ros2_control
@@ -635,6 +677,38 @@ class CrashStopContractTest(unittest.TestCase):
 
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("finish after the delegated upstream write", completed.stderr)
+
+    def test_default_adapter_requires_posix_attachment(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                (
+                    "src/voice_nav_sim/test_support/"
+                    "journaled_gazebo_sim_system_adapter.cpp"
+                ),
+                "std::make_shared<PosixHardwareWriteJournalAttachment>()",
+                "std::shared_ptr<HardwareWriteJournalAttachment>{}",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("default Adapter must construct", completed.stderr)
+
+    def test_adapter_target_requires_posix_ledger_link(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_sim/CMakeLists.txt",
+                "    gz-sim8::gz-sim8\n"
+                "    voice_nav_sim_hardware_write_ledger_posix\n",
+                "    gz-sim8::gz-sim8\n",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("must link the POSIX hardware ledger", completed.stderr)
 
     def test_adapter_cannot_drop_upstream_lifecycle_delegation(self) -> None:
         def mutation(root: Path) -> None:
