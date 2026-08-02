@@ -460,4 +460,39 @@ TEST(HardwareWriteLedger, LatchesCapacityExhaustionBeforeLosingASegment)
   EXPECT_EQ(snapshot->page_checksum, independent_page_checksum(*snapshot));
 }
 
+TEST(HardwareWriteLedger, LatchesNonzeroWritesInAZeroRequiredInterval)
+{
+  voice_nav_sim::HardwareWriteLedger ledger({50U, 16U, 0U, 1U, 1U, true});
+  const voice_nav_sim::HardwareWriteRecord nonzero{
+    50U,
+    1U,
+    10'000'000,
+    0U,
+    UINT64_C(0x3ff0000000000000),
+    UINT64_C(0x0000000000000000)};
+  EXPECT_FALSE(ledger.append(nonzero));
+  EXPECT_EQ(
+    ledger.oracle_faults(),
+    voice_nav_sim::kHardwareWriteOracleFaultZeroRequired);
+
+  auto signed_zeros = nonzero;
+  signed_zeros.left_command_bits = UINT64_C(0x0000000000000000);
+  signed_zeros.right_command_bits = UINT64_C(0x8000000000000000);
+  ASSERT_TRUE(ledger.append(signed_zeros));
+  ASSERT_TRUE(ledger.seal());
+  const auto snapshot = ledger.snapshot_page(0U);
+  ASSERT_TRUE(snapshot.has_value());
+  EXPECT_EQ(
+    snapshot->oracle_faults,
+    voice_nav_sim::kHardwareWriteOracleFaultZeroRequired);
+  ASSERT_EQ(snapshot->segments.size(), 1U);
+  EXPECT_EQ(
+    snapshot->segments.front().left_command_bits,
+    signed_zeros.left_command_bits);
+  EXPECT_EQ(
+    snapshot->segments.front().right_command_bits,
+    signed_zeros.right_command_bits);
+  EXPECT_EQ(snapshot->page_checksum, independent_page_checksum(*snapshot));
+}
+
 }  // namespace
