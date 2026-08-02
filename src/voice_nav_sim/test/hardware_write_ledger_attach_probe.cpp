@@ -143,20 +143,20 @@ int main(int argc, char ** argv)
       ledger = std::make_unique<
         voice_nav_sim::AttachedHardwareWriteLedger>(
         voice_nav_sim::HardwareWriteLedgerDiscoveryConfig{
-          argv[1], argv[2]});
+        argv[1], argv[2]});
     } else {
       ledger = std::make_unique<
         voice_nav_sim::AttachedHardwareWriteLedger>(
         voice_nav_sim::HardwareWriteLedgerAttachmentConfig{
-          argv[1],
-          voice_nav_sim::HardwareWriteLedgerIdentity{
-            parse_word(argv[2]),
-            parse_word(argv[3]),
-            parse_word(argv[4]),
-            parse_word(argv[5])},
-          voice_nav_sim::HardwareWriteLedgerLayout{
-            parse_word(argv[6]),
-            parse_word(argv[7])}});
+        argv[1],
+        voice_nav_sim::HardwareWriteLedgerIdentity{
+          parse_word(argv[2]),
+          parse_word(argv[3]),
+          parse_word(argv[4]),
+          parse_word(argv[5])},
+        voice_nav_sim::HardwareWriteLedgerLayout{
+          parse_word(argv[6]),
+          parse_word(argv[7])}});
     }
 
     std::cout << "READY" << std::endl;
