@@ -340,6 +340,51 @@ TEST(
     0);
 }
 
+TEST(GateEventJournal, RejectsNonFreshGenerationBeforeWriterClaim)
+{
+  {
+    OneSlotRegion region;
+    const auto identity = initialize_region(region);
+    gate_event_journal_store_release(region.header.claimed_slots, 1U);
+    FakeClock clock;
+
+    EXPECT_THROW(
+        {
+          GateEventJournal journal(
+          &region,
+          sizeof(region),
+          identity,
+          GateEventJournalClock{&FakeClock::read, &clock});
+          (void)journal;
+        },
+      std::invalid_argument);
+    EXPECT_EQ(
+      gate_event_journal_load_acquire(region.header.writer_pid),
+      0U);
+  }
+
+  {
+    OneSlotRegion region;
+    const auto identity = initialize_region(region);
+    gate_event_journal_store_release(region.header.overflow_latched, 1U);
+    FakeClock clock;
+
+    EXPECT_THROW(
+        {
+          GateEventJournal journal(
+          &region,
+          sizeof(region),
+          identity,
+          GateEventJournalClock{&FakeClock::read, &clock});
+          (void)journal;
+        },
+      std::invalid_argument);
+    EXPECT_EQ(
+      gate_event_journal_load_acquire(region.header.writer_pid),
+      0U);
+  }
+}
+
 TEST(GateEventJournal, ChecksumCoverageMatchesAbiV1)
 {
   using HeaderField = std::uint64_t GateEventJournalHeader::*;
