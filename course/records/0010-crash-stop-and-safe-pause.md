@@ -769,6 +769,49 @@ package/full-repository/Gazebo runtime gates: not run for this checkpoint
 root crash-stop checker: expected RED at missing crash_stop_policy.py
 ```
 
+### Immutable Parent pages and exact-ACK checkpoint
+
+Parent now exposes one deep `read_sealed_interval()` / `acknowledge()` Module
+instead of raw mmap operations. It acquire-observes a terminal bank, validates
+the immutable header and bounded bank geometry, copies only finalized
+segments, checks tuple/range/predicate semantics, independently recomputes the
+bank CRC, and constructs the complete local page CRC chain. It then rereads
+the bank and segments and acquire-rechecks the terminal state before returning
+a frozen snapshot. Reading has no shared-memory side effect.
+
+The first RED/GREEN pair proves three segments split into two immutable pages,
+followed by one exact ACK and duplicate rejection. The next pair retains both
+banks, observes `NO_FREE_BANK`, releases only an exact snapshot, advances the
+reused bank epoch, and rejects stale or altered identity/root/page snapshots.
+Review found that an invocation-budget fault is valid attempted evidence even
+when its count exceeds the budget; `02c0783` reproduced the unreadable
+`SEALED_FAULT` and `39d1315` now requires `CAPACITY` rather than rejecting it.
+
+Review also found a same-Parent ABA: two callers could validate one old
+snapshot before either performed the state-only CAS. Deterministic RED
+`c870a4b` paused the first caller after its full copy and showed the duplicate
+winning the release. GREEN `1345750` claims the registered snapshot under a
+Parent-local lock, marks that bank in flight through validation and its single
+CAS, and rejects duplicate ACK/read attempts. Re-review reports P0=0/P1=0;
+PIT-0064 and PIT-0065 preserve both patterns.
+
+```text
+immutable page RED/GREEN: 6279025, 58ec486
+dual-bank/exact-ACK RED/GREEN: eb39405, 328cdc1
+faulted-attempt reader RED/GREEN: 02c0783, 39d1315
+duplicate-ACK ABA RED/GREEN: c870a4b, 1345750
+focused C ABI/concurrency/cross-process/core CTests: 4/4 passed
+cross-process CTest: 5/5 consecutive executions passed
+Writer TSAN CTest: 10/10 consecutive executions passed
+cppcheck/flake8/lint_cmake/pep257/uncrustify: 5/5 passed
+static repository contract: passed
+unsourced repository runner: reproduced PIT-0011 import failures
+sourced repository runner: 319 tests, exactly 1 deliberate root RED at the
+  missing src/voice_nav_sim/test_support/crash_stop_policy.py
+protected Gazebo: not signaled, stopped, or reused
+package/full-repository/Gazebo runtime gates: pending the crash-stop policy
+```
+
 ## VN-0011A observed crash evidence
 
 | Case | Expected threshold | Observed result |

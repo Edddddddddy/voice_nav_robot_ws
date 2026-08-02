@@ -474,21 +474,28 @@ and [ADR-0006](../adr/0006-use-fenced-dual-bank-hardware-write-ledger.md).
   write in a zero-required interval latches an oracle fault and invalidates the
   case;
 - finalized fenced segments are read through immutable bounded snapshot pages;
-  snapshots expose only finalized data. Page checksum, generation/fence
-  identity, segment counts, and contiguous `write_seq` ranges make loss,
-  duplication, reordering, stale pages, and partial snapshots fail closed;
-  simulation stamp is nondecreasing and may repeat while paused. The ledger
-  does not claim Gazebo iteration; in VN-0011A World Statistics independently
-  proves continuous progress, while VN-0011B correlates ARM/SEAL with one
-  acknowledged, World-Statistics-confirmed exact `N -> N+1` step; and
+  snapshots expose only finalized data. Parent copies the exact bounded
+  segment count into a complete local page chain, independently validates the
+  root and chained page CRCs, then acquire-rechecks the unchanged bank and
+  segment bytes. Page identity, segment counts, and `write_seq` ranges make
+  loss, duplication, reordering, stale pages, and partial snapshots fail
+  closed. A successful interval has nondecreasing simulation stamps that may
+  repeat while paused; a faulted interval may retain a regressed forensic
+  tuple only with `SIM_STAMP`. The ledger does not claim Gazebo iteration; in
+  VN-0011A World Statistics independently proves continuous progress, while
+  VN-0011B correlates ARM/SEAL with one acknowledged,
+  World-Statistics-confirmed exact `N -> N+1` step; and
 - a sealed interval is retained until the test explicitly acknowledges it;
   two fixed banks permit later intervals to use separate storage/fences and
   cannot mutate retained pages. ACK is allowed only after complete checksum,
   identity, fence, page-chain, and predicate validation and must match the
   exact generation, interval, bank epoch, seal fence, and root checksum. The
-  reader stops accessing the bank before the release ACK transition; a future
-  Writer acquire may then reuse it. With one ACTIVE bank and no FREE bank, ARM
-  returns `NO_FREE_BANK` rather than overwriting evidence;
+  Parent atomically claims its registered immutable snapshot before final
+  validation; while that claim is in flight, duplicate ACKs and reads of the
+  same bank fail closed. The reader stops accessing the bank before one strong
+  release ACK compare/exchange; a future Writer acquire may then reuse it.
+  With one ACTIVE bank and no FREE bank, ARM returns `NO_FREE_BANK` rather than
+  overwriting evidence;
   one Writer PID may claim a generation. Writer death with an ACTIVE/pending
   interval invalidates it, while a release-published SEALED bank remains
   readable after Writer death. Parent death never implies ACK;
@@ -652,6 +659,20 @@ pre-existing user-owned Gazebo process.
   The valid journal launch observed an independently checksummed COMMITTED
   zero-output record from the exact child PID; both partial configurations
   remained unclaimed and exited 1 as designed.
+- `6279025`/`58ec486` add the complete immutable Parent page chain and exact
+  ACK seam. `eb39405`/`328cdc1` prove both terminal banks remain retained,
+  return `NO_FREE_BANK`, and advance the released bank epoch without accepting
+  stale or locally altered snapshots. Review then found two P1 defects:
+  over-budget attempted metadata was mistaken for unreadable corruption, and
+  two same-Parent ACK callers could both validate before either claimed the
+  snapshot. RED/GREEN pairs `02c0783`/`39d1315` and
+  `c870a4b`/`1345750` preserve readable `SEALED_FAULT` evidence and claim the
+  snapshot before validation with a per-bank in-flight exclusion. Independent
+  re-review reports P0=0 and P1=0. Focused ledger tests passed 4/4,
+  cross-process passed 5/5 consecutively, Writer TSAN passed 10/10, and the
+  five static/format checks passed. The sourced 319-test repository run has
+  exactly the deliberate missing-`crash_stop_policy.py` RED; the static
+  repository contract passes.
 
 These are component and Layer-2 contract facts, not observed product crash
 evidence. The repository topology contract remains deliberately RED until Node

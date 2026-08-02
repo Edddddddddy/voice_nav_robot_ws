@@ -53,8 +53,9 @@ returning a usable Writer. The POSIX Attached Adapter owns mapping RAII and
 delegates ledger policy to the Writer implementation. Its claimed-PID
 inspection is a test diagnostic, not part of the Gazebo Writer Interface.
 
-The Parent Interface posts ARM/SEAL, polls the matching receipt, reads a sealed
-page, and ACKs an exact sealed identity. Only one request may be outstanding.
+The Parent Interface posts ARM/SEAL, polls the matching receipt, copies every
+bounded page of one sealed interval, and ACKs an exact sealed identity. Only
+one request may be outstanding.
 The monotonically increasing request ticket is its idempotency identity; a
 duplicate with identical checksum returns the original receipt, while reuse
 with different payload, a gap, or wrap latches a protocol fault.
@@ -158,17 +159,23 @@ FREE -> ACTIVE -> SEALED_OK | SEALED_FAULT -> FREE
 At most one bank is ACTIVE. ARM chooses a FREE bank and increments its
 non-wrapping `bank_epoch`. A terminal bank, its segments, fences, faults, and
 checksum never change. Parent reads only after acquire-observing SEALED, copies
-one bounded page, then rechecks state/epoch/checksum before accepting it.
+exactly the bounded segment count into a complete immutable page chain, then
+rechecks the terminal state, full bank bytes, copied segments, epoch, and root
+checksum before accepting it.
 
-Exactly one Parent owns ACK. ACK is its release compare/exchange from the exact
-SEALED state to FREE. Before that transition, Parent must have validated every
-page, acquire-rechecked the unchanged terminal state and identity, and stopped
-all reads. Its identity is `{generation, interval_id, bank_index, bank_epoch,
+Exactly one Parent owns ACK. Inside that Parent, the complete immutable
+snapshot is registered once and must be claimed before validation; an
+in-flight claim excludes a duplicate ACK or another read of the same bank.
+ACK then performs a release compare/exchange from the exact SEALED state to
+FREE. Before that transition, Parent must have validated every page,
+acquire-rechecked the unchanged terminal state and identity, and stopped all
+reads. Its identity is `{generation, interval_id, bank_index, bank_epoch,
 seal_fence, bank_checksum}`. Writer never mutates a SEALED bank, so those fields
-remain stable until the successful state transition. A retry may succeed only
-while they still match; reuse with a newer epoch makes the old ACK stale.
-Writer acquire-observes FREE before resetting the bank. Two retained banks
-make a new ARM return `NO_FREE_BANK`.
+remain stable until the successful state transition. Claim failure, validation
+failure, or a failed single CAS cannot be retried with that snapshot; a new
+complete read is required while the exact bank remains terminal. Reuse with a
+newer epoch makes every old snapshot stale. Writer acquire-observes FREE before
+resetting the bank. Two retained banks make a new ARM return `NO_FREE_BANK`.
 
 ## Fixed ABI v1
 

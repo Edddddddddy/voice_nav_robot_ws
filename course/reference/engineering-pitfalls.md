@@ -71,6 +71,8 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0061 | A fail-closed checksum path reads beyond fixed evidence storage | Was untrusted count geometry rejected before traversal? | Guarded |
 | PIT-0062 | An invalid write becomes a fake segment or makes the next valid write look out of sequence | Are attempted metadata and recordable segment coverage validated separately? | Guarded |
 | PIT-0063 | An INVALID receipt appears to select an existing terminal bank | Does rejection use the canonical invalid identity without touching bank evidence? | Guarded |
+| PIT-0064 | A valid faulted interval cannot be read because attempts exceed its armed budget | Does CAPACITY explain the attempted count instead of making the bank structurally unreadable? | Guarded |
+| PIT-0065 | Two Parent ACK callers can release a later bank epoch | Is the registered snapshot claimed before validation and excluded until its single CAS completes? | Guarded |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -1569,3 +1571,43 @@ response by CRC, latches global `PROTOCOL`, and never changes ACTIVE,
 `SEALED_OK`, or `SEALED_FAULT` bank bytes. Cross-process coverage mutates every
 SEAL field independently, corrupts the request checksum, and compares all bank
 words plus the full fixed segment capacity before and after unarmed FINISH.
+
+## PIT-0064: An armed budget limits success, not attempted evidence
+
+**Symptom.** Writer correctly seals an invocation-budget overflow as
+`SEALED_FAULT`, but Parent refuses to read or ACK it because
+`invocation_count > invocation_budget`. Repeating this on both banks leaves no
+FREE bank even though the retained forensic evidence is complete and
+checksummed.
+
+**Cause.** Reader treated the trusted admission budget as a structural bound
+on terminal attempted metadata. The qualifying over-budget invocation must
+still consume its global sequence and extend first/last/count; only its exact
+tuple is omitted. Exceeding the budget is therefore the evidence represented
+by `FAULT_CAPACITY`, not proof that the mapping is corrupt.
+
+**Guardrail.** Require a non-zero attempted count and exact fence arithmetic.
+Allow it to exceed the invocation budget only when `FAULT_CAPACITY` is sticky;
+continue to bound every stored segment by the fixed segment capacity and root
+CRC. The regression reads a `budget=1, count=2` terminal page, verifies its one
+retained segment plus two-attempt page range, and ACKs the exact faulted bank.
+
+## PIT-0065: Validate-then-claim permits a duplicate-ACK ABA
+
+**Symptom.** Two Parent threads ACK the same immutable snapshot. One releases
+the bank; Writer reuses and seals the same bank at a newer epoch; the delayed
+caller then compares only the identical terminal-state value and releases the
+new evidence.
+
+**Cause.** Both callers checked the snapshot registry and copied the old epoch
+before either removed it. The final CAS protected only `SEALED_OK` or
+`SEALED_FAULT`, so state reuse formed an ABA window even though every identity
+and checksum comparison had been correct earlier.
+
+**Guardrail.** Under a Parent-local lock, remove the exact registered snapshot
+and mark its bank ACK-in-flight before any final validation. A duplicate ACK or
+same-bank read fails immediately until the claimant finishes its one strong
+CAS; every return and exception clears the in-flight marker. Writer cannot
+reuse the bank before that CAS changes it to FREE. A deterministic two-thread
+test pauses the claimant after its complete copy and proves the duplicate
+cannot release the state or consume the newer epoch.
