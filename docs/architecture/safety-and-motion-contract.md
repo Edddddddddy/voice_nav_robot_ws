@@ -200,9 +200,12 @@ serial barrier. Callbacks never publish directly. Once current-lease
 `INHIBIT`, expiry, or invalid-input retirement publishes zero through that
 barrier, an earlier queued non-zero decision cannot publish afterward.
 The Core owns the selected command and state decision, not publication
-acknowledgement. The Node Adapter owns actual final/state publication,
-`output_publish_seq`, `zero_publish_seq`, and the response's `zero_published`
-fact.
+acknowledgement. `MotionGateProcessRuntime` owns the serialized final-command
+transaction, its attempt/success/zero counters, journal retirement, direct
+safety-zero fallback, and one-shot terminal-cause consumption. The Node Adapter
+owns the ROS publisher and state publisher only: it supplies the simulation
+stamp and transport callback, then maps the Runtime result and counters into
+the ROS State and control response.
 
 ### Authority and candidate handover barrier
 

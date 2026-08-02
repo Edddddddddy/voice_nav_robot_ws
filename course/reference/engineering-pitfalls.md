@@ -242,6 +242,14 @@ product-isolation checker and its mutations still exercised an obsolete
 the stale-guard boundary described in PIT-0050 instead of treating a rejection
 of the unused spelling as product evidence.
 
+The same review found two incompatible publication owners in one architecture
+document: an earlier paragraph assigned successful-output counters to the Node
+Adapter, while the later frozen crash contract assigned the transaction,
+counters, and terminal-cause binding to `MotionGateProcessRuntime`. The deeper
+Runtime boundary is authoritative: Node now supplies only ROS time/transport
+and maps the returned facts. This contradiction was removed before coding the
+transaction, so tests do not institutionalize two ownership models.
+
 ## PIT-0010: An absolute deadline surrounds the RPC
 
 **Symptom.** A convergence helper checks the remaining budget before an RPC,
