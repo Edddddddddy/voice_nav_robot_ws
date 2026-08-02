@@ -21,6 +21,7 @@ import math
 import mmap
 import os
 import struct
+import threading
 import time
 import uuid
 
@@ -322,6 +323,8 @@ class HardwareWriteLedgerRegionOwner:
         self.linked = False
         self._evidence_owner_token = object()
         self._registered_snapshots = {}
+        self._ack_in_flight = set()
+        self._snapshot_lock = threading.Lock()
 
         try:
             flags = os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_CLOEXEC
@@ -717,33 +720,36 @@ class HardwareWriteLedgerRegionOwner:
         seal_fence_write_seq,
     ):
         """Return a complete immutable snapshot without releasing its bank."""
-        terminal_state, bank, segments, pages = (
-            self._copy_validated_terminal_evidence(
-                interval_id,
-                bank_index,
-                bank_epoch,
-                seal_fence_write_seq,
+        with self._snapshot_lock:
+            if bank_index in self._ack_in_flight:
+                raise AssertionError('ledger bank ACK is already in flight')
+            terminal_state, bank, segments, pages = (
+                self._copy_validated_terminal_evidence(
+                    interval_id,
+                    bank_index,
+                    bank_epoch,
+                    seal_fence_write_seq,
+                )
             )
-        )
-        ack_token = object()
-        snapshot = SealedHardwareWriteLedgerInterval(
-            generation=self.generation,
-            interval_id=interval_id,
-            bank_index=bank_index,
-            bank_epoch=bank_epoch,
-            terminal_state=terminal_state,
-            arm_fence_write_seq=bank[3],
-            seal_fence_write_seq=seal_fence_write_seq,
-            bank_checksum=bank[15],
-            oracle_faults=bank[13],
-            pages=pages,
-            _owner_token=self._evidence_owner_token,
-            _ack_token=ack_token,
-            _bank_words=bank,
-            _segments=segments,
-        )
-        self._registered_snapshots[bank_index] = snapshot
-        return snapshot
+            ack_token = object()
+            snapshot = SealedHardwareWriteLedgerInterval(
+                generation=self.generation,
+                interval_id=interval_id,
+                bank_index=bank_index,
+                bank_epoch=bank_epoch,
+                terminal_state=terminal_state,
+                arm_fence_write_seq=bank[3],
+                seal_fence_write_seq=seal_fence_write_seq,
+                bank_checksum=bank[15],
+                oracle_faults=bank[13],
+                pages=pages,
+                _owner_token=self._evidence_owner_token,
+                _ack_token=ack_token,
+                _bank_words=bank,
+                _segments=segments,
+            )
+            self._registered_snapshots[bank_index] = snapshot
+            return snapshot
 
     def acknowledge(self, snapshot):
         """Release one exact fully validated snapshot with a single CAS."""
@@ -751,40 +757,49 @@ class HardwareWriteLedgerRegionOwner:
             return False
         if snapshot._owner_token is not self._evidence_owner_token:
             return False
-        if self._registered_snapshots.get(snapshot.bank_index) is not snapshot:
-            return False
+        with self._snapshot_lock:
+            if snapshot.bank_index in self._ack_in_flight:
+                return False
+            if (
+                self._registered_snapshots.get(snapshot.bank_index) is not
+                snapshot
+            ):
+                return False
+            self._registered_snapshots.pop(snapshot.bank_index)
+            self._ack_in_flight.add(snapshot.bank_index)
         try:
-            terminal_state, bank, segments, pages = (
-                self._copy_validated_terminal_evidence(
-                    snapshot.interval_id,
-                    snapshot.bank_index,
-                    snapshot.bank_epoch,
-                    snapshot.seal_fence_write_seq,
+            try:
+                terminal_state, bank, segments, pages = (
+                    self._copy_validated_terminal_evidence(
+                        snapshot.interval_id,
+                        snapshot.bank_index,
+                        snapshot.bank_epoch,
+                        snapshot.seal_fence_write_seq,
+                    )
                 )
+            except (AssertionError, IndexError, struct.error):
+                return False
+            if (
+                snapshot.generation != self.generation or
+                snapshot.terminal_state != terminal_state or
+                snapshot.arm_fence_write_seq != bank[3] or
+                snapshot.bank_checksum != bank[15] or
+                snapshot.oracle_faults != bank[13] or
+                snapshot.pages != pages or
+                snapshot._bank_words != bank or
+                snapshot._segments != segments
+            ):
+                return False
+            exchanged, _observed = self.atomic.compare_exchange_acq_rel(
+                self.region,
+                self.bank_offset(snapshot.bank_index),
+                terminal_state,
+                BANK_STATE_FREE,
             )
-        except (AssertionError, IndexError, struct.error):
-            self._registered_snapshots.pop(snapshot.bank_index, None)
-            return False
-        if (
-            snapshot.generation != self.generation or
-            snapshot.terminal_state != terminal_state or
-            snapshot.arm_fence_write_seq != bank[3] or
-            snapshot.bank_checksum != bank[15] or
-            snapshot.oracle_faults != bank[13] or
-            snapshot.pages != pages or
-            snapshot._bank_words != bank or
-            snapshot._segments != segments
-        ):
-            self._registered_snapshots.pop(snapshot.bank_index, None)
-            return False
-        self._registered_snapshots.pop(snapshot.bank_index, None)
-        exchanged, _observed = self.atomic.compare_exchange_acq_rel(
-            self.region,
-            self.bank_offset(snapshot.bank_index),
-            terminal_state,
-            BANK_STATE_FREE,
-        )
-        return exchanged
+            return exchanged
+        finally:
+            with self._snapshot_lock:
+                self._ack_in_flight.discard(snapshot.bank_index)
 
     def load_header_word(self, index):
         """Acquire-load one dynamic header word."""
@@ -1206,7 +1221,9 @@ class HardwareWriteLedgerRegionOwner:
 
     def cleanup(self):
         """Release only resources owned by this test object."""
-        self._registered_snapshots.clear()
+        with self._snapshot_lock:
+            self._registered_snapshots.clear()
+            self._ack_in_flight.clear()
         try:
             if self.linked:
                 try:
