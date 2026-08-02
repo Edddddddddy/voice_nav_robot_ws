@@ -640,6 +640,60 @@ TEST(
     gate_event_journal_commit_checksum(region.slot));
 }
 
+TEST(GateEventJournal, TransitionFailureLeavesLinearizedIntent)
+{
+  OneSlotRegion region;
+  const auto identity = initialize_region(region);
+  FakeClock clock{{100U, 150U, 200U}, 0U};
+  GateEventJournal journal(
+    &region,
+    sizeof(region),
+    identity,
+    GateEventJournalClock{&FakeClock::read, &clock});
+  const GateTransitionIntent intent{
+    6U,
+    9U,
+    30U,
+    40U,
+    0x1111222233334444U,
+    0x5555666677778888U,
+    0x9999aaaabbbbccccU,
+    0xddddeeeeffff0000U,
+    0xa5U};
+  std::uint64_t transition_calls = 0U;
+
+  EXPECT_THROW(
+    journal.apply_transition(
+      intent,
+      [&region, &transition_calls]() -> GateTransitionAfter {
+        ++transition_calls;
+        EXPECT_EQ(
+          gate_event_journal_load_acquire(region.slot.phase),
+          VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_INTENT);
+        EXPECT_EQ(region.slot.transition_linearization_ns, 150U);
+        throw std::runtime_error("injected transition failure");
+      }),
+    std::runtime_error);
+
+  EXPECT_EQ(transition_calls, 1U);
+  EXPECT_EQ(clock.next, 2U);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(region.header.claimed_slots),
+    1U);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(region.slot.phase),
+    VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_INTENT);
+  EXPECT_EQ(region.slot.intent_monotonic_ns, 100U);
+  EXPECT_EQ(region.slot.transition_linearization_ns, 150U);
+  EXPECT_EQ(region.slot.commit_monotonic_ns, 0U);
+  EXPECT_EQ(region.slot.after_state_seq, 0U);
+  EXPECT_EQ(region.slot.after_control_seq, 0U);
+  EXPECT_EQ(region.slot.commit_checksum, 0U);
+  EXPECT_EQ(
+    region.slot.intent_checksum,
+    gate_event_journal_intent_checksum(region.slot));
+}
+
 TEST(GateEventJournal, ChecksumCoverageMatchesAbiV1)
 {
   using HeaderField = std::uint64_t GateEventJournalHeader::*;
