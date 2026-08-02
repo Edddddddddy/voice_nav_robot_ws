@@ -25,7 +25,6 @@
 #include <iomanip>
 #include <limits>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <random>
 #include <sstream>
@@ -35,6 +34,7 @@
 #include <utility>
 #include <vector>
 
+#include <builtin_interfaces/msg/time.hpp>
 #include <geometry_msgs/msg/twist_stamped.hpp>
 #include <rclcpp/rclcpp.hpp>
 
@@ -138,11 +138,6 @@ std::string make_gate_instance_id()
   return stream.str();
 }
 
-Command make_zero_command() noexcept
-{
-  return {};
-}
-
 }  // namespace
 
 class MotionGateNode final : public rclcpp::Node
@@ -232,9 +227,8 @@ public:
       [this]() {on_output_timer();},
       callback_group_);
 
-    const bool zero_published =
-      publish_serialized(make_zero_command());
-    if (zero_published) {
+    const auto initial_output = publish_serialized();
+    if (initial_output.published) {
       publish_state_or_stop();
     }
 
@@ -621,13 +615,11 @@ private:
     reconcile_adapter_transition(before, after);
 
     const auto before_tick = after;
-    const auto command = core_.tick(now);
+    (void)core_.tick(now);
     after = core_.snapshot();
     reconcile_adapter_transition(before_tick, after);
     const auto before_publish = after;
-    if (!publish_serialized(command)) {
-      (void)publish_serialized(make_zero_command());
-    }
+    (void)publish_serialized();
     after = core_.snapshot();
     reconcile_adapter_transition(before_publish, after);
     publish_state_or_stop();
@@ -636,96 +628,73 @@ private:
   void on_output_timer()
   {
     const auto before = core_.snapshot();
-    const auto command =
-      core_.tick(std::chrono::steady_clock::now());
+    (void)core_.tick(std::chrono::steady_clock::now());
     auto after = core_.snapshot();
     reconcile_adapter_transition(before, after);
     const auto before_publish = after;
-    if (!publish_serialized(command)) {
-      (void)publish_serialized(make_zero_command());
-    }
+    (void)publish_serialized();
     after = core_.snapshot();
     reconcile_adapter_transition(before_publish, after);
     publish_state_or_stop();
   }
 
-  bool publish_serialized(const Command & selected)
+  FinalOutputResult publish_serialized()
   {
-    std::scoped_lock lock(publication_mutex_);
-    auto command_to_publish = selected;
-    bool use_sim_time_locked_true = false;
+    FinalOutputTime output_time;
     try {
-      use_sim_time_locked_true =
+      output_time.simulation_time_active =
         get_parameter("use_sim_time").as_bool() &&
         get_clock()->ros_time_is_active();
-    } catch (const std::exception &) {
-      use_sim_time_locked_true = false;
-    }
-    if (!use_sim_time_locked_true) {
-      core_.force_fault(
-        Reason::ConfigurationInvalid,
-        "use_sim_time runtime invariant was violated");
-      command_to_publish = make_zero_command();
-    }
-
-    const bool sequence_exhausted =
-      output_publish_seq_ == std::numeric_limits<std::uint64_t>::max();
-    if (sequence_exhausted) {
-      core_.force_fault(
-        Reason::SequenceExhausted,
-        "output publication sequence exhausted");
-      command_to_publish = make_zero_command();
-    }
-
-    TwistStamped command;
-    if (use_sim_time_locked_true) {
-      command.header.stamp = get_clock()->now();
-    } else {
-      // Never emit a system-time stamp on the simulation command endpoint.
-      // A zero ROS stamp plus a zero command remains fail-closed even if a
-      // future rclcpp regression bypasses the immutable-parameter callback.
-      command.header.stamp.sec = 0;
-      command.header.stamp.nanosec = 0U;
-    }
-    command.twist.linear.x = command_to_publish.linear_x;
-    command.twist.angular.z = command_to_publish.angular_z;
-
-    try {
-      final_command_publisher_->publish(command);
+      if (output_time.simulation_time_active) {
+        const builtin_interfaces::msg::Time stamp = get_clock()->now();
+        output_time.stamp_sec = stamp.sec;
+        output_time.stamp_nanosec = stamp.nanosec;
+      }
     } catch (const std::exception & error) {
-      core_.force_fault(
-        Reason::PublishFailed,
-        std::string{"final command publication failed: "} + error.what());
+      output_time = {};
       RCLCPP_ERROR(
         get_logger(),
-        "MotionGate final publication failed: %s",
+        "use_sim_time runtime invariant was violated: %s",
         error.what());
-      return false;
     } catch (...) {
-      core_.force_fault(
-        Reason::PublishFailed,
-        "final command publication failed with an unknown exception");
+      output_time = {};
       RCLCPP_ERROR(
         get_logger(),
-        "MotionGate final publication failed with an unknown exception");
-      return false;
+        "use_sim_time runtime invariant was violated with an unknown exception");
     }
 
-    last_publication_was_zero_ = command_to_publish.is_zero();
-    if (sequence_exhausted) {
-      zero_publish_seq_ = output_publish_seq_;
-      return true;
+    const auto output = runtime_.publish_final_command(
+      output_time,
+      FinalOutputPublisher{
+        [](void * context, const FinalOutputFrame & frame) {
+          auto & node = *static_cast<MotionGateNode *>(context);
+          TwistStamped command;
+          command.header.stamp.sec = frame.stamp_sec;
+          command.header.stamp.nanosec = frame.stamp_nanosec;
+          command.twist.linear.x = frame.command.linear_x;
+          command.twist.angular.z = frame.command.angular_z;
+          node.final_command_publisher_->publish(command);
+        },
+        this});
+
+    if (!output.published) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "MotionGate final output transaction failed with code %u",
+        static_cast<unsigned int>(output.failure));
+    } else if (output.fallback_attempted) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "MotionGate final output transaction failed closed to zero (code %u)",
+        static_cast<unsigned int>(output.failure));
     }
-    ++output_publish_seq_;
-    if (command_to_publish.is_zero()) {
-      zero_publish_seq_ = output_publish_seq_;
-    }
-    return true;
+    return output;
   }
 
   bool publish_state()
   {
     const auto snapshot = core_.snapshot();
+    const auto output_state = runtime_.output_state();
     StateMessage message;
     message.gate_instance_id = snapshot.gate_instance_id;
     message.state_seq = snapshot.state_seq;
@@ -742,8 +711,8 @@ private:
     message.candidate_fresh = snapshot.candidate_fresh;
     message.writer_bound = snapshot.writer_bound;
     message.zero_selected = snapshot.zero_selected;
-    message.output_publish_seq = output_publish_seq_;
-    message.zero_publish_seq = zero_publish_seq_;
+    message.output_publish_seq = output_state.output_publish_seq;
+    message.zero_publish_seq = output_state.zero_publish_seq;
     message.reason = static_cast<std::uint16_t>(snapshot.reason);
     message.detail = bounded_detail(snapshot.detail);
     try {
@@ -777,7 +746,7 @@ private:
     }
     const auto after = core_.snapshot();
     reconcile_adapter_transition(before, after);
-    (void)publish_serialized(make_zero_command());
+    (void)publish_serialized();
   }
 
   void remember_retired_writer(const Snapshot & snapshot)
@@ -861,10 +830,9 @@ private:
         return true;
       }
       if (std::chrono::steady_clock::now() >= next_zero) {
-        const bool zero_published =
-          publish_serialized(make_zero_command());
+        const auto output = publish_serialized();
         if (
-          !zero_published ||
+          !output.zero_published ||
           core_.snapshot().state == State::Faulted)
         {
           throw std::runtime_error(
@@ -1002,7 +970,7 @@ private:
   void fill_response(
     const ControlResult & result,
     ControlService::Response & response,
-    bool zero_published) const
+    const FinalOutputResult & output) const
   {
     response.code = static_cast<std::uint16_t>(result.code);
     response.reason = static_cast<std::uint16_t>(result.reason);
@@ -1020,9 +988,9 @@ private:
     response.candidate_fresh = result.candidate_fresh;
     response.writer_bound = result.writer_bound;
     response.zero_selected = result.zero_selected;
-    response.zero_published = zero_published;
-    response.output_publish_seq = output_publish_seq_;
-    response.zero_publish_seq = zero_publish_seq_;
+    response.zero_published = output.zero_published;
+    response.output_publish_seq = output.state.output_publish_seq;
+    response.zero_publish_seq = output.state.zero_publish_seq;
     response.detail = bounded_detail(result.detail);
   }
 
@@ -1053,30 +1021,24 @@ private:
     }
 
     auto before_tick = core_.snapshot();
-    const auto command = core_.tick(now);
+    (void)core_.tick(now);
     auto after = core_.snapshot();
     reconcile_adapter_transition(before_tick, after);
 
     const auto before_publish = after;
-    const bool command_published = publish_serialized(command);
-    const bool emergency_zero_published =
-      !command_published && publish_serialized(make_zero_command());
+    auto output = publish_serialized();
     after = core_.snapshot();
     reconcile_adapter_transition(before_publish, after);
-    bool zero_published =
-      (command_published || emergency_zero_published) &&
-      last_publication_was_zero_;
 
     const auto before_state = after;
     const bool state_published = publish_state();
     after = core_.snapshot();
     reconcile_adapter_transition(before_state, after);
     if (!state_published) {
-      const bool state_failure_zero_published =
-        publish_serialized(make_zero_command());
-      zero_published =
-        zero_published ||
-        (state_failure_zero_published && last_publication_was_zero_);
+      const auto state_failure_output = publish_serialized();
+      output.zero_published =
+        output.zero_published || state_failure_output.zero_published;
+      output.state = state_failure_output.state;
       after = core_.snapshot();
     }
 
@@ -1088,7 +1050,7 @@ private:
         result.reason,
         result.detail);
     }
-    fill_response(result, *response, zero_published);
+    fill_response(result, *response, output);
   }
 
   NodeConfig node_config_;
@@ -1106,10 +1068,6 @@ private:
   rclcpp::Subscription<TwistStamped>::SharedPtr
     candidate_subscription_;
   rclcpp::TimerBase::SharedPtr output_timer_;
-  std::mutex publication_mutex_;
-  std::uint64_t output_publish_seq_{0U};
-  std::uint64_t zero_publish_seq_{0U};
-  bool last_publication_was_zero_{true};
   std::string retired_candidate_topic_;
   WriterGid retired_writer_gid_{};
 };
