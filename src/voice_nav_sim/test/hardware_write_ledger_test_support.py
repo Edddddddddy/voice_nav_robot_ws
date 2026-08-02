@@ -27,7 +27,7 @@ MAGIC = 0x564E48574C444731
 ABI_VERSION = 1
 ENDIAN_TAG = 0x0102030405060708
 HEADER_BYTES = 192
-CONTROL_BYTES = 128
+CONTROL_BYTES = 192
 BANK_BYTES = 128
 SEGMENT_BYTES = 64
 PAGE_BYTES = 192
@@ -36,8 +36,8 @@ INIT_READY = 1
 CRC64_ECMA_POLYNOMIAL = 0x42F0E1EBA9EA3693
 UINT64_MASK = (1 << 64) - 1
 HEADER_FORMAT = '<24Q'
-CONTROL_FORMAT = '<16Q'
-CONTROL_REQUEST_FORMAT = '<9Q'
+CONTROL_FORMAT = '<24Q'
+CONTROL_REQUEST_FORMAT = '<10Q'
 BANK_FORMAT = '<16Q'
 SEGMENT_FORMAT = '<8Q'
 INIT_STATE_WORD = 17
@@ -45,8 +45,15 @@ WRITER_PID_WORD = 18
 LAST_COMPLETED_WRITE_SEQ_WORD = 19
 GLOBAL_ORACLE_FAULTS_WORD = 20
 CONTROL_OFFSET = HEADER_BYTES
-CONTROL_RESPONSE_TICKET_WORD = 14
-CONTROL_REQUEST_TICKET_WORD = 15
+CONTROL_REQUEST_TICKET_WORD = 9
+CONTROL_REQUEST_STATE_WORD = 10
+CONTROL_RESPONSE_REQUEST_CHECKSUM_WORD = 15
+CONTROL_RESPONSE_CHECKSUM_WORD = 16
+CONTROL_RESPONSE_TICKET_WORD = 17
+CONTROL_REQUEST_IDLE = 0
+CONTROL_REQUEST_WRITING = 1
+CONTROL_REQUEST_READY = 2
+CONTROL_REQUEST_READING = 3
 BANK_STATE_ACTIVE = 1
 BANK_STATE_FREE = 0
 CONTROL_OP_ARM = 1
@@ -99,9 +106,9 @@ def control_response_checksum(owner, control, response_ticket):
             owner.generation,
             owner.nonce_hi,
             owner.nonce_lo,
-            control[8],
+            control[CONTROL_RESPONSE_REQUEST_CHECKSUM_WORD],
             response_ticket,
-            *control[9:13],
+            *control[11:15],
         ),
     )
 
@@ -111,6 +118,7 @@ class AtomicUint64:
 
     _ACQUIRE = 2
     _RELEASE = 3
+    _ACQ_REL = 4
 
     def __init__(self):
         """Bind the uint64 operations shared with the C++ implementation."""
@@ -128,6 +136,19 @@ class AtomicUint64:
             ctypes.c_int,
         ]
         self._store.restype = None
+        self._compare_exchange = getattr(
+            library,
+            '__atomic_compare_exchange_8',
+        )
+        self._compare_exchange.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_uint64,
+            ctypes.c_bool,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
+        self._compare_exchange.restype = ctypes.c_bool
         self._library = library
 
     @staticmethod
@@ -143,6 +164,20 @@ class AtomicUint64:
         """Release-store one aligned ABI word."""
         word = self._word(region, offset)
         self._store(ctypes.byref(word), value, self._RELEASE)
+
+    def compare_exchange_acq_rel(self, region, offset, expected, desired):
+        """Claim one exact word and return success plus observed value."""
+        word = self._word(region, offset)
+        observed = ctypes.c_uint64(expected)
+        exchanged = self._compare_exchange(
+            ctypes.byref(word),
+            ctypes.byref(observed),
+            desired,
+            False,
+            self._ACQ_REL,
+            self._ACQUIRE,
+        )
+        return bool(exchanged), int(observed.value)
 
 
 class PosixSharedMemoryApi:
@@ -291,6 +326,37 @@ class HardwareWriteLedgerRegionOwner:
             time.sleep(0.005)
         raise TimeoutError('ledger Writer did not claim the region')
 
+    def _claim_request_mailbox(self):
+        state_offset = (
+            CONTROL_OFFSET + CONTROL_REQUEST_STATE_WORD * 8
+        )
+        claimed, observed = self.atomic.compare_exchange_acq_rel(
+            self.region,
+            state_offset,
+            CONTROL_REQUEST_IDLE,
+            CONTROL_REQUEST_WRITING,
+        )
+        if not claimed:
+            raise AssertionError(
+                f'ledger request mailbox is owned in state {observed}',
+            )
+
+    def _release_request_mailbox(self, state):
+        self.atomic.store_release(
+            self.region,
+            CONTROL_OFFSET + CONTROL_REQUEST_STATE_WORD * 8,
+            state,
+        )
+
+    def _publish_request(self, request):
+        struct.pack_into(
+            CONTROL_REQUEST_FORMAT,
+            self.region,
+            CONTROL_OFFSET,
+            *request,
+        )
+        self._release_request_mailbox(CONTROL_REQUEST_READY)
+
     def post_arm(
         self,
         interval_id,
@@ -298,104 +364,103 @@ class HardwareWriteLedgerRegionOwner:
         invocation_budget,
         require_zero_commands,
     ):
-        """Release-publish the first checksummed ARM request."""
-        if self.atomic.load_acquire(
-            self.region,
-            CONTROL_OFFSET + CONTROL_REQUEST_TICKET_WORD * 8,
-        ) != 0:
-            raise AssertionError('test owner supports one request in this slice')
+        """Claim and release-publish one checksummed ARM request."""
         flags = CONTROL_FLAG_ZERO_REQUIRED if require_zero_commands else 0
-        control = [
-            CONTROL_OP_ARM,
-            flags,
-            interval_id,
-            0,
-            0,
-            segment_budget,
-            invocation_budget,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        ]
-        request_ticket = 1
-        control[8] = control_request_checksum(
-            self,
-            control,
-            request_ticket,
-        )
-        struct.pack_into(CONTROL_FORMAT, self.region, CONTROL_OFFSET, *control)
-        self.atomic.store_release(
-            self.region,
-            CONTROL_OFFSET + CONTROL_REQUEST_TICKET_WORD * 8,
-            request_ticket,
-        )
-        return request_ticket
+        self._claim_request_mailbox()
+        try:
+            control = struct.unpack_from(
+                CONTROL_FORMAT,
+                self.region,
+                CONTROL_OFFSET,
+            )
+            response_ticket = control[CONTROL_RESPONSE_TICKET_WORD]
+            if response_ticket == UINT64_MASK:
+                raise OverflowError('ledger request ticket is exhausted')
+            if control[CONTROL_REQUEST_TICKET_WORD] != response_ticket:
+                raise AssertionError(
+                    'ledger mailbox tickets differ while IDLE',
+                )
+            request_ticket = response_ticket + 1
+            request = [
+                CONTROL_OP_ARM,
+                flags,
+                interval_id,
+                0,
+                0,
+                segment_budget,
+                invocation_budget,
+                0,
+                0,
+                request_ticket,
+            ]
+            request[8] = control_request_checksum(
+                self,
+                request,
+                request_ticket,
+            )
+            self._publish_request(request)
+            return request_ticket
+        except BaseException:
+            self._release_request_mailbox(CONTROL_REQUEST_IDLE)
+            raise
 
     def replay_arm_with_interval(self, request_ticket, interval_id):
         """Release-republish one ticket with a different valid payload."""
-        control = list(
-            struct.unpack_from(CONTROL_FORMAT, self.region, CONTROL_OFFSET),
-        )
-        response_ticket = self.atomic.load_acquire(
-            self.region,
-            CONTROL_OFFSET + CONTROL_RESPONSE_TICKET_WORD * 8,
-        )
-        published_ticket = self.atomic.load_acquire(
-            self.region,
-            CONTROL_OFFSET + CONTROL_REQUEST_TICKET_WORD * 8,
-        )
-        if response_ticket != request_ticket or published_ticket != request_ticket:
-            raise AssertionError('replay requires one completed request ticket')
-        control[2] = interval_id
-        control[8] = control_request_checksum(
-            self,
-            control,
-            request_ticket,
-        )
-        struct.pack_into(
-            CONTROL_REQUEST_FORMAT,
-            self.region,
-            CONTROL_OFFSET,
-            *control[0:9],
-        )
-        self.atomic.store_release(
-            self.region,
-            CONTROL_OFFSET + CONTROL_REQUEST_TICKET_WORD * 8,
-            request_ticket,
-        )
+        self._claim_request_mailbox()
+        try:
+            control = list(
+                struct.unpack_from(
+                    CONTROL_FORMAT,
+                    self.region,
+                    CONTROL_OFFSET,
+                ),
+            )
+            response_ticket = control[CONTROL_RESPONSE_TICKET_WORD]
+            published_ticket = control[CONTROL_REQUEST_TICKET_WORD]
+            if (
+                response_ticket != request_ticket or
+                published_ticket != request_ticket
+            ):
+                raise AssertionError(
+                    'replay requires one completed request ticket',
+                )
+            control[2] = interval_id
+            control[8] = control_request_checksum(
+                self,
+                control,
+                request_ticket,
+            )
+            self._publish_request(control[0:10])
+        except BaseException:
+            self._release_request_mailbox(CONTROL_REQUEST_IDLE)
+            raise
 
     def force_wrapped_request_after_exhausted_response(self):
         """Inject response MAX followed by wrapped request zero."""
-        control = list(
-            struct.unpack_from(CONTROL_FORMAT, self.region, CONTROL_OFFSET),
-        )
-        control[2] += 1
-        control[8] = control_request_checksum(self, control, 0)
-        struct.pack_into(
-            CONTROL_REQUEST_FORMAT,
-            self.region,
-            CONTROL_OFFSET,
-            *control[0:9],
-        )
-        self.atomic.store_release(
-            self.region,
-            CONTROL_OFFSET + CONTROL_RESPONSE_TICKET_WORD * 8,
-            UINT64_MASK,
-        )
-        self.atomic.store_release(
-            self.region,
-            CONTROL_OFFSET + CONTROL_REQUEST_TICKET_WORD * 8,
-            0,
-        )
+        self._claim_request_mailbox()
+        try:
+            control = list(
+                struct.unpack_from(
+                    CONTROL_FORMAT,
+                    self.region,
+                    CONTROL_OFFSET,
+                ),
+            )
+            control[2] += 1
+            control[CONTROL_REQUEST_TICKET_WORD] = 0
+            control[8] = control_request_checksum(self, control, 0)
+            self.atomic.store_release(
+                self.region,
+                CONTROL_OFFSET + CONTROL_RESPONSE_TICKET_WORD * 8,
+                UINT64_MASK,
+            )
+            self._publish_request(control[0:10])
+        except BaseException:
+            self._release_request_mailbox(CONTROL_REQUEST_IDLE)
+            raise
 
     def load_response_ticket(self):
-        """Acquire-load the monotonic Writer response ticket."""
+        """Acquire-load the monotonic Writer response publication."""
         return self.atomic.load_acquire(
             self.region,
             CONTROL_OFFSET + CONTROL_RESPONSE_TICKET_WORD * 8,
@@ -418,14 +483,30 @@ class HardwareWriteLedgerRegionOwner:
                     self.region,
                     CONTROL_OFFSET,
                 )
-                if control[13] != control_response_checksum(
-                    self,
-                    control,
-                    response_ticket,
+                if (
+                    control[CONTROL_REQUEST_TICKET_WORD] != request_ticket or
+                    control[CONTROL_RESPONSE_REQUEST_CHECKSUM_WORD] !=
+                    control[8]
+                ):
+                    raise AssertionError(
+                        'ledger response does not bind its exact request',
+                    )
+                if control[CONTROL_RESPONSE_CHECKSUM_WORD] != (
+                    control_response_checksum(
+                        self,
+                        control,
+                        response_ticket,
+                    )
                 ):
                     raise AssertionError('ledger response checksum mismatch')
-                return control
-            if response_ticket != 0:
+                return (
+                    *control[0:9],
+                    *control[11:15],
+                    control[CONTROL_RESPONSE_CHECKSUM_WORD],
+                    response_ticket,
+                    control[CONTROL_REQUEST_TICKET_WORD],
+                )
+            if response_ticket > request_ticket:
                 raise AssertionError(
                     f'unexpected response ticket {response_ticket}',
                 )
@@ -498,7 +579,9 @@ class HardwareWriteLedgerRegionOwner:
                     self.fd = -1
 
     def __enter__(self):
+        """Return this live owner to a context manager."""
         return self
 
     def __exit__(self, _exception_type, _exception, _traceback):
+        """Release the exact mapping and POSIX object owned here."""
         self.cleanup()

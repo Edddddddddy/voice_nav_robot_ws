@@ -25,7 +25,7 @@
 #define VOICE_NAV_HARDWARE_WRITE_LEDGER_ENDIAN_TAG \
   UINT64_C(0x0102030405060708)
 #define VOICE_NAV_HARDWARE_WRITE_LEDGER_HEADER_BYTES UINT64_C(192)
-#define VOICE_NAV_HARDWARE_WRITE_LEDGER_CONTROL_BYTES UINT64_C(128)
+#define VOICE_NAV_HARDWARE_WRITE_LEDGER_CONTROL_BYTES UINT64_C(192)
 #define VOICE_NAV_HARDWARE_WRITE_LEDGER_BANK_BYTES UINT64_C(128)
 #define VOICE_NAV_HARDWARE_WRITE_LEDGER_SEGMENT_BYTES UINT64_C(64)
 #define VOICE_NAV_HARDWARE_WRITE_LEDGER_PAGE_BYTES UINT64_C(192)
@@ -42,6 +42,11 @@
 #define VOICE_NAV_HARDWARE_WRITE_LEDGER_CONTROL_NONE UINT64_C(0)
 #define VOICE_NAV_HARDWARE_WRITE_LEDGER_CONTROL_ARM UINT64_C(1)
 #define VOICE_NAV_HARDWARE_WRITE_LEDGER_CONTROL_SEAL UINT64_C(2)
+
+#define VOICE_NAV_HARDWARE_WRITE_LEDGER_REQUEST_IDLE UINT64_C(0)
+#define VOICE_NAV_HARDWARE_WRITE_LEDGER_REQUEST_WRITING UINT64_C(1)
+#define VOICE_NAV_HARDWARE_WRITE_LEDGER_REQUEST_READY UINT64_C(2)
+#define VOICE_NAV_HARDWARE_WRITE_LEDGER_REQUEST_READING UINT64_C(3)
 
 #define VOICE_NAV_HARDWARE_WRITE_LEDGER_RESPONSE_NONE UINT64_C(0)
 #define VOICE_NAV_HARDWARE_WRITE_LEDGER_RESPONSE_OK UINT64_C(1)
@@ -109,13 +114,21 @@ typedef struct voice_nav_hardware_write_ledger_control_v1
   uint64_t request_invocation_budget;
   uint64_t request_not_before_sim_stamp_ns_bits;
   uint64_t request_checksum;
+  uint64_t request_ticket;
+  uint64_t request_state;
   uint64_t response_code;
   uint64_t response_bank_index;
   uint64_t response_bank_epoch;
   uint64_t response_fence_write_seq;
+  uint64_t response_request_checksum;
   uint64_t response_checksum;
   uint64_t response_ticket;
-  uint64_t request_ticket;
+  uint64_t reserved0;
+  uint64_t reserved1;
+  uint64_t reserved2;
+  uint64_t reserved3;
+  uint64_t reserved4;
+  uint64_t reserved5;
 } voice_nav_hardware_write_ledger_control_v1;
 
 typedef struct voice_nav_hardware_write_ledger_bank_v1

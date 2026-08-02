@@ -37,6 +37,20 @@ constexpr std::uint64_t kWriterBeginning{1U};
 constexpr std::uint64_t kWriterOutstanding{2U};
 constexpr std::uint64_t kWriterFinishing{3U};
 
+struct ControlRequestSnapshot
+{
+  std::uint64_t op;
+  std::uint64_t flags;
+  std::uint64_t interval_id;
+  std::uint64_t bank_index;
+  std::uint64_t bank_epoch;
+  std::uint64_t segment_budget;
+  std::uint64_t invocation_budget;
+  std::uint64_t not_before_sim_stamp_ns_bits;
+  std::uint64_t checksum;
+  std::uint64_t ticket;
+};
+
 std::uint64_t atomic_load_acquire(const std::uint64_t & value) noexcept
 {
   return __atomic_load_n(&value, __ATOMIC_ACQUIRE);
@@ -112,42 +126,45 @@ std::uint64_t crc64_words(Iterator first, Iterator last) noexcept
 
 std::uint64_t request_checksum(
   const voice_nav_hardware_write_ledger_header_v1 & header,
-  const voice_nav_hardware_write_ledger_control_v1 & control,
-  std::uint64_t request_ticket) noexcept
+  const ControlRequestSnapshot & request) noexcept
 {
   const std::uint64_t words[] = {
     header.owner_uid,
     header.generation,
     header.nonce_hi,
     header.nonce_lo,
-    control.request_op,
-    control.request_flags,
-    control.request_interval_id,
-    control.request_bank_index,
-    control.request_bank_epoch,
-    control.request_segment_budget,
-    control.request_invocation_budget,
-    control.request_not_before_sim_stamp_ns_bits,
-    request_ticket};
+    request.op,
+    request.flags,
+    request.interval_id,
+    request.bank_index,
+    request.bank_epoch,
+    request.segment_budget,
+    request.invocation_budget,
+    request.not_before_sim_stamp_ns_bits,
+    request.ticket};
   return crc64_words(std::begin(words), std::end(words));
 }
 
 std::uint64_t response_checksum(
   const voice_nav_hardware_write_ledger_header_v1 & header,
-  const voice_nav_hardware_write_ledger_control_v1 & control,
-  std::uint64_t response_ticket) noexcept
+  std::uint64_t request_checksum_value,
+  std::uint64_t response_ticket,
+  std::uint64_t response_code,
+  std::uint64_t response_bank_index,
+  std::uint64_t response_bank_epoch,
+  std::uint64_t response_fence_write_seq) noexcept
 {
   const std::uint64_t words[] = {
     header.owner_uid,
     header.generation,
     header.nonce_hi,
     header.nonce_lo,
-    control.request_checksum,
+    request_checksum_value,
     response_ticket,
-    control.response_code,
-    control.response_bank_index,
-    control.response_bank_epoch,
-    control.response_fence_write_seq};
+    response_code,
+    response_bank_index,
+    response_bank_epoch,
+    response_fence_write_seq};
   return crc64_words(std::begin(words), std::end(words));
 }
 
@@ -244,6 +261,7 @@ struct HardwareWriteLedgerWriter::Impl
 
   void publish_response(
     std::uint64_t request_ticket,
+    std::uint64_t request_checksum_value,
     std::uint64_t response_code,
     std::uint64_t bank_index,
     std::uint64_t bank_epoch,
@@ -253,31 +271,39 @@ struct HardwareWriteLedgerWriter::Impl
     control->response_bank_index = bank_index;
     control->response_bank_epoch = bank_epoch;
     control->response_fence_write_seq = fence_write_seq;
+    control->response_request_checksum = request_checksum_value;
     control->response_checksum = response_checksum(
-      *header, *control, request_ticket);
+      *header,
+      request_checksum_value,
+      request_ticket,
+      response_code,
+      bank_index,
+      bank_epoch,
+      fence_write_seq);
     atomic_store_release(control->response_ticket, request_ticket);
   }
 
   void process_arm(
-    std::uint64_t request_ticket,
+    const ControlRequestSnapshot & request,
     std::uint64_t last_completed_write_seq) noexcept
   {
     const auto allowed_flags =
       VOICE_NAV_HARDWARE_WRITE_LEDGER_FLAG_ZERO_REQUIRED;
     if (
-      control->request_interval_id == 0U ||
-      (control->request_flags & ~allowed_flags) != 0U ||
-      control->request_bank_index != 0U ||
-      control->request_bank_epoch != 0U ||
-      control->request_segment_budget == 0U ||
-      control->request_segment_budget >
+      request.interval_id == 0U ||
+      (request.flags & ~allowed_flags) != 0U ||
+      request.bank_index != 0U ||
+      request.bank_epoch != 0U ||
+      request.segment_budget == 0U ||
+      request.segment_budget >
       header->segment_capacity_per_bank ||
-      control->request_invocation_budget == 0U ||
-      control->request_not_before_sim_stamp_ns_bits != 0U)
+      request.invocation_budget == 0U ||
+      request.not_before_sim_stamp_ns_bits != 0U)
     {
       latch_global_fault(VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_PROTOCOL);
       publish_response(
-        request_ticket,
+        request.ticket,
+        request.checksum,
         VOICE_NAV_HARDWARE_WRITE_LEDGER_RESPONSE_INVALID,
         kInvalidBankIndex,
         0U,
@@ -288,7 +314,8 @@ struct HardwareWriteLedgerWriter::Impl
     if (last_completed_write_seq == std::numeric_limits<std::uint64_t>::max()) {
       latch_global_fault(VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_SEQUENCE);
       publish_response(
-        request_ticket,
+        request.ticket,
+        request.checksum,
         VOICE_NAV_HARDWARE_WRITE_LEDGER_RESPONSE_INVALID,
         kInvalidBankIndex,
         0U,
@@ -304,7 +331,8 @@ struct HardwareWriteLedgerWriter::Impl
       const auto state = atomic_load_acquire(bank(bank_index)->state);
       if (state == VOICE_NAV_HARDWARE_WRITE_LEDGER_BANK_ACTIVE) {
         publish_response(
-          request_ticket,
+          request.ticket,
+          request.checksum,
           VOICE_NAV_HARDWARE_WRITE_LEDGER_RESPONSE_BUSY,
           bank_index,
           bank(bank_index)->bank_epoch,
@@ -320,7 +348,8 @@ struct HardwareWriteLedgerWriter::Impl
     }
     if (free_bank_index == kInvalidBankIndex) {
       publish_response(
-        request_ticket,
+        request.ticket,
+        request.checksum,
         VOICE_NAV_HARDWARE_WRITE_LEDGER_RESPONSE_NO_FREE_BANK,
         kInvalidBankIndex,
         0U,
@@ -332,7 +361,8 @@ struct HardwareWriteLedgerWriter::Impl
     if (selected_bank->bank_epoch == std::numeric_limits<std::uint64_t>::max()) {
       latch_global_fault(VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_SEQUENCE);
       publish_response(
-        request_ticket,
+        request.ticket,
+        request.checksum,
         VOICE_NAV_HARDWARE_WRITE_LEDGER_RESPONSE_INVALID,
         free_bank_index,
         selected_bank->bank_epoch,
@@ -341,12 +371,12 @@ struct HardwareWriteLedgerWriter::Impl
     }
     const auto next_bank_epoch = selected_bank->bank_epoch + 1U;
     selected_bank->bank_epoch = next_bank_epoch;
-    selected_bank->interval_id = control->request_interval_id;
+    selected_bank->interval_id = request.interval_id;
     selected_bank->arm_fence_write_seq = last_completed_write_seq;
     selected_bank->seal_fence_write_seq = 0U;
-    selected_bank->segment_budget = control->request_segment_budget;
-    selected_bank->invocation_budget = control->request_invocation_budget;
-    selected_bank->predicate_flags = control->request_flags;
+    selected_bank->segment_budget = request.segment_budget;
+    selected_bank->invocation_budget = request.invocation_budget;
+    selected_bank->predicate_flags = request.flags;
     selected_bank->seal_not_before_sim_stamp_ns_bits = 0U;
     selected_bank->segment_count = 0U;
     selected_bank->invocation_count = 0U;
@@ -361,7 +391,8 @@ struct HardwareWriteLedgerWriter::Impl
     active_bank_index = free_bank_index;
     active_bank_epoch = next_bank_epoch;
     publish_response(
-      request_ticket,
+      request.ticket,
+      request.checksum,
       VOICE_NAV_HARDWARE_WRITE_LEDGER_RESPONSE_OK,
       free_bank_index,
       next_bank_epoch,
@@ -370,41 +401,71 @@ struct HardwareWriteLedgerWriter::Impl
 
   void process_control() noexcept
   {
-    const auto request_ticket = atomic_load_acquire(control->request_ticket);
+    const auto request_state = atomic_load_acquire(control->request_state);
+    if (
+      request_state == VOICE_NAV_HARDWARE_WRITE_LEDGER_REQUEST_IDLE ||
+      request_state == VOICE_NAV_HARDWARE_WRITE_LEDGER_REQUEST_WRITING)
+    {
+      return;
+    }
+    if (request_state != VOICE_NAV_HARDWARE_WRITE_LEDGER_REQUEST_READY) {
+      latch_global_fault(VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_PROTOCOL);
+      return;
+    }
+    std::uint64_t expected_state =
+      VOICE_NAV_HARDWARE_WRITE_LEDGER_REQUEST_READY;
+    if (!atomic_compare_exchange_acq_rel(
+        control->request_state,
+        expected_state,
+        VOICE_NAV_HARDWARE_WRITE_LEDGER_REQUEST_READING))
+    {
+      return;
+    }
+    const ControlRequestSnapshot request{
+      control->request_op,
+      control->request_flags,
+      control->request_interval_id,
+      control->request_bank_index,
+      control->request_bank_epoch,
+      control->request_segment_budget,
+      control->request_invocation_budget,
+      control->request_not_before_sim_stamp_ns_bits,
+      control->request_checksum,
+      control->request_ticket};
+    atomic_store_release(
+      control->request_state,
+      VOICE_NAV_HARDWARE_WRITE_LEDGER_REQUEST_IDLE);
+
     const auto response_ticket = atomic_load_acquire(control->response_ticket);
-    if (request_ticket == response_ticket) {
-      if (request_ticket == 0U) {
-        return;
-      }
-      const auto declared_checksum = control->request_checksum;
+    const auto calculated_checksum = request_checksum(*header, request);
+    if (request.ticket == response_ticket) {
       if (
-        request_ticket != last_consumed_request_ticket ||
-        declared_checksum != last_consumed_request_checksum ||
-        declared_checksum !=
-        request_checksum(*header, *control, request_ticket))
+        request.ticket == 0U ||
+        request.ticket != last_consumed_request_ticket ||
+        request.checksum != last_consumed_request_checksum ||
+        request.checksum != calculated_checksum ||
+        control->response_request_checksum != request.checksum)
       {
         latch_global_fault(VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_PROTOCOL);
       }
       return;
     }
     if (
-      request_ticket == 0U ||
+      request.ticket == 0U ||
       response_ticket == std::numeric_limits<std::uint64_t>::max() ||
-      request_ticket != response_ticket + 1U)
+      request.ticket != response_ticket + 1U)
     {
       latch_global_fault(VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_PROTOCOL);
       return;
     }
 
-    last_consumed_request_ticket = request_ticket;
-    last_consumed_request_checksum = control->request_checksum;
-    if (
-      control->request_checksum !=
-      request_checksum(*header, *control, request_ticket))
-    {
+    last_consumed_request_ticket = request.ticket;
+    last_consumed_request_checksum = request.checksum;
+    if (request.checksum != calculated_checksum) {
       latch_global_fault(VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_PROTOCOL);
       publish_response(
-        request_ticket,
+        request.ticket,
+        request.checksum,
         VOICE_NAV_HARDWARE_WRITE_LEDGER_RESPONSE_INVALID,
         kInvalidBankIndex,
         0U,
@@ -414,13 +475,14 @@ struct HardwareWriteLedgerWriter::Impl
 
     const auto last_completed_write_seq =
       atomic_load_acquire(header->last_completed_write_seq);
-    if (control->request_op == VOICE_NAV_HARDWARE_WRITE_LEDGER_CONTROL_ARM) {
-      process_arm(request_ticket, last_completed_write_seq);
+    if (request.op == VOICE_NAV_HARDWARE_WRITE_LEDGER_CONTROL_ARM) {
+      process_arm(request, last_completed_write_seq);
       return;
     }
     latch_global_fault(VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_PROTOCOL);
     publish_response(
-      request_ticket,
+      request.ticket,
+      request.checksum,
       VOICE_NAV_HARDWARE_WRITE_LEDGER_RESPONSE_INVALID,
       kInvalidBankIndex,
       0U,
