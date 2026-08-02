@@ -32,6 +32,8 @@ inline constexpr std::uint64_t kHardwareWriteOracleFaultGeneration =
   UINT64_C(1) << 1U;
 inline constexpr std::uint64_t kHardwareWriteOracleFaultNonFiniteCommand =
   UINT64_C(1) << 2U;
+inline constexpr std::uint64_t kHardwareWriteOracleFaultSimulationStamp =
+  UINT64_C(1) << 3U;
 
 struct HardwareWriteLedgerConfig
 {

@@ -182,6 +182,12 @@ bool HardwareWriteLedger::append(
         std::memory_order_release);
       return false;
     }
+    if (record.sim_stamp_ns < active.sim_stamp_ns) {
+      impl_->oracle_faults.fetch_or(
+        kHardwareWriteOracleFaultSimulationStamp,
+        std::memory_order_release);
+      return false;
+    }
 
     const bool same_tuple =
       record.sim_stamp_ns == active.sim_stamp_ns &&
