@@ -50,6 +50,7 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0040 | Some Gate transitions have evidence while equivalent paths do not | Is journaling owned by one Core transition seam or scattered through Node callbacks? | Specified |
 | PIT-0041 | A checksum test stays green after its implementation omits a field | Does an independent constant and an include/exclude mutation matrix define the oracle? | Guarded |
 | PIT-0042 | An incremental WSL build warns that a dependency file is milliseconds in the future | Does the same target rebuild cleanly after comparing WSL time and file epoch? | Guarded |
+| PIT-0043 | A full evidence journal prevents MotionGate from inhibiting or faulting | Is evidence failure policy different for admission and safety-terminal mutations? | Guarded |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -93,6 +94,13 @@ expand a Linux-style wildcard embedded in a path argument for a Windows-native
 regex containing `|` and a quoted `stat -c` format containing spaces can lose
 their inner quote boundary at the same shell crossing. Prefer separate CTest
 invocations and no-space diagnostic formats such as `stat -c %Y`.
+
+**Recurrence evidence.** During VN-0011A Core-journal integration, a grouped
+CTest regex containing `()` and `|` again reached Bash without its intended
+quote boundary and failed before any build or test ran. The replacement used
+separate literal `ctest -R <name>` invocations. This recurrence confirms that
+the safe template, not another layer of escaping, is the permanent process
+guardrail.
 
 ## PIT-0002: WSL transport warnings are not the command result
 
@@ -1023,3 +1031,24 @@ the rerun exits zero without the warning and the focused tests still pass. If
 the warning repeats, stop and inspect host/guest clock divergence and
 concurrent writers; do not use `touch`, delete build metadata, or suppress the
 warning to manufacture green evidence.
+
+## PIT-0043: Evidence failure must not veto a safety mutation
+
+**Symptom.** MotionGate has an active lease, but `INHIBIT`, automatic expiry,
+or `force_fault()` throws when the crash-evidence journal is full, leaving the
+Gate armed because the recorder could not reserve another slot.
+
+**Cause.** One generic transaction policy treats both authority admission and
+safety termination as if journal durability were the primary outcome. For an
+admission transition, refusing an unrecordable mutation is fail-closed. For a
+terminal transition, refusing to select zero is the unsafe outcome.
+
+**Guardrail.** The Core owns two explicit policies at its single transition
+seam. `PREPARE`, `OPEN`, and `RENEW` reject mutation when reservation fails.
+`INHIBIT`, automatic retirement, and `FAULT` execute one bounded `noexcept`
+safety mutation even if reservation fails; the journal latches overflow or
+corruption so that the evidence generation is rejected. Unit tests fill the
+journal immediately before both PREPARE and INHIBIT and require opposite state
+outcomes. Evidence may fail closed as evidence, but it may never become a
+dependency for stopping motion. See
+[VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md).

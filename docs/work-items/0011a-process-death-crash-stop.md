@@ -248,6 +248,26 @@ succeeds does that same slot become `COMMITTED`; journal writes use release
 stores, and the parent reads them with acquire ordering only after
 `ProcessExited`. The bounded shared-memory journal survives exact SIGKILL.
 
+Control-transition `event_code` values are stable ABI facts:
+
+| Code | Transition |
+| --- | --- |
+| `1` | `PREPARE` |
+| `2` | `OPEN` |
+| `3` | `RENEW` |
+| `4` | explicit `INHIBIT` |
+| `5` | automatic lease retirement; `reason` identifies expiry or candidate failure |
+| `6` | `FAULT`, including sequence exhaustion |
+
+The Core is a non-copyable and non-movable single owner of its optional
+single-writer journal. Every fenced mutation is compile-time constrained to a
+bounded `noexcept` callback. Journal reservation failure has two deliberately
+different policies: admission/extension transitions (`PREPARE`, `OPEN`, and
+`RENEW`) do not mutate, while safety-terminal transitions (`INHIBIT`, automatic
+retirement, and `FAULT`) still inhibit/fault and select zero. The latter
+invalidates the evidence generation through the latched journal fault, but
+evidence capture is never allowed to veto a safety mutation.
+
 Gate journal ABI v1 is a little-endian C layout with a 128-byte header and
 256-byte fixed slots. All three checksums use CRC64-ECMA-182, polynomial
 `0x42F0E1EBA9EA3693`, init/xorout zero, non-reflected processing, and feed each

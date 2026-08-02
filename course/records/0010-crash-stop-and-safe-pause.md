@@ -296,10 +296,48 @@ no warning, so the transient mounted-filesystem case is retained as
 [PIT-0042](../reference/engineering-pitfalls.md#pit-0042-mounted-filesystem-clock-skew-needs-a-bounded-rerun).
 
 This is not VN-0011A completion. The journal is still an uninstalled static
-module with no MotionGate product link. Transition records, POSIX shared-memory
-ownership, Node integration, the Gazebo hardware Adapter, and real crash
-evidence remain open; the repository-level topology test therefore remains
-deliberately RED.
+module. POSIX shared-memory ownership, Node attachment/configuration, the
+Gazebo hardware Adapter, and real crash evidence remain open; the
+repository-level topology test therefore remains deliberately RED.
+
+### Core-owned transition integration
+
+The Core integration was implemented as reviewable TDD microcycles:
+
+```text
+d689df5 RED  -> 22b4472 GREEN  PREPARE
+dee5f9e RED  -> b486beb GREEN  OPEN
+586d412 RED  -> 403b408 GREEN  RENEW
+75e8e65 RED  -> 3618fdb GREEN  INHIBIT / shared retirement seam
+417d8dc RED  -> bfe5702 GREEN  FAULT / sequence exhaustion
+```
+
+Each successful transition records an exact before-image, an INTENT and
+linearization sample immediately before the Core-owned mutation, an exact
+after-image, and a COMMITTED checksum. Stable event codes are `1..6` for
+PREPARE, OPEN, RENEW, explicit INHIBIT, automatic retirement, and FAULT.
+`MotionGateCore` is now non-copyable and non-movable so two state machines
+cannot alias the journal's single writer. Fence callbacks are compile-time
+required to be `noexcept`; strings are prepared outside the fence and swapped
+inside it.
+
+Independent review of the first PREPARE slice reported P0=0 and P1=0. Its two
+P2 findings became executable corrections: commits `e471dd9`/`0887c35` lock
+single ownership, while `345304b` locks the no-throw fence and proves a
+reservation failure leaves PREPARE inhibited and unchanged.
+
+A later safety review exposed a more important asymmetric failure policy. A
+full journal should reject an unrecordable PREPARE, but it must never prevent
+INHIBIT or FAULT. Commit `4ebac11` preserved the failing counterexample;
+`7244541` introduced explicit `RejectMutation` and `ApplySafetyMutation`
+policies. Terminal mutation still selects zero while journal overflow
+invalidates the evidence generation. The reusable lesson is
+[PIT-0043](../reference/engineering-pitfalls.md#pit-0043-evidence-failure-must-not-veto-a-safety-mutation).
+
+One grouped CTest filter containing `()` and `|` again failed at the
+PowerShell-to-Bash boundary before entering the test gate. Separate literal
+CTest invocations succeeded, and the recurrence was appended to PIT-0001. It
+was not counted as a product RED.
 
 ## VN-0011A observed crash evidence
 
