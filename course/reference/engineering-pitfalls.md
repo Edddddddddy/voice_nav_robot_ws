@@ -48,6 +48,8 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0038 | “No allocation in the write seam” accidentally includes upstream code | Is the real-time claim scoped to added instrumentation only? | Specified |
 | PIT-0039 | A late journal commit makes an earlier transition look post-crash | Is the recorded time the transition linearization fence or only a later snapshot? | Specified |
 | PIT-0040 | Some Gate transitions have evidence while equivalent paths do not | Is journaling owned by one Core transition seam or scattered through Node callbacks? | Specified |
+| PIT-0041 | A checksum test stays green after its implementation omits a field | Does an independent constant and an include/exclude mutation matrix define the oracle? | Guarded |
+| PIT-0042 | An incremental WSL build warns that a dependency file is milliseconds in the future | Does the same target rebuild cleanly after comparing WSL time and file epoch? | Guarded |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -85,7 +87,12 @@ directory over nested PowerShell/Bash command substitution that synthesizes
 programs containing `$0`, or `$(git ...)` identity guards inside a
 PowerShell-to-`bash -lc` string. Read Git identity in a separate native command;
 use pytest's no-space `--deselect=<node-id>` form and PowerShell-native text
-inspection when either shell can consume the inner syntax.
+inspection when either shell can consume the inner syntax. PowerShell does not
+expand a Linux-style wildcard embedded in a path argument for a Windows-native
+`rg`; pass the directory and use `rg -g '<pattern>'` instead. A quoted CTest
+regex containing `|` and a quoted `stat -c` format containing spaces can lose
+their inner quote boundary at the same shell crossing. Prefer separate CTest
+invocations and no-space diagnostic formats such as `stat -c %Y`.
 
 ## PIT-0002: WSL transport warnings are not the command result
 
@@ -977,3 +984,42 @@ every transition kind and reject both missing and duplicate journal sequence
 values. Do not extend `reconcile_adapter_transition()` into a recorder; it runs
 after mutation and only owns subscription cleanup. See
 [VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md).
+
+## PIT-0041: A checksum implementation cannot be its own oracle
+
+**Symptom.** A checksum test writes a record, compares its stored checksum with
+the same production helper, and passes even after a required field is removed
+from both calls. Non-zero output proves neither the selected polynomial nor the
+ABI coverage domain.
+
+**Cause.** Producer and verifier share one implementation and therefore share
+the same mistake. Size/offset assertions protect layout but do not protect the
+algorithm, field order, byte order, or the intended mutable-field exclusions.
+
+**Guardrail.** Specify the checksum independently in the Work Item. Lock at
+least one externally calculated constant for each record phase, then mutate
+every included field and every excluded field individually. Included mutations
+must change the checksum; mutable phase/claim/commit fields excluded from that
+phase must not. Compile the shared ABI header through a real C11 target as well
+as C++. For Gate journal ABI v1 the fixed oracle is CRC64-ECMA-182, non-
+reflected, init/xorout zero, feeding each `uint64_t` least-significant byte
+first. See
+[VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md).
+
+## PIT-0042: Mounted-filesystem clock skew needs a bounded rerun
+
+**Symptom.** GNU Make completes a target but warns that a dependency file has a
+modification time a few milliseconds in the future and that the build may be
+incomplete.
+
+**Cause.** WSL and the Windows-mounted NTFS path can expose slightly different
+sub-second timestamp observations. This is distinct from a compiler failure,
+but the warning also prevents treating that one invocation as final evidence.
+
+**Guardrail.** Keep the exact target and output. Compare the WSL epoch with the
+reported file epoch using no-space commands, then rerun the same incremental
+target once the alleged future timestamp has passed. Accept the build only if
+the rerun exits zero without the warning and the focused tests still pass. If
+the warning repeats, stop and inspect host/guest clock divergence and
+concurrent writers; do not use `touch`, delete build metadata, or suppress the
+warning to manufacture green evidence.

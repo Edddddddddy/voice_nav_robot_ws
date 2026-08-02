@@ -238,6 +238,69 @@ This correction is preserved as
 and
 [PIT-0040](../reference/engineering-pitfalls.md#pit-0040-scattered-callback-journals-create-partial-evidence).
 
+### Gate event journal output transaction and ABI evidence
+
+The first Gate-journal tracer bullet was preserved as a real RED commit before
+implementation:
+
+```text
+RED commit:
+e78635fa373f8bdfc921cca436012f7fb3f8186a
+
+Command:
+source /opt/ros/jazzy/setup.bash
+ctest --test-dir build/voice_nav_mission \
+  -R gate_event_journal_test --output-on-failure
+
+Observed: 1 test executed, 1 failed
+Only failure: C++ exception "VN-0011A tests-first RED"
+```
+
+Commit `844a335` implemented the bounded output transaction. The single writer
+atomically claims a never-reused slot, writes payload and CRC64, release-stores
+`INTENT`, calls the supplied final publisher exactly once, then writes commit
+time/CRC64 and release-stores `COMMITTED`. A crash after claim but before
+INTENT leaves a claimed/FREE gap; a publisher exception or kill after INTENT
+leaves a trailing INTENT. Both invalidate the evidence generation instead of
+being repaired or overwritten.
+
+An independent review reported P0=0 and P1=0. It confirmed that the payload
+clear begins at offset 8 and never writes `phase` non-atomically, each reader
+boundary is paired with release/acquire ordering, and publisher exceptions
+cannot reach `commit_output`. It identified the production-checksum helper
+self-comparison as a P2 oracle weakness. Commit `774d525` closed that weakness
+with a real C11 ABI target, fixed externally calculated header/INTENT/COMMITTED
+constants, and include/exclude mutation matrices for all 11/20/27 covered
+fields. The checksum contract is recorded as
+[PIT-0041](../reference/engineering-pitfalls.md#pit-0041-a-checksum-implementation-cannot-be-its-own-oracle).
+
+```text
+Final focused result on 774d525:
+gate_event_journal_test .......... passed
+gate_event_journal_c_abi_test .... passed
+
+voice_nav_mission package gate:
+13 CTest tests passed
+123 tests, 0 errors, 0 failures, 12 skipped
+```
+
+Three more Windows-to-WSL command-boundary failures occurred while collecting
+this evidence: a wildcard embedded in a Windows `rg` path was not expanded, a
+quoted CTest regex containing `|` arrived as Bash pipelines, and a quoted
+`stat -c` format containing spaces lost its argument boundary. These were
+classified as further PIT-0001 occurrences and replaced with `rg -g`, separate
+CTest calls, and `stat -c %Y`; none was accepted as code RED. One incremental
+build also reported a dependency timestamp 23 ms in the future. Comparing the
+WSL/file epochs and rerunning the same target produced a clean zero exit with
+no warning, so the transient mounted-filesystem case is retained as
+[PIT-0042](../reference/engineering-pitfalls.md#pit-0042-mounted-filesystem-clock-skew-needs-a-bounded-rerun).
+
+This is not VN-0011A completion. The journal is still an uninstalled static
+module with no MotionGate product link. Transition records, POSIX shared-memory
+ownership, Node integration, the Gazebo hardware Adapter, and real crash
+evidence remain open; the repository-level topology test therefore remains
+deliberately RED.
+
 ## VN-0011A observed crash evidence
 
 | Case | Expected threshold | Observed result |

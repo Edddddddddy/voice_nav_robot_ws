@@ -12,8 +12,11 @@
 
 **Capability state:** In progress. The exact-action/exact-exit CrashLedger has
 completed two reviewable RED/GREEN microcycles and is registered through the
-real ament/CTest path. Evidence analysis, repository RED, product crash runs,
-the final local gate, PR, and CI remain open.
+real ament/CTest path. The Gate event journal has completed its first
+output-transaction GREEN plus independent C ABI/checksum contract hardening.
+Transition journaling, POSIX shared-memory ownership, Node integration,
+evidence analysis, repository GREEN, product crash runs, the final local gate,
+PR, and CI remain open.
 
 ## Immutable base
 
@@ -244,6 +247,33 @@ sequence, header stamp, marker, and checksum. Only after the DDS publish call
 succeeds does that same slot become `COMMITTED`; journal writes use release
 stores, and the parent reads them with acquire ordering only after
 `ProcessExited`. The bounded shared-memory journal survives exact SIGKILL.
+
+Gate journal ABI v1 is a little-endian C layout with a 128-byte header and
+256-byte fixed slots. All three checksums use CRC64-ECMA-182, polynomial
+`0x42F0E1EBA9EA3693`, init/xorout zero, non-reflected processing, and feed each
+`uint64_t` as eight least-significant-first bytes. Coverage and order are
+normative:
+
+- header: `magic`, `abi_version`, `header_bytes`, `slot_bytes`,
+  `region_bytes`, `capacity`, `owner_uid`, `generation`, `nonce_hi`,
+  `nonce_lo`, `reserved`; it excludes `init_state`, `claimed_slots`,
+  `overflow_latched`, `writer_pid`, and `header_checksum`;
+- output INTENT: `record_kind`, `journal_seq`, `generation`,
+  `intent_monotonic_ns`, `event_code`, `reason`, `before_state_seq`,
+  `before_control_seq`, `output_attempt_seq`, `intended_output_seq`, ROS stamp
+  seconds/nanoseconds, linear/angular value bits, before-lease words,
+  Gate-instance words, `cause_transition_journal_seq`, and `flags`; it excludes
+  phase, transition/commit time, both checksum fields, all after-image fields,
+  and reserved words;
+- COMMITTED: `intent_checksum`, then the complete INTENT sequence above, then
+  `transition_linearization_ns`, `commit_monotonic_ns`, after state/control
+  sequences, and after-lease words; it excludes phase, `commit_checksum`, and
+  reserved words.
+
+The version-controlled oracle combines fixed externally calculated fixture
+values with an include/exclude mutation matrix; comparing the production helper
+only with itself is not acceptance evidence.
+
 After `ProcessExited`, the final slot must be that single non-zero `COMMITTED`
 record. A trailing `INTENT`, overflow, wrap, corrupt checksum, gap, a second
 publish of the final marker, or any later output record invalidates the
