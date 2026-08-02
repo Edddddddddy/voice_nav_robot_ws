@@ -46,8 +46,21 @@ def transform_product_urdf(product_urdf, journal_name, journal_nonce):
             'canonical product hardware plugin changed',
         )
 
-    hardware_plugin.text = TEST_HARDWARE_PLUGIN
     hardware = hardware_nodes[0]
+    owned_parameter_names = {'journal_name', 'journal_nonce'}
+    collisions = sorted(
+        child.get('name')
+        for child in list(hardware)
+        if child.tag == 'param'
+        and child.get('name') in owned_parameter_names
+    )
+    if collisions:
+        raise CrashRobotDescriptionError(
+            'canonical hardware must not already contain owned journal '
+            'parameters: ' + ', '.join(collisions),
+        )
+
+    hardware_plugin.text = TEST_HARDWARE_PLUGIN
     element_tree.SubElement(
         hardware,
         'param',
