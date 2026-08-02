@@ -24,6 +24,7 @@
 #include <cstring>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 
 namespace
 {
@@ -174,6 +175,9 @@ public:
         write_journal->begin_calls == 1U &&
         write_journal->finish_calls == 0U;
     }
+    if (throw_on_write) {
+      throw std::runtime_error("delegated write failed");
+    }
     if (write_entity_component_manager != nullptr) {
       auto * left_command =
         write_entity_component_manager->Component<
@@ -221,6 +225,7 @@ public:
   const rclcpp::Duration * write_period{nullptr};
   RecordingHardwareWriteJournal * write_journal{nullptr};
   bool journal_began_before_upstream_write{false};
+  bool throw_on_write{false};
   gz::sim::EntityComponentManager * write_entity_component_manager{nullptr};
   gz::sim::Entity write_left_entity{gz::sim::kNullEntity};
   gz::sim::Entity write_right_entity{gz::sim::kNullEntity};
@@ -484,6 +489,112 @@ TEST(
     voice_nav_sim::HardwareWriteObservationStatus::kMissingEntity);
   EXPECT_EQ(journal->observation.left_command_bits, 0U);
   EXPECT_EQ(journal->observation.right_command_bits, 0U);
+}
+
+TEST(
+  JournaledGazeboSimSystemAdapter,
+  ReportsMissingWheelCommandComponent)
+{
+  auto upstream = std::make_shared<RecordingGazeboSystem>();
+  auto journal = std::make_shared<RecordingHardwareWriteJournal>();
+  voice_nav_sim::JournaledGazeboSimSystemAdapter adapter(upstream, journal);
+  rclcpp::Node::SharedPtr model_node;
+  gz::sim::EntityComponentManager entity_component_manager;
+  const auto left_entity = entity_component_manager.CreateEntity();
+  const auto right_entity = entity_component_manager.CreateEntity();
+  std::map<std::string, gz::sim::Entity> joints{
+    {"left_wheel_joint", left_entity},
+    {"right_wheel_joint", right_entity}};
+  const hardware_interface::HardwareInfo hardware_info{};
+  ASSERT_TRUE(
+    adapter.initSim(
+      model_node,
+      joints,
+      hardware_info,
+      entity_component_manager,
+      50U));
+
+  (void)adapter.write(
+    rclcpp::Time(3, 0, RCL_ROS_TIME), rclcpp::Duration(0, 20'000'000));
+
+  EXPECT_EQ(journal->begin_calls, 1U);
+  EXPECT_EQ(journal->finish_calls, 1U);
+  EXPECT_EQ(
+    journal->observation.status,
+    voice_nav_sim::HardwareWriteObservationStatus::kMissingComponent);
+  EXPECT_EQ(journal->observation.left_command_bits, 0U);
+  EXPECT_EQ(journal->observation.right_command_bits, 0U);
+}
+
+TEST(
+  JournaledGazeboSimSystemAdapter,
+  ReportsEmptyWheelCommandComponent)
+{
+  auto upstream = std::make_shared<RecordingGazeboSystem>();
+  auto journal = std::make_shared<RecordingHardwareWriteJournal>();
+  voice_nav_sim::JournaledGazeboSimSystemAdapter adapter(upstream, journal);
+  rclcpp::Node::SharedPtr model_node;
+  gz::sim::EntityComponentManager entity_component_manager;
+  const auto left_entity = entity_component_manager.CreateEntity();
+  const auto right_entity = entity_component_manager.CreateEntity();
+  (void)entity_component_manager.CreateComponent(
+    left_entity,
+    gz::sim::components::JointVelocityCmd(std::vector<double>{}));
+  (void)entity_component_manager.CreateComponent(
+    right_entity,
+    gz::sim::components::JointVelocityCmd(std::vector<double>{}));
+  std::map<std::string, gz::sim::Entity> joints{
+    {"left_wheel_joint", left_entity},
+    {"right_wheel_joint", right_entity}};
+  const hardware_interface::HardwareInfo hardware_info{};
+  ASSERT_TRUE(
+    adapter.initSim(
+      model_node,
+      joints,
+      hardware_info,
+      entity_component_manager,
+      50U));
+  upstream->write_entity_component_manager = &entity_component_manager;
+  upstream->write_left_entity = left_entity;
+  upstream->write_right_entity = right_entity;
+
+  (void)adapter.write(
+    rclcpp::Time(4, 0, RCL_ROS_TIME), rclcpp::Duration(0, 20'000'000));
+
+  EXPECT_EQ(journal->begin_calls, 1U);
+  EXPECT_EQ(journal->finish_calls, 1U);
+  EXPECT_EQ(
+    journal->observation.status,
+    voice_nav_sim::HardwareWriteObservationStatus::kEmptyComponent);
+  EXPECT_EQ(journal->observation.left_command_bits, 0U);
+  EXPECT_EQ(journal->observation.right_command_bits, 0U);
+}
+
+TEST(
+  JournaledGazeboSimSystemAdapter,
+  FinishesJournalCycleWhenDelegatedWriteThrows)
+{
+  auto upstream = std::make_shared<RecordingGazeboSystem>();
+  auto journal = std::make_shared<RecordingHardwareWriteJournal>();
+  voice_nav_sim::JournaledGazeboSimSystemAdapter adapter(upstream, journal);
+  upstream->write_journal = journal.get();
+  upstream->throw_on_write = true;
+
+  EXPECT_THROW(
+    adapter.write(
+      rclcpp::Time(5, 0, RCL_ROS_TIME),
+      rclcpp::Duration(0, 20'000'000)),
+    std::runtime_error);
+
+  EXPECT_TRUE(upstream->journal_began_before_upstream_write);
+  EXPECT_EQ(journal->begin_calls, 1U);
+  EXPECT_EQ(journal->finish_calls, 1U);
+  EXPECT_EQ(
+    journal->delegated_result,
+    static_cast<std::uint64_t>(hardware_interface::return_type::ERROR));
+  EXPECT_EQ(
+    journal->observation.status,
+    voice_nav_sim::HardwareWriteObservationStatus::kMissingEntity);
 }
 
 }  // namespace
