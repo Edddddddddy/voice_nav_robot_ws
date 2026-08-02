@@ -391,11 +391,11 @@ TEST(MotionGateJournal, ExplicitInhibitCommitsLeaseRetirementAtOneFence)
 
   const auto result = gate.inhibit(
     ControlRequest{
-      Operation::Inhibit,
-      "00000000000000000000000000000003",
-      kGateId,
-      armed.control_seq,
-      armed.lease_id},
+        Operation::Inhibit,
+        "00000000000000000000000000000003",
+        kGateId,
+        armed.control_seq,
+        armed.lease_id},
     now);
 
   ASSERT_EQ(result.code, ResultCode::Applied);

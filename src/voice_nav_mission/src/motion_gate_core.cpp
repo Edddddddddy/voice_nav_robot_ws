@@ -37,12 +37,16 @@ constexpr std::size_t kMaximumDetailLength = 160U;
 constexpr std::uint64_t kTransitionEventPrepare = 1U;
 constexpr std::uint64_t kTransitionEventOpen = 2U;
 constexpr std::uint64_t kTransitionEventRenew = 3U;
+constexpr std::uint64_t kTransitionEventInhibit = 4U;
+constexpr std::uint64_t kTransitionEventAutomaticRetire = 5U;
 static_assert(
   static_cast<std::uint64_t>(Operation::Prepare) == kTransitionEventPrepare);
 static_assert(
   static_cast<std::uint64_t>(Operation::Open) == kTransitionEventOpen);
 static_assert(
   static_cast<std::uint64_t>(Operation::Renew) == kTransitionEventRenew);
+static_assert(
+  static_cast<std::uint64_t>(Operation::Inhibit) == kTransitionEventInhibit);
 
 struct IdentifierWords
 {
@@ -294,7 +298,10 @@ ControlResult MotionGateCore::open(
       "OPEN lease_id is not the current prepared lease");
   }
   if (now >= prepare_deadline_) {
-    retire_lease(Reason::PrepareExpired, "prepared lease expired");
+    retire_lease(
+      kTransitionEventAutomaticRetire,
+      Reason::PrepareExpired,
+      "prepared lease expired");
     return reject(
       request, Reason::PrepareExpired,
       "OPEN reached the prepare deadline");
@@ -393,11 +400,20 @@ ControlResult MotionGateCore::renew(
   SteadyTimePoint now)
 {
   if (state_ == State::Prepared && now >= prepare_deadline_) {
-    retire_lease(Reason::PrepareExpired, "prepared lease expired");
+    retire_lease(
+      kTransitionEventAutomaticRetire,
+      Reason::PrepareExpired,
+      "prepared lease expired");
   } else if (state_ == State::Armed && now >= authority_deadline_) {
-    retire_lease(Reason::AuthorityExpired, "authority lease expired");
+    retire_lease(
+      kTransitionEventAutomaticRetire,
+      Reason::AuthorityExpired,
+      "authority lease expired");
   } else if (state_ == State::Armed && now >= candidate_deadline_) {
-    retire_lease(Reason::CandidateExpired, "candidate freshness expired");
+    retire_lease(
+      kTransitionEventAutomaticRetire,
+      Reason::CandidateExpired,
+      "candidate freshness expired");
   }
 
   if (const auto replay = replay_or_collision(request)) {
@@ -424,7 +440,10 @@ ControlResult MotionGateCore::renew(
       "RENEW lease_id is not the current armed lease");
   }
   if (now >= authority_deadline_) {
-    retire_lease(Reason::AuthorityExpired, "authority lease expired");
+    retire_lease(
+      kTransitionEventAutomaticRetire,
+      Reason::AuthorityExpired,
+      "authority lease expired");
     return reject(
       request, Reason::AuthorityExpired,
       "RENEW reached the authority deadline");
@@ -488,7 +507,7 @@ ControlResult MotionGateCore::inhibit(
       "INHIBIT lease_id is not the current lease");
   }
 
-  retire_lease(Reason::None, "lease inhibited");
+  retire_lease(kTransitionEventInhibit, Reason::None, "lease inhibited");
   auto result = applied(request);
   remember(request, result);
   return result;
@@ -515,6 +534,7 @@ CandidateResult MotionGateCore::accept_candidate(
     candidate.writer_gid != bound_writer_gid_)
   {
     retire_lease(
+      kTransitionEventAutomaticRetire,
       Reason::WriterMismatch,
       "current candidate did not match the bound inter-process writer");
     return CandidateResult{
@@ -535,6 +555,7 @@ CandidateResult MotionGateCore::accept_candidate(
     candidate.angular_y == 0.0;
   if (!all_finite || !unsupported_axes_are_zero) {
     retire_lease(
+      kTransitionEventAutomaticRetire,
       Reason::InvalidCandidate,
       "current candidate contained a non-finite or unsupported axis");
     return CandidateResult{
@@ -557,11 +578,20 @@ CandidateResult MotionGateCore::accept_candidate(
 Command MotionGateCore::tick(SteadyTimePoint now)
 {
   if (state_ == State::Prepared && now >= prepare_deadline_) {
-    retire_lease(Reason::PrepareExpired, "prepared lease expired");
+    retire_lease(
+      kTransitionEventAutomaticRetire,
+      Reason::PrepareExpired,
+      "prepared lease expired");
   } else if (state_ == State::Armed && now >= authority_deadline_) {
-    retire_lease(Reason::AuthorityExpired, "authority lease expired");
+    retire_lease(
+      kTransitionEventAutomaticRetire,
+      Reason::AuthorityExpired,
+      "authority lease expired");
   } else if (state_ == State::Armed && now >= candidate_deadline_) {
-    retire_lease(Reason::CandidateExpired, "candidate freshness expired");
+    retire_lease(
+      kTransitionEventAutomaticRetire,
+      Reason::CandidateExpired,
+      "candidate freshness expired");
   }
 
   if (state_ != State::Armed || !candidate_fresh_) {
@@ -808,15 +838,27 @@ void MotionGateCore::advance_state_seq()
 void MotionGateCore::reconcile_deadlines(SteadyTimePoint now)
 {
   if (state_ == State::Prepared && now >= prepare_deadline_) {
-    retire_lease(Reason::PrepareExpired, "prepared lease expired");
+    retire_lease(
+      kTransitionEventAutomaticRetire,
+      Reason::PrepareExpired,
+      "prepared lease expired");
   } else if (state_ == State::Armed && now >= authority_deadline_) {
-    retire_lease(Reason::AuthorityExpired, "authority lease expired");
+    retire_lease(
+      kTransitionEventAutomaticRetire,
+      Reason::AuthorityExpired,
+      "authority lease expired");
   } else if (state_ == State::Armed && now >= candidate_deadline_) {
-    retire_lease(Reason::CandidateExpired, "candidate freshness expired");
+    retire_lease(
+      kTransitionEventAutomaticRetire,
+      Reason::CandidateExpired,
+      "candidate freshness expired");
   }
 }
 
-void MotionGateCore::retire_lease(Reason reason, std::string detail)
+void MotionGateCore::retire_lease(
+  std::uint64_t event_code,
+  Reason reason,
+  std::string detail)
 {
   if (state_ == State::Faulted) {
     selected_ = zero_command();
@@ -826,24 +868,32 @@ void MotionGateCore::retire_lease(Reason reason, std::string detail)
     selected_ = zero_command();
     return;
   }
-  if (!advance_control_seq()) {
+  if (control_seq_ == std::numeric_limits<std::uint64_t>::max()) {
+    (void)advance_control_seq();
     return;
   }
 
-  state_ = State::Inhibited;
-  lease_id_.clear();
-  candidate_topic_.clear();
-  bound_writer_gid_.fill(0U);
-  writer_bound_ = false;
-  candidate_fresh_ = false;
-  selected_ = zero_command();
-  prepare_deadline_ = SteadyTimePoint{};
-  authority_deadline_ = SteadyTimePoint{};
-  candidate_deadline_ = SteadyTimePoint{};
-  reason_ = reason;
-  detail_ = bounded_detail(
+  auto next_detail = bounded_detail(
     detail.empty() ? "lease retired" : std::move(detail));
-  advance_state_seq();
+  apply_transition(
+    event_code,
+    reason,
+    [this, reason, &next_detail]() noexcept {
+      ++control_seq_;
+      state_ = State::Inhibited;
+      lease_id_.clear();
+      candidate_topic_.clear();
+      bound_writer_gid_.fill(0U);
+      writer_bound_ = false;
+      candidate_fresh_ = false;
+      selected_ = zero_command();
+      prepare_deadline_ = SteadyTimePoint{};
+      authority_deadline_ = SteadyTimePoint{};
+      candidate_deadline_ = SteadyTimePoint{};
+      reason_ = reason;
+      detail_.swap(next_detail);
+      advance_state_seq();
+    });
 }
 
 std::string MotionGateCore::make_lease_id(

@@ -265,7 +265,10 @@ private:
     Reason reason,
     Mutation && mutation);
   void reconcile_deadlines(SteadyTimePoint now);
-  void retire_lease(Reason reason, std::string detail);
+  void retire_lease(
+    std::uint64_t event_code,
+    Reason reason,
+    std::string detail);
   [[nodiscard]] std::string make_lease_id(
     std::uint64_t next_control_seq) const;
   [[nodiscard]] std::string make_candidate_topic(
