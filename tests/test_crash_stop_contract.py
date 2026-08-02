@@ -159,15 +159,23 @@ ADAPTER_BEHAVIOR_TEST = """\
 
 TEST(
   JournaledGazeboSimSystemAdapter,
-  ForwardsLifecycleArgumentsAndResults)
+  LoadsExportedAdapterAndItsPinnedUpstream)
 {}
 
+TEST(JournaledGazeboSimSystemAdapter, ForwardsInitSimArgumentsAndResult) {}
+TEST(JournaledGazeboSimSystemAdapter, ForwardsOnInitArgumentAndResult) {}
+TEST(JournaledGazeboSimSystemAdapter, ForwardsOnConfigureArgumentAndResult) {}
+TEST(JournaledGazeboSimSystemAdapter, ForwardsExportedInterfaceCollections) {}
+TEST(JournaledGazeboSimSystemAdapter, ForwardsActivationTransitions) {}
+TEST(JournaledGazeboSimSystemAdapter, ForwardsCommandModeSwitches) {}
+TEST(JournaledGazeboSimSystemAdapter, ForwardsReadAndWriteCycles) {}
 TEST(
   JournaledGazeboSimSystemAdapter,
-  ForwardsInterfacesModeSwitchAndIoArgumentsAndResults)
+  ObservesActualWheelCommandsAfterDelegatedWrite)
 {}
-
-TEST(JournaledGazeboSimSystemAdapter, LoadsExportedAdapterPlugin)
+TEST(
+  JournaledGazeboSimSystemAdapter,
+  DoesNotObserveFromBindingBeforeFailedReinitialization)
 {}
 """
 
