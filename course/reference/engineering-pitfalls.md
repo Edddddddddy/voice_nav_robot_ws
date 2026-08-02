@@ -58,6 +58,7 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0048 | A read-only parameter test passes although the parameter is undeclared | Did `describe_parameters` prove the exact name, string type, and read-only descriptor before testing mutation? | Guarded |
 | PIT-0049 | A direct package install leaves a manifest in the repository root | Was installation run through `colcon`, followed by a clean-worktree check? | Guarded |
 | PIT-0050 | A static checker rejects the correct implementation after a field refactor | Do both the synthetic fixture and real-repository positive controls use the current semantic token? | Guarded |
+| PIT-0051 | One launch test intentionally starts both valid and invalid processes | Are exit codes asserted per exact launch action instead of globally? | Guarded |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -375,6 +376,14 @@ Run that exact entry point, not only its `run_suite()` unit helper, before
 claiming the gate is usable. The same runner fails closed if any discovered
 contract is skipped.
 
+**Recurrence evidence.** The Node-journal launch test initially imported a
+sibling support module as though its source directory were guaranteed on
+`sys.path`. CTest actually launched it with the package build directory as the
+working directory, so collection failed before the Node ran. The test now
+resolves the helper from `Path(__file__)` and loads that exact file explicitly;
+the generated-metadata contract continues to verify the real build working
+directory so a source-tree-only fixture cannot hide the dependency.
+
 ## PIT-0014: A fixed ROS domain is not concurrent test isolation
 
 **Symptom.** A launch test passes alone but intermittently discovers another
@@ -562,6 +571,13 @@ resolved `build/<package>` working directory, alongside the existing runner,
 source, environment, serialization, and closed property set. Required mutation
 tests independently replace `LABELS`, `TIMEOUT`, and `WORKING_DIRECTORY` and
 must prove that every replacement is rejected.
+
+**Recurrence evidence.** When the mission package gained a second launch test,
+a fixture regex using `.*?` crossed a closing CMake parenthesis and associated
+an unrelated cross-process filename with a later `set_tests_properties()`
+call. Restricting the captured target list to `[^)]*?` restored the actual
+single-call boundary. The exact generated inventory remains the authoritative
+oracle; source regex is only a focused structural guard.
 
 ## PIT-0020: Unit-quaternion formulas require a unit quaternion
 
@@ -1270,3 +1286,21 @@ marker with those two keys made all 17 non-topology crash-contract fixture
 cases pass. The repository-root checker remains separately RED for the
 not-yet-implemented Gazebo Adapter and was not counted as this correction's
 failure.
+
+## PIT-0051: Mixed-outcome launch tests need per-action exit assertions
+
+**Symptom.** A launch test deliberately starts one valid process and malformed
+siblings, correctly observes the siblings exit with code 1, but the suite still
+fails during a global exit-code assertion.
+
+**Cause.** `launch_testing.assertExitCodes(proc_info)` applies one allowable
+set to every managed action. A process whose rejection is the behavior under
+test is therefore indistinguishable from an unexpected process failure when
+the assertion is global.
+
+**Guardrail.** Keep a distinct launch action object for each process and call
+`assertExitCodes(..., process=action, allowable_exit_codes=[...])` for every
+expected outcome. Also bind stderr and PID assertions to that same action so an
+unrelated process cannot satisfy the oracle. The Node-journal acceptance test
+requires code 0 for the fully configured Gate and code 1 for each partial
+configuration, both during the live test and again in post-shutdown evidence.

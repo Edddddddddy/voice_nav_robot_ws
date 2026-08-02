@@ -14,6 +14,40 @@ BOUNDARY_CHECKER = (
 REPORTER = REPOSITORY_ROOT / "scripts" / "report_test_results.py"
 VERIFY_SCRIPT = REPOSITORY_ROOT / "scripts" / "verify.sh"
 CI_WORKFLOW = REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml"
+MOTION_GATE_NODE_CRITICAL_CASES = (
+    (
+        "voice_nav_mission.MotionGateNodeTest",
+        (
+            "test_journal_parameters_are_declared_read_only_and_"
+            "default_off"
+        ),
+    ),
+    (
+        "voice_nav_mission.MotionGateNodeTest",
+        "test_steady_fail_closed_protocol_without_clock",
+    ),
+    (
+        "voice_nav_mission.MotionGateNodeShutdownTest",
+        "test_motion_gate_exits_cleanly",
+    ),
+)
+MOTION_GATE_NODE_JOURNAL_CRITICAL_CASES = (
+    (
+        "voice_nav_mission.MotionGateNodeJournalTest",
+        "test_partial_configuration_exits_without_writer_claim",
+    ),
+    (
+        "voice_nav_mission.MotionGateNodeJournalTest",
+        (
+            "test_full_configuration_claims_exact_pid_and_"
+            "mapping_survives_exit"
+        ),
+    ),
+    (
+        "voice_nav_mission.MotionGateNodeJournalShutdownTest",
+        "test_exit_codes_match_configuration_contract",
+    ),
+)
 
 
 def write_xunit(path: Path, *, tests: int, skipped: int = 0) -> None:
@@ -53,6 +87,18 @@ def write_launch_xunit(
             f'{"".join(case_xml)}</testsuite>\n'
         ),
         encoding="utf-8",
+    )
+
+
+def write_mission_launch_evidence(results: Path) -> None:
+    """Write the complete safety-critical MotionGate launch inventory."""
+    write_launch_xunit(
+        results / "test_test_motion_gate_node.py.xunit.xml",
+        MOTION_GATE_NODE_CRITICAL_CASES,
+    )
+    write_launch_xunit(
+        results / "test_test_motion_gate_node_journal.py.xunit.xml",
+        MOTION_GATE_NODE_JOURNAL_CRITICAL_CASES,
     )
 
 
@@ -312,6 +358,35 @@ class ScopedTestResultsTest(unittest.TestCase):
             )
             write_launch_xunit(
                 result,
+                (("voice_nav_mission.UnrelatedTest", "test_unrelated"),),
+            )
+
+            completed = self.run_reporter(
+                build_base,
+                "voice_nav_mission",
+            )
+
+            self.assertEqual(completed.returncode, 2, completed.stdout)
+            self.assertIn("critical launch evidence", completed.stderr)
+
+    def test_report_requires_motion_gate_node_journal_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            results = (
+                build_base
+                / "voice_nav_mission"
+                / "test_results"
+                / "voice_nav_mission"
+            )
+            write_launch_xunit(
+                results / "test_test_motion_gate_node.py.xunit.xml",
+                MOTION_GATE_NODE_CRITICAL_CASES,
+            )
+            write_launch_xunit(
+                (
+                    results
+                    / "test_test_motion_gate_node_journal.py.xunit.xml"
+                ),
                 (("voice_nav_mission.UnrelatedTest", "test_unrelated"),),
             )
 
@@ -978,25 +1053,10 @@ class ScopedTestResultsTest(unittest.TestCase):
                         tests=1,
                     )
                     if package_name == "voice_nav_mission":
-                        write_launch_xunit(
+                        write_mission_launch_evidence(
                             selected_package
                             / "test_results"
-                            / "voice_nav_mission"
-                            / "test_test_motion_gate_node.py.xunit.xml",
-                            (
-                                (
-                                    "voice_nav_mission.MotionGateNodeTest",
-                                    (
-                                        "test_steady_fail_closed_protocol_"
-                                        "without_clock"
-                                    ),
-                                ),
-                                (
-                                    "voice_nav_mission."
-                                    "MotionGateNodeShutdownTest",
-                                    "test_motion_gate_exits_cleanly",
-                                ),
-                            ),
+                            / "voice_nav_mission",
                         )
                     source_package = workspace / "src" / package_name
                     write_package_manifest(
@@ -1030,7 +1090,7 @@ class ScopedTestResultsTest(unittest.TestCase):
                         completed.stderr,
                     )
                     expected_tests = (
-                        3 if package_name == "voice_nav_mission" else 1
+                        7 if package_name == "voice_nav_mission" else 1
                     )
                     self.assertIn(
                         f"Summary: {expected_tests} test",

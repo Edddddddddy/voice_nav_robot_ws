@@ -57,50 +57,60 @@ def load_generated_checker():
     return module
 
 
+def generated_launch_test(name: str, source: str, timeout: float) -> dict:
+    return {
+        "name": name,
+        "command": [
+            "/usr/bin/python3",
+            "-u",
+            (
+                "/opt/ros/jazzy/share/ament_cmake_ros/cmake/"
+                "run_test_isolated.py"
+            ),
+            "/tmp/result.xunit.xml",
+            "--command",
+            f"/workspace/src/voice_nav_mission/test/{source}",
+        ],
+        "properties": [
+            {
+                "name": "ENVIRONMENT",
+                "value": [
+                    "RMW_IMPLEMENTATION=rmw_fastrtps_cpp",
+                    "ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST",
+                ],
+            },
+            {
+                "name": "ENVIRONMENT_MODIFICATION",
+                "value": [
+                    "ROS_DOMAIN_ID=unset:",
+                    "DISABLE_ROS_ISOLATION=unset:",
+                ],
+            },
+            {"name": "LABELS", "value": ["launch_test"]},
+            {"name": "RUN_SERIAL", "value": True},
+            {"name": "TIMEOUT", "value": timeout},
+            {
+                "name": "WORKING_DIRECTORY",
+                "value": GENERATED_MISSION_WORKING_DIRECTORY,
+            },
+        ],
+    }
+
+
 def generated_mission_payload():
     return {
         "kind": "ctestInfo",
         "tests": [
-            {
-                "name": "test_test_motion_gate_node.py",
-                "command": [
-                    "/usr/bin/python3",
-                    "-u",
-                    (
-                        "/opt/ros/jazzy/share/ament_cmake_ros/cmake/"
-                        "run_test_isolated.py"
-                    ),
-                    "/tmp/result.xunit.xml",
-                    "--command",
-                    (
-                        "/workspace/src/voice_nav_mission/test/"
-                        "test_motion_gate_node.py"
-                    ),
-                ],
-                "properties": [
-                    {
-                        "name": "ENVIRONMENT",
-                        "value": [
-                            "RMW_IMPLEMENTATION=rmw_fastrtps_cpp",
-                            "ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST",
-                        ],
-                    },
-                    {
-                        "name": "ENVIRONMENT_MODIFICATION",
-                        "value": [
-                            "ROS_DOMAIN_ID=unset:",
-                            "DISABLE_ROS_ISOLATION=unset:",
-                        ],
-                    },
-                    {"name": "LABELS", "value": ["launch_test"]},
-                    {"name": "RUN_SERIAL", "value": True},
-                    {"name": "TIMEOUT", "value": 60.0},
-                    {
-                        "name": "WORKING_DIRECTORY",
-                        "value": GENERATED_MISSION_WORKING_DIRECTORY,
-                    },
-                ],
-            },
+            generated_launch_test(
+                "test_test_motion_gate_node.py",
+                "test_motion_gate_node.py",
+                60.0,
+            ),
+            generated_launch_test(
+                "test_test_motion_gate_node_journal.py",
+                "test_motion_gate_node_journal.py",
+                30.0,
+            ),
         ],
     }
 
@@ -129,7 +139,7 @@ def calls_to_method(tree: ast.AST, method_name: str) -> list[ast.Call]:
 def launch_test_runtime(cmake_path: Path) -> tuple[set[str], dict[str, str]]:
     cmake = cmake_path.read_text(encoding="utf-8")
     matches = re.findall(
-        r"set_tests_properties\(\s*(.*?)\s+PROPERTIES\s+"
+        r"set_tests_properties\(\s*([^)]*?)\s+PROPERTIES\s+"
         r"ENVIRONMENT\s+\"([^\"]+)\"\s+"
         r"RUN_SERIAL\s+TRUE\s*\)",
         cmake,
@@ -238,7 +248,10 @@ class CiReadinessContractTest(unittest.TestCase):
         })
         self.assertEqual(
             mission_targets,
-            {"test_test_motion_gate_node.py"},
+            {
+                "test_test_motion_gate_node.py",
+                "test_test_motion_gate_node_journal.py",
+            },
         )
         self.assertEqual(
             bringup_targets,
@@ -268,7 +281,7 @@ class CiReadinessContractTest(unittest.TestCase):
     def test_launch_tests_use_official_process_scoped_domain_leases(self):
         expected_launch_test_counts = {
             SIMULATION_CMAKE: 3,
-            MISSION_CMAKE: 1,
+            MISSION_CMAKE: 2,
             BRINGUP_CMAKE: 1,
         }
         isolated_runner = (
@@ -333,6 +346,22 @@ class CiReadinessContractTest(unittest.TestCase):
                 GENERATED_MISSION_WORKING_DIRECTORY
             ),
         )
+
+    def test_generated_metadata_requires_node_journal_inventory(self):
+        checker = load_generated_checker()
+        payload = generated_mission_payload()
+        payload["tests"].pop()
+
+        with self.assertRaises(
+            checker.GeneratedLaunchTestContractError,
+        ):
+            checker.validate_package_payload(
+                "voice_nav_mission",
+                payload,
+                expected_working_directory=(
+                    GENERATED_MISSION_WORKING_DIRECTORY
+                ),
+            )
 
     def test_generated_metadata_rejects_isolation_override(self):
         checker = load_generated_checker()

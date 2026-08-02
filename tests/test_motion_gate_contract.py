@@ -986,13 +986,20 @@ if(BUILD_TESTING)
     TIMEOUT 60
     RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
   )
+  add_launch_test(
+    test/test_motion_gate_node_journal.py
+    TIMEOUT 30
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
+  )
   set_tests_properties(
     test_test_motion_gate_node.py
+    test_test_motion_gate_node_journal.py
     PROPERTIES
       RUN_SERIAL TRUE
   )
   set_tests_properties(
     test_test_motion_gate_node.py
+    test_test_motion_gate_node_journal.py
     PROPERTIES
       ENVIRONMENT_MODIFICATION
         "ROS_DOMAIN_ID=unset:;DISABLE_ROS_ISOLATION=unset:"
@@ -2294,7 +2301,7 @@ class MotionGateContractTest(unittest.TestCase):
                 self.assertNotEqual(completed.returncode, 0)
                 self.assertIn(diagnostic, completed.stderr)
 
-    def test_each_package_registers_one_serial_launch_test(self) -> None:
+    def test_each_package_registers_exact_serial_launch_inventory(self) -> None:
         specifications = (
             (
                 "voice_nav_mission",
@@ -2376,7 +2383,7 @@ class MotionGateContractTest(unittest.TestCase):
                         '"${ament_cmake_ros_DIR}/run_test_isolated.py"\n'
                         "  )"
                     ),
-                    "exactly one add_launch_test",
+                    "invalid or duplicate path",
                 ),
             )
             for old, new, diagnostic in mutations:
@@ -2393,6 +2400,29 @@ class MotionGateContractTest(unittest.TestCase):
 
                     self.assertNotEqual(completed.returncode, 0)
                     self.assertIn(diagnostic, completed.stderr)
+
+    def test_mission_requires_node_journal_launch_test(self) -> None:
+        journal_registration = (
+            "  add_launch_test(\n"
+            "    test/test_motion_gate_node_journal.py\n"
+            "    TIMEOUT 30\n"
+            "    RUNNER "
+            '"${ament_cmake_ros_DIR}/run_test_isolated.py"\n'
+            "  )\n"
+        )
+
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_mission/CMakeLists.txt",
+                journal_registration,
+                "",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("exact launch-test inventory", completed.stderr)
 
     def test_gate_limits_cannot_exceed_controller_limits(self) -> None:
         def mutation(root: Path) -> None:

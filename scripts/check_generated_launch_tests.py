@@ -17,6 +17,10 @@ EXPECTED_TESTS = {
             "source": "test_motion_gate_node.py",
             "timeout": 60.0,
         },
+        "test_test_motion_gate_node_journal.py": {
+            "source": "test_motion_gate_node_journal.py",
+            "timeout": 30.0,
+        },
     },
     "voice_nav_sim": {
         "test_test_simulation_control.py": {

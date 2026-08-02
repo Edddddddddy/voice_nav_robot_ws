@@ -15,11 +15,11 @@
 """Cross-process contract test for the parent-owned Gate event journal."""
 
 import os
+from pathlib import Path
 import subprocess
 import sys
 import time
 import unittest
-from pathlib import Path
 
 import gate_event_journal_test_support as journal_support
 

@@ -35,11 +35,46 @@ CRITICAL_LAUNCH_CASES: dict[
             {
                 (
                     "voice_nav_mission.MotionGateNodeTest",
+                    (
+                        "test_journal_parameters_are_declared_read_only_"
+                        "and_default_off"
+                    ),
+                ),
+                (
+                    "voice_nav_mission.MotionGateNodeTest",
                     "test_steady_fail_closed_protocol_without_clock",
                 ),
                 (
                     "voice_nav_mission.MotionGateNodeShutdownTest",
                     "test_motion_gate_exits_cleanly",
+                ),
+            }
+        ),
+        Path(
+            "test_results/voice_nav_mission/"
+            "test_test_motion_gate_node_journal.py.xunit.xml"
+        ): frozenset(
+            {
+                (
+                    "voice_nav_mission.MotionGateNodeJournalTest",
+                    (
+                        "test_partial_configuration_exits_without_"
+                        "writer_claim"
+                    ),
+                ),
+                (
+                    "voice_nav_mission.MotionGateNodeJournalTest",
+                    (
+                        "test_full_configuration_claims_exact_pid_and_"
+                        "mapping_survives_exit"
+                    ),
+                ),
+                (
+                    (
+                        "voice_nav_mission."
+                        "MotionGateNodeJournalShutdownTest"
+                    ),
+                    "test_exit_codes_match_configuration_contract",
                 ),
             }
         ),
