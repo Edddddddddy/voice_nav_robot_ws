@@ -586,9 +586,44 @@ Independent review again found P0=0 and P1=0. Its remaining P2 is intentionally
 the next ledger slice, not a completed claim: missing/null/duplicate wheel
 entities, missing/empty command components, sequence exhaustion, and sink
 rejection must latch an oracle fault without changing the upstream hardware
-result. Product Xacro still selects only `gz_ros2_control/GazeboSimSystem`; the
-test transformer remains unimplemented and therefore cannot yet select the
-Adapter.
+result. Product Xacro still selects only `gz_ros2_control/GazeboSimSystem`; at
+this checkpoint the test transformer remained unimplemented and therefore
+could not yet select the Adapter.
+
+### Owned crash robot-description transformer checkpoint
+
+The next tracer began with a registered pytest that could not load the missing
+`crash_robot_description.py`. GREEN introduced one pure function over expanded
+URDF text. It parses XML, requires exactly one canonical
+`gz_ros2_control/GazeboSimSystem` plugin in one hardware block, replaces that
+plugin with the owned Adapter, and appends only `journal_name` and
+`journal_nonce`. The test removes those two additions, restores the original
+plugin, and compares recursive element signatures, so unrelated tags,
+attributes, text, or child order cannot change unnoticed.
+
+Later RED/GREEN cycles reject a pre-existing owned parameter, an empty or
+unsafe POSIX shared-memory name, and a nonce that is not exactly 32 lowercase,
+nonzero hexadecimal digits. Missing, duplicate, unexpected, or multiply owned
+hardware plugins are also characterized as fail-closed inputs. Canonical
+product Xacro remains byte-for-byte unchanged and still selects only the
+upstream plugin.
+
+The first static run exposed a checker bug rather than a transformer defect:
+the Windows-drive regex matched `p:/` inside the standard Apache `http://`
+license URL. A synthetic-repository RED now requires URLs to pass while real
+`C:/`, `C:\\`, `/home`, and `/mnt/c` paths still fail; a boundary-aware regex
+made all 19 non-root crash-contract tests GREEN.
+
+```text
+focused transformer pytest: 4 tests passed
+transformer static contract: passed
+crash-contract sibling tests: 19 passed, 1 intentional root test deselected
+voice_nav_sim package CTest: 13/13 passed
+scoped xUnit: 69 tests, 0 errors, 0 failures, 6 skipped
+protected Gazebo fingerprint before/after:
+  3631225|1|34712103|gz sim server (identical)
+root crash-stop checker: expected RED at missing crash_stop_policy.py
+```
 
 ## VN-0011A observed crash evidence
 

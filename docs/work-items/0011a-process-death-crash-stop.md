@@ -17,10 +17,13 @@ composition are complete. The current `voice_nav_mission` package gate is
 18/18 GREEN. Real pluginlib discovery now constructs the public-Interface test
 Adapter and its pinned upstream plugin. Its complete Jazzy 1.2.19 forwarding
 surface and post-delegate `JointVelocityCmd` observation are behavior-tested;
-the focused Adapter target is 10/10 GREEN and `voice_nav_sim` is 12/12 CTest
-GREEN (63 scoped xUnit tests, 6 skipped). The lossless hardware-write ledger,
-its fail-closed oracle-fault paths, evidence policy and composition, repository
-GREEN, product crash runs, the final local gate, PR, and CI remain open.
+the focused Adapter target is 10/10 GREEN. The pure crash robot-description
+transformer now replaces only the unique canonical upstream plugin, injects
+only the validated journal name/nonce, and rejects structural or ownership
+ambiguity. `voice_nav_sim` is 13/13 CTest GREEN (69 scoped xUnit tests, 6
+skipped). The lossless hardware-write ledger, its fail-closed oracle-fault
+paths, evidence policy and composition, repository GREEN, product crash runs,
+the final local gate, PR, and CI remain open.
 
 ## Immutable base
 

@@ -1422,3 +1422,19 @@ process itself remains unchanged.
 line after its final `)` because the parenthesized command name may contain
 spaces. Compare the raw start ticks before and after the gate; use `lstart`
 only for human display, never as the teardown-safety identity oracle.
+
+## PIT-0057: A drive-letter regex can mistake a URL scheme for a path
+
+**Symptom.** The real transformer passed its behavior tests but its static
+contract rejected the standard Apache license URL as a machine-specific
+Windows path. The decisive regex match was `p:/` inside `http://`.
+
+**Cause.** The checker searched for any `[a-z]:/` substring without requiring
+a token boundary before the drive letter. A URL scheme therefore contained a
+syntactically matching suffix even though no machine path was present.
+
+**Guardrail.** Machine-path checks must require a non-alphanumeric boundary
+before a drive letter or Unix absolute-path marker. Test both sides of the
+classifier: ordinary `http://` and `https://` source text must pass, while
+quoted or commented `C:/`, `C:\\`, `/home/...`, and `/mnt/c/...` examples must
+still fail. Never remove a license header to satisfy a faulty source checker.
