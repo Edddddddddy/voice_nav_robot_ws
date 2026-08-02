@@ -464,8 +464,10 @@ class HardwareWriteLedgerRegionOwner:
             raise AssertionError('ledger seal stamp is negative')
         if bank[9] > bank[5] or bank[9] > self.segment_capacity:
             raise AssertionError('ledger segment count exceeds capacity')
-        if bank[10] == 0 or bank[10] > bank[6]:
-            raise AssertionError('ledger invocation count exceeds its budget')
+        if bank[10] == 0:
+            raise AssertionError('ledger invocation count is zero')
+        if bank[10] > bank[6] and not bank[13] & FAULT_CAPACITY:
+            raise AssertionError('ledger over-budget attempts lack fault')
         if bank[11] != bank[3] + 1:
             raise AssertionError('ledger first write does not follow ARM')
         if bank[12] != bank[4]:
