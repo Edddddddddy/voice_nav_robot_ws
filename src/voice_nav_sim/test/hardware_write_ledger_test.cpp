@@ -278,4 +278,52 @@ TEST(HardwareWriteLedger, FinalizesASegmentWhenTheWriteTupleChanges)
   EXPECT_EQ(snapshot->page_checksum, independent_page_checksum(*snapshot));
 }
 
+TEST(HardwareWriteLedger, PaginatesSealedSegmentsWithAChecksumChain)
+{
+  voice_nav_sim::HardwareWriteLedger ledger({43U, 10U, 0U, 2U, 1U});
+  const voice_nav_sim::HardwareWriteRecord first{
+    43U, 1U, 4'000'000, 0U, UINT64_C(1), UINT64_C(2)};
+  const voice_nav_sim::HardwareWriteRecord second{
+    43U, 2U, 4'010'000, 0U, UINT64_C(3), UINT64_C(4)};
+  ASSERT_TRUE(ledger.append(first));
+  ASSERT_TRUE(ledger.append(second));
+  ASSERT_TRUE(ledger.seal());
+
+  const auto first_page = ledger.snapshot_page(0U);
+  const auto second_page = ledger.snapshot_page(1U);
+  ASSERT_TRUE(first_page.has_value());
+  ASSERT_TRUE(second_page.has_value());
+  EXPECT_FALSE(ledger.snapshot_page(2U).has_value());
+  EXPECT_EQ(first_page->page_index, 0U);
+  EXPECT_EQ(second_page->page_index, 1U);
+  EXPECT_EQ(first_page->page_count, 2U);
+  EXPECT_EQ(second_page->page_count, 2U);
+  EXPECT_EQ(first_page->total_segment_count, 2U);
+  EXPECT_EQ(second_page->total_segment_count, 2U);
+  EXPECT_EQ(first_page->total_invocation_count, 2U);
+  EXPECT_EQ(second_page->total_invocation_count, 2U);
+  EXPECT_EQ(first_page->page_segment_count, 1U);
+  EXPECT_EQ(second_page->page_segment_count, 1U);
+  EXPECT_EQ(first_page->page_invocation_count, 1U);
+  EXPECT_EQ(second_page->page_invocation_count, 1U);
+  EXPECT_EQ(first_page->page_first_write_seq, 1U);
+  EXPECT_EQ(first_page->page_last_write_seq, 1U);
+  EXPECT_EQ(second_page->page_first_write_seq, 2U);
+  EXPECT_EQ(second_page->page_last_write_seq, 2U);
+  EXPECT_EQ(first_page->previous_page_checksum, 0U);
+  EXPECT_EQ(
+    second_page->previous_page_checksum,
+    first_page->page_checksum);
+  ASSERT_EQ(first_page->segments.size(), 1U);
+  ASSERT_EQ(second_page->segments.size(), 1U);
+  EXPECT_EQ(first_page->segments.front().first_write_seq, 1U);
+  EXPECT_EQ(second_page->segments.front().first_write_seq, 2U);
+  EXPECT_EQ(
+    first_page->page_checksum,
+    independent_page_checksum(*first_page));
+  EXPECT_EQ(
+    second_page->page_checksum,
+    independent_page_checksum(*second_page));
+}
+
 }  // namespace
