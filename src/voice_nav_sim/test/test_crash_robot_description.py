@@ -125,13 +125,17 @@ class CrashRobotDescriptionTest(unittest.TestCase):
                     )
 
     def test_rejects_malformed_journal_identity(self):
-        valid_name = '/voice_nav_contract_fixture'
+        valid_name = '/voice_nav_hardware_0011223344556677'
         valid_nonce = '00112233445566778899aabbccddeeff'
         invalid_identities = (
             ('', valid_nonce, 'journal name'),
             ('voice_nav_missing_slash', valid_nonce, 'journal name'),
             ('/voice/nav', valid_nonce, 'journal name'),
             ('/voice nav', valid_nonce, 'journal name'),
+            ('/voice_nav_contract_fixture', valid_nonce, 'journal name'),
+            ('/voice_nav_hardware_001122334455667', valid_nonce, 'journal name'),
+            ('/voice_nav_hardware_001122334455667G', valid_nonce, 'journal name'),
+            ('/other_nav_hardware_0011223344556677', valid_nonce, 'journal name'),
             (valid_name, '', 'journal nonce'),
             (valid_name, '00112233445566778899AABBCCDDEEFF', 'journal nonce'),
             (valid_name, '00112233445566778899aabbccddeef', 'journal nonce'),
