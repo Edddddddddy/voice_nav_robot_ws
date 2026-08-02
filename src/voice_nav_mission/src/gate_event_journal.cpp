@@ -228,6 +228,17 @@ GateEventJournal::GateEventJournal(
   {
     throw std::invalid_argument("GateEventJournal header validation failed");
   }
+  for (std::size_t index = 0U;
+    index < static_cast<std::size_t>(header_->capacity);
+    ++index)
+  {
+    if (
+      gate_event_journal_load_acquire(slots_[index].phase) !=
+      VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_FREE)
+    {
+      throw std::invalid_argument("GateEventJournal contains an occupied slot");
+    }
+  }
 
   const auto writer_pid = static_cast<std::uint64_t>(getpid());
   std::uint64_t unclaimed_writer = 0U;
