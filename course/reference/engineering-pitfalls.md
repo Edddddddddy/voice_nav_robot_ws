@@ -67,7 +67,8 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0057 | A drive-letter regex rejects an ordinary source URL | Does the path detector require a token boundary and test both URLs and real machine paths? | Guarded |
 | PIT-0058 | Entry-time SEAL excludes the write being proved | Is SEAL deferred until the qualifying write is recorded? | Guarded |
 | PIT-0059 | TSAN intermittently crashes before the test under WSL | Does only the TSAN executable run non-PIE with per-process ASLR disabled? | Guarded |
-| PIT-0060 | A mailbox replay races or binds its response to changed request bytes | Does each retry perform a fresh owned-state handoff and bind the consumed snapshot? | Guarded |
+| PIT-0060 | A mailbox replay races or binds its response to changed request bytes | Does a pending request retain Writer ownership and bind the consumed snapshot? | Guarded |
+| PIT-0061 | A fail-closed checksum path reads beyond fixed evidence storage | Was untrusted count geometry rejected before traversal? | Guarded |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -1500,7 +1501,27 @@ path.
 **Guardrail.** Use the single owned-envelope state machine from
 [ADR-0007](../../docs/adr/0007-own-hardware-ledger-request-publication.md).
 Parent writes only while it owns WRITING; Writer reads only after claiming
-READY, snapshots locally, then releases IDLE. The response stores and checksums
-the consumed request checksum. A cross-process regression test deliberately
+READY and snapshots locally. Immediate requests release IDLE before their
+receipt; deferred requests retain READING until terminal response. The response
+stores and checksums the consumed request checksum. A cross-process regression
+test deliberately
 holds WRITING across a Writer `begin_write()` and proves there is no receipt,
 bank activation, or protocol fault until Parent release-publishes READY.
+
+## PIT-0061: Detecting corrupt geometry does not make later traversal safe
+
+**Symptom.** Writer correctly latches a protocol fault for a segment count
+larger than the fixed bank capacity, but then crashes, reads the adjacent bank,
+or publishes a root checksum over bytes outside the declared evidence.
+
+**Cause.** The structural validator reported the bad count and then reused the
+normal terminalization path. That path iterated to the untrusted count while
+calculating CRC, so the failure handler crossed the boundary it had just found
+invalid.
+
+**Guardrail.** Treat fixed-capacity geometry as a prerequisite for every loop,
+not merely as a fault bit. Before page-count or CRC calculation, revalidate the
+segment count and page limit against the mapped capacity. On failure, latch
+PROTOCOL and publish neither a readable sealed bank nor a receipt. The
+cross-process mutation test sets the count to capacity plus one and requires
+the exact Writer child to remain alive with the bank ACTIVE and faulted.

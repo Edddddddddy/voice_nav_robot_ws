@@ -68,13 +68,14 @@ IDLE -> WRITING -> READY -> READING -> IDLE
 
 Parent claims `IDLE -> WRITING`, fills the complete request, then
 release-publishes READY. Writer claims `READY -> READING`, copies the request
-to a local snapshot, and release-publishes IDLE; checksum validation and all
-later processing use only that snapshot. IDLE means the bytes are reusable,
-not that a response exists. Parent waits for the matching response ticket,
-which Writer publishes last with release semantics, before publishing a
-different ticket. A pending request retry must republish the same ticket and
-payload through a new WRITING/READY handoff. The response stores the consumed
-request checksum, so its CRC never depends on a mutable request word.
+to a local snapshot, and all later processing uses only that snapshot. An
+immediate request releases IDLE before its response ticket. A deferred SEAL
+retains READING across non-qualifying writes and the qualifying finish, then
+releases IDLE before release-publishing its response ticket. Thus observing a
+response also observes a reusable envelope, while a pending request cannot be
+republished or replaced. An exact replay is idempotent only after the original
+receipt exists. The response stores the consumed request checksum, so its CRC
+never depends on a mutable request word.
 
 ## Linearization and interval semantics
 

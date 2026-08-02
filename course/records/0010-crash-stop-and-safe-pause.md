@@ -669,6 +669,43 @@ Adapter construction from the transformed journal identity, and fail-closed
 handling of missing wheel entities/components, sink rejection, and Adapter
 sequence exhaustion remain the next slices.
 
+### Shared-memory ARM and deferred-SEAL checkpoint
+
+The cross-process Module now owns a 192-byte control area and one request
+envelope with explicit `IDLE -> WRITING -> READY -> READING -> IDLE`
+ownership. Writer copies a fixed snapshot only after claiming READY. Immediate
+requests release the envelope before their receipt; deferred SEAL retains
+READING until the qualifying write has finished, preventing a late retry from
+stranding READY after the final write. Response CRC binds the consumed request
+checksum rather than mutable request bytes.
+
+ARM, global non-wrapping sequence assignment, multi-write append/folding,
+simulation-stamp regression, ticket wrap/replay, and single-Writer lifecycle
+are executable. Deferred exact SEAL was added tests-first: stamps 100 and 150
+remain inside ACTIVE, the stamp-200 BEGIN still has no receipt, and only its
+FINISH appends sequence three, publishes `last_completed_write_seq`, fixes the
+three-segment/two-page root CRC, release-publishes SEALED_OK, and then publishes
+the fence-three receipt. A corrupted segment count now faults and remains
+unsealed without traversing untrusted geometry.
+
+Independent review found the pending-retry and untrusted-count P1 defects;
+both received deterministic RED tests before correction. Its remaining P2 is
+not claimed complete here: qualifying fault writes must still prove exact
+attempted fence/count metadata, and the invalid SEAL/exact-skip/terminal
+immutability matrix remains the next slice before ACK and page reads.
+
+```text
+owned-envelope ABI/behavior commits: 7faa91e..43bf6de
+deferred-SEAL RED/refinement/review RED: d92bef8, 68c03a6, 9d958ad
+deferred-SEAL GREEN: f6cd3ef
+cross-process CTest: 5/5 consecutive executions passed
+focused C ABI/concurrency/cross-process/core CTests: 4/4 passed
+Writer TSAN CTest: 10/10 consecutive executions passed
+cppcheck/flake8/lint_cmake/pep257/uncrustify: 5/5 passed
+package/full-repository/Gazebo runtime gates: not run for this checkpoint
+root crash-stop checker: still expected RED at missing crash_stop_policy.py
+```
+
 ## VN-0011A observed crash evidence
 
 | Case | Expected threshold | Observed result |

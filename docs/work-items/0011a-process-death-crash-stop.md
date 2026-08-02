@@ -419,8 +419,9 @@ and [ADR-0006](../adr/0006-use-fenced-dual-bank-hardware-write-ledger.md).
 - `ARM(generation, interval_id, request_ticket, budgets, predicate)` is
   release-published through one checksummed, single-outstanding owned envelope.
   Parent owns ordinary request words only in WRITING; Writer consumes them only
-  after claiming READY, snapshots them, and releases the envelope before using
-  that immutable snapshot. The
+  after claiming READY and snapshots them. A deferred SEAL retains Writer
+  ownership until its terminal receipt, preventing an in-flight retry from
+  stranding READY after the last qualifying write. The
   Writer consumes it at the next `write()` entry before assigning that call's
   sequence. If that call receives sequence `s`, `arm_fence_write_seq=s-1` and
   `s` is the first included invocation. Only that linearization may publish the
