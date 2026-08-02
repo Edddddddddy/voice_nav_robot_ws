@@ -158,13 +158,27 @@ def seal_single_write_interval(
     arm_ticket = owner.post_arm(
         interval_id=interval_id,
         segment_budget=1,
-        invocation_budget=1,
+        invocation_budget=2,
         require_zero_commands=False,
+    )
+    process.stdin.write(f'BEGIN {sim_stamp_ns}\n')
+    process.stdin.flush()
+    require(
+        read_owned_line(process, f'interval {interval_id} first begin') ==
+        f'BEGAN {expected_write_seq - 1}',
+        f'interval {interval_id} first write sequence changed',
     )
     arm_response = owner.wait_response(arm_ticket)
     require(
         arm_response[9] == CONTROL_RESPONSE_OK,
         f'interval {interval_id} ARM failed: {arm_response!r}',
+    )
+    process.stdin.write('FINISH 0 0 0 0\n')
+    process.stdin.flush()
+    require(
+        read_owned_line(process, f'interval {interval_id} first finish') ==
+        f'FINISHED {expected_write_seq - 1}',
+        f'interval {interval_id} first finish changed',
     )
     seal_ticket = owner.post_seal(
         interval_id=interval_id,
@@ -1187,14 +1201,14 @@ def test_retained_banks_require_exact_ack_before_epoch_reuse(probe):
                 owner,
                 interval_id=201,
                 sim_stamp_ns=100,
-                expected_write_seq=1,
+                expected_write_seq=2,
             )
             second_arm, second_snapshot = seal_single_write_interval(
                 process,
                 owner,
                 interval_id=202,
                 sim_stamp_ns=200,
-                expected_write_seq=2,
+                expected_write_seq=4,
             )
             require(
                 (first_arm[10], second_arm[10]) == (0, 1),
@@ -1207,13 +1221,26 @@ def test_retained_banks_require_exact_ack_before_epoch_reuse(probe):
                 invocation_budget=1,
                 require_zero_commands=False,
             )
+            process.stdin.write('BEGIN 250\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'blocked ARM begin') == 'BEGAN 5',
+                'blocked ARM trigger sequence changed',
+            )
             blocked_response = owner.wait_response(blocked_ticket)
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'blocked ARM finish') ==
+                'FINISHED 5',
+                'blocked ARM trigger did not finish',
+            )
             require(
                 blocked_response[9:13] == (
                     CONTROL_RESPONSE_NO_FREE_BANK,
                     INVALID_BANK_INDEX,
                     0,
-                    2,
+                    4,
                 ),
                 f'two retained banks did not fail closed: '
                 f'{blocked_response!r}',
@@ -1233,7 +1260,7 @@ def test_retained_banks_require_exact_ack_before_epoch_reuse(probe):
                 owner,
                 interval_id=203,
                 sim_stamp_ns=300,
-                expected_write_seq=3,
+                expected_write_seq=7,
             )
             require(
                 reused_arm[10] == first_snapshot.bank_index and
