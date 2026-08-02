@@ -27,15 +27,17 @@ from hardware_write_ledger_test_support import (
     CONTROL_FLAG_EXACT_SEAL_STAMP,
     CONTROL_FLAG_ZERO_REQUIRED,
     CONTROL_OP_ARM,
+    CONTROL_REQUEST_IDLE,
+    CONTROL_REQUEST_READING,
     CONTROL_RESPONSE_INVALID,
     CONTROL_RESPONSE_OK,
+    crc64_ecma_words,
     FAULT_PROTOCOL,
     FAULT_SEQUENCE,
     FAULT_SIM_STAMP,
     GLOBAL_ORACLE_FAULTS_WORD,
     HardwareWriteLedgerRegionOwner,
     WRITER_PID_WORD,
-    crc64_ecma_words,
 )
 
 
@@ -572,6 +574,10 @@ def test_seal_is_deferred_and_includes_qualifying_write(probe):
                 owner.load_response_ticket() == arm_ticket,
                 'SEAL acknowledged before its threshold',
             )
+            require(
+                owner.load_request_state() == CONTROL_REQUEST_READING,
+                'Writer released a pending SEAL request for unsafe retry',
+            )
             process.stdin.write('FINISH 0 0 0 0\n')
             process.stdin.flush()
             require(
@@ -581,6 +587,10 @@ def test_seal_is_deferred_and_includes_qualifying_write(probe):
             require(
                 owner.load_response_ticket() == arm_ticket,
                 'pre-threshold write prematurely sealed the bank',
+            )
+            require(
+                owner.load_request_state() == CONTROL_REQUEST_READING,
+                'pending SEAL lost Writer ownership below its threshold',
             )
 
             process.stdin.write('BEGIN 200\n')
@@ -592,6 +602,10 @@ def test_seal_is_deferred_and_includes_qualifying_write(probe):
             require(
                 owner.load_response_ticket() == arm_ticket,
                 'SEAL acknowledged before the qualifying write finished',
+            )
+            require(
+                owner.load_request_state() == CONTROL_REQUEST_READING,
+                'qualifying SEAL released ownership before finish',
             )
             process.stdin.write('FINISH 0 0 0 0\n')
             process.stdin.flush()
@@ -656,6 +670,10 @@ def test_seal_is_deferred_and_includes_qualifying_write(probe):
                 'SEALED bank root checksum does not bind all evidence',
             )
             require(
+                owner.load_request_state() == CONTROL_REQUEST_IDLE,
+                'terminal SEAL did not release its request envelope',
+            )
+            require(
                 owner.load_header_word(GLOBAL_ORACLE_FAULTS_WORD) == 0,
                 'valid deferred SEAL latched an oracle fault',
             )
@@ -667,6 +685,98 @@ def test_seal_is_deferred_and_includes_qualifying_write(probe):
             require(
                 return_code == 0,
                 f'SEAL probe exited {return_code}: {stderr}',
+            )
+        finally:
+            terminate_owned_process(process)
+            close_owned_process_pipes(process)
+
+
+def test_corrupt_segment_count_does_not_escape_mapping(probe):
+    """Prove malformed bank geometry faults without CRC traversal."""
+    with HardwareWriteLedgerRegionOwner(
+        generation=86,
+        segment_capacity=4,
+        page_segment_limit=2,
+    ) as owner:
+        process = spawn_probe(probe, owner)
+        try:
+            require(
+                owner.wait_for_writer(process.pid) == process.pid,
+                'corrupt-bank probe Writer PID mismatch',
+            )
+            require(
+                read_owned_line(process, 'READY') == 'READY',
+                'corrupt-bank probe did not publish READY',
+            )
+            owner.unlink_name()
+            arm_ticket = owner.post_arm(
+                interval_id=100,
+                segment_budget=4,
+                invocation_budget=4,
+                require_zero_commands=False,
+            )
+            process.stdin.write('BEGIN 100\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 1',
+                'corrupt-bank setup write did not begin',
+            )
+            arm_response = owner.wait_response(arm_ticket)
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 1',
+                'corrupt-bank setup write did not finish',
+            )
+
+            owner.post_seal(
+                interval_id=100,
+                bank_index=arm_response[10],
+                bank_epoch=arm_response[11],
+                not_before_sim_stamp_ns=200,
+                require_exact_stamp=True,
+            )
+            process.stdin.write('BEGIN 200\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 2',
+                'corrupt-bank qualifying write did not begin',
+            )
+            owner.force_bank_segment_count(
+                arm_response[10],
+                owner.segment_capacity + 1,
+            )
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 2',
+                'corrupt-bank finish did not return safely',
+            )
+            require(
+                process.poll() is None,
+                'corrupt segment count crashed the Writer process',
+            )
+            require(
+                owner.load_response_ticket() == arm_ticket,
+                'corrupt bank fabricated a readable SEAL receipt',
+            )
+            require(
+                owner.snapshot_bank(arm_response[10])[0] == BANK_STATE_ACTIVE,
+                'corrupt bank fabricated a terminal snapshot',
+            )
+            require(
+                owner.load_header_word(GLOBAL_ORACLE_FAULTS_WORD) &
+                FAULT_PROTOCOL,
+                'corrupt bank geometry did not latch a protocol fault',
+            )
+
+            process.stdin.write('EXIT\n')
+            process.stdin.flush()
+            return_code = process.wait(timeout=3.0)
+            stderr = process.stderr.read()
+            require(
+                return_code == 0,
+                f'corrupt-bank probe exited {return_code}: {stderr}',
             )
         finally:
             terminate_owned_process(process)
@@ -988,6 +1098,7 @@ def main():
     test_arm_excludes_prior_write_and_preserves_multiple_records(probe)
     test_writing_request_is_invisible_until_ready(probe)
     test_seal_is_deferred_and_includes_qualifying_write(probe)
+    test_corrupt_segment_count_does_not_escape_mapping(probe)
     test_same_ticket_different_payload_replay_latches_fault(probe)
     test_decreasing_sim_stamp_latches_fault_without_overwrite(probe)
     test_sequence_exhaustion_rejects_arm_before_bank_activation(probe)
