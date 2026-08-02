@@ -154,6 +154,38 @@ class CrashRobotDescriptionTest(unittest.TestCase):
                         journal_nonce,
                     )
 
+    def test_requires_one_unchanged_product_hardware_plugin(self):
+        plugin_xml = (
+            '<plugin>gz_ros2_control/GazeboSimSystem</plugin>'
+        )
+        invalid_descriptions = (
+            PRODUCT_URDF.replace(plugin_xml, '', 1),
+            PRODUCT_URDF.replace(plugin_xml, plugin_xml * 2, 1),
+            PRODUCT_URDF.replace(
+                'gz_ros2_control/GazeboSimSystem',
+                'another_vendor/UnexpectedSystem',
+                1,
+            ),
+            PRODUCT_URDF.replace(
+                '</ros2_control>',
+                '<ros2_control name="duplicate" type="system">'
+                '<hardware>{}</hardware></ros2_control>'
+                '</ros2_control>'.format(plugin_xml),
+                1,
+            ),
+        )
+
+        for description in invalid_descriptions:
+            with self.subTest(description=description):
+                with self.assertRaises(
+                    crash_robot_description.CrashRobotDescriptionError,
+                ):
+                    crash_robot_description.transform_product_urdf(
+                        description,
+                        '/voice_nav_contract_fixture',
+                        '00112233445566778899aabbccddeeff',
+                    )
+
 
 if __name__ == '__main__':
     unittest.main()
