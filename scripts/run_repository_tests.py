@@ -30,6 +30,10 @@ REQUIRED_TEST_IDS: frozenset[str] = frozenset(
             "test_repository_control_contract_passes"
         ),
         (
+            "test_crash_stop_contract.CrashStopContractTest."
+            "test_repository_crash_stop_contract_passes"
+        ),
+        (
             "test_motion_gate_contract.MotionGateContractTest."
             "test_repository_motion_gate_contract_passes"
         ),
