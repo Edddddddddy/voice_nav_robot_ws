@@ -35,6 +35,7 @@ BANK_COUNT = 2
 INIT_READY = 1
 CRC64_ECMA_POLYNOMIAL = 0x42F0E1EBA9EA3693
 UINT64_MASK = (1 << 64) - 1
+INVALID_BANK_INDEX = UINT64_MASK
 HEADER_FORMAT = '<24Q'
 CONTROL_FORMAT = '<24Q'
 CONTROL_REQUEST_FORMAT = '<10Q'
@@ -500,6 +501,38 @@ class HardwareWriteLedgerRegionOwner:
                 int(not_before_sim_stamp_ns) & UINT64_MASK,
             ),
         )
+        self.commit_prepared_request(request_ticket)
+        return request_ticket
+
+    def post_seal_with_corrupt_checksum(
+        self,
+        interval_id,
+        bank_index,
+        bank_epoch,
+        not_before_sim_stamp_ns,
+    ):
+        """Publish one otherwise valid SEAL with a corrupted checksum."""
+        request_ticket = self._begin_request_preparation(
+            (
+                CONTROL_OP_SEAL,
+                CONTROL_FLAG_EXACT_SEAL_STAMP,
+                interval_id,
+                bank_index,
+                bank_epoch,
+                0,
+                0,
+                int(not_before_sim_stamp_ns) & UINT64_MASK,
+            ),
+        )
+        request = list(
+            struct.unpack_from(
+                CONTROL_REQUEST_FORMAT,
+                self.region,
+                CONTROL_OFFSET,
+            ),
+        )
+        request[8] ^= 1
+        self._write_owned_request(request)
         self.commit_prepared_request(request_ticket)
         return request_ticket
 

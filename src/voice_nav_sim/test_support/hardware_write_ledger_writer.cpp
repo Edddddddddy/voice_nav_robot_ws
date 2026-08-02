@@ -31,7 +31,7 @@ static_assert(__atomic_always_lock_free(8U, nullptr));
 constexpr std::uint64_t kCrc64EcmaPolynomial =
   UINT64_C(0x42f0e1eba9ea3693);
 constexpr std::uint64_t kInvalidBankIndex =
-  std::numeric_limits<std::uint64_t>::max();
+  VOICE_NAV_HARDWARE_WRITE_LEDGER_INVALID_BANK_INDEX;
 constexpr std::uint64_t kWriterIdle{0U};
 constexpr std::uint64_t kWriterBeginning{1U};
 constexpr std::uint64_t kWriterOutstanding{2U};

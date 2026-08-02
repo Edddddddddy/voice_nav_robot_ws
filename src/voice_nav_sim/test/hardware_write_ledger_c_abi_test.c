@@ -18,6 +18,10 @@
 #include <stdint.h>
 
 _Static_assert(
+  VOICE_NAV_HARDWARE_WRITE_LEDGER_INVALID_BANK_INDEX == UINT64_MAX,
+  "Hardware-write ledger invalid bank identity changed");
+
+_Static_assert(
   sizeof(voice_nav_hardware_write_ledger_header_v1) == 192U,
   "Hardware-write ledger header ABI must remain 192 bytes");
 _Static_assert(

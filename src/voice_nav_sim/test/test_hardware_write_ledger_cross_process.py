@@ -40,6 +40,7 @@ from hardware_write_ledger_test_support import (
     FAULT_SIM_STAMP,
     GLOBAL_ORACLE_FAULTS_WORD,
     HardwareWriteLedgerRegionOwner,
+    INVALID_BANK_INDEX,
     LAST_COMPLETED_WRITE_SEQ_WORD,
     WRITER_PID_WORD,
 )
@@ -1107,7 +1108,7 @@ def test_invalid_seal_cannot_claim_or_mutate_terminal_bank(probe):
             require(
                 invalid_response[9:13] == (
                     CONTROL_RESPONSE_INVALID,
-                    (1 << 64) - 1,
+                    INVALID_BANK_INDEX,
                     0,
                     2,
                 ),
@@ -1144,6 +1145,62 @@ def test_invalid_seal_cannot_claim_or_mutate_terminal_bank(probe):
                     for index in range(owner.segment_capacity)
                 ) == terminal_segments,
                 'unarmed FINISH mutated terminal evidence',
+            )
+
+            corrupt_ticket = owner.post_seal_with_corrupt_checksum(
+                interval_id=105,
+                bank_index=bank_index,
+                bank_epoch=seal_response[11],
+                not_before_sim_stamp_ns=400,
+            )
+            process.stdin.write('BEGIN 400\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 4',
+                'corrupt-checksum terminal SEAL did not reach Writer',
+            )
+            corrupt_response = owner.wait_response(corrupt_ticket)
+            require(
+                corrupt_response[9:13] == (
+                    CONTROL_RESPONSE_INVALID,
+                    INVALID_BANK_INDEX,
+                    0,
+                    3,
+                ),
+                f'corrupt-checksum SEAL response changed: '
+                f'{corrupt_response!r}',
+            )
+            require(
+                owner.load_request_state() == CONTROL_REQUEST_IDLE,
+                'corrupt-checksum SEAL retained the request envelope',
+            )
+            require(
+                owner.load_header_word(GLOBAL_ORACLE_FAULTS_WORD) ==
+                FAULT_PROTOCOL,
+                'corrupt checksum changed the exact global fault',
+            )
+            require(
+                owner.snapshot_bank(bank_index) == terminal_bank and
+                tuple(
+                    owner.snapshot_segment(bank_index, index)
+                    for index in range(owner.segment_capacity)
+                ) == terminal_segments,
+                'corrupt-checksum SEAL mutated terminal evidence',
+            )
+
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 4',
+                'unarmed write after corrupt checksum did not finish',
+            )
+            require(
+                owner.snapshot_bank(bank_index) == terminal_bank and
+                tuple(
+                    owner.snapshot_segment(bank_index, index)
+                    for index in range(owner.segment_capacity)
+                ) == terminal_segments,
+                'post-checksum FINISH mutated terminal evidence',
             )
 
             process.stdin.write('EXIT\n')
