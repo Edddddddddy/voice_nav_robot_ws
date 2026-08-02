@@ -370,6 +370,37 @@ class HardwareWriteLedgerRegionOwner:
             request_ticket,
         )
 
+    def force_wrapped_request_after_exhausted_response(self):
+        """Inject response MAX followed by wrapped request zero."""
+        control = list(
+            struct.unpack_from(CONTROL_FORMAT, self.region, CONTROL_OFFSET),
+        )
+        control[2] += 1
+        control[8] = control_request_checksum(self, control, 0)
+        struct.pack_into(
+            CONTROL_REQUEST_FORMAT,
+            self.region,
+            CONTROL_OFFSET,
+            *control[0:9],
+        )
+        self.atomic.store_release(
+            self.region,
+            CONTROL_OFFSET + CONTROL_RESPONSE_TICKET_WORD * 8,
+            UINT64_MASK,
+        )
+        self.atomic.store_release(
+            self.region,
+            CONTROL_OFFSET + CONTROL_REQUEST_TICKET_WORD * 8,
+            0,
+        )
+
+    def load_response_ticket(self):
+        """Acquire-load the monotonic Writer response ticket."""
+        return self.atomic.load_acquire(
+            self.region,
+            CONTROL_OFFSET + CONTROL_RESPONSE_TICKET_WORD * 8,
+        )
+
     def wait_response(self, request_ticket, timeout=3.0):
         """Acquire one exact Writer response and validate its checksum."""
         deadline = time.monotonic() + timeout

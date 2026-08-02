@@ -649,6 +649,83 @@ def test_sequence_exhaustion_rejects_arm_before_bank_activation(probe):
             close_owned_process_pipes(process)
 
 
+def test_wrapped_request_cannot_lower_exhausted_response_ticket(probe):
+    """Prove mailbox wrap faults without publishing response ticket zero."""
+    with HardwareWriteLedgerRegionOwner(
+        generation=83,
+        segment_capacity=4,
+        page_segment_limit=2,
+    ) as owner:
+        process = spawn_probe(probe, owner)
+        try:
+            require(
+                owner.wait_for_writer(process.pid) == process.pid,
+                'wrap probe Writer PID mismatch',
+            )
+            require(
+                read_owned_line(process, 'READY') == 'READY',
+                'wrap probe did not publish READY',
+            )
+            owner.unlink_name()
+            request_ticket = owner.post_arm(
+                interval_id=97,
+                segment_budget=2,
+                invocation_budget=3,
+                require_zero_commands=False,
+            )
+            process.stdin.write('BEGIN 100\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 1',
+                'wrap setup write did not begin',
+            )
+            require(
+                owner.wait_response(request_ticket)[9] == CONTROL_RESPONSE_OK,
+                'wrap setup ARM was not acknowledged',
+            )
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 1',
+                'wrap setup write did not finish',
+            )
+            require(owner.wait_completed_write(1) == 1, 'wrap setup lost')
+
+            owner.force_wrapped_request_after_exhausted_response()
+            process.stdin.write('BEGIN 200\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 2',
+                'wrap trigger write did not begin',
+            )
+            require(
+                owner.load_response_ticket() == (1 << 64) - 1,
+                'wrapped request lowered the response ticket to zero',
+            )
+            require(
+                owner.load_header_word(GLOBAL_ORACLE_FAULTS_WORD) &
+                FAULT_PROTOCOL,
+                'wrapped request did not latch a protocol fault',
+            )
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 2',
+                'wrap trigger write did not finish',
+            )
+            process.stdin.write('EXIT\n')
+            process.stdin.flush()
+            return_code = process.wait(timeout=3.0)
+            stderr = process.stderr.read()
+            require(
+                return_code == 0,
+                f'wrap probe exited {return_code}: {stderr}',
+            )
+        finally:
+            terminate_owned_process(process)
+            close_owned_process_pipes(process)
+
+
 def main():
     """Run the bounded cross-process ledger behavior slices."""
     if len(sys.argv) != 2:
@@ -661,6 +738,7 @@ def main():
     test_same_ticket_different_payload_replay_latches_fault(probe)
     test_decreasing_sim_stamp_latches_fault_without_overwrite(probe)
     test_sequence_exhaustion_rejects_arm_before_bank_activation(probe)
+    test_wrapped_request_cannot_lower_exhausted_response_ticket(probe)
 
 
 if __name__ == '__main__':
