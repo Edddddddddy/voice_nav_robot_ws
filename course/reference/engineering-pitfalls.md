@@ -1384,3 +1384,20 @@ drop direct dependencies or hide them transitively merely to avoid the style
 conflict. VN-0011A first exposed this while linking both the test-only Gazebo
 hardware Adapter and its GTest; using one plain form per target produced the
 focused plugin-load GREEN.
+
+## PIT-0055: A PowerShell-to-WSL script pipe can prepend a UTF-8 BOM
+
+**Symptom.** A Bash script piped from a PowerShell here-string starts with
+`bash: line 1: ﻿set: command not found`, while later build and test commands
+may still run successfully.
+
+**Cause.** The producer encoded the piped script with a UTF-8 byte-order mark.
+Bash treated the mark as part of the first command name. In this case the
+failed first command was `set -o pipefail`, so a later pipeline could also have
+hidden its real exit status.
+
+**Guardrail.** Do not pipe an implicitly encoded PowerShell here-string into
+WSL Bash for evidence-producing commands. Pass the script to `bash -lc`, or
+write a temporary script explicitly with `new UTF8Encoding(false)` and execute
+that file. Preserve and test the build or test process exit code independently;
+a green tail of output is not sufficient evidence when shell setup failed.
