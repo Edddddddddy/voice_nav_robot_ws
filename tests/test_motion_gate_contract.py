@@ -228,7 +228,7 @@ ControlResult MotionGateCore::open(
   }
   bound_writer_gid_ = binding.writer_gid;
   writer_bound_ = true;
-  authority_deadline_ = now + authority_lease_;
+  authority_deadline_ = now + config_.authority_lease;
   candidate_deadline_ = now + candidate_freshness_;
   ++control_seq_;
   state_ = State::Armed;
@@ -246,7 +246,7 @@ ControlResult MotionGateCore::renew(
     return stale_request();
   }
   ++control_seq_;
-  authority_deadline_ = now + authority_lease_;
+  authority_deadline_ = now + config_.authority_lease;
   return applied_result();
 }
 
@@ -2400,7 +2400,7 @@ class MotionGateContractTest(unittest.TestCase):
                 ),
                 (
                     "candidate_deadline_ = now + candidate_freshness_;\n"
-                    "  authority_deadline_ = now + authority_lease_;\n"
+                    "  authority_deadline_ = now + config_.authority_lease;\n"
                     "  return applied_result();\n"
                     "}\n\n"
                     "Command MotionGateCore::tick"

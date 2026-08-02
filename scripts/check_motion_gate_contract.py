@@ -1072,7 +1072,7 @@ def validate_core(header_path: Path, source_path: Path) -> None:
             "State::Armed",
             "request.expected_control_seq != control_seq_",
             "now >= authority_deadline_",
-            "authority_deadline_ = now + authority_lease",
+            "authority_deadline_ = now + config_.authority_lease",
         ),
         "MotionGateCore::renew",
     )
