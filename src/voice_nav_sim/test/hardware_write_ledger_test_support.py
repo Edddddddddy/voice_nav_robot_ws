@@ -348,23 +348,26 @@ class HardwareWriteLedgerRegionOwner:
             state,
         )
 
-    def _publish_request(self, request):
+    def _write_owned_request(self, request):
         struct.pack_into(
             CONTROL_REQUEST_FORMAT,
             self.region,
             CONTROL_OFFSET,
             *request,
         )
+
+    def _publish_request(self, request):
+        self._write_owned_request(request)
         self._release_request_mailbox(CONTROL_REQUEST_READY)
 
-    def post_arm(
+    def begin_arm_preparation(
         self,
         interval_id,
         segment_budget,
         invocation_budget,
         require_zero_commands,
     ):
-        """Claim and release-publish one checksummed ARM request."""
+        """Write one ARM request while retaining Parent mailbox ownership."""
         flags = CONTROL_FLAG_ZERO_REQUIRED if require_zero_commands else 0
         self._claim_request_mailbox()
         try:
@@ -398,11 +401,46 @@ class HardwareWriteLedgerRegionOwner:
                 request,
                 request_ticket,
             )
-            self._publish_request(request)
+            self._write_owned_request(request)
             return request_ticket
         except BaseException:
             self._release_request_mailbox(CONTROL_REQUEST_IDLE)
             raise
+
+    def commit_prepared_request(self, request_ticket):
+        """Release-publish the exact request currently owned by Parent."""
+        control = struct.unpack_from(
+            CONTROL_FORMAT,
+            self.region,
+            CONTROL_OFFSET,
+        )
+        request_state = self.atomic.load_acquire(
+            self.region,
+            CONTROL_OFFSET + CONTROL_REQUEST_STATE_WORD * 8,
+        )
+        if (
+            request_state != CONTROL_REQUEST_WRITING or
+            control[CONTROL_REQUEST_TICKET_WORD] != request_ticket
+        ):
+            raise AssertionError('no matching prepared ledger request')
+        self._release_request_mailbox(CONTROL_REQUEST_READY)
+
+    def post_arm(
+        self,
+        interval_id,
+        segment_budget,
+        invocation_budget,
+        require_zero_commands,
+    ):
+        """Prepare and release-publish one checksummed ARM request."""
+        request_ticket = self.begin_arm_preparation(
+            interval_id,
+            segment_budget,
+            invocation_budget,
+            require_zero_commands,
+        )
+        self.commit_prepared_request(request_ticket)
+        return request_ticket
 
     def replay_arm_with_interval(self, request_ticket, interval_id):
         """Release-republish one ticket with a different valid payload."""
