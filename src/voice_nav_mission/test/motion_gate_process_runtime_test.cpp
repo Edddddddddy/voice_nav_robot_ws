@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "motion_gate_process_runtime.hpp"
@@ -26,6 +27,11 @@ namespace voice_nav_mission
 {
 namespace
 {
+
+static_assert(!std::is_copy_constructible_v<MotionGateProcessRuntime>);
+static_assert(!std::is_copy_assignable_v<MotionGateProcessRuntime>);
+static_assert(!std::is_move_constructible_v<MotionGateProcessRuntime>);
+static_assert(!std::is_move_assignable_v<MotionGateProcessRuntime>);
 
 TEST(MotionGateProcessRuntimeTest, BothEmptyParametersDisableAttachment)
 {
@@ -118,6 +124,22 @@ TEST(MotionGateProcessRuntimeTest, MalformedParametersAreRejected)
         parse_gate_event_journal_test_parameters(parameters)),
       std::invalid_argument);
   }
+}
+
+TEST(MotionGateProcessRuntimeTest, DefaultOffRuntimeOwnsOneFailClosedCore)
+{
+  const std::string gate_instance_id =
+    "0123456789abcdef0123456789abcdef";
+  MotionGateProcessRuntime runtime(
+    MotionGateConfig{},
+    gate_instance_id,
+    GateEventJournalTestParameters{"", ""});
+
+  const auto snapshot = runtime.core().snapshot();
+  EXPECT_EQ(snapshot.gate_instance_id, gate_instance_id);
+  EXPECT_EQ(snapshot.state, State::Inhibited);
+  EXPECT_TRUE(snapshot.motion_inhibited);
+  EXPECT_TRUE(snapshot.zero_selected);
 }
 
 }  // namespace
