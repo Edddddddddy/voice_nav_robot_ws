@@ -625,6 +625,48 @@ protected Gazebo fingerprint before/after:
 root crash-stop checker: expected RED at missing crash_stop_policy.py
 ```
 
+### Hardware-write ledger core checkpoint
+
+The hardware observation types were first extracted from the Gazebo Adapter
+into the independent `HardwareWriteSink` seam. A pure C++
+`HardwareWriteLedger` Adapter now sits behind that same one-method Interface,
+so its protocol tests do not load Gazebo, ROS, or pluginlib. Construction is
+the only allocation point: append and SEAL use fixed preallocated segment
+storage plus lock-free atomics; immutable snapshot copying and CRC calculation
+run after the release-published seal.
+
+Vertical RED/GREEN cycles prove one sealed write, identical-tuple folding,
+tuple-change segmentation, bounded pagination with previous-page checksum
+chaining, duplicate/gap/non-wrapping sequence handling, nondecreasing
+simulation stamps, finite wheel values, capacity exhaustion, and a numeric
+zero-required predicate that accepts either signed zero. CRC64-ECMA-182 is
+checked by an independent implementation, a fixed external constant, and a
+bit-flip rejection. Every attempted invocation is retained in the fence/count
+metadata even when no valid segment can be created.
+
+Independent review found that the first implementation could not SEAL an
+interval whose first write was itself invalid. A dedicated RED then required
+a zero-segment fault-only page. The first repair covered semantic faults but
+not a first sequence gap; a second RED made attempted sequence/count evidence
+precede sequence validation. Final review reported no remaining P0-P2 in this
+core slice. It also required and verified a compile-time lock-free assertion
+for the atomic sealed flag.
+
+```text
+focused hardware_write_ledger GTest: 14/14 passed
+focused cppcheck + uncrustify: passed
+independent final review: P0=0, P1=0, P2=0
+protected Gazebo fingerprint:
+  3631225|1|34712103|gz sim server (unchanged)
+root crash-stop checker: still expected RED at missing crash_stop_policy.py
+```
+
+This checkpoint is not the complete cross-process oracle. Atomic shared-memory
+ARM/SEAL requests, immutable dual-bank retention until ACK, fixed mapping ABI,
+Adapter construction from the transformed journal identity, and fail-closed
+handling of missing wheel entities/components, sink rejection, and Adapter
+sequence exhaustion remain the next slices.
+
 ## VN-0011A observed crash evidence
 
 | Case | Expected threshold | Observed result |

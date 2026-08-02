@@ -62,6 +62,9 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0052 | An evidence/DDS failure prevents the direct safety-zero fallback | Can fault recording itself throw before the zero publisher is called? | Guarded |
 | PIT-0053 | Jazzy rejects `rclcpp::Time::to_msg()` while wiring a message stamp | Was an API from another ROS distribution assumed instead of compiling the target? | Guarded |
 | PIT-0054 | CMake rejects a target after `ament_*` wiring with a plain/keyword signature conflict | Did a later `target_link_libraries(... PRIVATE ...)` mix styles with an ament macro's plain call? | Guarded |
+| PIT-0055 | A PowerShell-to-WSL script pipe prepends a UTF-8 BOM or strips Bash variables | Are UTF-8 bytes transported as Base64 before Bash decodes them? | Guarded |
+| PIT-0056 | A protected WSL process appears to change its start time | Is identity based on raw `/proc/<pid>/stat` start ticks instead of `ps lstart`? | Guarded |
+| PIT-0057 | A drive-letter regex rejects an ordinary source URL | Does the path detector require a token boundary and test both URLs and real machine paths? | Guarded |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -315,7 +318,10 @@ same 15-test gate passed after sourcing the overlay. The Layer-2 verification
 also enabled `set -u` before sourcing ROS and stopped on the intentionally
 unset `AMENT_TRACE_SETUP_FILES`. Sourcing first, then enabling strict mode,
 allowed the complete 16/16 package gate to run. Neither invocation failure was
-accepted as a code RED.
+accepted as a code RED. The hardware-write ledger slice reproduced both
+failure modes: its first diagnostic enabled nounset too early, and a later
+direct CTest omitted the sourced environment. Both were classified by this
+existing pitfall before product debugging continued.
 
 ## PIT-0012: No residual Gazebo process is not a clean Gazebo exit
 

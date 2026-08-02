@@ -21,9 +21,13 @@ the focused Adapter target is 10/10 GREEN. The pure crash robot-description
 transformer now replaces only the unique canonical upstream plugin, injects
 only the validated journal name/nonce, and rejects structural or ownership
 ambiguity. `voice_nav_sim` is 13/13 CTest GREEN (69 scoped xUnit tests, 6
-skipped). The lossless hardware-write ledger, its fail-closed oracle-fault
-paths, evidence policy and composition, repository GREEN, product crash runs,
-the final local gate, PR, and CI remain open.
+skipped). The preallocated pure-C++ hardware-write ledger core now has
+contiguous non-wrapping sequence accounting, count-preserving segmentation,
+immutable CRC64 snapshot pages, and sticky generation/finite/stamp/capacity/
+zero-window faults; its focused behavior suite is 14/14 GREEN. Shared-memory
+ARM/SEAL control, retained dual banks and ACK, Adapter fail-closed integration,
+evidence policy and composition, repository GREEN, product crash runs, the
+final local gate, PR, and CI remain open.
 
 ## Immutable base
 
