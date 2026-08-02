@@ -28,6 +28,8 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <type_traits>
+#include <utility>
 
 #include "attached_gate_event_journal.hpp"
 #include "gate_event_journal.hpp"
@@ -37,9 +39,13 @@ namespace voice_nav_mission
 namespace
 {
 
-constexpr char kNonceHex[] = "123456789abcdef00fedcba987654321";
 constexpr std::uint64_t kNonceHi = UINT64_C(0x123456789abcdef0);
 constexpr std::uint64_t kNonceLo = UINT64_C(0x0fedcba987654321);
+
+static_assert(!std::is_copy_constructible_v<AttachedGateEventJournal>);
+static_assert(!std::is_copy_assignable_v<AttachedGateEventJournal>);
+static_assert(!std::is_move_constructible_v<AttachedGateEventJournal>);
+static_assert(!std::is_move_assignable_v<AttachedGateEventJournal>);
 
 struct FakeClock
 {
@@ -140,6 +146,22 @@ public:
     return *static_cast<GateEventJournalHeader *>(region_);
   }
 
+  [[nodiscard]] GateEventJournalIdentity identity() const noexcept
+  {
+    const auto & header =
+      *static_cast<const GateEventJournalHeader *>(region_);
+    return {
+      header.owner_uid,
+      header.generation,
+      header.nonce_hi,
+      header.nonce_lo};
+  }
+
+  [[nodiscard]] std::uint64_t capacity() const noexcept
+  {
+    return static_cast<const GateEventJournalHeader *>(region_)->capacity;
+  }
+
   [[nodiscard]] GateEventJournalSlot & slot(std::size_t index) noexcept
   {
     auto * slots = reinterpret_cast<GateEventJournalSlot *>(
@@ -153,6 +175,13 @@ public:
       throw system_error("shm_unlink owner region failed");
     }
     linked_ = false;
+  }
+
+  void set_mode(mode_t mode)
+  {
+    if (fchmod(fd_, mode) != 0) {
+      throw system_error("fchmod owner region failed");
+    }
   }
 
 private:
@@ -184,27 +213,32 @@ private:
   bool linked_{false};
 };
 
+GateEventJournalAttachmentConfig attachment_config(
+  const OwnedJournalRegion & owner,
+  FakeClock & clock)
+{
+  return {
+    owner.name(),
+    owner.identity(),
+    owner.capacity(),
+    GateEventJournalClock{&FakeClock::read, &clock}};
+}
+
 TEST(AttachedGateEventJournal, ExistingMappingSurvivesOwnerUnlink)
 {
   OwnedJournalRegion owner(2U);
   FakeClock clock;
-  auto attached = AttachedGateEventJournal::open_existing(
-    owner.name(),
-    kNonceHex,
-    GateEventJournalClock{&FakeClock::read, &clock});
+  AttachedGateEventJournal attached(attachment_config(owner, clock));
 
   EXPECT_EQ(
     gate_event_journal_load_acquire(owner.header().writer_pid),
     static_cast<std::uint64_t>(getpid()));
   owner.unlink_name();
   EXPECT_THROW(
-    (void)AttachedGateEventJournal::open_existing(
-      owner.name(),
-      kNonceHex,
-      GateEventJournalClock{&FakeClock::read, &clock}),
+    (void)AttachedGateEventJournal(attachment_config(owner, clock)),
     std::system_error);
 
-  const auto outcome = attached.writer().publish_output(
+  const auto outcome = attached.journal().publish_output(
     GateOutputIntent{
         41U, 9U, 17U, 18U, 23U, 456U,
         UINT64_C(0x3fd0000000000000),
@@ -221,6 +255,84 @@ TEST(AttachedGateEventJournal, ExistingMappingSurvivesOwnerUnlink)
   EXPECT_EQ(
     owner.slot(0U).commit_checksum,
     gate_event_journal_commit_checksum(owner.slot(0U)));
+}
+
+TEST(AttachedGateEventJournal, WrongExpectedGenerationDoesNotClaimWriter)
+{
+  OwnedJournalRegion owner(1U);
+  FakeClock clock;
+  auto config = attachment_config(owner, clock);
+  ++config.expected_identity.generation;
+
+  EXPECT_THROW(
+    (void)AttachedGateEventJournal(std::move(config)),
+    std::invalid_argument);
+  EXPECT_EQ(gate_event_journal_load_acquire(owner.header().writer_pid), 0U);
+}
+
+TEST(AttachedGateEventJournal, WrongExpectedIdentityDoesNotClaimWriter)
+{
+  OwnedJournalRegion owner(1U);
+  FakeClock clock;
+  auto config = attachment_config(owner, clock);
+  config.expected_identity.nonce_lo ^= 1U;
+
+  EXPECT_THROW(
+    (void)AttachedGateEventJournal(std::move(config)),
+    std::invalid_argument);
+  EXPECT_EQ(gate_event_journal_load_acquire(owner.header().writer_pid), 0U);
+}
+
+TEST(AttachedGateEventJournal, WrongExpectedCapacityDoesNotClaimWriter)
+{
+  OwnedJournalRegion owner(1U);
+  FakeClock clock;
+  auto config = attachment_config(owner, clock);
+  ++config.expected_capacity;
+
+  EXPECT_THROW(
+    (void)AttachedGateEventJournal(std::move(config)),
+    std::invalid_argument);
+  EXPECT_EQ(gate_event_journal_load_acquire(owner.header().writer_pid), 0U);
+}
+
+TEST(AttachedGateEventJournal, ZeroExpectedNonceDoesNotClaimWriter)
+{
+  OwnedJournalRegion owner(1U);
+  FakeClock clock;
+  auto config = attachment_config(owner, clock);
+  config.expected_identity.nonce_hi = 0U;
+  config.expected_identity.nonce_lo = 0U;
+
+  EXPECT_THROW(
+    (void)AttachedGateEventJournal(std::move(config)),
+    std::invalid_argument);
+  EXPECT_EQ(gate_event_journal_load_acquire(owner.header().writer_pid), 0U);
+}
+
+TEST(AttachedGateEventJournal, NonPrivateModeDoesNotClaimWriter)
+{
+  OwnedJournalRegion owner(1U);
+  owner.set_mode(0640);
+  FakeClock clock;
+
+  EXPECT_THROW(
+    (void)AttachedGateEventJournal(attachment_config(owner, clock)),
+    std::invalid_argument);
+  EXPECT_EQ(gate_event_journal_load_acquire(owner.header().writer_pid), 0U);
+}
+
+TEST(AttachedGateEventJournal, InvalidNameDoesNotClaimWriter)
+{
+  OwnedJournalRegion owner(1U);
+  FakeClock clock;
+  auto config = attachment_config(owner, clock);
+  config.shared_memory_name = "/VOICE_NAV_GATE_0123456789abcdef0123456789abcdef";
+
+  EXPECT_THROW(
+    (void)AttachedGateEventJournal(std::move(config)),
+    std::invalid_argument);
+  EXPECT_EQ(gate_event_journal_load_acquire(owner.header().writer_pid), 0U);
 }
 
 }  // namespace
