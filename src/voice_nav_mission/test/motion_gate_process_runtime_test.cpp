@@ -19,6 +19,7 @@
 #include <chrono>
 #include <cstdint>
 #include <iomanip>
+#include <new>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -89,6 +90,31 @@ struct RecordingFinalPublisher
   [[nodiscard]] FinalOutputPublisher adapter() noexcept
   {
     return FinalOutputPublisher{&RecordingFinalPublisher::publish, this};
+  }
+};
+
+struct ThrowingFaultTestAdapter
+{
+  std::size_t calls{0U};
+
+  static void apply(
+    void * context,
+    MotionGateCore & core,
+    Reason reason,
+    const char * detail)
+  {
+    auto & self = *static_cast<ThrowingFaultTestAdapter *>(context);
+    ++self.calls;
+    static_cast<void>(core);
+    static_cast<void>(reason);
+    static_cast<void>(detail);
+    throw std::bad_alloc{};
+  }
+
+  [[nodiscard]] FinalOutputFaultTestAdapter adapter() noexcept
+  {
+    return FinalOutputFaultTestAdapter{
+      &ThrowingFaultTestAdapter::apply, this};
   }
 };
 
@@ -666,6 +692,47 @@ TEST(MotionGateProcessRuntimeTest, InactiveSimulationTimeCommitsStampedZero)
   EXPECT_EQ(
     output.reason,
     static_cast<std::uint64_t>(Reason::ConfigurationInvalid));
+}
+
+TEST(MotionGateProcessRuntimeTest, FaultRecordingFailureCannotVetoDirectZero)
+{
+  const std::string gate_instance_id =
+    "0123456789abcdef0123456789abcdef";
+  OwnedJournalRegion owner(2U);
+  ThrowingFaultTestAdapter fault_adapter;
+  MotionGateProcessRuntime runtime(
+    MotionGateConfig{},
+    gate_instance_id,
+    GateEventJournalTestParameters{
+        owner.name(), descriptor_for(owner)},
+    fault_adapter.adapter());
+  select_nonzero_command(runtime, gate_instance_id);
+  RecordingFinalPublisher publisher{&owner};
+
+  const auto result = runtime.publish_final_command(
+    FinalOutputTime{true, 71, 72U}, publisher.adapter());
+
+  EXPECT_EQ(fault_adapter.calls, 1U);
+  ASSERT_EQ(publisher.frames.size(), 1U);
+  EXPECT_TRUE(publisher.frames[0].command.is_zero());
+  EXPECT_EQ(result.failure, FinalOutputFailure::JournalFailure);
+  EXPECT_TRUE(result.fallback_attempted);
+  EXPECT_TRUE(result.zero_published);
+  EXPECT_EQ(result.state.output_publish_seq, 1U);
+  EXPECT_EQ(runtime.core().snapshot().state, State::Armed);
+  EXPECT_FALSE(runtime.core().selected_command().is_zero());
+
+  const auto retired = runtime.publish_final_command(
+    FinalOutputTime{true, 73, 74U}, publisher.adapter());
+  EXPECT_EQ(fault_adapter.calls, 1U);
+  ASSERT_EQ(publisher.frames.size(), 2U);
+  EXPECT_TRUE(publisher.frames[1].command.is_zero());
+  EXPECT_EQ(retired.failure, FinalOutputFailure::JournalFailure);
+  EXPECT_FALSE(retired.fallback_attempted);
+  EXPECT_EQ(retired.state.output_publish_seq, 2U);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(owner.header().claimed_slots),
+    2U);
 }
 
 }  // namespace
