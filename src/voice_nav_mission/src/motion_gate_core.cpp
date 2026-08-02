@@ -529,6 +529,11 @@ ControlResult MotionGateCore::inhibit(
   }
 
   retire_lease(kTransitionEventInhibit, Reason::None, "lease inhibited");
+  if (state_ == State::Faulted) {
+    auto fault = result_from_snapshot(ResultCode::Faulted, reason_, detail_);
+    remember(request, fault);
+    return fault;
+  }
   auto result = applied(request);
   remember(request, result);
   return result;
