@@ -69,6 +69,7 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0059 | TSAN intermittently crashes before the test under WSL | Does only the TSAN executable run non-PIE with per-process ASLR disabled? | Guarded |
 | PIT-0060 | A mailbox replay races or binds its response to changed request bytes | Does a pending request retain Writer ownership and bind the consumed snapshot? | Guarded |
 | PIT-0061 | A fail-closed checksum path reads beyond fixed evidence storage | Was untrusted count geometry rejected before traversal? | Guarded |
+| PIT-0062 | An invalid write becomes a fake segment or makes the next valid write look out of sequence | Are attempted metadata and recordable segment coverage validated separately? | Guarded |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -1525,3 +1526,26 @@ segment count and page limit against the mapped capacity. On failure, latch
 PROTOCOL and publish neither a readable sealed bank nor a receipt. The
 cross-process mutation test sets the count to capacity plus one and requires
 the exact Writer child to remain alive with the bank ACTIVE and faulted.
+
+## PIT-0062: Attempted writes and recordable segments are different evidence
+
+**Symptom.** A missing wheel component consumes a legitimate write sequence
+but is serialized as if exact wheel bits existed. Alternatively, omitting that
+fake segment makes the next valid tuple trigger a derived `PROTOCOL` fault, or
+a corrupted clean bank with fewer stored invocations is sealed `SEALED_OK`.
+
+**Cause.** One set of first/last/count fields was made to describe both the
+complete attempted interval and the subset for which an exact command tuple
+can be recorded. Requiring the last segment to end at the latest attempt also
+forbade legitimate gaps in a bank that was already faulted.
+
+**Guardrail.** Bank metadata counts every contiguous included attempt.
+Segments contain only otherwise recordable tuples and use strictly ordered,
+non-overlapping ranges; folding requires adjacency and therefore never crosses
+a gap. A sticky fault permits recorded counts to be smaller than attempted
+counts, while a fault-free bank requires exact equality before it can remain
+eligible for `SEALED_OK`. A relational simulation-stamp regression retains its
+otherwise recordable offending tuple as a separate forensic segment and
+latches `SIM_STAMP`. Cross-process tracers cover an observation-only gap,
+later valid evidence, capacity exhaustion, and a clean segment-count mutation
+that must become `PROTOCOL/SEALED_FAULT`.

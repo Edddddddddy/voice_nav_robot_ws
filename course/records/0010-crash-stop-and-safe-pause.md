@@ -706,6 +706,39 @@ package/full-repository/Gazebo runtime gates: not run for this checkpoint
 root crash-stop checker: still expected RED at missing crash_stop_policy.py
 ```
 
+### Attempt-accounting and segment-integrity checkpoint
+
+The next TDD cycles separated the bank's complete attempted interval from its
+stored tuple evidence. A qualifying invocation-budget failure now advances the
+bank fence/count before the deferred exact SEAL terminalizes. Exact-stamp skip
+coverage proves that the qualifying write is retained before `SIM_STAMP` fixes
+the bank as faulted. An invalid wheel observation consumes its sequence but
+does not fabricate exact command bits; a later valid tuple can still occupy
+the first segment, and a later transition that exhausts segment capacity adds
+only the expected sticky faults.
+
+Independent review then found one remaining clean-bank integrity hole: a
+mutated segment count could discard recorded coverage while leaving attempted
+metadata and the fault mask apparently clean. RED commit `1727a16` reproduced
+the false `SEALED_OK`. GREEN commit `220fdec` validates every bounded stored
+range, permits count gaps only after a sticky fault, and requires exact stored
+versus attempted invocation equality for an otherwise clean bank. Review
+confirmed P0=0, P1=0; protocol and PIT-0062 now make the raw timestamp-regression
+segment exception explicit.
+
+```text
+attempt/fault coverage commits: 8a57388..cae61bb
+clean-coverage RED/GREEN: 1727a16, 220fdec
+focused C ABI/concurrency/cross-process/core CTests: 4/4 passed
+cross-process CTest: 5/5 consecutive executions passed
+Writer TSAN CTest: 10/10 consecutive executions passed
+cppcheck/flake8/lint_cmake/pep257/uncrustify: 5/5 passed
+PIT-0011 invocation-only failure: corrected by sourcing base + overlay
+PIT-0042 clock-skew warning: identical target rebuild passed cleanly
+package/full-repository/Gazebo runtime gates: not run for this checkpoint
+root crash-stop checker: expected RED at missing crash_stop_policy.py
+```
+
 ## VN-0011A observed crash evidence
 
 | Case | Expected threshold | Observed result |

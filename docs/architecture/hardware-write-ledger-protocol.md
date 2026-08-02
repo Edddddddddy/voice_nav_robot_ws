@@ -119,6 +119,25 @@ the first terminal transition. A successful bank is non-empty, has
 `invocation_count == seal_fence - arm_fence`, has contiguous segment ranges,
 and satisfies the armed predicate for the whole interval.
 
+Bank attempt metadata and stored tuple segments have distinct meanings.
+`first_write_seq`, `last_write_seq`, and `invocation_count` cover every
+contiguous included invocation, including observation, semantic, invocation
+budget, and segment-capacity failures. A segment is created only for an
+otherwise recordable tuple: the observation is `VALID`, the delegated result
+fits the ABI, both command values are finite, the armed predicate passes, and
+the invocation and segment budgets permit storage. Consequently a faulted
+bank may contain no segments or strictly ordered, non-overlapping segment
+ranges with gaps; a successful bank must have exact segment coverage whose
+summed counts equal `invocation_count`. Identical tuples on opposite sides of
+a gap never fold together.
+
+A simulation-stamp regression is relational: its otherwise recordable tuple
+has already been captured when comparison with the prior stored tuple detects
+the fault. ABI v1 retains that offending tuple as a distinct, non-folded
+segment and latches `SIM_STAMP`, so the bank can only become `SEALED_FAULT`.
+Readers must not infer that segments in a faulted bank are monotonic or valid
+proof; they are bounded forensic evidence governed by the sticky fault mask.
+
 ## Banks and ACK
 
 There are exactly two banks with this state machine:
@@ -152,7 +171,7 @@ of the Interface and are checked by a C translation unit.
 | region header | 192 | static layout/identity plus init, Writer claim, global sequence/fault state |
 | control mailbox | 192 | one owned request envelope plus its bounded response |
 | bank header | 128 | lifecycle, identity, fences, budgets, counts, predicate, faults, root checksum |
-| segment | 64 | generation, sequence range/count, stamp, observation/result, exact command bits |
+| segment | 64 | recordable tuple evidence: generation, sequence range/count, stamp, observation/result, exact command bits |
 | snapshot page header | 192 | sealed identity, page/range/count chain and checksums |
 
 The region layout is:

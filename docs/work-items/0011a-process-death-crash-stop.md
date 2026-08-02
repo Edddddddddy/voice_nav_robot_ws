@@ -445,6 +445,14 @@ and [ADR-0006](../adr/0006-use-fenced-dual-bank-hardware-write-ledger.md).
   write means no fabricated SEALED state; the bounded caller selects
   `RESTART_REQUIRED` on timeout. The first terminal transition fixes the
   fences, faults, pages, and receipt; late or replayed requests cannot move it;
+- bank first/last/count metadata covers every included attempted invocation.
+  Stored segments cover only otherwise recordable tuples; invalid observation,
+  semantic, invocation-budget, or segment-capacity failures leave explicit
+  gaps in an already faulted bank instead of fabricating command evidence. A
+  fault-free bank requires exact segment-count coverage, and tuple folding may
+  never cross a gap. An otherwise recordable tuple that reveals a simulation
+  stamp regression is retained as a distinct forensic segment while
+  `SIM_STAMP` makes the bank terminally faulted;
 - one active accumulator contains generation, first/last `write_seq`,
   invocation count, simulation stamp, delegated return result, and exact
   wheel-command bit patterns. Only a consecutive invocation with the
