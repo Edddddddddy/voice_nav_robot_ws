@@ -27,6 +27,36 @@ if(BUILD_TESTING)
   find_package(rmw REQUIRED)
   find_package(tf2_msgs REQUIRED)
 
+  add_library(
+    voice_nav_sim_journaled_gazebo_sim_system_adapter SHARED
+    test_support/journaled_gazebo_sim_system_adapter.cpp
+  )
+  target_compile_features(
+    voice_nav_sim_journaled_gazebo_sim_system_adapter
+    PRIVATE cxx_std_17
+  )
+  ament_target_dependencies(
+    voice_nav_sim_journaled_gazebo_sim_system_adapter
+    gz_ros2_control
+    hardware_interface
+    pluginlib
+    rclcpp
+    rclcpp_lifecycle
+  )
+  target_link_libraries(
+    voice_nav_sim_journaled_gazebo_sim_system_adapter
+    gz-sim8::gz-sim8
+  )
+  pluginlib_export_plugin_description_file(
+    gz_ros2_control
+    test_support/journaled_gazebo_sim_system_adapter_plugins.xml
+  )
+
+  install(
+    TARGETS voice_nav_sim_journaled_gazebo_sim_system_adapter
+    DESTINATION lib
+  )
+
   add_executable(
     tf_ownership_auditor
     test/tf_ownership_auditor.cpp
@@ -76,6 +106,7 @@ if(BUILD_TESTING)
   )
   target_link_libraries(
     journaled_gazebo_sim_system_adapter_test
+    voice_nav_sim_journaled_gazebo_sim_system_adapter
     gz-sim8::gz-sim8
   )
 

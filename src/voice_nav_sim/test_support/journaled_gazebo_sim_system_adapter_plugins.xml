@@ -1,0 +1,10 @@
+<library path="voice_nav_sim_journaled_gazebo_sim_system_adapter">
+  <class
+    name="voice_nav_sim/JournaledGazeboSimSystemAdapter"
+    type="voice_nav_sim::JournaledGazeboSimSystemAdapter"
+    base_class_type="gz_ros2_control::GazeboSimSystemInterface">
+    <description>
+      Test-only Adapter that delegates to the standard Gazebo hardware plugin.
+    </description>
+  </class>
+</library>
