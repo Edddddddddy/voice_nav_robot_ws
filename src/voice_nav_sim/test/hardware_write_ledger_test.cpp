@@ -375,6 +375,34 @@ TEST(HardwareWriteLedger, LatchesASequenceFaultForAGap)
     voice_nav_sim::kHardwareWriteOracleFaultSequence);
 }
 
+TEST(HardwareWriteLedger, SealsASequenceFaultOnlyInterval)
+{
+  voice_nav_sim::HardwareWriteLedger ledger({44U, 20U, 5U, 1U, 1U});
+  const voice_nav_sim::HardwareWriteRecord skipped{
+    44U, 7U, 5'150'000, 0U, UINT64_C(21), UINT64_C(22)};
+  EXPECT_FALSE(ledger.append(skipped));
+  EXPECT_EQ(
+    ledger.oracle_faults(),
+    voice_nav_sim::kHardwareWriteOracleFaultSequence);
+
+  ASSERT_TRUE(ledger.seal());
+  const auto snapshot = ledger.snapshot_page(0U);
+  ASSERT_TRUE(snapshot.has_value());
+  EXPECT_EQ(snapshot->arm_fence_write_seq, 5U);
+  EXPECT_EQ(snapshot->seal_fence_write_seq, 7U);
+  EXPECT_EQ(snapshot->total_segment_count, 0U);
+  EXPECT_EQ(snapshot->total_invocation_count, 1U);
+  EXPECT_EQ(snapshot->page_segment_count, 0U);
+  EXPECT_EQ(snapshot->page_invocation_count, 1U);
+  EXPECT_EQ(snapshot->page_first_write_seq, 7U);
+  EXPECT_EQ(snapshot->page_last_write_seq, 7U);
+  EXPECT_TRUE(snapshot->segments.empty());
+  EXPECT_EQ(
+    snapshot->oracle_faults,
+    voice_nav_sim::kHardwareWriteOracleFaultSequence);
+  EXPECT_EQ(snapshot->page_checksum, independent_page_checksum(*snapshot));
+}
+
 TEST(HardwareWriteLedger, RefusesToWrapTheWriteSequence)
 {
   constexpr auto max_sequence = std::numeric_limits<std::uint64_t>::max();
