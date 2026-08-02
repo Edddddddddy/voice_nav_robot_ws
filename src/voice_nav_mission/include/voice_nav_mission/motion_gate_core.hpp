@@ -173,6 +173,7 @@ struct Snapshot
   std::string gate_instance_id;
   std::uint64_t state_seq{0U};
   std::uint64_t control_seq{0U};
+  std::uint64_t output_cause_transition_journal_seq{0U};
   State state{State::Inhibited};
   std::string lease_id;
   std::string candidate_topic;
@@ -273,7 +274,7 @@ private:
     ControlResult & rejection);
   void advance_state_seq();
   template<typename Mutation>
-  void apply_transition(
+  std::uint64_t apply_transition(
     std::uint64_t event_code,
     Reason reason,
     JournalFailurePolicy failure_policy,
@@ -301,6 +302,7 @@ private:
   State state_{State::Inhibited};
   std::uint64_t state_seq_{0U};
   std::uint64_t control_seq_{0U};
+  std::uint64_t last_terminal_transition_journal_seq_{0U};
   std::string lease_id_;
   std::string candidate_topic_;
   WriterGid bound_writer_gid_{};

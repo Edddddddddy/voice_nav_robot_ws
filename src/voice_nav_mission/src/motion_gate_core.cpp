@@ -127,7 +127,7 @@ MotionGateCore::MotionGateCore(
 MotionGateCore::~MotionGateCore() = default;
 
 template<typename Mutation>
-void MotionGateCore::apply_transition(
+std::uint64_t MotionGateCore::apply_transition(
   std::uint64_t event_code,
   Reason reason,
   JournalFailurePolicy failure_policy,
@@ -139,7 +139,7 @@ void MotionGateCore::apply_transition(
 
   if (transition_journal_ == nullptr) {
     std::forward<Mutation>(mutation)();
-    return;
+    return 0U;
   }
 
   const auto gate_words = identifier_words(gate_instance_id_);
@@ -156,23 +156,24 @@ void MotionGateCore::apply_transition(
     0U};
 
   try {
-    (void)transition_journal_->apply_transition(
+    const auto outcome = transition_journal_->apply_transition(
       intent,
       [this, &mutation]() noexcept {
         std::forward<Mutation>(mutation)();
         const auto after_lease_words = identifier_words(lease_id_);
         return GateTransitionAfter{
-          state_seq_,
-          control_seq_,
-          after_lease_words.hi,
-          after_lease_words.lo};
+        state_seq_,
+        control_seq_,
+        after_lease_words.hi,
+        after_lease_words.lo};
       });
+    return outcome.journal_seq;
   } catch (...) {
     // For a noexcept Core callback, Journal transition marking and commit are
     // noexcept too. Therefore an exception can only precede the mutation.
     if (failure_policy == JournalFailurePolicy::ApplySafetyMutation) {
       std::forward<Mutation>(mutation)();
-      return;
+      return 0U;
     }
     throw;
   }
@@ -271,7 +272,7 @@ ControlResult MotionGateCore::prepare(
   auto next_lease_id = make_lease_id(next_control_seq);
   auto next_candidate_topic = make_candidate_topic(next_lease_id);
   std::string next_detail{"lease prepared"};
-  apply_transition(
+  (void)apply_transition(
     kTransitionEventPrepare,
     Reason::None,
     JournalFailurePolicy::RejectMutation,
@@ -404,7 +405,7 @@ ControlResult MotionGateCore::open(
   }
 
   std::string next_detail{"lease armed; awaiting a fresh candidate"};
-  apply_transition(
+  (void)apply_transition(
     kTransitionEventOpen,
     Reason::None,
     JournalFailurePolicy::RejectMutation,
@@ -492,7 +493,7 @@ ControlResult MotionGateCore::renew(
   }
 
   std::string next_detail{"authority renewed"};
-  apply_transition(
+  (void)apply_transition(
     kTransitionEventRenew,
     Reason::None,
     JournalFailurePolicy::RejectMutation,
@@ -647,6 +648,8 @@ Snapshot MotionGateCore::snapshot() const
     gate_instance_id_,
     state_seq_,
     control_seq_,
+    (state_ == State::Inhibited || state_ == State::Faulted) ?
+    last_terminal_transition_journal_seq_ : 0U,
     state_,
     lease_id_,
     candidate_topic_,
@@ -683,7 +686,7 @@ void MotionGateCore::force_fault(Reason reason, std::string detail)
     sequence_exhausted ?
     "control sequence exhausted while entering fault" :
     (detail.empty() ? "MotionGate faulted" : std::move(detail)));
-  apply_transition(
+  last_terminal_transition_journal_seq_ = apply_transition(
     kTransitionEventFault,
     next_reason,
     JournalFailurePolicy::ApplySafetyMutation,
@@ -908,7 +911,7 @@ void MotionGateCore::retire_lease(
 
   auto next_detail = bounded_detail(
     detail.empty() ? "lease retired" : std::move(detail));
-  apply_transition(
+  last_terminal_transition_journal_seq_ = apply_transition(
     event_code,
     reason,
     JournalFailurePolicy::ApplySafetyMutation,
