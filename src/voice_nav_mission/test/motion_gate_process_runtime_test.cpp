@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <iomanip>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -60,23 +61,29 @@ struct RecordingFinalPublisher
   OwnedJournalRegion * owner{nullptr};
   std::vector<FinalOutputFrame> frames;
   std::vector<std::uint64_t> phases_during_publish;
+  std::size_t failures_remaining{0U};
 
   static void publish(void * context, const FinalOutputFrame & frame)
   {
     auto & self = *static_cast<RecordingFinalPublisher *>(context);
     self.frames.push_back(frame);
     if (self.owner == nullptr) {
-      return;
-    }
-    const auto claimed = gate_event_journal_load_acquire(
-      self.owner->header().claimed_slots);
-    if (claimed == 0U) {
       self.phases_during_publish.push_back(0U);
-      return;
+    } else {
+      const auto claimed = gate_event_journal_load_acquire(
+        self.owner->header().claimed_slots);
+      if (claimed == 0U) {
+        self.phases_during_publish.push_back(0U);
+      } else {
+        self.phases_during_publish.push_back(
+          gate_event_journal_load_acquire(
+            self.owner->slot(claimed - 1U).phase));
+      }
     }
-    self.phases_during_publish.push_back(
-      gate_event_journal_load_acquire(
-        self.owner->slot(claimed - 1U).phase));
+    if (self.failures_remaining != 0U) {
+      --self.failures_remaining;
+      throw std::runtime_error("injected final publisher failure");
+    }
   }
 
   [[nodiscard]] FinalOutputPublisher adapter() noexcept
@@ -84,6 +91,58 @@ struct RecordingFinalPublisher
     return FinalOutputPublisher{&RecordingFinalPublisher::publish, this};
   }
 };
+
+void select_nonzero_command(
+  MotionGateProcessRuntime & runtime,
+  const std::string & gate_instance_id)
+{
+  const auto now = MotionGateCore::SteadyTimePoint{} +
+  std::chrono::milliseconds{10};
+  const auto prepared = runtime.core().prepare(
+    ControlRequest{
+        Operation::Prepare,
+        "00000000000000000000000000000011",
+        gate_instance_id,
+        0U,
+        ""},
+    now);
+  if (prepared.code != ResultCode::Applied) {
+    throw std::runtime_error("test could not prepare MotionGate");
+  }
+
+  WriterGid writer_gid{};
+  writer_gid[0] = 0x5aU;
+  const auto opened = runtime.core().open(
+    ControlRequest{
+        Operation::Open,
+        "00000000000000000000000000000012",
+        gate_instance_id,
+        prepared.control_seq,
+        prepared.lease_id},
+    now,
+    [writer_gid]() {
+      return OpenBinding{true, Reason::None, writer_gid, "ready"};
+    });
+  if (opened.code != ResultCode::Applied) {
+    throw std::runtime_error("test could not open MotionGate");
+  }
+
+  const auto candidate = runtime.core().accept_candidate(
+    Candidate{
+        opened.lease_id,
+        writer_gid,
+        false,
+        0.20,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.40},
+    now);
+  if (!candidate.accepted || runtime.core().tick(now).is_zero()) {
+    throw std::runtime_error("test could not select a nonzero command");
+  }
+}
 
 TEST(MotionGateProcessRuntimeTest, BothEmptyParametersDisableAttachment)
 {
@@ -359,6 +418,254 @@ TEST(MotionGateProcessRuntimeTest, TerminalZeroBindsCauseExactlyOnce)
   EXPECT_EQ(
     gate_event_journal_load_acquire(owner.slot(3U).phase),
     VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_COMMITTED);
+}
+
+TEST(MotionGateProcessRuntimeTest, JournalOverflowFallsBackOnceAndRetiresLane)
+{
+  const std::string gate_instance_id =
+    "0123456789abcdef0123456789abcdef";
+  OwnedJournalRegion owner(2U);
+  MotionGateProcessRuntime runtime(
+    MotionGateConfig{},
+    gate_instance_id,
+    GateEventJournalTestParameters{
+        owner.name(), descriptor_for(owner)});
+  select_nonzero_command(runtime, gate_instance_id);
+  ASSERT_EQ(
+    gate_event_journal_load_acquire(owner.header().claimed_slots),
+    2U);
+  RecordingFinalPublisher publisher{&owner};
+
+  const auto failed = runtime.publish_final_command(
+    FinalOutputTime{true, 21, 22U}, publisher.adapter());
+
+  ASSERT_EQ(publisher.frames.size(), 1U);
+  EXPECT_TRUE(publisher.frames[0].command.is_zero());
+  EXPECT_EQ(failed.failure, FinalOutputFailure::JournalFailure);
+  EXPECT_TRUE(failed.fallback_attempted);
+  EXPECT_TRUE(failed.published);
+  EXPECT_TRUE(failed.zero_published);
+  EXPECT_FALSE(failed.journal_committed);
+  EXPECT_EQ(failed.state.output_publish_seq, 1U);
+  EXPECT_EQ(failed.state.zero_publish_seq, 1U);
+  EXPECT_EQ(failed.locally_consumed_terminal_cause_seq, 0U);
+  EXPECT_EQ(runtime.core().snapshot().state, State::Faulted);
+  EXPECT_EQ(runtime.core().snapshot().reason, Reason::InternalFailure);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(owner.header().overflow_latched),
+    1U);
+
+  const auto retired_claimed_slots = gate_event_journal_load_acquire(
+    owner.header().claimed_slots);
+  const auto retired = runtime.publish_final_command(
+    FinalOutputTime{true, 23, 24U}, publisher.adapter());
+
+  ASSERT_EQ(publisher.frames.size(), 2U);
+  EXPECT_TRUE(publisher.frames[1].command.is_zero());
+  EXPECT_EQ(retired.failure, FinalOutputFailure::JournalFailure);
+  EXPECT_FALSE(retired.fallback_attempted);
+  EXPECT_TRUE(retired.zero_published);
+  EXPECT_EQ(retired.state.output_publish_seq, 2U);
+  EXPECT_EQ(retired.state.zero_publish_seq, 2U);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(owner.header().claimed_slots),
+    retired_claimed_slots);
+}
+
+TEST(MotionGateProcessRuntimeTest, DdsThrowLeavesIntentAndFallsBackOnce)
+{
+  const std::string gate_instance_id =
+    "0123456789abcdef0123456789abcdef";
+  OwnedJournalRegion owner(8U);
+  MotionGateProcessRuntime runtime(
+    MotionGateConfig{},
+    gate_instance_id,
+    GateEventJournalTestParameters{
+        owner.name(), descriptor_for(owner)});
+  select_nonzero_command(runtime, gate_instance_id);
+  RecordingFinalPublisher publisher{&owner};
+  publisher.failures_remaining = 1U;
+
+  const auto result = runtime.publish_final_command(
+    FinalOutputTime{true, 31, 32U}, publisher.adapter());
+
+  ASSERT_EQ(publisher.frames.size(), 2U);
+  EXPECT_FALSE(publisher.frames[0].command.is_zero());
+  EXPECT_TRUE(publisher.frames[1].command.is_zero());
+  EXPECT_EQ(result.failure, FinalOutputFailure::DdsFailure);
+  EXPECT_TRUE(result.fallback_attempted);
+  EXPECT_TRUE(result.published);
+  EXPECT_TRUE(result.zero_published);
+  EXPECT_FALSE(result.journal_committed);
+  EXPECT_EQ(result.state.output_publish_seq, 1U);
+  EXPECT_EQ(result.state.zero_publish_seq, 1U);
+  EXPECT_EQ(result.locally_consumed_terminal_cause_seq, 4U);
+  ASSERT_EQ(
+    gate_event_journal_load_acquire(owner.header().claimed_slots),
+    4U);
+  const auto & output_intent = owner.slot(2U);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(output_intent.phase),
+    VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_INTENT);
+  EXPECT_EQ(
+    output_intent.record_kind,
+    VOICE_NAV_GATE_EVENT_JOURNAL_KIND_OUTPUT_ATTEMPT);
+  EXPECT_EQ(output_intent.output_attempt_seq, 1U);
+  EXPECT_EQ(output_intent.intended_output_seq, 1U);
+  const auto & fault = owner.slot(3U);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(fault.phase),
+    VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_COMMITTED);
+  EXPECT_EQ(
+    fault.record_kind,
+    VOICE_NAV_GATE_EVENT_JOURNAL_KIND_CONTROL_TRANSITION);
+  EXPECT_EQ(fault.event_code, 6U);
+  EXPECT_EQ(
+    fault.reason,
+    static_cast<std::uint64_t>(Reason::PublishFailed));
+
+  const auto retired = runtime.publish_final_command(
+    FinalOutputTime{true, 33, 34U}, publisher.adapter());
+  ASSERT_EQ(publisher.frames.size(), 3U);
+  EXPECT_TRUE(publisher.frames[2].command.is_zero());
+  EXPECT_EQ(retired.failure, FinalOutputFailure::DdsFailure);
+  EXPECT_FALSE(retired.fallback_attempted);
+  EXPECT_EQ(retired.locally_consumed_terminal_cause_seq, 0U);
+  EXPECT_EQ(retired.state.output_publish_seq, 2U);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(owner.header().claimed_slots),
+    4U);
+}
+
+TEST(MotionGateProcessRuntimeTest, DoubleDdsFailureDoesNotRecurse)
+{
+  const std::string gate_instance_id =
+    "0123456789abcdef0123456789abcdef";
+  OwnedJournalRegion owner(8U);
+  MotionGateProcessRuntime runtime(
+    MotionGateConfig{},
+    gate_instance_id,
+    GateEventJournalTestParameters{
+        owner.name(), descriptor_for(owner)});
+  select_nonzero_command(runtime, gate_instance_id);
+  RecordingFinalPublisher failing_publisher{&owner};
+  failing_publisher.failures_remaining = 2U;
+
+  const auto failed = runtime.publish_final_command(
+    FinalOutputTime{true, 41, 42U}, failing_publisher.adapter());
+
+  ASSERT_EQ(failing_publisher.frames.size(), 2U);
+  EXPECT_FALSE(failing_publisher.frames[0].command.is_zero());
+  EXPECT_TRUE(failing_publisher.frames[1].command.is_zero());
+  EXPECT_EQ(failed.failure, FinalOutputFailure::DirectZeroDdsFailure);
+  EXPECT_TRUE(failed.fallback_attempted);
+  EXPECT_FALSE(failed.published);
+  EXPECT_FALSE(failed.zero_published);
+  EXPECT_EQ(failed.state.output_publish_seq, 0U);
+  EXPECT_EQ(failed.state.zero_publish_seq, 0U);
+  EXPECT_EQ(failed.locally_consumed_terminal_cause_seq, 0U);
+
+  RecordingFinalPublisher recovery_publisher{&owner};
+  const auto recovered = runtime.publish_final_command(
+    FinalOutputTime{true, 43, 44U}, recovery_publisher.adapter());
+  ASSERT_EQ(recovery_publisher.frames.size(), 1U);
+  EXPECT_TRUE(recovery_publisher.frames[0].command.is_zero());
+  EXPECT_EQ(recovered.failure, FinalOutputFailure::DdsFailure);
+  EXPECT_FALSE(recovered.fallback_attempted);
+  EXPECT_TRUE(recovered.zero_published);
+  EXPECT_EQ(recovered.state.output_publish_seq, 1U);
+  EXPECT_EQ(recovered.state.zero_publish_seq, 1U);
+  EXPECT_EQ(recovered.locally_consumed_terminal_cause_seq, 4U);
+
+  const auto repeated = runtime.publish_final_command(
+    FinalOutputTime{true, 45, 46U}, recovery_publisher.adapter());
+  EXPECT_EQ(repeated.locally_consumed_terminal_cause_seq, 0U);
+  EXPECT_EQ(repeated.state.output_publish_seq, 2U);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(owner.header().claimed_slots),
+    4U);
+}
+
+TEST(MotionGateProcessRuntimeTest, DefaultOffPathPreservesOutputSemantics)
+{
+  const std::string gate_instance_id =
+    "0123456789abcdef0123456789abcdef";
+  MotionGateProcessRuntime runtime(
+    MotionGateConfig{},
+    gate_instance_id,
+    GateEventJournalTestParameters{"", ""});
+  select_nonzero_command(runtime, gate_instance_id);
+  RecordingFinalPublisher publisher{nullptr};
+
+  const auto first = runtime.publish_final_command(
+    FinalOutputTime{true, 51, 52U}, publisher.adapter());
+  ASSERT_EQ(publisher.frames.size(), 1U);
+  EXPECT_FALSE(publisher.frames[0].command.is_zero());
+  EXPECT_EQ(first.failure, FinalOutputFailure::None);
+  EXPECT_TRUE(first.published);
+  EXPECT_FALSE(first.zero_published);
+  EXPECT_FALSE(first.journal_committed);
+  EXPECT_EQ(first.state.output_publish_seq, 1U);
+  EXPECT_EQ(first.state.zero_publish_seq, 0U);
+  EXPECT_FALSE(first.state.last_publication_was_zero);
+
+  publisher.failures_remaining = 1U;
+  const auto recovered = runtime.publish_final_command(
+    FinalOutputTime{true, 53, 54U}, publisher.adapter());
+  ASSERT_EQ(publisher.frames.size(), 3U);
+  EXPECT_FALSE(publisher.frames[1].command.is_zero());
+  EXPECT_TRUE(publisher.frames[2].command.is_zero());
+  EXPECT_EQ(recovered.failure, FinalOutputFailure::DdsFailure);
+  EXPECT_TRUE(recovered.fallback_attempted);
+  EXPECT_TRUE(recovered.zero_published);
+  EXPECT_EQ(recovered.state.output_publish_seq, 2U);
+  EXPECT_EQ(recovered.state.zero_publish_seq, 2U);
+  EXPECT_TRUE(recovered.state.last_publication_was_zero);
+  EXPECT_EQ(runtime.core().snapshot().state, State::Faulted);
+  EXPECT_EQ(runtime.core().snapshot().reason, Reason::PublishFailed);
+}
+
+TEST(MotionGateProcessRuntimeTest, InactiveSimulationTimeCommitsStampedZero)
+{
+  const std::string gate_instance_id =
+    "0123456789abcdef0123456789abcdef";
+  OwnedJournalRegion owner(4U);
+  MotionGateProcessRuntime runtime(
+    MotionGateConfig{},
+    gate_instance_id,
+    GateEventJournalTestParameters{
+        owner.name(), descriptor_for(owner)});
+  RecordingFinalPublisher publisher{&owner};
+
+  const auto result = runtime.publish_final_command(
+    FinalOutputTime{false, 61, 62U}, publisher.adapter());
+
+  ASSERT_EQ(publisher.frames.size(), 1U);
+  EXPECT_TRUE(publisher.frames[0].command.is_zero());
+  EXPECT_EQ(publisher.frames[0].stamp_sec, 0);
+  EXPECT_EQ(publisher.frames[0].stamp_nanosec, 0U);
+  EXPECT_EQ(result.failure, FinalOutputFailure::RuntimeInvariant);
+  EXPECT_TRUE(result.published);
+  EXPECT_TRUE(result.zero_published);
+  EXPECT_TRUE(result.journal_committed);
+  EXPECT_EQ(result.locally_consumed_terminal_cause_seq, 1U);
+  EXPECT_EQ(runtime.core().snapshot().state, State::Faulted);
+  EXPECT_EQ(
+    runtime.core().snapshot().reason,
+    Reason::ConfigurationInvalid);
+  ASSERT_EQ(
+    gate_event_journal_load_acquire(owner.header().claimed_slots),
+    2U);
+  const auto & output = owner.slot(1U);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(output.phase),
+    VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_COMMITTED);
+  EXPECT_EQ(output.ros_stamp_sec_bits, 0U);
+  EXPECT_EQ(output.ros_stamp_nanosec, 0U);
+  EXPECT_EQ(output.cause_transition_journal_seq, 1U);
+  EXPECT_EQ(
+    output.reason,
+    static_cast<std::uint64_t>(Reason::ConfigurationInvalid));
 }
 
 }  // namespace
