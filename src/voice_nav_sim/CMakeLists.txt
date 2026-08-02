@@ -119,6 +119,11 @@ if(BUILD_TESTING)
     test/test_crash_evidence.py
     TIMEOUT 10
   )
+  ament_add_pytest_test(
+    crash_robot_description_test
+    test/test_crash_robot_description.py
+    TIMEOUT 10
+  )
   target_include_directories(
     tf_ownership_evaluator_test
     PRIVATE test
