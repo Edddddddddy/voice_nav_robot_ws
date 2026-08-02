@@ -14,6 +14,8 @@
 
 #include "journaled_gazebo_sim_system_adapter.hpp"
 
+#include "attached_hardware_write_ledger.hpp"
+
 #include <gz/sim/EntityComponentManager.hh>
 #include <gz/sim/components/JointVelocityCmd.hh>
 #include <pluginlib/class_list_macros.hpp>
@@ -30,6 +32,19 @@ namespace
 constexpr char kLeftWheelJoint[] = "left_wheel_joint";
 constexpr char kRightWheelJoint[] = "right_wheel_joint";
 
+class PosixHardwareWriteJournalAttachment final
+  : public HardwareWriteJournalAttachment
+{
+public:
+  std::shared_ptr<HardwareWriteJournal> attach(
+    const std::string & journal_name,
+    const std::string & journal_nonce) override
+  {
+    return std::make_shared<AttachedHardwareWriteLedger>(
+      HardwareWriteLedgerDiscoveryConfig{journal_name, journal_nonce});
+  }
+};
+
 std::uint64_t double_bits(double value) noexcept
 {
   static_assert(sizeof(value) == sizeof(std::uint64_t));
@@ -45,7 +60,9 @@ JournaledGazeboSimSystemAdapter::JournaledGazeboSimSystemAdapter()
     "gz_ros2_control",
     "gz_ros2_control::GazeboSimSystemInterface"),
   upstream_(upstream_loader_.createSharedInstance(
-      "gz_ros2_control/GazeboSimSystem"))
+      "gz_ros2_control/GazeboSimSystem")),
+  write_journal_attachment_(
+    std::make_shared<PosixHardwareWriteJournalAttachment>())
 {
 }
 

@@ -195,6 +195,10 @@ if(BUILD_TESTING)
     voice_nav_sim_hardware_write_ledger_posix
     rt
   )
+  target_link_libraries(
+    voice_nav_sim_journaled_gazebo_sim_system_adapter
+    voice_nav_sim_hardware_write_ledger_posix
+  )
   target_compile_features(
     hardware_write_ledger_attach_probe
     PRIVATE cxx_std_17

@@ -188,6 +188,33 @@ def validate_adapter(
             "gz_ros2_control/GazeboSimSystem"
         )
 
+    attachment_interface = re.search(
+        r"class\s+HardwareWriteJournalAttachment\b.*?"
+        r"\battach\s*\(",
+        header,
+        flags=re.DOTALL,
+    )
+    attachment_member = re.search(
+        r"std::shared_ptr\s*<\s*HardwareWriteJournalAttachment\s*>\s*"
+        r"write_journal_attachment_\s*;",
+        header,
+    )
+    if attachment_interface is None or attachment_member is None:
+        raise CrashStopContractError(
+            "Adapter must own the runtime journal attachment seam"
+        )
+    required_default_attachment = (
+        "PosixHardwareWriteJournalAttachment",
+        "AttachedHardwareWriteLedger",
+        "HardwareWriteLedgerDiscoveryConfig",
+        "std::make_shared<PosixHardwareWriteJournalAttachment>()",
+    )
+    if any(fragment not in source for fragment in required_default_attachment):
+        raise CrashStopContractError(
+            "default Adapter must construct the nonce-authenticated POSIX "
+            "journal attachment"
+        )
+
     required_delegations = {
         "upstream_->initSim(": "initSim",
         "upstream_->on_init(": "on_init",
@@ -673,6 +700,9 @@ def validate_adapter_behavior_test(path: Path) -> None:
         "ReportsRemovedWheelEntity",
         "ReportsEmptyWheelCommandComponent",
         "FinishesJournalCycleWhenDelegatedWriteThrows",
+        "AttachesJournalIdentityBeforeFirstWrite",
+        "RejectsIncompleteJournalIdentityWithoutAttaching",
+        "RejectsJournalAttachmentFailure",
     }
     missing = sorted(
         test_name
@@ -797,6 +827,27 @@ def validate_sim_cmake(path: Path) -> None:
         raise CrashStopContractError(
             "voice_nav_sim CMake must link the Adapter behavior test to the "
             "Adapter library"
+        )
+    posix_ledger_target = "voice_nav_sim_hardware_write_ledger_posix"
+    posix_definition = re.search(
+        r"add_library\(\s*" + re.escape(posix_ledger_target) + r"\b",
+        source,
+    )
+    adapter_link_blocks = re.finditer(
+        r"target_link_libraries\(\s*"
+        + re.escape(ADAPTER_TARGET)
+        + r"\b(?P<body>.*?)\)",
+        source,
+        flags=re.DOTALL,
+    )
+    adapter_links_posix = any(
+        re.search(rf"\b{re.escape(posix_ledger_target)}\b", match.group("body"))
+        is not None
+        for match in adapter_link_blocks
+    )
+    if posix_definition is None or not adapter_links_posix:
+        raise CrashStopContractError(
+            "voice_nav_sim Adapter target must link the POSIX hardware ledger"
         )
 
 
