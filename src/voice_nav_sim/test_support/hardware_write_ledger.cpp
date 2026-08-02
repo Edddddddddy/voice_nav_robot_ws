@@ -202,6 +202,9 @@ bool HardwareWriteLedger::append(
         impl_->finalized_segment_count >=
         impl_->config.segment_capacity - 1U)
       {
+        impl_->oracle_faults.fetch_or(
+          kHardwareWriteOracleFaultCapacity,
+          std::memory_order_release);
         return false;
       }
       impl_->finalized_segments[impl_->finalized_segment_count] = active;
