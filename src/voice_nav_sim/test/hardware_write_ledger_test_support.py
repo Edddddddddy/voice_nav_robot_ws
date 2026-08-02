@@ -255,6 +255,12 @@ class HardwareWriteLedgerRegionOwner:
         """Acquire-load one dynamic header word."""
         return self.atomic.load_acquire(self.region, index * 8)
 
+    def corrupt_header_checksum(self):
+        """Flip only the immutable header checksum for one mutation test."""
+        header = list(struct.unpack_from(HEADER_FORMAT, self.region, 0))
+        header[23] ^= 1
+        struct.pack_into(HEADER_FORMAT, self.region, 0, *header)
+
     def wait_for_writer(self, expected_pid, timeout=3.0):
         """Wait until the exact child PID owns the Writer claim."""
         deadline = time.monotonic() + timeout

@@ -26,6 +26,7 @@ from hardware_write_ledger_test_support import (
     CONTROL_OP_ARM,
     CONTROL_RESPONSE_OK,
     HardwareWriteLedgerRegionOwner,
+    WRITER_PID_WORD,
 )
 
 
@@ -90,6 +91,36 @@ def spawn_probe(probe, owner):
         text=True,
         close_fds=True,
     )
+
+
+def test_corrupt_header_is_rejected_before_claim(probe):
+    """Prove an identity CRC mutation cannot obtain the Writer claim."""
+    with HardwareWriteLedgerRegionOwner(
+        generation=72,
+        segment_capacity=4,
+        page_segment_limit=2,
+    ) as owner:
+        owner.corrupt_header_checksum()
+        process = spawn_probe(probe, owner)
+        try:
+            return_code = process.wait(timeout=3.0)
+            stdout = process.stdout.read()
+            stderr = process.stderr.read()
+            require(return_code != 0, 'corrupt header probe unexpectedly passed')
+            require(stdout == '', 'corrupt header probe published READY')
+            require(
+                owner.load_header_word(WRITER_PID_WORD) == 0,
+                'corrupt header obtained the Writer claim',
+            )
+            require(
+                'checksum mismatch' in stderr,
+                f'corrupt header diagnostic changed: {stderr}',
+            )
+            descriptor = owner.api.open_object(owner.name, os.O_RDWR)
+            os.close(descriptor)
+        finally:
+            terminate_owned_process(process)
+            close_owned_process_pipes(process)
 
 
 def test_exec_attach_survives_unlink(probe):
@@ -239,6 +270,7 @@ def main():
     if len(sys.argv) != 2:
         raise SystemExit('expected the attach probe executable')
     probe = os.path.abspath(sys.argv[1])
+    test_corrupt_header_is_rejected_before_claim(probe)
     test_exec_attach_survives_unlink(probe)
     test_arm_linearizes_before_first_write(probe)
 
