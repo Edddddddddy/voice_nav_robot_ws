@@ -22,6 +22,7 @@ if(BUILD_TESTING)
   find_package(hardware_interface REQUIRED)
   find_package(launch_testing_ament_cmake REQUIRED)
   find_package(pluginlib REQUIRED)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
   find_package(rclcpp REQUIRED)
   find_package(rclcpp_lifecycle REQUIRED)
   find_package(rmw REQUIRED)
@@ -84,6 +85,34 @@ if(BUILD_TESTING)
   add_test(
     NAME hardware_write_ledger_c_abi_test
     COMMAND $<TARGET_FILE:hardware_write_ledger_c_abi_test>
+  )
+
+  add_executable(
+    hardware_write_ledger_attach_probe
+    test/hardware_write_ledger_attach_probe.cpp
+  )
+  target_compile_features(
+    hardware_write_ledger_attach_probe
+    PRIVATE cxx_std_17
+  )
+  target_include_directories(
+    hardware_write_ledger_attach_probe
+    PRIVATE test_support
+  )
+  add_test(
+    NAME hardware_write_ledger_cross_process_test
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/test/test_hardware_write_ledger_cross_process.py"
+      "$<TARGET_FILE:hardware_write_ledger_attach_probe>"
+  )
+  set_tests_properties(
+    hardware_write_ledger_cross_process_test
+    PROPERTIES
+      ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+      LABELS cross_process
+      RUN_SERIAL TRUE
+      TIMEOUT 15
   )
 
   install(
