@@ -1267,6 +1267,48 @@ class MotionGateContractTest(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
+    def test_process_runtime_must_outlive_core_and_product_endpoints(
+        self,
+    ) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_mission/src/motion_gate_node.cpp",
+                (
+                    "MotionGateProcessRuntime runtime_;\n"
+                    "  MotionGateCore & core_;"
+                ),
+                (
+                    "MotionGateCore & core_;\n"
+                    "  MotionGateProcessRuntime runtime_;"
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("Runtime member lifetime", completed.stderr)
+
+    def test_node_cannot_bypass_process_runtime_link(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_mission/CMakeLists.txt",
+                (
+                    "  motion_gate_process_runtime\n"
+                    '  "${motion_gate_typesupport}"'
+                ),
+                (
+                    "  motion_gate_core\n"
+                    '  "${motion_gate_typesupport}"'
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("must link the process Runtime", completed.stderr)
+
     def test_node_must_delegate_gate_local_snapshot_to_observation_session(
         self,
     ) -> None:
