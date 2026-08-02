@@ -263,6 +263,74 @@ TEST(MotionGateJournal, ReservationFailureLeavesPrepareFailClosedAndUnchanged)
   EXPECT_EQ(clock.samples, 2U);
 }
 
+TEST(MotionGateJournal, FullJournalCannotPreventExplicitInhibit)
+{
+  JournalRegion<2U> region;
+  const auto identity = initialize_region(region);
+  FakeClock clock;
+  GateEventJournal journal(
+    &region,
+    sizeof(region),
+    identity,
+    GateEventJournalClock{&FakeClock::read, &clock});
+  MotionGateCore gate(MotionGateConfig{}, kGateId, 0U, &journal);
+  const auto now = MotionGateCore::SteadyTimePoint{};
+  ASSERT_EQ(
+    gate.prepare(
+      ControlRequest{
+        Operation::Prepare,
+        "00000000000000000000000000000001",
+        kGateId,
+        0U,
+        ""},
+      now).code,
+    ResultCode::Applied);
+  const auto prepared = gate.snapshot();
+  WriterGid writer{};
+  writer.front() = 0x42U;
+  writer.back() = 0xe7U;
+  ASSERT_EQ(
+    gate.open(
+      ControlRequest{
+        Operation::Open,
+        "00000000000000000000000000000002",
+        kGateId,
+        prepared.control_seq,
+        prepared.lease_id},
+      now,
+      [writer]() {
+        return OpenBinding{true, Reason::None, writer, "writer ready"};
+      }).code,
+    ResultCode::Applied);
+  const auto armed = gate.snapshot();
+
+  ControlResult result;
+  EXPECT_NO_THROW(
+    result = gate.inhibit(
+      ControlRequest{
+        Operation::Inhibit,
+        "00000000000000000000000000000003",
+        kGateId,
+        armed.control_seq,
+        armed.lease_id},
+      now));
+
+  EXPECT_EQ(result.code, ResultCode::Applied);
+  EXPECT_EQ(result.state, State::Inhibited);
+  EXPECT_EQ(result.control_seq, 3U);
+  EXPECT_TRUE(result.lease_id.empty());
+  EXPECT_TRUE(result.motion_inhibited);
+  EXPECT_TRUE(result.zero_selected);
+  EXPECT_TRUE(gate.selected_command().is_zero());
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(region.header.claimed_slots),
+    2U);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(region.header.overflow_latched),
+    1U);
+  EXPECT_EQ(clock.samples, 6U);
+}
+
 TEST(MotionGateJournal, SuccessfulRenewUsesTheSameCoreOwnedFence)
 {
   JournalRegion<3U> region;
