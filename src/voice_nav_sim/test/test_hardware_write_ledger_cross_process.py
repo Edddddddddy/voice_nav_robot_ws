@@ -25,6 +25,8 @@ from hardware_write_ledger_test_support import (
     CONTROL_FLAG_ZERO_REQUIRED,
     CONTROL_OP_ARM,
     CONTROL_RESPONSE_OK,
+    FAULT_PROTOCOL,
+    GLOBAL_ORACLE_FAULTS_WORD,
     HardwareWriteLedgerRegionOwner,
     WRITER_PID_WORD,
 )
@@ -416,6 +418,84 @@ def test_arm_excludes_prior_write_and_preserves_multiple_records(probe):
             close_owned_process_pipes(process)
 
 
+def test_same_ticket_different_payload_replay_latches_fault(probe):
+    """Prove an acknowledged ticket cannot be reused for another payload."""
+    with HardwareWriteLedgerRegionOwner(
+        generation=76,
+        segment_capacity=4,
+        page_segment_limit=2,
+    ) as owner:
+        process = spawn_probe(probe, owner)
+        try:
+            require(
+                owner.wait_for_writer(process.pid) == process.pid,
+                'replay probe Writer PID mismatch',
+            )
+            require(
+                read_owned_line(process, 'READY') == 'READY',
+                'replay probe did not publish READY',
+            )
+            owner.unlink_name()
+            request_ticket = owner.post_arm(
+                interval_id=93,
+                segment_budget=2,
+                invocation_budget=3,
+                require_zero_commands=False,
+            )
+            process.stdin.write('BEGIN 1000000\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 1',
+                'replay setup write did not begin',
+            )
+            response = owner.wait_response(request_ticket)
+            require(
+                response[9] == CONTROL_RESPONSE_OK,
+                'replay setup ARM was not acknowledged',
+            )
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 1',
+                'replay setup write did not finish',
+            )
+            require(owner.wait_completed_write(1) == 1, 'setup completion lost')
+
+            owner.replay_arm_with_interval(request_ticket, interval_id=94)
+            process.stdin.write('BEGIN 2000000\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 2',
+                'replay trigger write did not begin',
+            )
+            faults = owner.load_header_word(GLOBAL_ORACLE_FAULTS_WORD)
+            require(
+                faults & FAULT_PROTOCOL,
+                'same-ticket different-payload replay was silently ignored',
+            )
+            require(
+                owner.snapshot_bank(response[10])[2] == 93,
+                'replay changed the acknowledged interval identity',
+            )
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 2',
+                'replay trigger write did not finish',
+            )
+            process.stdin.write('EXIT\n')
+            process.stdin.flush()
+            return_code = process.wait(timeout=3.0)
+            stderr = process.stderr.read()
+            require(
+                return_code == 0,
+                f'replay probe exited {return_code}: {stderr}',
+            )
+        finally:
+            terminate_owned_process(process)
+            close_owned_process_pipes(process)
+
+
 def main():
     """Run the bounded cross-process ledger behavior slices."""
     if len(sys.argv) != 2:
@@ -425,6 +505,7 @@ def main():
     test_exec_attach_survives_unlink(probe)
     test_arm_linearizes_before_first_write(probe)
     test_arm_excludes_prior_write_and_preserves_multiple_records(probe)
+    test_same_ticket_different_payload_replay_latches_fault(probe)
 
 
 if __name__ == '__main__':

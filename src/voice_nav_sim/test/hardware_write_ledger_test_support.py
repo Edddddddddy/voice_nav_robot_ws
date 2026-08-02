@@ -37,11 +37,13 @@ CRC64_ECMA_POLYNOMIAL = 0x42F0E1EBA9EA3693
 UINT64_MASK = (1 << 64) - 1
 HEADER_FORMAT = '<24Q'
 CONTROL_FORMAT = '<16Q'
+CONTROL_REQUEST_FORMAT = '<9Q'
 BANK_FORMAT = '<16Q'
 SEGMENT_FORMAT = '<8Q'
 INIT_STATE_WORD = 17
 WRITER_PID_WORD = 18
 LAST_COMPLETED_WRITE_SEQ_WORD = 19
+GLOBAL_ORACLE_FAULTS_WORD = 20
 CONTROL_OFFSET = HEADER_BYTES
 CONTROL_RESPONSE_TICKET_WORD = 14
 CONTROL_REQUEST_TICKET_WORD = 15
@@ -49,6 +51,7 @@ BANK_STATE_ACTIVE = 1
 CONTROL_OP_ARM = 1
 CONTROL_FLAG_ZERO_REQUIRED = 1
 CONTROL_RESPONSE_OK = 1
+FAULT_PROTOCOL = 1 << 7
 
 
 def crc64_ecma_words(words):
@@ -320,6 +323,39 @@ class HardwareWriteLedgerRegionOwner:
             request_ticket,
         )
         return request_ticket
+
+    def replay_arm_with_interval(self, request_ticket, interval_id):
+        """Release-republish one ticket with a different valid payload."""
+        control = list(
+            struct.unpack_from(CONTROL_FORMAT, self.region, CONTROL_OFFSET),
+        )
+        response_ticket = self.atomic.load_acquire(
+            self.region,
+            CONTROL_OFFSET + CONTROL_RESPONSE_TICKET_WORD * 8,
+        )
+        published_ticket = self.atomic.load_acquire(
+            self.region,
+            CONTROL_OFFSET + CONTROL_REQUEST_TICKET_WORD * 8,
+        )
+        if response_ticket != request_ticket or published_ticket != request_ticket:
+            raise AssertionError('replay requires one completed request ticket')
+        control[2] = interval_id
+        control[8] = control_request_checksum(
+            self,
+            control,
+            request_ticket,
+        )
+        struct.pack_into(
+            CONTROL_REQUEST_FORMAT,
+            self.region,
+            CONTROL_OFFSET,
+            *control[0:9],
+        )
+        self.atomic.store_release(
+            self.region,
+            CONTROL_OFFSET + CONTROL_REQUEST_TICKET_WORD * 8,
+            request_ticket,
+        )
 
     def wait_response(self, request_ticket, timeout=3.0):
         """Acquire one exact Writer response and validate its checksum."""
