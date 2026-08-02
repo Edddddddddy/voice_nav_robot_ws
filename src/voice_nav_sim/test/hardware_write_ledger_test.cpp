@@ -17,6 +17,7 @@
 #include "hardware_write_ledger.hpp"
 
 #include <cstdint>
+#include <limits>
 
 namespace
 {
@@ -350,6 +351,52 @@ TEST(HardwareWriteLedger, LatchesASequenceFaultForADuplicateWrite)
   EXPECT_EQ(snapshot->segments.front().last_write_seq, 1U);
   EXPECT_EQ(snapshot->segments.front().invocation_count, 1U);
   EXPECT_EQ(snapshot->page_checksum, independent_page_checksum(*snapshot));
+}
+
+TEST(HardwareWriteLedger, LatchesASequenceFaultForAGap)
+{
+  voice_nav_sim::HardwareWriteLedger ledger({44U, 17U, 10U, 1U, 1U});
+  const voice_nav_sim::HardwareWriteRecord first{
+    44U, 11U, 5'100'000, 0U, UINT64_C(17), UINT64_C(18)};
+  auto skipped = first;
+  skipped.write_seq = 13U;
+  ASSERT_TRUE(ledger.append(first));
+
+  EXPECT_FALSE(ledger.append(skipped));
+  EXPECT_EQ(
+    ledger.oracle_faults(),
+    voice_nav_sim::kHardwareWriteOracleFaultSequence);
+  ASSERT_TRUE(ledger.seal());
+  const auto snapshot = ledger.snapshot_page(0U);
+  ASSERT_TRUE(snapshot.has_value());
+  EXPECT_EQ(snapshot->seal_fence_write_seq, 11U);
+  EXPECT_EQ(
+    snapshot->oracle_faults,
+    voice_nav_sim::kHardwareWriteOracleFaultSequence);
+}
+
+TEST(HardwareWriteLedger, RefusesToWrapTheWriteSequence)
+{
+  constexpr auto max_sequence = std::numeric_limits<std::uint64_t>::max();
+  voice_nav_sim::HardwareWriteLedger ledger(
+    {44U, 18U, max_sequence - 1U, 1U, 1U});
+  const voice_nav_sim::HardwareWriteRecord final_sequence{
+    44U, max_sequence, 5'200'000, 0U, UINT64_C(19), UINT64_C(20)};
+  auto wrapped = final_sequence;
+  wrapped.write_seq = 0U;
+  ASSERT_TRUE(ledger.append(final_sequence));
+
+  EXPECT_FALSE(ledger.append(wrapped));
+  EXPECT_EQ(
+    ledger.oracle_faults(),
+    voice_nav_sim::kHardwareWriteOracleFaultSequence);
+  ASSERT_TRUE(ledger.seal());
+  const auto snapshot = ledger.snapshot_page(0U);
+  ASSERT_TRUE(snapshot.has_value());
+  EXPECT_EQ(snapshot->seal_fence_write_seq, max_sequence);
+  EXPECT_EQ(
+    snapshot->oracle_faults,
+    voice_nav_sim::kHardwareWriteOracleFaultSequence);
 }
 
 TEST(HardwareWriteLedger, LatchesAStickyGenerationFault)
