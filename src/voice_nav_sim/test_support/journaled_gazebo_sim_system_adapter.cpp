@@ -67,6 +67,17 @@ JournaledGazeboSimSystemAdapter::JournaledGazeboSimSystemAdapter(
 {
 }
 
+JournaledGazeboSimSystemAdapter::JournaledGazeboSimSystemAdapter(
+  std::shared_ptr<gz_ros2_control::GazeboSimSystemInterface> upstream,
+  std::shared_ptr<HardwareWriteJournalAttachment> write_journal_attachment)
+: upstream_loader_(
+    "gz_ros2_control",
+    "gz_ros2_control::GazeboSimSystemInterface"),
+  upstream_(std::move(upstream)),
+  write_journal_attachment_(std::move(write_journal_attachment))
+{
+}
+
 #if defined(__GNUC__) || defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
@@ -156,6 +167,41 @@ bool JournaledGazeboSimSystemAdapter::initSim(
     hardware_info,
     entity_component_manager,
     update_rate);
+  if (!initialized) {
+    return false;
+  }
+  if (write_journal_attachment_ != nullptr) {
+    const auto journal_name =
+      hardware_info.hardware_parameters.find("journal_name");
+    const auto journal_nonce =
+      hardware_info.hardware_parameters.find("journal_nonce");
+    if (
+      journal_name == hardware_info.hardware_parameters.end() ||
+      journal_nonce == hardware_info.hardware_parameters.end() ||
+      journal_name->second.empty() || journal_nonce->second.empty())
+    {
+      return false;
+    }
+    if (write_journal_ == nullptr) {
+      try {
+        auto attached = write_journal_attachment_->attach(
+          journal_name->second, journal_nonce->second);
+        if (attached == nullptr) {
+          return false;
+        }
+        write_journal_ = std::move(attached);
+        attached_journal_name_ = journal_name->second;
+        attached_journal_nonce_ = journal_nonce->second;
+      } catch (...) {
+        return false;
+      }
+    } else if (
+      journal_name->second != attached_journal_name_ ||
+      journal_nonce->second != attached_journal_nonce_)
+    {
+      return false;
+    }
+  }
   if (initialized && write_journal_ != nullptr) {
     const auto left_joint = joints.find(kLeftWheelJoint);
     const auto right_joint = joints.find(kRightWheelJoint);
@@ -165,7 +211,7 @@ bool JournaledGazeboSimSystemAdapter::initSim(
       right_wheel_entity_ = right_joint->second;
     }
   }
-  return initialized;
+  return true;
 }
 
 hardware_interface::return_type JournaledGazeboSimSystemAdapter::read(

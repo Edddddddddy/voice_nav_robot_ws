@@ -29,6 +29,16 @@
 namespace voice_nav_sim
 {
 
+class HardwareWriteJournalAttachment
+{
+public:
+  virtual ~HardwareWriteJournalAttachment() = default;
+
+  [[nodiscard]] virtual std::shared_ptr<HardwareWriteJournal> attach(
+    const std::string & journal_name,
+    const std::string & journal_nonce) = 0;
+};
+
 class JournaledGazeboSimSystemAdapter final
   : public gz_ros2_control::GazeboSimSystemInterface
 {
@@ -39,6 +49,9 @@ public:
   JournaledGazeboSimSystemAdapter(
     std::shared_ptr<gz_ros2_control::GazeboSimSystemInterface> upstream,
     std::shared_ptr<HardwareWriteJournal> write_journal);
+  JournaledGazeboSimSystemAdapter(
+    std::shared_ptr<gz_ros2_control::GazeboSimSystemInterface> upstream,
+    std::shared_ptr<HardwareWriteJournalAttachment> write_journal_attachment);
 
   hardware_interface::CallbackReturn on_init(
     const hardware_interface::HardwareInfo & hardware_info) override;
@@ -89,7 +102,10 @@ private:
     gz_ros2_control::GazeboSimSystemInterface> upstream_loader_;
   std::shared_ptr<
     gz_ros2_control::GazeboSimSystemInterface> upstream_;
+  std::shared_ptr<HardwareWriteJournalAttachment> write_journal_attachment_;
   std::shared_ptr<HardwareWriteJournal> write_journal_;
+  std::string attached_journal_name_;
+  std::string attached_journal_nonce_;
   gz::sim::EntityComponentManager * entity_component_manager_{nullptr};
   gz::sim::Entity left_wheel_entity_{gz::sim::kNullEntity};
   gz::sim::Entity right_wheel_entity_{gz::sim::kNullEntity};
