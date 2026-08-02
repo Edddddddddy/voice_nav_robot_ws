@@ -385,6 +385,38 @@ TEST(GateEventJournal, RejectsNonFreshGenerationBeforeWriterClaim)
   }
 }
 
+TEST(GateEventJournal, RejectsClaimlessOccupiedSlotBeforeWriterClaim)
+{
+  const std::array<std::uint64_t, 2U> occupied_phases{
+    VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_INTENT,
+    VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_COMMITTED};
+
+  for (const auto phase : occupied_phases) {
+    SCOPED_TRACE(phase);
+    OneSlotRegion region;
+    const auto identity = initialize_region(region);
+    gate_event_journal_store_release(region.slot.phase, phase);
+    FakeClock clock;
+
+    EXPECT_THROW(
+        {
+          GateEventJournal journal(
+          &region,
+          sizeof(region),
+          identity,
+          GateEventJournalClock{&FakeClock::read, &clock});
+          (void)journal;
+        },
+      std::invalid_argument);
+    EXPECT_EQ(
+      gate_event_journal_load_acquire(region.header.writer_pid),
+      0U);
+    EXPECT_EQ(
+      gate_event_journal_load_acquire(region.header.claimed_slots),
+      0U);
+  }
+}
+
 TEST(GateEventJournal, ChecksumCoverageMatchesAbiV1)
 {
   using HeaderField = std::uint64_t GateEventJournalHeader::*;
