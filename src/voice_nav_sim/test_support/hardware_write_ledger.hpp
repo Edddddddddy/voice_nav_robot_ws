@@ -26,6 +26,9 @@
 namespace voice_nav_sim
 {
 
+inline constexpr std::uint64_t kHardwareWriteOracleFaultSequence =
+  UINT64_C(1) << 0U;
+
 struct HardwareWriteLedgerConfig
 {
   std::uint64_t generation;
@@ -84,6 +87,8 @@ public:
 
   bool append(const HardwareWriteRecord & record) noexcept override;
   bool seal() noexcept;
+
+  [[nodiscard]] std::uint64_t oracle_faults() const noexcept;
 
   [[nodiscard]] std::optional<HardwareWriteSnapshotPage> snapshot_page(
     std::uint64_t page_index) const;

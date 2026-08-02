@@ -25,6 +25,8 @@ namespace voice_nav_sim
 namespace
 {
 
+static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
+
 constexpr std::uint64_t kCrc64EcmaPolynomial =
   UINT64_C(0x42f0e1eba9ea3693);
 
@@ -123,6 +125,8 @@ public:
   std::size_t finalized_segment_count{0U};
   std::uint64_t total_invocation_count{0U};
   std::uint64_t seal_fence_write_seq{0U};
+  std::uint64_t sealed_oracle_faults{0U};
+  std::atomic<std::uint64_t> oracle_faults{0U};
   std::atomic_bool sealed{false};
 };
 
@@ -151,6 +155,9 @@ bool HardwareWriteLedger::append(
       std::numeric_limits<std::uint64_t>::max() ||
       record.write_seq != active.last_write_seq + 1U)
     {
+      impl_->oracle_faults.fetch_or(
+        kHardwareWriteOracleFaultSequence,
+        std::memory_order_release);
       return false;
     }
 
@@ -186,6 +193,9 @@ bool HardwareWriteLedger::append(
   }
 
   if (record.write_seq != impl_->config.arm_fence_write_seq + 1U) {
+    impl_->oracle_faults.fetch_or(
+      kHardwareWriteOracleFaultSequence,
+      std::memory_order_release);
     return false;
   }
 
@@ -217,8 +227,15 @@ bool HardwareWriteLedger::seal() noexcept
   ++impl_->finalized_segment_count;
   impl_->seal_fence_write_seq = impl_->active_segment->last_write_seq;
   impl_->active_segment.reset();
+  impl_->sealed_oracle_faults =
+    impl_->oracle_faults.load(std::memory_order_acquire);
   impl_->sealed.store(true, std::memory_order_release);
   return true;
+}
+
+std::uint64_t HardwareWriteLedger::oracle_faults() const noexcept
+{
+  return impl_->oracle_faults.load(std::memory_order_acquire);
 }
 
 std::optional<HardwareWriteSnapshotPage> HardwareWriteLedger::snapshot_page(
@@ -270,7 +287,7 @@ std::optional<HardwareWriteSnapshotPage> HardwareWriteLedger::snapshot_page(
       impl_->finalized_segments[first_segment_index].first_write_seq,
       impl_->finalized_segments[final_segment_index].last_write_seq,
       previous_checksum,
-      0U,
+      impl_->sealed_oracle_faults,
       0U,
       {}};
     page.segments.reserve(segment_count);
