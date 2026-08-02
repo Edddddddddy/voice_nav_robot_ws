@@ -16,11 +16,15 @@
 
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstdint>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <type_traits>
 #include <vector>
 
+#include "gate_event_journal_test_region.hpp"
 #include "motion_gate_process_runtime.hpp"
 
 namespace voice_nav_mission
@@ -32,6 +36,19 @@ static_assert(!std::is_copy_constructible_v<MotionGateProcessRuntime>);
 static_assert(!std::is_copy_assignable_v<MotionGateProcessRuntime>);
 static_assert(!std::is_move_constructible_v<MotionGateProcessRuntime>);
 static_assert(!std::is_move_assignable_v<MotionGateProcessRuntime>);
+
+std::string descriptor_for(const OwnedJournalRegion & owner)
+{
+  const auto identity = owner.identity();
+  std::ostringstream descriptor;
+  descriptor << "v1:" << identity.owner_uid
+             << ':' << identity.generation
+             << ':' << owner.capacity()
+             << ':' << std::hex << std::nouppercase << std::setfill('0')
+             << std::setw(16) << identity.nonce_hi
+             << std::setw(16) << identity.nonce_lo;
+  return descriptor.str();
+}
 
 TEST(MotionGateProcessRuntimeTest, BothEmptyParametersDisableAttachment)
 {
@@ -140,6 +157,53 @@ TEST(MotionGateProcessRuntimeTest, DefaultOffRuntimeOwnsOneFailClosedCore)
   EXPECT_EQ(snapshot.state, State::Inhibited);
   EXPECT_TRUE(snapshot.motion_inhibited);
   EXPECT_TRUE(snapshot.zero_selected);
+}
+
+TEST(MotionGateProcessRuntimeTest, AttachedRuntimeOwnsCoreBeforeMapping)
+{
+  const std::string gate_instance_id =
+    "0123456789abcdef0123456789abcdef";
+  OwnedJournalRegion owner(4U);
+
+  {
+    MotionGateProcessRuntime runtime(
+      MotionGateConfig{},
+      gate_instance_id,
+      GateEventJournalTestParameters{
+          owner.name(), descriptor_for(owner)});
+
+    EXPECT_EQ(
+      gate_event_journal_load_acquire(owner.header().writer_pid),
+      static_cast<std::uint64_t>(getpid()));
+    owner.unlink_name();
+
+    const auto result = runtime.core().prepare(
+      ControlRequest{
+          Operation::Prepare,
+          "00000000000000000000000000000001",
+          gate_instance_id,
+          0U,
+          ""},
+      MotionGateCore::SteadyTimePoint{} + std::chrono::milliseconds{10});
+    ASSERT_EQ(result.code, ResultCode::Applied);
+  }
+
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(owner.header().claimed_slots),
+    1U);
+  const auto & slot = owner.slot(0U);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(slot.phase),
+    VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_COMMITTED);
+  EXPECT_EQ(
+    slot.record_kind,
+    VOICE_NAV_GATE_EVENT_JOURNAL_KIND_CONTROL_TRANSITION);
+  EXPECT_EQ(slot.event_code, 1U);
+  EXPECT_EQ(slot.journal_seq, 1U);
+  EXPECT_EQ(slot.generation, owner.identity().generation);
+  EXPECT_NE(slot.intent_monotonic_ns, 0U);
+  EXPECT_GE(slot.transition_linearization_ns, slot.intent_monotonic_ns);
+  EXPECT_GE(slot.commit_monotonic_ns, slot.transition_linearization_ns);
 }
 
 }  // namespace
