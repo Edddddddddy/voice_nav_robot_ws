@@ -14,6 +14,7 @@
 
 """Create the test-only crash robot from a canonical expanded product URDF."""
 
+import re
 import xml.etree.ElementTree as element_tree
 
 
@@ -25,8 +26,27 @@ class CrashRobotDescriptionError(ValueError):
     """Report a robot description that cannot be transformed safely."""
 
 
+def _validate_journal_identity(journal_name, journal_nonce):
+    if not isinstance(journal_name, str) or re.fullmatch(
+        r'/[A-Za-z0-9][A-Za-z0-9_.-]{0,253}',
+        journal_name,
+    ) is None:
+        raise CrashRobotDescriptionError(
+            'journal name must be one bounded POSIX shared-memory component',
+        )
+    if (
+        not isinstance(journal_nonce, str)
+        or re.fullmatch(r'[0-9a-f]{32}', journal_nonce) is None
+        or journal_nonce == '0' * 32
+    ):
+        raise CrashRobotDescriptionError(
+            'journal nonce must be 32 lowercase nonzero hex digits',
+        )
+
+
 def transform_product_urdf(product_urdf, journal_name, journal_nonce):
     """Replace only the owned hardware plugin seam and add journal identity."""
+    _validate_journal_identity(journal_name, journal_nonce)
     try:
         root = element_tree.fromstring(product_urdf)
     except (element_tree.ParseError, TypeError) as error:
