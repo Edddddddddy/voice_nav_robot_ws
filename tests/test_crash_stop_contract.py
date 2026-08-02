@@ -13,24 +13,15 @@ CHECKER = REPOSITORY_ROOT / "scripts" / "check_crash_stop_contract.py"
 ADAPTER_HEADER = """\
 #pragma once
 
-#include <cstdint>
 #include <memory>
 
 #include <gz_ros2_control/gz_system_interface.hpp>
 #include <pluginlib/class_loader.hpp>
 
+#include "hardware_write_sink.hpp"
+
 namespace voice_nav_sim
 {
-struct HardwareWriteRecord
-{
-  std::uint64_t generation;
-  std::uint64_t write_seq;
-  std::int64_t sim_stamp_ns;
-  std::uint8_t delegated_result;
-  std::uint64_t left_command_bits;
-  std::uint64_t right_command_bits;
-};
-
 class JournaledGazeboSimSystemAdapter final : public
   gz_ros2_control::GazeboSimSystemInterface
 {
@@ -52,6 +43,26 @@ private:
     gz_ros2_control::GazeboSimSystemInterface> upstream_loader_;
   std::shared_ptr<
     gz_ros2_control::GazeboSimSystemInterface> upstream_;
+};
+}  // namespace voice_nav_sim
+"""
+
+
+WRITE_SINK_HEADER = """\
+#pragma once
+
+#include <cstdint>
+
+namespace voice_nav_sim
+{
+struct HardwareWriteRecord
+{
+  std::uint64_t generation;
+  std::uint64_t write_seq;
+  std::int64_t sim_stamp_ns;
+  std::uint8_t delegated_result;
+  std::uint64_t left_command_bits;
+  std::uint64_t right_command_bits;
 };
 }  // namespace voice_nav_sim
 """
@@ -337,6 +348,9 @@ motion_gate_node:
 
 FIXTURE_FILES = {
     (
+        "src/voice_nav_sim/test_support/hardware_write_sink.hpp"
+    ): WRITE_SINK_HEADER,
+    (
         "src/voice_nav_sim/test_support/"
         "journaled_gazebo_sim_system_adapter.hpp"
     ): ADAPTER_HEADER,
@@ -446,7 +460,7 @@ class CrashStopContractTest(unittest.TestCase):
                 root,
                 (
                     "src/voice_nav_sim/test_support/"
-                    "journaled_gazebo_sim_system_adapter.hpp"
+                    "hardware_write_sink.hpp"
                 ),
                 (
                     "class JournaledGazeboSimSystemAdapter final : public\n"
@@ -486,7 +500,7 @@ class CrashStopContractTest(unittest.TestCase):
                 root,
                 (
                     "src/voice_nav_sim/test_support/"
-                    "journaled_gazebo_sim_system_adapter.hpp"
+                    "hardware_write_sink.hpp"
                 ),
                 "  std::uint64_t write_seq;",
                 (
