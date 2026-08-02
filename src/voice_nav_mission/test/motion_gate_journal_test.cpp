@@ -348,5 +348,93 @@ TEST(MotionGateJournal, SuccessfulRenewUsesTheSameCoreOwnedFence)
   EXPECT_EQ(slot.commit_checksum, gate_event_journal_commit_checksum(slot));
 }
 
+TEST(MotionGateJournal, ExplicitInhibitCommitsLeaseRetirementAtOneFence)
+{
+  JournalRegion<3U> region;
+  const auto identity = initialize_region(region);
+  FakeClock clock;
+  GateEventJournal journal(
+    &region,
+    sizeof(region),
+    identity,
+    GateEventJournalClock{&FakeClock::read, &clock});
+  MotionGateCore gate(MotionGateConfig{}, kGateId, 0U, &journal);
+  const auto now = MotionGateCore::SteadyTimePoint{};
+  ASSERT_EQ(
+    gate.prepare(
+      ControlRequest{
+        Operation::Prepare,
+        "00000000000000000000000000000001",
+        kGateId,
+        0U,
+        ""},
+      now).code,
+    ResultCode::Applied);
+  const auto prepared = gate.snapshot();
+  WriterGid writer{};
+  writer.front() = 0x42U;
+  writer.back() = 0xe7U;
+  ASSERT_EQ(
+    gate.open(
+      ControlRequest{
+        Operation::Open,
+        "00000000000000000000000000000002",
+        kGateId,
+        prepared.control_seq,
+        prepared.lease_id},
+      now,
+      [writer]() {
+        return OpenBinding{true, Reason::None, writer, "writer ready"};
+      }).code,
+    ResultCode::Applied);
+  const auto armed = gate.snapshot();
+
+  const auto result = gate.inhibit(
+    ControlRequest{
+      Operation::Inhibit,
+      "00000000000000000000000000000003",
+      kGateId,
+      armed.control_seq,
+      armed.lease_id},
+    now);
+
+  ASSERT_EQ(result.code, ResultCode::Applied);
+  ASSERT_EQ(result.state, State::Inhibited);
+  EXPECT_TRUE(result.lease_id.empty());
+  EXPECT_TRUE(result.motion_inhibited);
+  EXPECT_TRUE(result.zero_selected);
+  EXPECT_EQ(clock.samples, 9U);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(region.header.claimed_slots),
+    3U);
+  const auto & slot = region.slots[2U];
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(slot.phase),
+    VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_COMMITTED);
+  EXPECT_EQ(
+    slot.record_kind,
+    VOICE_NAV_GATE_EVENT_JOURNAL_KIND_CONTROL_TRANSITION);
+  EXPECT_EQ(slot.journal_seq, 3U);
+  EXPECT_EQ(slot.generation, identity.generation);
+  EXPECT_EQ(slot.intent_monotonic_ns, 700U);
+  EXPECT_EQ(slot.transition_linearization_ns, 800U);
+  EXPECT_EQ(slot.commit_monotonic_ns, 900U);
+  EXPECT_EQ(slot.event_code, 4U);  // INHIBIT
+  EXPECT_EQ(slot.reason, static_cast<std::uint64_t>(Reason::None));
+  EXPECT_EQ(slot.before_state_seq, 2U);
+  EXPECT_EQ(slot.before_control_seq, 2U);
+  EXPECT_EQ(slot.after_state_seq, 3U);
+  EXPECT_EQ(slot.after_control_seq, 3U);
+  EXPECT_EQ(slot.before_lease_hi, UINT64_C(0x0123456789abcdef));
+  EXPECT_EQ(slot.before_lease_lo, UINT64_C(0x0123456789abcdee));
+  EXPECT_EQ(slot.after_lease_hi, 0U);
+  EXPECT_EQ(slot.after_lease_lo, 0U);
+  EXPECT_EQ(slot.gate_instance_hi, UINT64_C(0x0123456789abcdef));
+  EXPECT_EQ(slot.gate_instance_lo, UINT64_C(0x0123456789abcdef));
+  EXPECT_EQ(slot.flags, 0U);
+  EXPECT_EQ(slot.intent_checksum, gate_event_journal_intent_checksum(slot));
+  EXPECT_EQ(slot.commit_checksum, gate_event_journal_commit_checksum(slot));
+}
+
 }  // namespace
 }  // namespace voice_nav_mission
