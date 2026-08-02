@@ -528,6 +528,42 @@ TEST(
 
 TEST(
   JournaledGazeboSimSystemAdapter,
+  ReportsRemovedWheelEntity)
+{
+  auto upstream = std::make_shared<RecordingGazeboSystem>();
+  auto journal = std::make_shared<RecordingHardwareWriteJournal>();
+  voice_nav_sim::JournaledGazeboSimSystemAdapter adapter(upstream, journal);
+  rclcpp::Node::SharedPtr model_node;
+  gz::sim::EntityComponentManager entity_component_manager;
+  const auto left_entity = entity_component_manager.CreateEntity();
+  const auto right_entity = entity_component_manager.CreateEntity();
+  std::map<std::string, gz::sim::Entity> joints{
+    {"left_wheel_joint", left_entity},
+    {"right_wheel_joint", right_entity}};
+  const hardware_interface::HardwareInfo hardware_info{};
+  ASSERT_TRUE(
+    adapter.initSim(
+      model_node,
+      joints,
+      hardware_info,
+      entity_component_manager,
+      50U));
+  entity_component_manager.RequestRemoveEntity(left_entity);
+  entity_component_manager.ProcessRemoveEntityRequests();
+  ASSERT_FALSE(entity_component_manager.HasEntity(left_entity));
+
+  (void)adapter.write(
+    rclcpp::Time(4, 0, RCL_ROS_TIME), rclcpp::Duration(0, 20'000'000));
+
+  EXPECT_EQ(journal->begin_calls, 1U);
+  EXPECT_EQ(journal->finish_calls, 1U);
+  EXPECT_EQ(
+    journal->observation.status,
+    voice_nav_sim::HardwareWriteObservationStatus::kMissingEntity);
+}
+
+TEST(
+  JournaledGazeboSimSystemAdapter,
   ReportsEmptyWheelCommandComponent)
 {
   auto upstream = std::make_shared<RecordingGazeboSystem>();
@@ -591,7 +627,7 @@ TEST(
   EXPECT_EQ(journal->finish_calls, 1U);
   EXPECT_EQ(
     journal->delegated_result,
-    static_cast<std::uint64_t>(hardware_interface::return_type::ERROR));
+    voice_nav_sim::kHardwareWriteDelegatedException);
   EXPECT_EQ(
     journal->observation.status,
     voice_nav_sim::HardwareWriteObservationStatus::kMissingEntity);
