@@ -196,6 +196,11 @@ public:
     std::uint64_t initial_control_seq = 0U,
     GateEventJournal * event_journal = nullptr);
 
+  MotionGateCore(const MotionGateCore &) = delete;
+  MotionGateCore & operator=(const MotionGateCore &) = delete;
+  MotionGateCore(MotionGateCore &&) = delete;
+  MotionGateCore & operator=(MotionGateCore &&) = delete;
+
   [[nodiscard]] ControlResult prepare(
     const ControlRequest & request,
     SteadyTimePoint now,

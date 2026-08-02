@@ -130,6 +130,22 @@ ControlResult open_with(
 
 struct ArmedGate
 {
+  ArmedGate(
+    MotionGateConfig config,
+    MotionGateCore::SteadyTimePoint now,
+    std::uint64_t initial_control_seq)
+  : gate(config, kGateId, initial_control_seq),
+    writer(writer_gid())
+  {
+    EXPECT_EQ(
+      prepare_with(gate, 1U, now).code,
+      ResultCode::Applied);
+    lease = gate.snapshot().lease_id;
+    EXPECT_EQ(
+      open_with(gate, 2U, now, writer).code,
+      ResultCode::Applied);
+  }
+
   MotionGateCore gate;
   WriterGid writer;
   std::string lease;
@@ -140,18 +156,7 @@ ArmedGate make_armed_gate(
   MotionGateCore::SteadyTimePoint now = at(0ms),
   std::uint64_t initial_control_seq = 0U)
 {
-  ArmedGate context{
-    MotionGateCore{config, kGateId, initial_control_seq},
-    writer_gid(),
-    ""};
-  EXPECT_EQ(
-    prepare_with(context.gate, 1U, now).code,
-    ResultCode::Applied);
-  context.lease = context.gate.snapshot().lease_id;
-  EXPECT_EQ(
-    open_with(context.gate, 2U, now, context.writer).code,
-    ResultCode::Applied);
-  return context;
+  return ArmedGate{config, now, initial_control_seq};
 }
 
 Candidate valid_candidate(const ArmedGate & context)
