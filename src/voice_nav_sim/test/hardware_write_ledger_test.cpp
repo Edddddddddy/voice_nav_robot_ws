@@ -374,4 +374,32 @@ TEST(HardwareWriteLedger, LatchesAStickyGenerationFault)
   EXPECT_EQ(snapshot->page_checksum, independent_page_checksum(*snapshot));
 }
 
+TEST(HardwareWriteLedger, LatchesANonFiniteWheelCommandFault)
+{
+  voice_nav_sim::HardwareWriteLedger ledger({47U, 13U, 0U, 1U, 1U});
+  const voice_nav_sim::HardwareWriteRecord non_finite{
+    47U,
+    1U,
+    7'000'000,
+    0U,
+    UINT64_C(0x7ff0000000000000),
+    UINT64_C(0x0000000000000000)};
+
+  EXPECT_FALSE(ledger.append(non_finite));
+  EXPECT_EQ(
+    ledger.oracle_faults(),
+    voice_nav_sim::kHardwareWriteOracleFaultNonFiniteCommand);
+
+  auto finite = non_finite;
+  finite.left_command_bits = UINT64_C(0x3ff0000000000000);
+  ASSERT_TRUE(ledger.append(finite));
+  ASSERT_TRUE(ledger.seal());
+  const auto snapshot = ledger.snapshot_page(0U);
+  ASSERT_TRUE(snapshot.has_value());
+  EXPECT_EQ(
+    snapshot->oracle_faults,
+    voice_nav_sim::kHardwareWriteOracleFaultNonFiniteCommand);
+  EXPECT_EQ(snapshot->page_checksum, independent_page_checksum(*snapshot));
+}
+
 }  // namespace
