@@ -234,6 +234,7 @@ TEST(HardwareWriteLedger, FoldsIdenticalConsecutiveWritesWithoutLosingCount)
     segment.invocation_count,
     segment.last_write_seq - segment.first_write_seq + 1U);
   EXPECT_EQ(snapshot->page_checksum, independent_page_checksum(*snapshot));
+  EXPECT_EQ(snapshot->page_checksum, UINT64_C(0x20e6650a8c19bb32));
 }
 
 }  // namespace
