@@ -476,7 +476,10 @@ def call_transformer(
 
 def validate_robot_transformer(path: Path) -> None:
     source = read_text(path)
-    if re.search(r"(?i)(?:[a-z]:[\\/]|/home/|/mnt/[a-z]/)", source):
+    if re.search(
+        r"(?i)(?<![a-z0-9])(?:[a-z]:[\\/]|/home/|/mnt/[a-z]/)",
+        source,
+    ):
         raise CrashStopContractError(
             "crash robot-description transformer must not contain a "
             "machine-specific absolute path"

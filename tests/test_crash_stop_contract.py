@@ -607,6 +607,36 @@ class CrashStopContractTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertIn("Crash-stop contract passed", completed.stdout)
 
+    def test_transformer_machine_specific_paths_are_rejected(self) -> None:
+        machine_paths = (
+            "C:/Users/alice/robot.urdf",
+            "C:\\Users\\alice\\robot.urdf",
+            "/home/alice/robot.urdf",
+            "/mnt/c/Users/alice/robot.urdf",
+        )
+
+        for machine_path in machine_paths:
+            with self.subTest(machine_path=machine_path):
+                def mutation(root: Path) -> None:
+                    path = (
+                        root
+                        / "src/voice_nav_sim/test_support/"
+                        "crash_robot_description.py"
+                    )
+                    source = path.read_text(encoding="utf-8")
+                    path.write_text(
+                        f"# machine path: {machine_path}\n" + source,
+                        encoding="utf-8",
+                    )
+
+                completed = self.run_checker(mutation)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(
+                    "must not contain a machine-specific absolute path",
+                    completed.stderr,
+                )
+
     def test_adapter_requires_direct_statistics_dependency(self) -> None:
         def mutation(root: Path) -> None:
             self.replace(
