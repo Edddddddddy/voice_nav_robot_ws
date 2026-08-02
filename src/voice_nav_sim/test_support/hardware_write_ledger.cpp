@@ -142,6 +142,8 @@ public:
   std::optional<HardwareWriteSegment> active_segment;
   std::size_t finalized_segment_count{0U};
   std::uint64_t total_invocation_count{0U};
+  std::uint64_t first_attempted_write_seq{0U};
+  std::uint64_t last_attempted_write_seq{0U};
   std::uint64_t last_observed_write_seq{0U};
   std::uint64_t seal_fence_write_seq{0U};
   std::uint64_t sealed_oracle_faults{0U};
@@ -163,9 +165,22 @@ bool HardwareWriteLedger::append(
     return false;
   }
   if (
-    impl_->last_observed_write_seq ==
-    std::numeric_limits<std::uint64_t>::max() ||
     impl_->total_invocation_count ==
+    std::numeric_limits<std::uint64_t>::max())
+  {
+    impl_->oracle_faults.fetch_or(
+      kHardwareWriteOracleFaultSequence,
+      std::memory_order_release);
+    return false;
+  }
+  if (impl_->total_invocation_count == 0U) {
+    impl_->first_attempted_write_seq = record.write_seq;
+  }
+  impl_->last_attempted_write_seq = record.write_seq;
+  ++impl_->total_invocation_count;
+
+  if (
+    impl_->last_observed_write_seq ==
     std::numeric_limits<std::uint64_t>::max() ||
     record.write_seq != impl_->last_observed_write_seq + 1U)
   {
@@ -175,7 +190,6 @@ bool HardwareWriteLedger::append(
     return false;
   }
   impl_->last_observed_write_seq = record.write_seq;
-  ++impl_->total_invocation_count;
 
   if (record.generation != impl_->config.generation) {
     impl_->oracle_faults.fetch_or(
@@ -281,7 +295,7 @@ bool HardwareWriteLedger::seal() noexcept
   {
     return false;
   }
-  impl_->seal_fence_write_seq = impl_->last_observed_write_seq;
+  impl_->seal_fence_write_seq = impl_->last_attempted_write_seq;
   impl_->sealed_oracle_faults =
     impl_->oracle_faults.load(std::memory_order_acquire);
   impl_->sealed.store(true, std::memory_order_release);
@@ -319,7 +333,9 @@ std::optional<HardwareWriteSnapshotPage> HardwareWriteLedger::snapshot_page(
     const auto remaining_segments =
       impl_->finalized_segment_count - first_segment_index;
     const auto segment_count = std::min(page_limit, remaining_segments);
-    const auto page_first_write_seq = current_page_index == 0U ?
+    const auto page_first_write_seq =
+      impl_->finalized_segment_count == 0U ?
+      impl_->first_attempted_write_seq : current_page_index == 0U ?
       impl_->config.arm_fence_write_seq + 1U :
       impl_->finalized_segments[first_segment_index].first_write_seq;
     std::uint64_t page_last_write_seq = impl_->seal_fence_write_seq;
@@ -329,7 +345,8 @@ std::optional<HardwareWriteSnapshotPage> HardwareWriteLedger::snapshot_page(
       page_last_write_seq =
         impl_->finalized_segments[next_first_segment_index].first_write_seq - 1U;
     }
-    const auto page_invocation_count =
+    const auto page_invocation_count = segment_count == 0U ?
+      impl_->total_invocation_count :
       page_last_write_seq - page_first_write_seq + 1U;
 
     HardwareWriteSnapshotPage page{

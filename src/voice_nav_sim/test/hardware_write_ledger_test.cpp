@@ -345,7 +345,7 @@ TEST(HardwareWriteLedger, LatchesASequenceFaultForADuplicateWrite)
   EXPECT_EQ(
     snapshot->oracle_faults,
     voice_nav_sim::kHardwareWriteOracleFaultSequence);
-  EXPECT_EQ(snapshot->total_invocation_count, 1U);
+  EXPECT_EQ(snapshot->total_invocation_count, 2U);
   ASSERT_EQ(snapshot->segments.size(), 1U);
   EXPECT_EQ(snapshot->segments.front().first_write_seq, 1U);
   EXPECT_EQ(snapshot->segments.front().last_write_seq, 1U);
@@ -369,7 +369,7 @@ TEST(HardwareWriteLedger, LatchesASequenceFaultForAGap)
   ASSERT_TRUE(ledger.seal());
   const auto snapshot = ledger.snapshot_page(0U);
   ASSERT_TRUE(snapshot.has_value());
-  EXPECT_EQ(snapshot->seal_fence_write_seq, 11U);
+  EXPECT_EQ(snapshot->seal_fence_write_seq, 13U);
   EXPECT_EQ(
     snapshot->oracle_faults,
     voice_nav_sim::kHardwareWriteOracleFaultSequence);
@@ -421,7 +421,7 @@ TEST(HardwareWriteLedger, RefusesToWrapTheWriteSequence)
   ASSERT_TRUE(ledger.seal());
   const auto snapshot = ledger.snapshot_page(0U);
   ASSERT_TRUE(snapshot.has_value());
-  EXPECT_EQ(snapshot->seal_fence_write_seq, max_sequence);
+  EXPECT_EQ(snapshot->seal_fence_write_seq, 0U);
   EXPECT_EQ(
     snapshot->oracle_faults,
     voice_nav_sim::kHardwareWriteOracleFaultSequence);
