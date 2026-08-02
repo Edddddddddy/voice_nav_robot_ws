@@ -239,7 +239,7 @@ already complete:
 - killing the authority while valid-looking candidates continue still expires
   the independent Gate lease within 300 ms steady time after exact
   `ProcessExited`; one <=40 ms steady arming barrier has both validity flags
-  and a unique non-zero Gate marker, its final Gate receipt is <=20 ms old at
+  and a recent non-zero Gate commit, its final Gate receipt is <=20 ms old at
   signal dispatch, independently advancing/non-zero simulation surfaces are
   <=30 ms old in simulation time, and a parent-owned Gate event journal proves
   the terminal retirement plus bound zero-publication commit occur no earlier
@@ -252,11 +252,12 @@ already complete:
   terminal transition is exactly one non-wrapping step after the journal's
   final committed predecessor rather than after the older arming snapshot;
 - killing MotionGate causes `diff_drive_controller.cmd_vel_timeout` to select
-  zero on the first update where the Gate event journal output lane's final unambiguous COMMITTED
-  input, whose unique marker is ACKed by non-zero controller output, is older
-  than 0.35 seconds of advancing simulation time; a side observer's publisher
-  disappearance plus 100 ms quiet barrier is cleanup evidence, not acceptance
-  evidence;
+  zero on the first update where a previously unseen marker, committed exactly
+  once by the Gate event journal and ACKed by non-zero controller output before
+  the next 20 ms Gate publish, is older than 0.35 seconds of advancing
+  simulation time; a second publish invalidates and retries the generation,
+  while a side observer's publisher disappearance plus 100 ms quiet barrier is
+  cleanup evidence, not acceptance evidence;
 - Managed Safe Pause proves Gate, controller, and wheel zero before minting a
   token, then uses exact pause+single-step/re-pause transactions to prove the
   next controller update zero and one additional lossless post-update write
@@ -278,18 +279,29 @@ dropped. A default-off lossless hardware-write ledger accounts for every actual
 write after the arming barrier and proves first both-wheel zero plus no command
 regression through the final 0.20 s shared wheel-state/odom stationary window.
 It uses monotonic non-wrapping `write_seq`, atomic ARM/SEAL fences, finalized
-segments, and immutable bounded snapshot pages. One active accumulator may be
-atomically extended only when generation, iteration/stamp, and exact
-wheel-command bits are identical; its sequence range and invocation count must
-agree. A tuple change or `SEAL` finalizes it and makes it immutable. Capacity is
-proven from the bounded iteration/transition budget, while overflow/overwrite,
-an unaccounted invocation, or a non-zero write in a zero-required interval
-latches failure. Checksums, contiguous sequence ranges/generation, and
-nondecreasing iteration complete the validation. In VN-0011A,
-simulation is continuously running and iteration follows observed world
-progress. In VN-0011B's paused probe, iteration may repeat while the runner
-writes at one iteration, and only an acknowledged exact single-step request
-whose World Statistics commit is observed may produce one `N -> N+1` change.
+segments, and immutable bounded snapshot pages. A test Adapter inherits
+`GazeboSimSystemInterface`, delegates all calls to a pluginlib-loaded upstream
+`gz_ros2_control/GazeboSimSystem`, and records the actual
+`JointVelocityCmd` values only after delegated `write()` returns. One active
+accumulator may be extended only when generation, simulation stamp, delegated
+return result, and exact wheel-command bits are identical; its sequence range
+and invocation count must agree. A tuple change or `SEAL` finalizes it and
+makes it immutable. Capacity is proven from the bounded write-invocation and
+command-transition budget, while overflow/overwrite, an unaccounted
+invocation, or a non-zero write in a zero-required interval latches failure.
+Checksums and contiguous sequence ranges/generation complete the hardware
+validation. The public hardware Interface has no Gazebo iteration argument;
+World Statistics independently proves continuous progress in VN-0011A and
+correlates each acknowledged exact `N -> N+1` step with the ARM/SEAL interval
+in VN-0011B. Simulation stamp may repeat while paused.
+Compile/static tests must prove that the test plugin inherits the public
+Interface, delegates to the installed upstream plugin, and never directly
+derives from the concrete PImpl class. A robot-description transformer must
+expand canonical product Xacro and replace exactly one upstream hardware block;
+all other XML remains equivalent. Product Xacro, launch, and YAML must contain
+no Adapter or shared-memory parameter. The no-allocation assertion covers only
+the added preallocated journal operations after delegated `write()`, not the
+upstream implementation.
 “Reliable topic” or overwrite-on-full is not lossless proof.
 The stationarity clock starts at the later of first controller-output zero and
 the first lossless both-wheel-zero write; the first shared stationary sample
@@ -301,14 +313,17 @@ transition and zero commit did not precede it. DDS receipt order is not that
 proof. Wall time is only the outer test watchdog.
 
 The candidate helper emits finite safe marker tuples whose spacing exceeds the
-comparison tolerance and which are unique throughout the armed/crash window.
-A parent-owned Gate event journal records each Gate output publish in a
-crash-resilient two-phase INTENT/COMMITTED lane. After exact Gate exit, the final record must be an
-unambiguous non-zero COMMITTED marker with no trailing intent or later publish;
-that marker must be ACKed by non-zero `/cmd_vel_out`. Its journaled input stamp
-is therefore the final published-and-accepted timeout origin. Duplicate or
-unmatched markers, limiter changes, trailing intent, journal gaps/overflow, or
-a side-observer fallback fail the case.
+comparison tolerance. The decisive Gate-kill marker is new to its generation,
+not repeated by the helper before the attempt, and starts a narrow window at
+its first journal `COMMITTED` record. A parent-owned Gate event journal records
+each periodic output publish in a crash-resilient two-phase
+INTENT/COMMITTED lane. Non-zero `/cmd_vel_out` must ACK the new marker and exact
+SIGKILL must be dispatched before the next 20 ms Gate output. After exact Gate
+exit, that record must still be the one final non-zero COMMITTED output with no
+trailing intent or later publish. Its input stamp is therefore the final
+published-and-accepted timeout origin. A repeated final marker, late ACK,
+unmatched marker, limiter change, journal gap/overflow, or side-observer
+fallback invalidates the generation.
 
 Managed resume is a project policy boundary, not Gazebo Transport access
 control. A missing/stale/replayed token must return `RESTART_REQUIRED` without
@@ -318,9 +333,10 @@ VN-0011B delivers the package-private coordinator and test Adapter protocol,
 not a user-facing pause endpoint. Because the introspection stream is
 asynchronous BEST_EFFORT, the same default-off test-only lossless oracle at the
 actual hardware-write seam accounts for every invocation, generation,
-iteration, and both `JointVelocityCmd` values using the same sequence-range
-segments; valid repeated writes at one paused iteration fold only when their
-exact values agree. Without enabling continuous run, every request is
+simulation stamp, delegated result, and both `JointVelocityCmd` values using
+the same sequence-range segments; valid repeated writes at one paused stamp
+fold only when their exact values agree. World Statistics separately owns the
+real iteration proof. Without enabling continuous run, every request is
 exactly `{pause: true, multi_step: 1}`; its ACK is only queued intent and World
 Statistics must prove one transition plus re-pause. Bounded single steps first
 reach a same-stamp zero controller-output/introspection update, then one
@@ -338,9 +354,9 @@ acceptance criteria:
 - From maximum configured speed, STOP causes odometry to enter the stationary tolerance within 1.2 seconds and remain there for 200 ms.
 - Killing MissionRuntime causes the independent MotionGate lease to expire and automatically select zero velocity.
 - Killing MotionGate causes `diff_drive_controller.cmd_vel_timeout` to select
-  zero on the first control update after the Gate event journal output lane's final unambiguous
-  COMMITTED Gate input, ACKed by its non-zero controller marker, becomes more
-  than 0.35 seconds old in advancing simulation time. The
+  zero on the first control update after the Gate event journal's previously
+  unseen, exactly-once COMMITTED Gate input, ACKed before its next 20 ms repeat,
+  becomes more than 0.35 seconds old in advancing simulation time. The
   configured 100 Hz period gives the measurement one 10 ms scheduling
   tolerance; physical stationarity is a separate assertion.
 - Candidate samples never renew Runtime authority; a test continues feeding

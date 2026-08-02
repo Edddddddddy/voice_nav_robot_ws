@@ -52,9 +52,9 @@ evidence, and the immutable solution checkpoint are complete.
 
 | Owner | Scenario | Required evidence |
 | --- | --- | --- |
-| A | Authority SIGKILL | one <=40 ms steady arming barrier proves authority/candidate validity and a unique non-zero Gate marker, with the final Gate state <=20 ms old; simulation evidence is independently advancing/non-zero and <=30 ms old in simulation time; a parent-owned Gate event journal includes every intervening accepted control transition and proves the terminal retirement plus bound zero commit occur no earlier than exact authority `ProcessExited`; the received matching state clears the lease, matches the journaled predecessor-plus-one control sequence, reports `AUTHORITY_EXPIRED`, and arrives within 300 ms steady time afterwards |
+| A | Authority SIGKILL | one <=40 ms steady arming barrier proves authority/candidate validity and a recent non-zero Gate commit, with the final Gate state <=20 ms old; simulation evidence is independently advancing/non-zero and <=30 ms old in simulation time; a parent-owned Gate event journal includes every intervening accepted control transition and proves the terminal retirement plus bound zero commit occur no earlier than exact authority `ProcessExited`; the received matching state clears the lease, matches the journaled predecessor-plus-one control sequence, reports `AUTHORITY_EXPIRED`, and arrives within 300 ms steady time afterwards |
 | A | Candidate SIGKILL | the same split-clock arming and Gate-journal rules apply; continued authority RENEWs are journaled rather than forbidden; the terminal retirement is exactly one non-wrapping sequence step after the final accepted RENEW, occurs no earlier than exact candidate `ProcessExited`, and the matching state reports `CANDIDATE_EXPIRED` within 200 ms steady time afterwards |
-| A | MotionGate SIGKILL | Gazebo and controller remain live; no test zero is injected; the Gate event journal's crash-resilient output lane proves the final Gate publish is an unambiguous non-zero COMMITTED marker with no later intent/commit, and matching non-zero controller output ACKs its acceptance; first controller zero occurs only when its stamp age is greater than 0.35 s and by the next 100 Hz update plus explicit step tolerance; publisher disappearance/quiet are cleanup only |
+| A | MotionGate SIGKILL | Gazebo and controller remain live; no test zero is injected; a marker new to the generation is COMMITTED exactly once by the Gate journal and ACKed by non-zero controller output before the next 20 ms Gate publish, then exact SIGKILL leaves it as the final record. A repeat invalidates and retries the generation. First controller zero occurs only when that input stamp age is greater than 0.35 s and by the next 100 Hz update plus explicit step tolerance; publisher disappearance/quiet are cleanup only |
 | A | Downstream stop | controller body command, both wheel command interfaces, both wheel states, and odometry are separate evidence; mandatory introspection corroborates the wheel values while a fenced, contiguous, overflow-failing lossless hardware-write ledger proves first both-wheel zero and no command regression; a shared 0.20 s wheel-state/odom stationary window begins within 1.2 s after the later controller/ledger zero linearization |
 | A | Process accounting | only predeclared killed actions may exit `-SIGKILL`; every other launch-managed action exits zero; no broad allowlist, name broadcast, `pkill`, or Gazebo exception |
 | B | Managed Safe Pause | Gate, controller, wheel command/state, and odometry zero are proven while simulation advances; World Statistics then confirms pause before a token is minted |
@@ -75,10 +75,16 @@ slice does not add an activation/reconstruction resume branch.
 - Lease/freshness and process-death latency use steady time. Controller, wheel,
   odometry, and pause evidence use strictly increasing simulation stamps. Wall
   time is only the outer bounded-test watchdog.
-- The lossless write journal is mode-aware: VN-0011A observes naturally
-  advancing continuous-run iterations; only VN-0011B's paused probe restricts
-  iteration changes to acknowledged and World-Statistics-confirmed exact
-  single-step transactions.
+- The lossless write journal records hardware `sim_stamp`, `write_seq`, exact
+  command bits, and delegated results; the public hardware Interface does not
+  expose Gazebo iteration. World Statistics independently owns iteration:
+  VN-0011A observes continuous progress, while VN-0011B restricts iteration
+  changes to acknowledged exact single-step transactions and correlates them
+  with the journal's ARM/SEAL interval.
+- The test hardware Adapter inherits the public
+  `GazeboSimSystemInterface` and delegates to a pluginlib-loaded upstream
+  `gz_ros2_control/GazeboSimSystem`; product URDF still selects the upstream
+  plugin directly. Directly subclassing that concrete PImpl class is rejected.
 - Managed resume is a project policy boundary, not protection against a local
   user invoking Gazebo Transport directly.
 - VN-0011B delivers a package-private coordinator and test Adapter protocol

@@ -117,16 +117,22 @@ MissionRuntime、smoother、Collision Monitor 的完整串接属于后续纵向�
   command-interface 值表示下一次同步 hardware write 将消费的值，不是 Gazebo
   已执行回执；这个有损 topic 既不能证明 exact first write，也不能证明中间没有
   command regression。A/B 都必须使用默认关闭的 test-only lossless
-  hardware-write ledger 在实际 write seam 逐次计入调用、generation、iteration 和
-  左右轮值；ledger 必须有单调 `write_seq`、atomic ARM/SEAL fences、容量证明、
-  overflow/overwrite fail-closed 与分页 checksum/连续性验证。只有 generation、
-  iteration/stamp 和轮速位模式完全相同的连续调用才能折叠成带 sequence range/count
-  的 segment；paused 时合法重复写不无限占槽，但每次调用仍被计数；introspection 仍作为 mandatory
-  corroboration。
+  hardware-write ledger。测试 Adapter 继承公开
+  `GazeboSimSystemInterface`，原样委托给 pluginlib-loaded upstream
+  `gz_ros2_control/GazeboSimSystem`，再在实际 write seam 逐次计入调用、generation、
+  simulation stamp、上游返回值和左右轮值；ledger 必须有单调 `write_seq`、atomic
+  ARM/SEAL fences、容量证明、overflow/overwrite fail-closed 与分页
+  checksum/连续性验证。只有 generation、stamp、返回值和轮速位模式完全相同的
+  连续调用才能折叠成带 sequence range/count 的 segment；paused 时合法重复写不
+  无限占槽，但每次调用仍被计数。公开 hardware Interface 不含 Gazebo iteration，
+  真实 iteration 由 World Statistics 独立证明并通过 fence 区间关联；introspection
+  仍作为 mandatory corroboration。
   Gate process death 后，旁路 observer 看到的最后 input 不能代表 controller
-  callback 真正接受的最后 input。测试必须让每个安全 command tuple 唯一，用
-  parent-owned Gate event journal 的 INTENT/COMMITTED output lane 在 SIGKILL 后证明 final Gate publish
-  无歧义且无后续记录，再用匹配 non-zero `/cmd_vel_out` ACK 证明 controller 接受；
+  callback 真正接受的最后 input。MotionGate 会每 20 ms 重发当前 tuple，所以不能
+  假设每条安全 command 都唯一。Gate-kill attempt 必须使用 generation 内此前未
+  使用的 final marker；parent-owned Gate event journal 的 INTENT/COMMITTED output
+  lane 证明它只 COMMIT 一次，匹配 non-zero `/cmd_vel_out` 在下一次重发前 ACK，
+  随后 exact SIGKILL。若死亡前出现第二条 publish，本 generation 失败并重试；
   publisher 消失和 100 ms quiet 只作 cleanup evidence。
   `/cmd_vel_out` 是 controller 底盘命令，`/joint_states` 是状态，`/odom` 是
   物理静止代理；不能把任何一层冒充另一层。该 process-kill 验收目前仍为

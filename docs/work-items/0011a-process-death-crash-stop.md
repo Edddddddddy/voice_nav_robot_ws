@@ -10,8 +10,10 @@
 
 **Branch:** `feat/vn-0011a-l0010-crash-stop`
 
-**Capability state:** Planned. No tests-first RED, product crash run, local
-full gate, PR, or CI evidence has been captured yet.
+**Capability state:** In progress. The exact-action/exact-exit CrashLedger has
+completed two reviewable RED/GREEN microcycles and is registered through the
+real ament/CTest path. Evidence analysis, repository RED, product crash runs,
+the final local gate, PR, and CI remain open.
 
 ## Immutable base
 
@@ -51,20 +53,46 @@ the real package-private Gate protocol but are not product nodes.
   journals, and the minimum launch composition seam needed to retain an exact
   MotionGate ProcessAction.
 - The real `motion_gate_node` contains the Gate-event-journal test seam, but it is
-  inactive unless its exact launch action receives a harness-created
-  process-private shared-memory identity and nonce. Normal product composition
-  passes neither; static contracts reject enabling the seam in a product
-  launch. This is test instrumentation, not a ROS Interface or security
-  boundary.
-- Only the crash/pause test model selects a journaled
-  `GazeboSimSystem` subclass. It calls the pinned base `write()` unchanged and
-  then records the actual left/right `JointVelocityCmd` components at that
-  seam. Product URDF continues selecting the upstream
-  `gz_ros2_control/GazeboSimSystem`; static and parity tests reject selecting
-  the journaled plugin outside the owned test model or changing base behavior.
+  inactive when both read-only journal parameters are empty. The crash harness
+  gives only that exact launch action a parent-owned POSIX-shared-memory name
+  and 128-bit nonce; partial configuration fails startup. MotionGate opens but
+  never creates or unlinks the object and validates ABI, size, UID, nonce,
+  capacity, and single-writer claim. Normal product composition passes neither
+  parameter; static contracts reject enabling the seam in a product launch.
+  This is test instrumentation, not a ROS Interface or security boundary.
+- Only the crash/pause test model selects a journaled Adapter that inherits the
+  public `gz_ros2_control::GazeboSimSystemInterface`. The Adapter owns a
+  `pluginlib` loader and an upstream interface instance created from
+  `gz_ros2_control/GazeboSimSystem`; it delegates lifecycle, interface export,
+  mode switching, `read()`, `write()`, and `initSim()` without changing their
+  arguments or return values. After the delegated `write()` returns, the
+  test-only instrumentation reads the actual left/right
+  `JointVelocityCmd` components from the saved ECM joint entities. Product
+  URDF continues selecting the upstream plugin directly. Static, compile, and
+  parity tests reject direct subclassing, selecting the Adapter outside the
+  owned test model, or changing delegated base behavior. Member lifetime keeps
+  the plugin loader alive until after the upstream instance is destroyed.
+- The crash harness expands the canonical product Xacro, parses it as XML,
+  requires exactly one upstream hardware plugin, replaces only that block with
+  the test Adapter, and injects the shared-memory identity there. A second or
+  missing plugin, any other XML difference, or any Adapter/journal reference in
+  canonical Xacro, product launch, or product YAML fails the static parity
+  contract.
+- The public hardware Interface receives ROS simulation `time` and `period`
+  but not Gazebo `UpdateInfo.iterations`. Its lossless ledger therefore records
+  `sim_stamp`, non-wrapping `write_seq`, exact command bits, and the delegated
+  return result. World Statistics records real iteration independently; the
+  ARM/SEAL interval and exact-step protocol correlate the two evidence streams
+  without inventing an iteration field at the hardware seam.
 - The package that owns the introspection subscriber declares a direct
   `pal_statistics_msgs` test dependency; it does not rely on a transitive
   controller-manager dependency.
+- The Adapter test target directly discovers and declares
+  `gz_sim_vendor`, `gz-sim8`, `gz_ros2_control`, `hardware_interface`,
+  `pluginlib`, `rclcpp`, and `rclcpp_lifecycle`; its plugin XML names
+  `gz_ros2_control::GazeboSimSystemInterface` as the base class. It does not
+  rely on the upstream package's incomplete exported-target discovery order or
+  transitive manifest dependencies.
 - No new ADR is required for A; it executes the dual-deadman decision already
   recorded by [ADR-0002](../adr/0002-migrate-to-gz-ros2-control.md).
 
@@ -74,7 +102,7 @@ the real package-private Gate protocol but are not product nodes.
 | --- | --- | --- | --- |
 | Authority | exact authority `ProcessExited` with `-SIGKILL`, recorded on the observer monotonic clock | the fault-arming barrier proves `authority_live=true`, candidate fresh, and every command surface non-zero | Gate reason `AUTHORITY_EXPIRED`; journaled terminal retirement and bound zero commit do not precede ProcessExited; the matching state is observed no later than 300 ms steady time afterwards |
 | Candidate | exact candidate `ProcessExited` with `-SIGKILL`, recorded on the observer monotonic clock | the fault-arming barrier proves `candidate_fresh=true`, authority live, and every command surface non-zero | Gate reason `CANDIDATE_EXPIRED`; journaled intervening RENEWs lead to one terminal predecessor-plus-one retirement after ProcessExited; the matching state is observed no later than 200 ms steady time afterwards |
-| MotionGate | exact Gate `ProcessExited` with `-SIGKILL` | the fault-arming barrier proves Gate authority/candidate validity and every command surface non-zero; Gazebo, controller manager, and controller stay live; test publishes no zero | after exit, the Gate event journal's output lane has one final unambiguous COMMITTED non-zero Gate publish and no later INTENT/COMMITTED record; that unique marker appears in a non-zero controller output, proving the final published input was accepted; first controller-output zero satisfies `0.35 s < delta_sim <= 0.36 s + step_epsilon` from its input stamp; the lossless hardware-write journal separately proves both wheel commands reach zero and never regress; downstream stationarity also passes |
+| MotionGate | exact Gate `ProcessExited` with `-SIGKILL` | the fault-arming barrier proves Gate authority/candidate validity and every command surface non-zero; Gazebo, controller manager, and controller stay live; test publishes no zero | a previously unseen final marker is COMMITTED exactly once by the Gate journal, ACKed by non-zero controller output, and followed immediately by exact Gate SIGKILL; a second periodic publish before death invalidates the attempt and requires a fresh generation. After exit there is no later INTENT/COMMITTED output record. First controller-output zero satisfies `0.35 s < delta_sim <= 0.36 s + step_epsilon` from that one input stamp; the lossless hardware-write journal separately proves both wheel commands reach zero and never regress; downstream stationarity also passes |
 
 Each case starts a new Gate lease generation. The Gate case runs last because
 the product does not respawn MotionGate.
@@ -86,7 +114,8 @@ sample that happens to be non-zero. The steady-clock part spans no more than
 two 20 ms Gate output periods and must see, for the same generation:
 
 - a Gate state with both `authority_live=true` and `candidate_fresh=true`;
-- a non-zero final Gate input carrying a unique safe motion marker; and
+- a recent non-zero final Gate input; the MotionGate-death case additionally
+  requires a marker not previously selected in that generation; and
 - no intervening zero, invalid lease/freshness state, publisher replacement,
   or generation change.
 
@@ -146,11 +175,11 @@ The test must preserve these as distinct observations:
 | Surface | Meaning | Clock |
 | --- | --- | --- |
 | `/motion_gate/internal/state` | pre-fault live/fresh snapshot, Gate decision, and typed expiry reason | steady observer receipt latency; ROS stamp is not the deadline clock |
-| `/diff_drive_controller/cmd_vel` | MotionGate's controller inputs, each with a safe marker tuple unique within the armed/crash window | strictly increasing simulation stamp |
+| `/diff_drive_controller/cmd_vel` | MotionGate's periodic controller inputs; the final crash marker is new to the generation and must occur exactly once before Gate death | strictly increasing simulation stamp |
 | default-off Gate event journal | applied control/terminal transitions plus crash-resilient two-phase INTENT/COMMITTED records for attempted final publishes; final records survive exact SIGKILL | same-host monotonic commit time and journal sequence; output records also carry simulation stamp |
 | `/diff_drive_controller/cmd_vel_out` | controller-limited body command; a marker match ACKs that the journaled input affected an actual controller update | strictly increasing simulation stamp |
 | `/controller_manager/introspection_data/full` (`pal_statistics_msgs/msg/Statistics`) | command-interface values that the next synchronous hardware write will consume, plus matching state-interface values; not a Gazebo execution acknowledgement | strictly increasing simulation stamp |
-| default-off test hardware-write ledger | every actual left/right command write, its controller/Gazebo generation, iteration, simulation stamp, and exact value; identical consecutive calls may use a count-preserving segment | contiguous `write_seq`; iteration/stamp are nondecreasing and mode-specific, not globally strict while paused |
+| default-off test hardware-write ledger | every delegated left/right command write, its test generation, simulation stamp, exact value bits, and upstream return result; identical consecutive calls may use a count-preserving segment | contiguous `write_seq`; simulation stamp is nondecreasing and may repeat while paused; World Statistics owns iteration evidence |
 | `/joint_states` | measured wheel velocity state, never a command oracle | strictly increasing simulation stamp |
 | `/odom` | physical stationarity proxy | strictly increasing simulation stamp |
 
@@ -184,11 +213,16 @@ controller inactivity, interface release, lossy introspection alone, or
 `/joint_states` alone is insufficient. See the
 [Jazzy ros2_control introspection contract](https://control.ros.org/jazzy/doc/ros2_control/doc/introspection.html).
 
-The candidate helper generates a bounded sequence of finite `(linear.x,
-angular.z)` marker tuples inside the unchanged trusted speed limits. Marker
-spacing is greater than the declared comparison tolerance, and every Gate
-input accepted into the armed/crash evidence window must have exactly one
-marker; duplicates or limiter changes fail the case.
+The candidate helper generates bounded finite `(linear.x, angular.z)` marker
+tuples inside the unchanged trusted speed limits, with spacing greater than the
+declared comparison tolerance. MotionGate intentionally republishes its
+selected tuple every 20 ms, so repeated values are normal outside the decisive
+window. The Gate-kill attempt starts only on the first `COMMITTED` publish of a
+marker never used earlier in that generation. A matching non-zero
+`/cmd_vel_out` must ACK it, and the harness must dispatch exact SIGKILL before
+the next 20 ms Gate publish. If another output record appears before actual
+death, or the marker appeared earlier, the attempt is ambiguous and retries
+with a fresh generation.
 
 The Gate's default-off, parent-owned event journal has one non-wrapping global
 `journal_seq`, a generation, checksum, and Linux `CLOCK_MONOTONIC` timestamp
@@ -200,14 +234,14 @@ sequence, header stamp, marker, and checksum. Only after the DDS publish call
 succeeds does that same slot become `COMMITTED`; journal writes use release
 stores, and the parent reads them with acquire ordering only after
 `ProcessExited`. The bounded shared-memory journal survives exact SIGKILL.
-After
-`ProcessExited`, the final slot must be an unambiguous non-zero `COMMITTED`
-record; a trailing `INTENT`, overflow, wrap, corrupt checksum, gap, duplicate,
-or any later record invalidates the generation. A non-zero `/cmd_vel_out`
-sample with the same unique marker is the controller-update ACK. Therefore
-the final committed Gate publish was accepted, and its header stamp is the
-exact timeout origin. A marker seen only by a side input observer or an older
-controller output is insufficient.
+After `ProcessExited`, the final slot must be that single non-zero `COMMITTED`
+record. A trailing `INTENT`, overflow, wrap, corrupt checksum, gap, a second
+publish of the final marker, or any later output record invalidates the
+generation. Because the marker was never used earlier, a matching non-zero
+`/cmd_vel_out` observed before the second Gate period is the controller-update
+ACK for this one publish. Its header stamp is therefore the exact timeout
+origin. A marker seen only by a side input observer, one already used in the
+generation, or an ACK arriving after a repeated Gate publish is insufficient.
 
 After MotionGate exits, the observer still waits for its input publisher count
 to reach zero and a 100 ms steady quiet barrier. That barrier is cleanup and
@@ -221,38 +255,41 @@ late-traffic evidence only; it is never the timeout origin.
   `uint64 write_seq`; every invocation obtains exactly one sequence value and
   checks both finite wheel commands against the currently armed predicate;
 - one active accumulator contains generation, first/last `write_seq`,
-  invocation count, simulation iteration/stamp, and exact wheel-command bit
-  patterns. Only a consecutive invocation with the identical tuple may
-  atomically extend its last sequence/count. A tuple change or `SEAL` finalizes
-  the segment; only then is it immutable. Its count must equal
+  invocation count, simulation stamp, delegated return result, and exact
+  wheel-command bit patterns. Only a consecutive invocation with the
+  identical tuple may atomically extend its last sequence/count. A tuple
+  change or `SEAL` finalizes the segment; only then is it immutable. Its count
+  must equal
   `last_seq - first_seq + 1`, so repeated paused writes remain individually
   accounted without consuming one slot each;
 - `ARM` and `SEAL` create atomic sequence fences at that same seam; the test
   analyzes the closed inclusive interval and never infers boundaries from
   receipt time;
 - preallocated segment capacity is proven before arming from the bounded
-  advancing-iteration/command-transition budget; valid same-iteration repeats
-  fold into the current segment. Any value/iteration change that cannot create
-  a segment, overflow, overwrite, wrap, unaccounted invocation, or non-zero
+  write-invocation/command-transition budget; valid identical-stamp repeats
+  fold into the current segment. Any value/stamp/result change that cannot
+  create a segment, overflow, overwrite, wrap, unaccounted invocation, or non-zero
   write in a zero-required interval latches an oracle fault and invalidates the
   case;
 - finalized fenced segments are read through immutable bounded snapshot pages;
   snapshots expose only finalized data. Page checksum, generation/fence
   identity, segment counts, and contiguous `write_seq` ranges make loss,
   duplication, reordering, stale pages, and partial snapshots fail closed;
-  iteration is nondecreasing; in VN-0011A continuous run it advances with the
-  observed world, while in VN-0011B paused probing it may repeat and only an
-  acknowledged, World-Statistics-confirmed exact single-step request may
-  produce its one `N -> N+1` transition; and
+  simulation stamp is nondecreasing and may repeat while paused. The ledger
+  does not claim Gazebo iteration; in VN-0011A World Statistics independently
+  proves continuous progress, while VN-0011B correlates ARM/SEAL with one
+  acknowledged, World-Statistics-confirmed exact `N -> N+1` step; and
 - a sealed interval is retained until the test explicitly acknowledges it;
   later writes use separate storage/fences and cannot mutate its pages;
   neither DDS BEST_EFFORT nor an overwrite-on-full ring is an admissible
   implementation of the proof channel.
 
-Both journal write paths are preallocated and use bounded non-blocking atomic
-stores only; they perform no allocation, filesystem I/O, logging, ROS calls,
-or transport publication in the Gate publication critical section or Gazebo
-hardware-write seam. Snapshot pagination runs outside those paths.
+The added journal instrumentation on both paths is preallocated and uses
+bounded non-blocking atomic stores only; it performs no allocation, filesystem
+I/O, logging, ROS calls, or transport publication in the Gate publication
+critical section or after the delegated hardware `write()`. This does not
+claim that pinned upstream `GazeboSimSystem::write()` is allocation-free.
+Snapshot pagination runs outside those instrumentation paths.
 
 ## Exact crash ledger
 
@@ -287,14 +324,17 @@ Tests must reject at least:
   instead of the last non-zero Gate input header stamp;
 - a side observer's last input, publisher disappearance, or quiet period used
   as controller-acceptance evidence instead of the final crash-resilient
-  COMMITTED publish plus its unique controller-output ACK;
+  exactly-once final-marker COMMIT plus its pre-repeat controller-output ACK;
 - authority/candidate latency measured with ROS simulation time;
 - omitted wheel command introspection, wheel state, or odometry hold evidence;
 - default/reliable introspection QoS, no complete pre-fault four-field sample,
   a retained-zero baseline, or non-increasing simulation stamps;
+- a concrete `GazeboSimSystem` subclass, non-delegating/copy-pasted upstream
+  behavior, a test transformer that replaces zero or multiple hardware blocks,
+  or any Adapter/journal reference in product Xacro, launch, or YAML;
 - lossy introspection used to claim exact first-wheel-zero or no-regression,
   an omitted/incomplete lossless hardware-write ledger, a missing/duplicate
-  marker, a trailing/absent Gate-output-journal commit, stale arming sample, a Gate
+  final marker, a trailing/absent Gate-output-journal commit, stale arming sample, a Gate
   steady barrier longer than 40 ms, a Gate state older than 20 ms at signal
   dispatch, a simulation surface older than
   30 ms simulation time, stalled simulation, delayed SIGKILL, a Gate journal
@@ -302,8 +342,10 @@ Tests must reject at least:
   timestamped before `ProcessExited`; DDS receipt order alone must also fail;
 - a ledger without monotonic sequence/fences, bounded capacity proof,
   overflow/overwrite fault, immutable paged snapshot, checksum, or contiguous
-  sequence/generation validation, or one that requires iteration to increase
-  for every paused write;
+  sequence/generation validation, or one that fabricates hardware-record
+  iteration or requires simulation stamp to increase for every paused write;
+- an unqualified allocation-free claim over delegated upstream `write()`
+  instead of only the added journal instrumentation;
 - skipped active/post-shutdown cases, early returns, or non-deterministic
   cleanup.
 
@@ -340,7 +382,8 @@ pre-existing user-owned Gazebo process.
 
 - Unit: crash ledger exact-action/exact-exit semantics, Gate terminal-state
   linearization, source INTENT/COMMITTED recovery, hardware-journal
-  fences/gaps/repeated iterations, marker ACK correlation, and
+  fences/gaps/repeated simulation stamps plus World-Statistics correlation,
+  marker ACK correlation, and
   simulation-window evidence analysis.
 - Contract: product launch topology, helper separation, clocks, controller
   parameters, evidence surfaces, generated test inventory, and mutation

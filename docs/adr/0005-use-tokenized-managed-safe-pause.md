@@ -72,19 +72,29 @@ The BEST_EFFORT asynchronous ros2_control introspection topic provides
 mandatory sampled pre-pause command/state corroboration, but cannot prove that
 an intermediate write was absent or that the very first resumed write was
 zero. VN-0011B therefore uses a default-off test-only oracle at the actual
-hardware-write seam. The oracle losslessly accounts for each `write()`
-invocation, Gazebo iteration, generation, and both resulting
-`JointVelocityCmd` values. Every invocation advances non-wrapping `write_seq`.
-Only consecutive calls with identical generation, iteration/stamp, and exact
-command bits may atomically extend one active accumulator; its first/last
+hardware-write seam. Its Adapter inherits the public
+`GazeboSimSystemInterface`, delegates every hardware call to a pluginlib-loaded
+upstream `gz_ros2_control/GazeboSimSystem`, and observes actual
+`JointVelocityCmd` components only after delegated `write()` returns. It does
+not directly inherit the concrete upstream class.
+
+The oracle losslessly accounts for each `write()` invocation, test generation,
+simulation stamp, delegated return result, and both wheel-command bit patterns.
+Every invocation advances non-wrapping `write_seq`. Only consecutive calls with
+an identical tuple may atomically extend one active accumulator; its first/last
 sequence and invocation count must agree. A tuple change or `SEAL` finalizes
 it, after which the segment is immutable; snapshots expose only finalized,
-sealed data through immutable pages. Atomic
-ARM/SEAL fences, a pre-armed bounded
-iteration/transition segment budget, latched overflow/overwrite/unaccounted-
-write or zero-window-nonzero failure, retained sealed intervals, and immutable
-paged checksum/continuity validation make completeness explicit without
-allocating one slot for every valid same-iteration repeat.
+sealed data through immutable pages. Atomic ARM/SEAL fences, a pre-armed
+bounded write-invocation/transition segment budget, latched
+overflow/overwrite/unaccounted-write or zero-window-nonzero failure, retained
+sealed intervals, and immutable paged checksum/continuity validation make
+completeness explicit without allocating one slot for every identical-stamp
+repeat. The public hardware Interface has no Gazebo iteration argument. World
+Statistics owns real iteration evidence; exact single-step commit observations
+are correlated with the hardware ARM/SEAL interval and `sim_stamp` rather than
+copied into a fictitious per-write field. Only the added oracle instrumentation
+is required to be preallocated and allocation-free; the pinned upstream
+`write()` is outside that claim.
 Without sending `pause:false` for continuous run, the coordinator repeatedly
 requests `{pause: true, multi_step: 1}`. The explicit true value is mandatory:
 Gazebo applies the pause field before processing the step, and protobuf's
@@ -102,14 +112,17 @@ one update must be encountered without assuming its phase.
 and updates the controller in `PostUpdate` only when its period is due. The
 update-step write therefore still reflects the pre-update zero. After the new
 controller update is proven zero, one final exact
-`{pause: true, multi_step: 1}` is required: its lossless invocation must be the
-exact next iteration and write two zeros. A
+`{pause: true, multi_step: 1}` is required. World Statistics must confirm the
+exact next `N -> N+1` transition, and the hardware ARM/SEAL interval correlated
+with that request must contain the post-update write of two zeros. A
 non-zero update fails before that final write; retained pre-pause data, wrong
-ordering/stamp, a gap, extra iteration, or a record beginning later also fails
-closed. Paused runner loops may create multiple invocations at one iteration;
+ordering/stamp, a sequence gap, an extra World Statistics iteration, or a
+record interval beginning later also fails closed. Paused runner loops may
+create multiple invocations at one simulation stamp;
 `write_seq` ranges are contiguous, identical repeats are count-preserving
-segments, iteration is nondecreasing, each request causes one exact transition,
-and every armed invocation through SEAL must be zero. Continuous
+segments, simulation stamp is nondecreasing, World Statistics proves that each
+request causes one exact iteration transition, and every armed invocation
+through SEAL must be zero. Continuous
 `pause:false` is allowed only after the post-update zero write. State and
 odometry remain separate physical-response evidence. The
 ordering is defined by the pinned

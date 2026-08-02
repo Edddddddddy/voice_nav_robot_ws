@@ -42,6 +42,10 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0032 | A correct producer-death test fails while authority RENEWs continue | Is terminal `control_seq` compared with the final committed predecessor instead of the arming snapshot? | Specified |
 | PIT-0033 | Delayed DDS delivery makes a pre-death zero look post-death | Does a same-host monotonic Gate journal order the terminal commit after `ProcessExited`? | Specified |
 | PIT-0034 | A dynamically loaded test-support module fails while decorating a dataclass | Does the loader register the module, or does the support type avoid that hidden dependency? | Guarded |
+| PIT-0035 | A concrete plugin class looks inheritable but an external subclass does not compile | Is the documented plugin Interface the real extension seam? | Specified |
+| PIT-0036 | A hardware journal claims a Gazebo iteration it cannot observe | Does the callback actually receive that field, or must World Statistics own it? | Specified |
+| PIT-0037 | A value-matched controller ACK may correspond to a periodic repeat | Was the final marker committed exactly once and ACKed before the next Gate period? | Specified |
+| PIT-0038 | “No allocation in the write seam” accidentally includes upstream code | Is the real-time claim scoped to added instrumentation only? | Specified |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -71,7 +75,11 @@ output as a line array; before passing multi-line text to another native
 command, join it explicitly to one string and quote the argument, or prefer the
 tool's stdin/file option. If an edit command rejects the first body line as an
 unknown flag, verify the remote object before retrying; do not assume a partial
-mutation.
+mutation. For a ROS compiler-feasibility probe with transitive include/link
+requirements, prefer a tiny explicit CMake target in an owned temporary source
+directory over nested PowerShell/Bash command substitution that synthesizes
+`-I` flags. Remove the probe after preserving the compiler result and inspect
+`git status`.
 
 ## PIT-0002: WSL transport warnings are not the command result
 
@@ -206,20 +214,25 @@ deadline inside `attempt()` and proves the late APPLIED result is rejected.
 ## PIT-0011: CTest needs the ROS environment, not only a build directory
 
 **Symptom.** Every CTest target fails at `/opt/ros/.../run_test.py` with
-`ModuleNotFoundError: ament_cmake_test`, including otherwise unrelated GTests
-and linters.
+`ModuleNotFoundError: ament_cmake_test`, or a direct repository Python suite
+fails every ROS-aware support test with `ModuleNotFoundError: launch` while
+unrelated pure tests pass.
 
-**Cause.** `ctest --test-dir build/<package>` was invoked from a fresh WSL shell
-without sourcing ROS. The generated ament wrappers need ROS Python paths; the
-existence of compiled test binaries does not supply that environment.
+**Cause.** CTest or `scripts/run_repository_tests.py` was invoked from a fresh
+WSL shell without sourcing ROS. Generated ament wrappers and support modules
+need ROS Python paths; compiled binaries and an existing build tree do not
+supply that environment.
 
 **Guardrail.** Source the base installation and current overlay in the same
 shell before CTest:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
-source install/setup.bash
+source install/setup.bash  # when exercising the built overlay
 ctest --test-dir build/voice_nav_mission --output-on-failure
+
+# Root contracts that import installed ROS Python packages need at least base:
+python3 scripts/run_repository_tests.py
 ```
 
 When a diagnostic shell uses Bash strict mode, enable `set -e -o pipefail`,
@@ -607,14 +620,16 @@ every controller update. In practice that delta is about one update period.
 time. Output-to-output delta therefore measures the zero transition period,
 not how old the last input was.
 
-**Diagnostic and planned guardrail.** Give every safe Gate input in the crash
-window a unique marker. The parent-owned Gate event journal's two-phase output
-lane must survive SIGKILL with one final unambiguous non-zero COMMITTED publish and no later
-intent/commit; matching non-zero `/cmd_vel_out` ACKs that exact final publish.
-Use its input stamp as the start and the first controller zero stamp as the
-timeout end. Wheel writes are a separate lossless-ledger assertion. Mutations
-must fail if the origin is rebound to periodic output time, an older ACK, or a
-side observer's last receipt. This is
+**Diagnostic and planned guardrail.** Reserve one marker not previously used in
+the generation for the final Gate-kill attempt. The parent-owned Gate event
+journal must show exactly one COMMITTED publish of that marker, and matching
+non-zero `/cmd_vel_out` must ACK it before MotionGate's next 20 ms periodic
+publish. Exact SIGKILL follows immediately; a second publish invalidates and
+retries the generation. Use that one input stamp as the start and the first
+controller zero stamp as the timeout end. Wheel writes are a separate
+lossless-ledger assertion. Mutations must fail if the origin is rebound to
+periodic output time, an older/late ACK, a repeated marker, or a side
+observer's last receipt. This is
 specified in [VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md)
 and [Lesson 0010](../lessons/0010-prove-crash-stop-and-safe-pause.md). The
 [pinned controller source](https://github.com/ros-controls/ros2_controllers/blob/jazzy/diff_drive_controller/src/diff_drive_controller.cpp)
@@ -660,8 +675,9 @@ and event ordering, `ProcessExited` need not precede the terminal zero being
 measured.
 
 **Diagnostic and planned guardrail.** VN-0011A uses a <=40 ms steady-clock
-barrier for both Gate validity flags and a unique non-zero Gate input; the final
-Gate receipt is <=20 ms old at signal dispatch. Independently, strictly
+barrier for both Gate validity flags and a recent non-zero Gate commit; the
+final Gate receipt is <=20 ms old at signal dispatch. Marker uniqueness is an
+additional narrow requirement only for the MotionGate-death case. Independently, strictly
 advancing non-zero simulation surfaces are <=30 ms old in simulation time.
 No invalid/zero event intervenes. A parent-owned Gate event journal uses the
 same host's monotonic clock to prove terminal retirement and its bound zero
@@ -684,13 +700,14 @@ two independent readers advance or execute callbacks in lockstep. A 100 ms
 quiet period can drain the observer while still saying nothing exact about the
 controller callback's accepted command.
 
-**Diagnostic and planned guardrail.** Emit a bounded unique safe marker
-sequence and record every source publish in a crash-resilient INTENT/COMMITTED
-journal. Only a final unambiguous COMMITTED record with no later record and a
-matching non-zero controller-output ACK supplies the timeout origin. A trailing
-intent covers the kill-between-publish-and-commit ambiguity and invalidates the
-generation. Duplicate/unmatched markers, limiter changes, gaps, or overflow
-fail closed. Publisher disappearance and 100 ms quiet remain cleanup only.
+**Diagnostic and planned guardrail.** Emit one marker not previously used in
+the generation and record every periodic source publish in a crash-resilient
+INTENT/COMMITTED journal. Only its first COMMITTED record plus a matching
+non-zero controller-output ACK observed before the next 20 ms Gate publish can
+supply the timeout origin. Exact SIGKILL follows immediately. A trailing
+intent, second publish, late ACK, limiter change, gap, or overflow invalidates
+and retries the generation. Publisher disappearance and 100 ms quiet remain
+cleanup only.
 Mutations must make the side-observer shortcut fail. See
 [VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md).
 
@@ -749,19 +766,18 @@ iteration.
 **Diagnostic and planned guardrail.** The write seam owns a non-wrapping
 `uint64 write_seq`; atomic ARM/SEAL fences close the analyzed interval. Every
 invocation advances the sequence. Only consecutive calls with identical
-generation, iteration/stamp, and exact command bits may fold into a segment;
-its first/last sequence and invocation count must agree. Prove segment capacity
-from the bounded iteration/transition budget before arming, latch
-overflow/overwrite, unaccounted calls, and zero-window nonzero writes as
-failure, retain sealed segments until acknowledgement, and validate immutable
-bounded pages by checksum plus contiguous generation/sequence ranges. In A's
-continuous run, iteration follows observed world progress. In B's paused probe
-it may repeat during runner loops without consuming one slot per identical
-write, and only an acknowledged,
-World-Statistics-confirmed exact single step may create one `N -> N+1`
-transition. Applying the paused-only rule to continuous A is itself a failing
-mutation. DDS BEST_EFFORT and overwrite-on-full are forbidden for the proof
-channel. See
+generation, simulation stamp, delegated return result, and exact command bits
+may fold into a segment; its first/last sequence and invocation count must
+agree. Prove segment capacity from the bounded write-invocation/transition
+budget before arming, latch overflow/overwrite, unaccounted calls, and
+zero-window nonzero writes as failure, retain sealed segments until
+acknowledgement, and validate immutable bounded pages by checksum plus
+contiguous generation/sequence ranges. Simulation stamp may repeat during a
+paused runner without consuming one slot per identical write. The hardware
+Interface has no iteration field; World Statistics independently proves
+continuous progress in A and exact `N -> N+1` single steps in B, correlated
+through ARM/SEAL. DDS BEST_EFFORT and overwrite-on-full are forbidden for the
+proof channel. See
 [VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md).
 
 ## PIT-0032: Heartbeats make an arming-snapshot `control_seq + 1` false
@@ -822,3 +838,92 @@ pytest loads the file through the same dynamic path used by launch support.
 Collection failure is not accepted as tests-first RED or GREEN; the executable
 test body must run. See
 [Lesson 0010 evidence](../records/0010-crash-stop-and-safe-pause.md).
+
+## PIT-0035: A concrete PImpl plugin class may be a false extension seam
+
+**Symptom.** A test-only class derives from
+`gz_ros2_control::GazeboSimSystem` because its methods are virtual, but a
+minimal Jazzy compile fails in `std::default_delete` with an invalid `sizeof`
+of incomplete `GazeboSimSystemPrivate`.
+
+**Cause.** The installed concrete class owns a
+`std::unique_ptr<GazeboSimSystemPrivate>`, forward-declares that PImpl in the
+public header, and does not declare an out-of-line destructor. Instantiating an
+external derived destructor therefore requires a private type that is still
+incomplete. Virtual methods do not by themselves make a concrete PImpl class a
+supported inheritance boundary. The installed plugin XML names
+`GazeboSimSystemInterface` as the public base class.
+
+**Diagnostic and planned guardrail.** Compile the smallest derived object
+against the exact installed release before designing the Adapter. Implement
+the test plugin by inheriting `GazeboSimSystemInterface`, owning a pluginlib
+loader and upstream Interface instance, and delegating lifecycle, interface
+export, mode switching, `read()`, `write()`, and `initSim()` unchanged. The
+test package must directly discover `gz_sim_vendor` and `gz-sim8` before
+consuming `gz_ros2_control`'s exported targets. A compile/static contract will
+reject the concrete subclass and verify the plugin XML base type, while product
+URDF continues selecting the upstream plugin directly. See
+[VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md) and the
+[Lesson 0010 occurrence](../records/0010-crash-stop-and-safe-pause.md#architecture-correction-use-the-public-hardware-extension-seam).
+
+## PIT-0036: An evidence seam cannot record a field it never receives
+
+**Symptom.** A hardware-write record claims an exact Gazebo iteration for each
+`write()` call, even though the Adapter only receives ROS simulation `time` and
+`period`.
+
+**Cause.** `GazeboSimSystemInterface::write()` has no
+`UpdateInfo.iterations` argument, and the ECM exposed at `initSim()` has no
+world-iteration component. The real iteration is available to the outer Gazebo
+System's `PreUpdate`, not to this public hardware plugin seam. Copying a nearby
+World Statistics value into every write record would manufacture precision and
+could misorder paused runner calls.
+
+**Diagnostic and planned guardrail.** The hardware ledger records only facts it
+owns: non-wrapping `write_seq`, generation, `sim_stamp`, delegated result, and
+exact wheel-command bits. World Statistics independently records real
+iteration, simulation time, and paused state. ARM/SEAL fences plus exact
+single-step request/commit evidence correlate the streams. Static and mutation
+tests must reject a per-write iteration field or an assertion that stamp must
+advance on every paused write. See
+[ADR-0005](../../docs/adr/0005-use-tokenized-managed-safe-pause.md).
+
+## PIT-0037: Periodic source repeats make value-only ACKs ambiguous
+
+**Symptom.** A non-zero `/cmd_vel_out` tuple matches the Gate journal's final
+value, so the test assumes the controller accepted one exact Gate publish even
+though MotionGate republishes the same selected tuple every 20 ms.
+
+**Cause.** The pinned controller stamps `/cmd_vel_out` with its update time and
+does not echo the input header stamp. A value reused by multiple Gate publishes
+cannot identify which input the controller consumed. Publisher disappearance
+and quiet time also do not repair that ambiguity.
+
+**Diagnostic and planned guardrail.** Reserve a marker never previously used
+in the generation. Arm only on its first journal COMMIT, require a matching
+non-zero controller output, and dispatch exact Gate SIGKILL before the next
+20 ms source publish. After `ProcessExited`, the journal must still end at that
+one COMMITTED record. If a second publish, trailing intent, or late ACK occurs,
+discard and retry the whole generation. Producer-death tests that do not use
+the controller timeout need only a recent non-zero commit; they must not inherit
+this narrow uniqueness rule. See
+[VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md).
+
+## PIT-0038: Instrumentation real-time claims do not cover delegated code
+
+**Symptom.** A design says the “hardware-write seam performs no allocation,”
+then treats any allocation inside pinned upstream
+`GazeboSimSystem::write()` as a product defect or silently copies the upstream
+implementation to make the claim true.
+
+**Cause.** The test owns only its added journal operations. The delegated
+implementation may create or assign Gazebo components and is outside the
+instrumentation's real-time contract. An unqualified seam-level statement
+expands ownership beyond what the project can enforce.
+
+**Diagnostic and planned guardrail.** State the invariant narrowly: after the
+delegated call, added journal work uses preallocated fixed storage, bounded
+lock-free atomic operations, and no filesystem, logging, ROS, or transport
+calls. Preserve upstream behavior through delegation rather than copying it.
+Static wording tests and implementation review must reject broader claims.
+See [the motion safety contract](../../docs/architecture/safety-and-motion-contract.md).

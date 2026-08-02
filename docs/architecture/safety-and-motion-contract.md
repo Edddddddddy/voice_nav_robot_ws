@@ -315,27 +315,48 @@ discovery, and arms a fault only after complete finite, strictly increasing
 samples corroborate that both wheel commands are non-zero. Delivery is lossy,
 so this topic cannot prove an exact first write or the absence of an
 intermediate non-zero regression. A default-off test-only lossless ledger at
-the actual hardware-write seam accounts for each invocation, generation,
-Gazebo iteration/stamp, and both wheel commands. Crash-stop and pause tests use
-that ledger to prove exact wheel-write transitions and no regression, while
-introspection remains mandatory independent corroboration. The ledger owns a
-non-wrapping `write_seq` and atomic ARM/SEAL fences at the write seam. It may
-fold only consecutive invocations with identical generation, iteration/stamp,
-and exact wheel-command bits into one atomically extended active accumulator
-whose sequence range and invocation count agree. A tuple change or `SEAL`
-finalizes it; only finalized segments and snapshot pages are immutable.
-Segment capacity is proven before arming from the
-bounded iteration/transition budget; valid same-iteration repeats therefore do
-not consume unbounded slots. Overflow/overwrite, an unaccounted invocation, or
-a non-zero write in a zero-required interval latches failure. Sealed segments
-are retained, and bounded immutable pages must have valid checksums plus
-contiguous generation/`write_seq` ranges; iteration is nondecreasing and may
-repeat while the paused runner calls the write seam. A reliable topic or
-overwrite-on-full ring is not lossless evidence. VN-0011A separately uses a
-parent-owned Gate event journal for applied control/terminal transitions and
-crash-resilient output INTENT/COMMITTED records. Only its final unambiguous
-committed marker with no later record plus a matching non-zero
-controller-output ACK can define the consumer timeout origin. For
+the actual hardware-write seam accounts for each invocation, test generation,
+simulation stamp, delegated return result, and both wheel-command bit patterns.
+The test Adapter inherits the public
+`gz_ros2_control::GazeboSimSystemInterface`, delegates every lifecycle and I/O
+call to a pluginlib-loaded upstream `gz_ros2_control/GazeboSimSystem`, and
+records `JointVelocityCmd` only after the upstream `write()` returns. Direct
+inheritance from the concrete upstream class is not an extension seam.
+The crash harness expands the canonical product Xacro, requires exactly one
+upstream hardware plugin, and transforms only that XML block to the Adapter
+while injecting the parent-owned shared-memory identity. Canonical Xacro,
+product launch, and product YAML contain neither the Adapter nor journal
+parameters. The Adapter's added post-delegate journal operations are
+preallocated and allocation-free; no such claim is made about upstream
+`write()` itself.
+
+The public Interface does not receive Gazebo `UpdateInfo.iterations`; World
+Statistics owns real iteration evidence independently. ARM/SEAL fences and
+exact-step observations correlate that world evidence with the ledger's
+`sim_stamp` and non-wrapping `write_seq` without fabricating an iteration value.
+Crash-stop and pause tests use the ledger to prove exact wheel-write
+transitions and no regression, while introspection remains mandatory
+independent corroboration. Only consecutive invocations with identical
+generation, simulation stamp, delegated return result, and exact wheel-command
+bits may extend one active accumulator whose sequence range and invocation
+count agree. A tuple change or `SEAL` finalizes it; only finalized segments and
+snapshot pages are immutable. Segment capacity is proven before arming from a
+bounded write-invocation/command-transition budget. Overflow/overwrite, an
+unaccounted invocation, or a non-zero write in a zero-required interval latches
+failure. Sealed segments are retained, and bounded immutable pages must have
+valid checksums plus contiguous generation/`write_seq` ranges; simulation
+stamp is nondecreasing and may repeat while paused. A reliable topic or
+overwrite-on-full ring is not lossless evidence.
+
+VN-0011A separately uses a parent-owned Gate event journal for applied
+control/terminal transitions and crash-resilient output INTENT/COMMITTED
+records. MotionGate normally republishes the selected tuple every 20 ms, so a
+value match alone is ambiguous. The Gate-kill attempt creates a previously
+unseen final marker, requires exactly one committed Gate publish and a matching
+non-zero controller-output ACK, then dispatches exact SIGKILL before the next
+periodic publish. A second publish or any later output record invalidates the
+generation. Only that single committed input can define the consumer timeout
+origin. For
 authority/candidate death, the same journal includes every accepted
 intervening RENEW; terminal retirement advances exactly once from its final
 committed predecessor, and same-host monotonic timestamps prove retirement and
@@ -482,7 +503,7 @@ above. Every Goal receives exactly one terminal result.
 | Dependency unavailable during whole-plan validation | reject before an earlier step starts |
 | Candidate stale or authority lease expired | Gate inhibits, latches the old lease closed, and continuously publishes zero |
 | Runtime disappears | Gate lease expires independently |
-| MotionGate disappears while simulation advances | the final crash-resilient COMMITTED Gate marker has no later source record and is ACKed by a non-zero controller output; controller selects zero on the first update where that input is older than 0.35 s simulation time |
+| MotionGate disappears while simulation advances | a marker new to the generation is COMMITTED exactly once and ACKed by non-zero controller output before the next 20 ms Gate publish; exact kill leaves it as the final source record, otherwise the generation retries. The controller selects zero on the first update where that one input is older than 0.35 s simulation time |
 | MotionGate disappears after a Managed Safe Pause | exact original-Gate exit plus zero final publishers remains admissible; any replacement identity invalidates the token |
 | Managed Safe Pause and resume | exact single-step/re-pause transactions reach and prove the next controller update zero; one additional step losslessly writes that post-update zero before continuous `pause:false` |
 | Unmanaged Pause without a Safe-Pause Token | in-place resume is refused; return `RESTART_REQUIRED` and shut down the old generation |

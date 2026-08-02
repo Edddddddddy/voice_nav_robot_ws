@@ -101,17 +101,31 @@ Gazebo 已执行回执。
 
 而且 introspection 是有损诊断流：它必须作为独立佐证保留，但不能证明中间没有
 漏掉一条 non-zero write，也不能证明精确 first write。A/B 共用一个默认关闭的
-test-only lossless hardware-write ledger，在实际 `write()` seam 计入每次调用、
-generation、Gazebo iteration/stamp 和左右轮命令。“lossless”还必须落成协议：
-单调不回绕 `write_seq`、同一 write seam 的 atomic ARM/SEAL fence、arm 前 segment
-容量证明、overflow/overwrite/未计入调用/zero-window nonzero 故障锁存、sealed
-interval 保留，以及分页 checksum、generation/`write_seq` 连续与 iteration 不递减
-检查。只有 generation、iteration/stamp 与轮速位模式完全相同的连续调用才能折叠，
-segment 的 sequence range 和 count 必须一致。只把 topic 改为 reliable 不够。
-每次调用都必须推进 `write_seq`；paused runner 会在同一 iteration 多次 write，
-所以 iteration 只要求不递减。Slice A 连续运行时 iteration 随真实 world 自然
-前进；只有 Slice B 的 paused probe 才限制为：经 ACK 且由 World Statistics 确认的
-精确单步请求产生一次 `N -> N+1`。
+test-only lossless hardware-write ledger。测试 Adapter 继承公开的
+`GazeboSimSystemInterface`，通过 pluginlib 创建固定的上游
+`gz_ros2_control/GazeboSimSystem`，原样委托 lifecycle、interface、`read()`、
+`write()` 与 `initSim()`；只在上游 `write()` 返回后读取真实左右轮
+`JointVelocityCmd`。不要直接继承具体 `GazeboSimSystem`：Jazzy 1.2.19 的头文件中
+PImpl 类型未完成，外部派生类析构会编译失败。
+
+不要复制整份机器人 Xacro。测试 transformer 应先展开 canonical product Xacro，
+要求恰好一个 upstream hardware plugin，只替换这一 XML block 并注入共享内存身份；
+其余结构必须等价。产品 Xacro、launch 与 YAML 中不得出现 Adapter 或 journal 参数。
+
+ledger 在实际 `write()` seam 计入每次调用、test generation、simulation stamp、
+上游返回值和左右轮命令位模式。“lossless”还必须落成协议：单调不回绕
+`write_seq`、同一 write seam 的 atomic ARM/SEAL fence、arm 前 segment 容量证明、
+overflow/overwrite/未计入调用/zero-window nonzero 故障锁存、sealed interval 保留，
+以及分页 checksum 与 generation/`write_seq` 连续检查。只有 generation、stamp、
+返回值与轮速位模式完全相同的连续调用才能折叠，segment 的 sequence range 和
+count 必须一致。只把 topic 改为 reliable 不够。
+
+公开 hardware Interface 没有 `UpdateInfo.iterations` 参数，不能伪造每条 write 的
+Gazebo iteration。每次调用仍必须推进 `write_seq`，simulation stamp 在 pause 时可
+重复；真实 iteration 由 World Statistics 独立记录。Slice A 用它证明 world 连续
+前进；Slice B 用 ARM/SEAL 区间关联经 ACK、World-Statistics-confirmed 的精确
+`N -> N+1` 单步。新增 journal instrumentation 必须预分配且无分配；这不等于宣称
+固定上游 `write()` 自身无分配。
 
 如果只看到一条 zero、controller inactive、interface released 或 odom 接近零，
 都还没有完成完整的零证明。
@@ -125,7 +139,8 @@ Slice A 使用三个 fault case，每个 case 都创建新的 Gate generation：
 1. authority 与 candidate 是两个独立 OS 进程；
 2. 只按手里持有的 exact launch action 发送 `SIGKILL`；
 3. 每次 SIGKILL 前，<=40 ms steady barrier 只约束 authority/candidate 有效和
-   unique non-zero Gate input，发信号时最后 Gate receipt <=20 ms；simulation
+   recent non-zero Gate commit，发信号时最后 Gate receipt <=20 ms；只有 Gate-kill
+   case 才另外要求 generation 内此前未使用且 exactly-once 的 final marker；simulation
    evidence 独立要求 `/clock` 前进，controller/introspection/lossless write 非零、
    严格递增且相对 Gate input 不旧于 30 ms simulation time；不能把低 RTF 混入
    steady deadline，期间也不能插入 zero/invalid；
@@ -139,10 +154,13 @@ Slice A 使用三个 fault case，每个 case 都创建新的 Gate generation：
    全部进入 journal。terminal retirement 同样严格接在最后已提交 RENEW 之后，并以
    `CANDIDATE_EXPIRED` 在 exact ProcessExited 后 200 ms steady time 内归零；
 6. Gate 最后被杀，Gazebo/controller 继续运行，测试不得补发 zero；candidate
-   生成限幅内、间距大于比较容差且 crash window 内唯一的 command tuple；Gate
-   的 parent-owned crash-resilient journal 对每次 publish 先写 INTENT、成功后改为
-   COMMITTED；SIGKILL 后最后一项必须是无歧义 non-zero COMMITTED 且没有尾随
-   intent/publish，其 marker 必须被 non-zero `/cmd_vel_out` ACK；
+   生成限幅内、间距大于比较容差且 generation 内此前未使用的 final tuple。Gate
+   本来就会每 20 ms 重发当前 tuple，因此不能要求整个 crash window 的所有值都
+   唯一。parent-owned crash-resilient journal 对每次 publish 先写 INTENT、成功后
+   改为 COMMITTED；final marker 第一次 COMMIT 后必须先被 non-zero
+   `/cmd_vel_out` ACK，再在下一次 20 ms publish 前发送 exact SIGKILL。若死亡前已
+   出现第二条相同或任何后续 output record，本 generation 失败并以新 generation
+   重试；SIGKILL 后 final record 必须仍是这条唯一 COMMITTED marker；
 7. 第一条 controller output zero 只有在该 final committed input 年龄严格大于
    0.35 s 后出现；publisher count 归零和 100 ms quiet 只证明 cleanup，不能冒充
    controller callback acceptance；
@@ -220,11 +238,12 @@ pure valid fixture passes
   -> refactor behind the same Interface
 ```
 
-Slice A 的文档 contract 已落盘，但可执行 tests-first RED/test contract 尚未落盘，
-因此本节不把未来脚本伪装成可运行命令。
-交付过程中必须补齐并执行：
+Slice A 的文档 contract 已落盘，CrashLedger 的 exact identity/closed exit 与
+signal-intent/ProcessExited 两个纯逻辑 RED/GREEN 微循环也已落盘并通过 ament/CTest
+注册。simulation-window analyzer、repository-only RED、Gate/hardware journal 和
+isolated launch 仍必须继续按 tests-first 补齐：
 
-- pure crash-ledger tests；
+- 扩展 pure crash-ledger tests；
 - pure simulation-window evidence tests；
 - static/mutation repository contract；
 - isolated headless product launch test；
@@ -270,8 +289,9 @@ Lesson 0010 完成时至少满足：
 - terminal state 必须同一 Gate instance、空 lease，`control_seq` 匹配 journal 中
   最后已提交 control predecessor 的非回绕 `+1`，并使用新
   `zero_publish_seq == output_publish_seq`；不能漏记合法 RENEW 或接受陈旧 zero；
-- controller deadman 从 crash-resilient journal 的 final unambiguous COMMITTED
-  Gate input 起算，并由匹配 non-zero `/cmd_vel_out` ACK，满足严格
+- controller deadman 从 crash-resilient journal 中 generation 内此前未使用且
+  exactly-once COMMITTED 的 Gate input 起算；它必须在下一次 20 ms 重发前由匹配
+  non-zero `/cmd_vel_out` ACK 并触发 exact kill，满足严格
   `age > 0.35 s` 与 100 Hz update 窗口；
 - introspection 仍是左右轮 command/state 的 mandatory corroboration；lossless
   write ledger 以 fences、无缺号、无 overflow/overwrite 的 closed interval 证明

@@ -120,6 +120,56 @@ Executed tests: 2
 Result: 2 passed in 0.36s
 ```
 
+### Architecture correction: use the public hardware extension seam
+
+Before implementing the hardware oracle, a temporary compile probe tested the
+planned direct subclass against the installed environment at ancestor HEAD
+`f475147`:
+
+```text
+Environment:
+Ubuntu 24.04 / ROS 2 Jazzy
+gz_ros2_control 1.2.19
+g++ 13.3.0
+
+Probe:
+class Probe final : public gz_ros2_control::GazeboSimSystem {};
+int main() { Probe probe; }
+
+Decisive compiler result:
+std::default_delete<gz_ros2_control::GazeboSimSystemPrivate>
+error: invalid application of sizeof to incomplete type
+```
+
+The installed `gz_system.hpp` forward-declares the private PImpl, stores it in
+`std::unique_ptr`, and declares no out-of-line destructor. The installed plugin
+XML instead names `GazeboSimSystemInterface` as the public base class. The
+probe also established that CMake must discover `gz_sim_vendor` and `gz-sim8`
+before consuming the exported `gz_ros2_control` targets. The temporary probe
+files were removed after observation.
+
+The accepted correction is a test-only Adapter that inherits the public
+Interface, pluginlib-loads `gz_ros2_control/GazeboSimSystem`, delegates every
+call unchanged, and journals actual `JointVelocityCmd` only after upstream
+`write()` returns. That Interface has `time` and `period` but no
+`UpdateInfo.iterations`; hardware records therefore use `sim_stamp +
+write_seq`, while World Statistics independently owns real iteration and is
+correlated through ARM/SEAL. The no-allocation claim applies only to added
+journal instrumentation, not to pinned upstream `write()`.
+
+An initial inline cross-shell compile command was rejected by Bash near `(`
+because PowerShell consumed nested quoting. No repository or external state
+changed; the diagnostic was rerun through the explicit CMake probe. This is a
+recurrence of [PIT-0001](../reference/engineering-pitfalls.md#pit-0001-windows-to-wsl-quoting-is-a-two-shell-contract), not compiler evidence.
+
+The first root-contract rerun used a fresh WSL shell without sourcing Jazzy.
+All 288 tests were discovered, but the 13 tests that import Gazebo launch
+support errored with `ModuleNotFoundError: launch`; this is environment failure,
+not tests-first RED. Repeating the same runner after
+`source /opt/ros/jazzy/setup.bash` executed all 288 tests with zero failure or
+error. [PIT-0011](../reference/engineering-pitfalls.md#pit-0011-ctest-needs-the-ros-environment-not-only-a-build-directory)
+now covers both CTest wrappers and direct ROS-aware repository support imports.
+
 - [ ] Pure valid fixtures pass.
 - [ ] Negative/mutation fixtures fail for their expected reasons.
 - [ ] Repository assertion alone fails because crash-stop artifacts are absent.
@@ -136,10 +186,10 @@ Expected repository failure: Not yet captured
 
 | Case | Expected threshold | Observed result |
 | --- | --- | --- |
-| Authority SIGKILL | <=40 ms steady valid/Gate-marker barrier; Gate receipt <=20 ms; advancing non-zero simulation surfaces <=30 ms simulation age; exact `-SIGKILL`; Gate-journal terminal/zero commits are not earlier than ProcessExited; state has empty lease, journaled predecessor-plus-one `control_seq`, new/equal zero-output seq, `AUTHORITY_EXPIRED`; <=300 ms steady | Not yet captured |
+| Authority SIGKILL | <=40 ms steady valid/recent-nonzero-Gate-commit barrier; Gate receipt <=20 ms; advancing non-zero simulation surfaces <=30 ms simulation age; exact `-SIGKILL`; Gate-journal terminal/zero commits are not earlier than ProcessExited; state has empty lease, journaled predecessor-plus-one `control_seq`, new/equal zero-output seq, `AUTHORITY_EXPIRED`; <=300 ms steady | Not yet captured |
 | Candidate SIGKILL | same bounded arming/Gate-journal rules; exact `-SIGKILL`; authority RENEWs remain live and are journaled; terminal sequence follows the last committed predecessor; `CANDIDATE_EXPIRED`; event-to-state <=200 ms steady | Not yet captured |
-| MotionGate SIGKILL | exact `-SIGKILL`; Gazebo/controller live; no injected zero; Gate event journal output lane ends in an unambiguous non-zero COMMITTED record with no later intent/publish and its marker is ACKed by non-zero controller output; first controller zero satisfies `0.35 s < delta_sim <= 0.36 s + epsilon`; graph quiet is cleanup only | Not yet captured |
-| Wheel command/state | compatible BEST_EFFORT introspection remains mandatory corroboration; fenced lossless ledger accounts for each invocation through contiguous sequence-range/count segments, nondecreasing iteration, and no overflow/gap/nonzero violation, proving first both-wheel zero plus no regression | Not yet captured |
+| MotionGate SIGKILL | exact `-SIGKILL`; Gazebo/controller live; no injected zero; a marker new to the generation is COMMITTED exactly once, ACKed by non-zero controller output before the next 20 ms repeat, and remains the final Gate output record after death; any repeat retries the generation; first controller zero satisfies `0.35 s < delta_sim <= 0.36 s + epsilon`; graph quiet is cleanup only | Not yet captured |
+| Wheel command/state | compatible BEST_EFFORT introspection remains mandatory corroboration; delegated hardware ledger accounts for each invocation through contiguous `write_seq` range/count segments, nondecreasing simulation stamp, and no overflow/gap/nonzero violation; World Statistics separately owns iteration; together they prove first both-wheel zero plus no regression | Not yet captured |
 | Physical stationarity | after the later controller/lossless both-wheel-zero linearization, shared wheel-state/odom window begins <=1.2 s and holds >=0.20 s simulation time | Not yet captured |
 | Exit ledger | killed actions `-SIGKILL`; all other launch-managed actions 0 | Not yet captured |
 
@@ -153,7 +203,8 @@ Expected repository failure: Not yet captured
 - [ ] Missing wheel command/state/odom surface is rejected.
 - [ ] Stale/delayed arming, terminal/zero journal commit before ProcessExited,
   DDS receipt ordering used as causal proof, omitted intervening RENEW, queued
-  late Gate input, duplicate/unmatched markers, absent/trailing Gate-output commit,
+  late Gate input, reused/repeated/unmatched final marker, absent/trailing
+  Gate-output commit,
   side-observer origin, lossy no-regression evidence, and incomplete write
   ledger are rejected.
 - [ ] Focused product repetitions pass.
