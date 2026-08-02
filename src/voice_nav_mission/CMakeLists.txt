@@ -45,6 +45,21 @@ target_link_libraries(
 )
 
 add_library(
+  motion_gate_process_runtime STATIC
+  src/motion_gate_process_runtime.cpp
+)
+target_compile_features(motion_gate_process_runtime PUBLIC cxx_std_17)
+target_include_directories(
+  motion_gate_process_runtime
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(
+  motion_gate_process_runtime
+  PUBLIC attached_gate_event_journal
+)
+
+add_library(
   motion_gate_core STATIC
   src/motion_gate_core.cpp
 )
@@ -159,7 +174,7 @@ if(BUILD_TESTING)
   )
   target_link_libraries(
     motion_gate_process_runtime_test
-    attached_gate_event_journal
+    motion_gate_process_runtime
   )
 
   add_executable(
