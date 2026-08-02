@@ -108,6 +108,12 @@ bool finite_command_bits(std::uint64_t bits) noexcept
   return std::isfinite(value);
 }
 
+bool zero_command_bits(std::uint64_t bits) noexcept
+{
+  static_assert(std::numeric_limits<double>::is_iec559);
+  return (bits & UINT64_C(0x7fffffffffffffff)) == 0U;
+}
+
 }  // namespace
 
 class HardwareWriteLedger::Impl
@@ -165,6 +171,16 @@ bool HardwareWriteLedger::append(
   {
     impl_->oracle_faults.fetch_or(
       kHardwareWriteOracleFaultNonFiniteCommand,
+      std::memory_order_release);
+    return false;
+  }
+  if (
+    impl_->config.require_zero_commands &&
+    (!zero_command_bits(record.left_command_bits) ||
+    !zero_command_bits(record.right_command_bits)))
+  {
+    impl_->oracle_faults.fetch_or(
+      kHardwareWriteOracleFaultZeroRequired,
       std::memory_order_release);
     return false;
   }

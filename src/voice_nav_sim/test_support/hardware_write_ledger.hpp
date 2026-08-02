@@ -36,6 +36,8 @@ inline constexpr std::uint64_t kHardwareWriteOracleFaultSimulationStamp =
   UINT64_C(1) << 3U;
 inline constexpr std::uint64_t kHardwareWriteOracleFaultCapacity =
   UINT64_C(1) << 4U;
+inline constexpr std::uint64_t kHardwareWriteOracleFaultZeroRequired =
+  UINT64_C(1) << 5U;
 
 struct HardwareWriteLedgerConfig
 {
@@ -44,6 +46,7 @@ struct HardwareWriteLedgerConfig
   std::uint64_t arm_fence_write_seq;
   std::size_t segment_capacity;
   std::size_t snapshot_page_segment_limit;
+  bool require_zero_commands{false};
 };
 
 struct HardwareWriteSegment
