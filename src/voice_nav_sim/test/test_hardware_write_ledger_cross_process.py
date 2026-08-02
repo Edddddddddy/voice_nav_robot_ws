@@ -23,6 +23,7 @@ import sys
 from hardware_write_ledger_test_support import (
     BANK_STATE_ACTIVE,
     BANK_STATE_FREE,
+    BANK_STATE_SEALED_FAULT,
     BANK_STATE_SEALED_OK,
     CONTROL_FLAG_EXACT_SEAL_STAMP,
     CONTROL_FLAG_ZERO_REQUIRED,
@@ -32,6 +33,7 @@ from hardware_write_ledger_test_support import (
     CONTROL_RESPONSE_INVALID,
     CONTROL_RESPONSE_OK,
     crc64_ecma_words,
+    FAULT_CAPACITY,
     FAULT_PROTOCOL,
     FAULT_SEQUENCE,
     FAULT_SIM_STAMP,
@@ -783,6 +785,130 @@ def test_corrupt_segment_count_does_not_escape_mapping(probe):
             close_owned_process_pipes(process)
 
 
+def test_qualifying_fault_preserves_attempted_fence_count(probe):
+    """Prove a budget fault retains its qualifying invocation metadata."""
+    with HardwareWriteLedgerRegionOwner(
+        generation=87,
+        segment_capacity=4,
+        page_segment_limit=2,
+    ) as owner:
+        process = spawn_probe(probe, owner)
+        try:
+            require(
+                owner.wait_for_writer(process.pid) == process.pid,
+                'fault-count probe Writer PID mismatch',
+            )
+            require(
+                read_owned_line(process, 'READY') == 'READY',
+                'fault-count probe did not publish READY',
+            )
+            owner.unlink_name()
+            arm_ticket = owner.post_arm(
+                interval_id=101,
+                segment_budget=4,
+                invocation_budget=1,
+                require_zero_commands=False,
+            )
+            process.stdin.write('BEGIN 100\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 1',
+                'fault-count setup write did not begin',
+            )
+            arm_response = owner.wait_response(arm_ticket)
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 1',
+                'fault-count setup write did not finish',
+            )
+
+            seal_ticket = owner.post_seal(
+                interval_id=101,
+                bank_index=arm_response[10],
+                bank_epoch=arm_response[11],
+                not_before_sim_stamp_ns=200,
+                require_exact_stamp=True,
+            )
+            process.stdin.write('BEGIN 200\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 2',
+                'fault-count qualifying write did not begin',
+            )
+            require(
+                owner.load_response_ticket() == arm_ticket,
+                'budget fault sealed before its write finished',
+            )
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 2',
+                'fault-count qualifying write did not finish',
+            )
+            seal_response = owner.wait_response(seal_ticket)
+            require(
+                seal_response[9] == CONTROL_RESPONSE_OK and
+                seal_response[12] == 2,
+                f'fault-count SEAL receipt changed: {seal_response!r}',
+            )
+
+            bank = owner.snapshot_bank(seal_response[10])
+            require(
+                bank[0:15] == (
+                    BANK_STATE_SEALED_FAULT,
+                    1,
+                    101,
+                    0,
+                    2,
+                    4,
+                    1,
+                    CONTROL_FLAG_EXACT_SEAL_STAMP,
+                    200,
+                    1,
+                    2,
+                    1,
+                    2,
+                    FAULT_CAPACITY,
+                    1,
+                ),
+                f'fault-count bank lost attempted metadata: {bank!r}',
+            )
+            retained_segment = owner.snapshot_segment(seal_response[10], 0)
+            require(
+                retained_segment[1:5] == (1, 1, 1, 100),
+                'budget fault changed the retained valid segment',
+            )
+            require(
+                owner.snapshot_segment(seal_response[10], 1) == (0,) * 8,
+                'budget fault fabricated a successful segment',
+            )
+            expected_bank_checksum = crc64_ecma_words(
+                (*bank[1:15], *retained_segment),
+            )
+            require(
+                bank[15] == expected_bank_checksum,
+                'fault-count root does not bind attempted metadata',
+            )
+            require(
+                owner.load_header_word(GLOBAL_ORACLE_FAULTS_WORD) ==
+                FAULT_CAPACITY,
+                'budget fault did not latch exactly CAPACITY',
+            )
+
+            process.stdin.write('EXIT\n')
+            process.stdin.flush()
+            return_code = process.wait(timeout=3.0)
+            stderr = process.stderr.read()
+            require(
+                return_code == 0,
+                f'fault-count probe exited {return_code}: {stderr}',
+            )
+        finally:
+            terminate_owned_process(process)
+            close_owned_process_pipes(process)
+
+
 def test_same_ticket_different_payload_replay_latches_fault(probe):
     """Prove an acknowledged ticket cannot be reused for another payload."""
     with HardwareWriteLedgerRegionOwner(
@@ -1099,6 +1225,7 @@ def main():
     test_writing_request_is_invisible_until_ready(probe)
     test_seal_is_deferred_and_includes_qualifying_write(probe)
     test_corrupt_segment_count_does_not_escape_mapping(probe)
+    test_qualifying_fault_preserves_attempted_fence_count(probe)
     test_same_ticket_different_payload_replay_latches_fault(probe)
     test_decreasing_sim_stamp_latches_fault_without_overwrite(probe)
     test_sequence_exhaustion_rejects_arm_before_bank_activation(probe)
