@@ -195,6 +195,10 @@ GateEventJournal::GateEventJournal(
   }
 
   const auto init_state = gate_event_journal_load_acquire(header_->init_state);
+  const auto claimed_slots = gate_event_journal_load_acquire(
+    header_->claimed_slots);
+  const auto overflow_latched = gate_event_journal_load_acquire(
+    header_->overflow_latched);
   const bool capacity_fits =
     header_->capacity <=
     (std::numeric_limits<std::size_t>::max() - sizeof(GateEventJournalHeader)) /
@@ -217,6 +221,8 @@ GateEventJournal::GateEventJournal(
     header_->generation != expected_identity_.generation ||
     header_->nonce_hi != expected_identity_.nonce_hi ||
     header_->nonce_lo != expected_identity_.nonce_lo ||
+    claimed_slots != 0U ||
+    overflow_latched != 0U ||
     header_->reserved != 0U ||
     header_->header_checksum != gate_event_journal_header_checksum(*header_))
   {
