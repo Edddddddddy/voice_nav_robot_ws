@@ -15,26 +15,14 @@
 #ifndef VOICE_NAV_SIM__ATTACHED_HARDWARE_WRITE_LEDGER_HPP_
 #define VOICE_NAV_SIM__ATTACHED_HARDWARE_WRITE_LEDGER_HPP_
 
+#include "hardware_write_ledger_writer.hpp"
+
 #include <cstdint>
 #include <memory>
 #include <string>
 
 namespace voice_nav_sim
 {
-
-struct HardwareWriteLedgerIdentity
-{
-  std::uint64_t owner_uid;
-  std::uint64_t generation;
-  std::uint64_t nonce_hi;
-  std::uint64_t nonce_lo;
-};
-
-struct HardwareWriteLedgerLayout
-{
-  std::uint64_t segment_capacity_per_bank;
-  std::uint64_t page_segment_limit;
-};
 
 struct HardwareWriteLedgerAttachmentConfig
 {
@@ -58,6 +46,7 @@ public:
     AttachedHardwareWriteLedger &&) = delete;
 
   [[nodiscard]] std::uint64_t claimed_writer_pid() const noexcept;
+  [[nodiscard]] HardwareWriteLedgerWriter & writer() noexcept;
 
 private:
   struct Impl;

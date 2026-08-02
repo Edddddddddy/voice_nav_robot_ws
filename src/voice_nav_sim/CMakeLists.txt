@@ -94,6 +94,7 @@ if(BUILD_TESTING)
   add_library(
     voice_nav_sim_hardware_write_ledger_posix STATIC
     test_support/attached_hardware_write_ledger.cpp
+    test_support/hardware_write_ledger_writer.cpp
   )
   set_target_properties(
     voice_nav_sim_hardware_write_ledger_posix

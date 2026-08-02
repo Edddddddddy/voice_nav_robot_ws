@@ -374,7 +374,10 @@ struct AttachedHardwareWriteLedger::Impl
         throw system_error("mmap hardware-write ledger failed");
       }
       validate_ready_region(region, region_bytes, config);
+      auto pending_writer =
+        std::make_unique<HardwareWriteLedgerWriter>(region, region_bytes);
       claim_writer(region);
+      writer = std::move(pending_writer);
     } catch (...) {
       cleanup();
       throw;
@@ -388,6 +391,7 @@ struct AttachedHardwareWriteLedger::Impl
 
   void cleanup() noexcept
   {
+    writer.reset();
     if (region != nullptr) {
       (void)munmap(region, region_bytes);
       region = nullptr;
@@ -412,6 +416,7 @@ struct AttachedHardwareWriteLedger::Impl
   int fd{-1};
   void * region{nullptr};
   std::size_t region_bytes{0U};
+  std::unique_ptr<HardwareWriteLedgerWriter> writer;
 };
 
 AttachedHardwareWriteLedger::AttachedHardwareWriteLedger(
@@ -426,6 +431,11 @@ std::uint64_t AttachedHardwareWriteLedger::claimed_writer_pid()
 const noexcept
 {
   return impl_->claimed_writer_pid();
+}
+
+HardwareWriteLedgerWriter & AttachedHardwareWriteLedger::writer() noexcept
+{
+  return *impl_->writer;
 }
 
 }  // namespace voice_nav_sim
