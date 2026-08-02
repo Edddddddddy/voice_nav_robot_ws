@@ -14,6 +14,7 @@
 
 """Cross-process behavior test for the hardware-write ledger mapping."""
 
+from dataclasses import replace
 import errno
 import os
 import selectors
@@ -32,6 +33,7 @@ from hardware_write_ledger_test_support import (
     CONTROL_REQUEST_IDLE,
     CONTROL_REQUEST_READING,
     CONTROL_RESPONSE_INVALID,
+    CONTROL_RESPONSE_NO_FREE_BANK,
     CONTROL_RESPONSE_OK,
     crc64_ecma_words,
     FAULT_CAPACITY,
@@ -143,6 +145,60 @@ def spawn_probe(probe, owner):
         text=True,
         close_fds=True,
     )
+
+
+def seal_single_write_interval(
+    process,
+    owner,
+    interval_id,
+    sim_stamp_ns,
+    expected_write_seq,
+):
+    """Create and read one exact single-write retained interval."""
+    arm_ticket = owner.post_arm(
+        interval_id=interval_id,
+        segment_budget=1,
+        invocation_budget=1,
+        require_zero_commands=False,
+    )
+    arm_response = owner.wait_response(arm_ticket)
+    require(
+        arm_response[9] == CONTROL_RESPONSE_OK,
+        f'interval {interval_id} ARM failed: {arm_response!r}',
+    )
+    seal_ticket = owner.post_seal(
+        interval_id=interval_id,
+        bank_index=arm_response[10],
+        bank_epoch=arm_response[11],
+        not_before_sim_stamp_ns=sim_stamp_ns,
+        require_exact_stamp=True,
+    )
+    process.stdin.write(f'BEGIN {sim_stamp_ns}\n')
+    process.stdin.flush()
+    require(
+        read_owned_line(process, f'interval {interval_id} begin') ==
+        f'BEGAN {expected_write_seq}',
+        f'interval {interval_id} write sequence changed',
+    )
+    process.stdin.write('FINISH 0 0 0 0\n')
+    process.stdin.flush()
+    require(
+        read_owned_line(process, f'interval {interval_id} finish') ==
+        f'FINISHED {expected_write_seq}',
+        f'interval {interval_id} finish changed',
+    )
+    seal_response = owner.wait_response(seal_ticket)
+    require(
+        seal_response[9] == CONTROL_RESPONSE_OK,
+        f'interval {interval_id} SEAL failed: {seal_response!r}',
+    )
+    snapshot = owner.read_sealed_interval(
+        interval_id=interval_id,
+        bank_index=seal_response[10],
+        bank_epoch=seal_response[11],
+        seal_fence_write_seq=expected_write_seq,
+    )
+    return arm_response, snapshot
 
 
 def test_corrupt_header_is_rejected_before_claim(probe):
@@ -1101,6 +1157,151 @@ def test_parent_reads_immutable_pages_before_exact_ack(probe):
             require(
                 return_code == 0,
                 f'page-reader probe exited {return_code}: {stderr}',
+            )
+        finally:
+            terminate_owned_process(process)
+            close_owned_process_pipes(process)
+
+
+def test_retained_banks_require_exact_ack_before_epoch_reuse(probe):
+    """Prove retention, exhaustion, reuse, and stale ACK rejection."""
+    with HardwareWriteLedgerRegionOwner(
+        generation=94,
+        segment_capacity=1,
+        page_segment_limit=1,
+    ) as owner:
+        process = spawn_probe(probe, owner)
+        try:
+            require(
+                owner.wait_for_writer(process.pid) == process.pid,
+                'retention probe Writer PID mismatch',
+            )
+            require(
+                read_owned_line(process, 'READY') == 'READY',
+                'retention probe did not publish READY',
+            )
+            owner.unlink_name()
+
+            first_arm, first_snapshot = seal_single_write_interval(
+                process,
+                owner,
+                interval_id=201,
+                sim_stamp_ns=100,
+                expected_write_seq=1,
+            )
+            second_arm, second_snapshot = seal_single_write_interval(
+                process,
+                owner,
+                interval_id=202,
+                sim_stamp_ns=200,
+                expected_write_seq=2,
+            )
+            require(
+                (first_arm[10], second_arm[10]) == (0, 1),
+                'retained intervals did not occupy both banks',
+            )
+
+            blocked_ticket = owner.post_arm(
+                interval_id=203,
+                segment_budget=1,
+                invocation_budget=1,
+                require_zero_commands=False,
+            )
+            blocked_response = owner.wait_response(blocked_ticket)
+            require(
+                blocked_response[9:13] == (
+                    CONTROL_RESPONSE_NO_FREE_BANK,
+                    INVALID_BANK_INDEX,
+                    0,
+                    2,
+                ),
+                f'two retained banks did not fail closed: '
+                f'{blocked_response!r}',
+            )
+            require(
+                owner.snapshot_bank(0)[0] == BANK_STATE_SEALED_OK and
+                owner.snapshot_bank(1)[0] == BANK_STATE_SEALED_OK,
+                'NO_FREE_BANK mutated retained evidence',
+            )
+
+            require(
+                owner.acknowledge(first_snapshot),
+                'exact first-bank ACK did not release its bank',
+            )
+            reused_arm, reused_snapshot = seal_single_write_interval(
+                process,
+                owner,
+                interval_id=203,
+                sim_stamp_ns=300,
+                expected_write_seq=3,
+            )
+            require(
+                reused_arm[10] == first_snapshot.bank_index and
+                reused_arm[11] == first_snapshot.bank_epoch + 1,
+                f'ACKed bank did not advance epoch on reuse: '
+                f'{reused_arm!r}',
+            )
+            require(
+                not owner.acknowledge(first_snapshot),
+                'stale pre-reuse snapshot released a newer epoch',
+            )
+            require(
+                owner.snapshot_bank(reused_snapshot.bank_index)[0] ==
+                BANK_STATE_SEALED_OK,
+                'stale ACK changed the newer terminal state',
+            )
+
+            bad_page = replace(
+                reused_snapshot.pages[0],
+                page_checksum=reused_snapshot.pages[0].page_checksum ^ 1,
+            )
+            bad_page_snapshot = replace(
+                reused_snapshot,
+                pages=(bad_page,),
+            )
+            bad_root_snapshot = replace(
+                reused_snapshot,
+                bank_checksum=reused_snapshot.bank_checksum ^ 1,
+            )
+            bad_identity_snapshot = replace(
+                reused_snapshot,
+                interval_id=reused_snapshot.interval_id + 1,
+            )
+            for description, invalid_snapshot in (
+                ('page checksum', bad_page_snapshot),
+                ('root checksum', bad_root_snapshot),
+                ('interval identity', bad_identity_snapshot),
+            ):
+                require(
+                    not owner.acknowledge(invalid_snapshot),
+                    f'tampered {description} snapshot was acknowledged',
+                )
+                require(
+                    owner.snapshot_bank(reused_snapshot.bank_index)[0] ==
+                    BANK_STATE_SEALED_OK,
+                    f'tampered {description} changed retained evidence',
+                )
+            require(
+                owner.acknowledge(reused_snapshot),
+                'exact reused-bank snapshot was not acknowledged',
+            )
+            require(
+                owner.acknowledge(second_snapshot),
+                'exact second-bank snapshot was not acknowledged',
+            )
+            require(
+                owner.snapshot_bank(0)[0] == BANK_STATE_FREE and
+                owner.snapshot_bank(1)[0] == BANK_STATE_FREE,
+                'exact ACKs did not release both retained banks',
+            )
+
+            process.stdin.write('EXIT\n')
+            process.stdin.flush()
+            return_code = process.wait(timeout=3.0)
+            stderr = process.stderr.read()
+            require(
+                return_code == 0,
+                f'retention probe exited {return_code}: {stderr}',
             )
         finally:
             terminate_owned_process(process)
@@ -2237,6 +2438,7 @@ def main():
     test_seal_is_deferred_and_includes_qualifying_write(probe)
     test_exact_seal_skip_includes_write_and_seals_fault(probe)
     test_parent_reads_immutable_pages_before_exact_ack(probe)
+    test_retained_banks_require_exact_ack_before_epoch_reuse(probe)
     test_corrupt_segment_count_does_not_escape_mapping(probe)
     test_clean_segment_coverage_gap_cannot_seal_ok(probe)
     test_invalid_active_seal_field_matrix_is_fail_closed(probe)
