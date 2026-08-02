@@ -28,6 +28,8 @@ namespace voice_nav_sim
 
 inline constexpr std::uint64_t kHardwareWriteOracleFaultSequence =
   UINT64_C(1) << 0U;
+inline constexpr std::uint64_t kHardwareWriteOracleFaultGeneration =
+  UINT64_C(1) << 1U;
 
 struct HardwareWriteLedgerConfig
 {

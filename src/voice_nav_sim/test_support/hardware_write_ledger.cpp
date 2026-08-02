@@ -144,6 +144,9 @@ bool HardwareWriteLedger::append(
     return false;
   }
   if (record.generation != impl_->config.generation) {
+    impl_->oracle_faults.fetch_or(
+      kHardwareWriteOracleFaultGeneration,
+      std::memory_order_release);
     return false;
   }
 
