@@ -12,15 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "gate_event_journal.hpp"
-#include "voice_nav_mission/motion_gate_core.hpp"
-
 #include <gtest/gtest.h>
 
 #include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+
+#include "gate_event_journal.hpp"
+#include "voice_nav_mission/motion_gate_core.hpp"
 
 namespace voice_nav_mission
 {
@@ -86,11 +86,11 @@ TEST(MotionGateJournal, SuccessfulPrepareOwnsItsLinearizationFence)
 
   const auto result = gate.prepare(
     ControlRequest{
-      Operation::Prepare,
-      "00000000000000000000000000000001",
-      kGateId,
-      0U,
-      ""},
+        Operation::Prepare,
+        "00000000000000000000000000000001",
+        kGateId,
+        0U,
+        ""},
     MotionGateCore::SteadyTimePoint{} + std::chrono::milliseconds{10});
 
   ASSERT_EQ(result.code, ResultCode::Applied);

@@ -20,7 +20,10 @@
 #include <iomanip>
 #include <limits>
 #include <sstream>
+#include <string_view>
 #include <utility>
+
+#include "gate_event_journal.hpp"  // NOLINT(build/include_subdir)
 
 namespace voice_nav_mission
 {
@@ -30,6 +33,36 @@ namespace
 constexpr char kCandidateTopicPrefix[] =
   "/voice_nav_internal/motion_gate/candidate/lease_";
 constexpr std::size_t kMaximumDetailLength = 160U;
+constexpr std::uint64_t kTransitionEventPrepare = 1U;
+static_assert(
+  static_cast<std::uint64_t>(Operation::Prepare) == kTransitionEventPrepare);
+
+struct IdentifierWords
+{
+  std::uint64_t hi{0U};
+  std::uint64_t lo{0U};
+};
+
+IdentifierWords identifier_words(std::string_view identifier) noexcept
+{
+  if (identifier.empty()) {
+    return {};
+  }
+  if (identifier.size() != 32U) {
+    return {};
+  }
+
+  IdentifierWords words;
+  for (std::size_t index = 0U; index < identifier.size(); ++index) {
+    const auto character = identifier[index];
+    const auto nibble = character <= '9' ?
+      static_cast<std::uint64_t>(character - '0') :
+      static_cast<std::uint64_t>(character - 'a' + 10);
+    auto & word = index < 16U ? words.hi : words.lo;
+    word = (word << 4U) | nibble;
+  }
+  return words;
+}
 
 std::string bounded_detail(std::string detail)
 {
@@ -49,9 +82,11 @@ bool Command::is_zero() const noexcept
 MotionGateCore::MotionGateCore(
   MotionGateConfig config,
   std::string gate_instance_id,
-  std::uint64_t initial_control_seq)
+  std::uint64_t initial_control_seq,
+  GateEventJournal * event_journal)
 : config_(std::move(config)),
   gate_instance_id_(std::move(gate_instance_id)),
+  event_journal_(event_journal),
   control_seq_(initial_control_seq)
 {
   selected_ = zero_command();
@@ -63,6 +98,43 @@ MotionGateCore::MotionGateCore(
     detail_ = "invalid MotionGate configuration or Gate instance identifier";
     advance_state_seq();
   }
+}
+
+template<typename Mutation>
+void MotionGateCore::apply_transition(
+  std::uint64_t event_code,
+  Reason reason,
+  Mutation && mutation)
+{
+  if (event_journal_ == nullptr) {
+    std::forward<Mutation>(mutation)();
+    return;
+  }
+
+  const auto gate_words = identifier_words(gate_instance_id_);
+  const auto before_lease_words = identifier_words(lease_id_);
+  const GateTransitionIntent intent{
+    event_code,
+    static_cast<std::uint64_t>(reason),
+    state_seq_,
+    control_seq_,
+    before_lease_words.hi,
+    before_lease_words.lo,
+    gate_words.hi,
+    gate_words.lo,
+    0U};
+
+  (void)event_journal_->apply_transition(
+    intent,
+    [this, &mutation]() {
+      std::forward<Mutation>(mutation)();
+      const auto after_lease_words = identifier_words(lease_id_);
+      return GateTransitionAfter{
+        state_seq_,
+        control_seq_,
+        after_lease_words.hi,
+        after_lease_words.lo};
+    });
 }
 
 ControlResult MotionGateCore::prepare(
@@ -143,7 +215,8 @@ ControlResult MotionGateCore::prepare(
     }
   }
 
-  if (!advance_control_seq()) {
+  if (control_seq_ == std::numeric_limits<std::uint64_t>::max()) {
+    (void)advance_control_seq();
     auto fault = result_from_snapshot(
       ResultCode::Faulted, Reason::SequenceExhausted,
       "control sequence exhausted while preparing");
@@ -151,19 +224,29 @@ ControlResult MotionGateCore::prepare(
     return fault;
   }
 
-  lease_id_ = make_lease_id(control_seq_);
-  candidate_topic_ = make_candidate_topic(lease_id_);
-  bound_writer_gid_.fill(0U);
-  writer_bound_ = false;
-  candidate_fresh_ = false;
-  selected_ = zero_command();
-  prepare_deadline_ = now + config_.prepare_timeout;
-  authority_deadline_ = SteadyTimePoint{};
-  candidate_deadline_ = SteadyTimePoint{};
-  state_ = State::Prepared;
-  reason_ = Reason::None;
-  detail_ = "lease prepared";
-  advance_state_seq();
+  const auto next_control_seq = control_seq_ + 1U;
+  auto next_lease_id = make_lease_id(next_control_seq);
+  auto next_candidate_topic = make_candidate_topic(next_lease_id);
+  std::string next_detail{"lease prepared"};
+  apply_transition(
+    kTransitionEventPrepare,
+    Reason::None,
+    [this, now, &next_lease_id, &next_candidate_topic, &next_detail]() {
+      ++control_seq_;
+      lease_id_.swap(next_lease_id);
+      candidate_topic_.swap(next_candidate_topic);
+      bound_writer_gid_.fill(0U);
+      writer_bound_ = false;
+      candidate_fresh_ = false;
+      selected_ = zero_command();
+      prepare_deadline_ = now + config_.prepare_timeout;
+      authority_deadline_ = SteadyTimePoint{};
+      candidate_deadline_ = SteadyTimePoint{};
+      state_ = State::Prepared;
+      reason_ = Reason::None;
+      detail_.swap(next_detail);
+      advance_state_seq();
+    });
 
   auto result = applied(request);
   remember(request, result);
