@@ -73,6 +73,31 @@ public:
   voice_nav_sim::HardwareWriteWheelObservation observation{};
 };
 
+class RecordingHardwareWriteJournalAttachment final
+  : public voice_nav_sim::HardwareWriteJournalAttachment
+{
+public:
+  std::shared_ptr<voice_nav_sim::HardwareWriteJournal> attach(
+    const std::string & journal_name,
+    const std::string & journal_nonce) override
+  {
+    ++attach_calls;
+    attached_name = journal_name;
+    attached_nonce = journal_nonce;
+    if (throw_on_attach) {
+      throw std::invalid_argument("attachment rejected");
+    }
+    return journal;
+  }
+
+  std::size_t attach_calls{0U};
+  std::string attached_name;
+  std::string attached_nonce;
+  bool throw_on_attach{false};
+  std::shared_ptr<RecordingHardwareWriteJournal> journal{
+    std::make_shared<RecordingHardwareWriteJournal>()};
+};
+
 class RecordingGazeboSystem final : public GazeboSystemInterface
 {
 public:
@@ -438,6 +463,103 @@ TEST(
   EXPECT_EQ(
     journal->observation.right_command_bits,
     double_bits(upstream->delegated_right_command));
+}
+
+TEST(
+  JournaledGazeboSimSystemAdapter,
+  AttachesJournalIdentityBeforeFirstWrite)
+{
+  auto upstream = std::make_shared<RecordingGazeboSystem>();
+  auto attachment =
+    std::make_shared<RecordingHardwareWriteJournalAttachment>();
+  voice_nav_sim::JournaledGazeboSimSystemAdapter adapter(
+    upstream, attachment);
+  rclcpp::Node::SharedPtr model_node;
+  gz::sim::EntityComponentManager entity_component_manager;
+  const auto left_entity = entity_component_manager.CreateEntity();
+  const auto right_entity = entity_component_manager.CreateEntity();
+  std::map<std::string, gz::sim::Entity> joints{
+    {"left_wheel_joint", left_entity},
+    {"right_wheel_joint", right_entity}};
+  hardware_interface::HardwareInfo hardware_info{};
+  hardware_info.hardware_parameters = {
+    {"journal_name", "/voice_nav_hardware_0011223344556677"},
+    {"journal_nonce", "00112233445566778899aabbccddeeff"}};
+
+  ASSERT_TRUE(
+    adapter.initSim(
+      model_node,
+      joints,
+      hardware_info,
+      entity_component_manager,
+      50U));
+  EXPECT_EQ(attachment->attach_calls, 1U);
+  EXPECT_EQ(
+    attachment->attached_name,
+    "/voice_nav_hardware_0011223344556677");
+  EXPECT_EQ(
+    attachment->attached_nonce,
+    "00112233445566778899aabbccddeeff");
+
+  (void)adapter.write(
+    rclcpp::Time(6, 0, RCL_ROS_TIME), rclcpp::Duration(0, 20'000'000));
+
+  EXPECT_EQ(attachment->journal->begin_calls, 1U);
+  EXPECT_EQ(attachment->journal->finish_calls, 1U);
+}
+
+TEST(
+  JournaledGazeboSimSystemAdapter,
+  RejectsIncompleteJournalIdentityWithoutAttaching)
+{
+  auto upstream = std::make_shared<RecordingGazeboSystem>();
+  auto attachment =
+    std::make_shared<RecordingHardwareWriteJournalAttachment>();
+  voice_nav_sim::JournaledGazeboSimSystemAdapter adapter(
+    upstream, attachment);
+  rclcpp::Node::SharedPtr model_node;
+  gz::sim::EntityComponentManager entity_component_manager;
+  std::map<std::string, gz::sim::Entity> joints;
+  hardware_interface::HardwareInfo hardware_info{};
+  hardware_info.hardware_parameters = {
+    {"journal_name", "/voice_nav_hardware_0011223344556677"}};
+
+  EXPECT_FALSE(
+    adapter.initSim(
+      model_node,
+      joints,
+      hardware_info,
+      entity_component_manager,
+      50U));
+  EXPECT_EQ(attachment->attach_calls, 0U);
+}
+
+TEST(
+  JournaledGazeboSimSystemAdapter,
+  RejectsJournalAttachmentFailure)
+{
+  auto upstream = std::make_shared<RecordingGazeboSystem>();
+  auto attachment =
+    std::make_shared<RecordingHardwareWriteJournalAttachment>();
+  attachment->throw_on_attach = true;
+  voice_nav_sim::JournaledGazeboSimSystemAdapter adapter(
+    upstream, attachment);
+  rclcpp::Node::SharedPtr model_node;
+  gz::sim::EntityComponentManager entity_component_manager;
+  std::map<std::string, gz::sim::Entity> joints;
+  hardware_interface::HardwareInfo hardware_info{};
+  hardware_info.hardware_parameters = {
+    {"journal_name", "/voice_nav_hardware_0011223344556677"},
+    {"journal_nonce", "00112233445566778899aabbccddeeff"}};
+
+  EXPECT_FALSE(
+    adapter.initSim(
+      model_node,
+      joints,
+      hardware_info,
+      entity_component_manager,
+      50U));
+  EXPECT_EQ(attachment->attach_calls, 1U);
 }
 
 TEST(
