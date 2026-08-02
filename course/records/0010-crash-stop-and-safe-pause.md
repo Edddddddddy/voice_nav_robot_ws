@@ -552,6 +552,44 @@ upstream lifecycle, interface-export, and mode-switch behavior. Product and
 test transformers therefore remain forbidden from selecting it until complete
 parameter/return parity is behavior-tested.
 
+### Complete Adapter forwarding and post-write observation checkpoint
+
+The follow-up vertical cycles now cover the complete Jazzy 1.2.19 forwarding
+surface: `initSim`, lifecycle transitions, interface export, mode switching,
+`read`, and `write` preserve the exact arguments and upstream result. The test
+constructor injects the upstream Interface, a package-private hardware-write
+sink, and its generation; the default plugin still loads the pinned upstream
+through the managed loader.
+
+The first post-write RED required evidence from the real ECM wheel components,
+not the exported command-interface cache. GREEN now calls upstream `write()`
+first, then re-queries left and right `JointVelocityCmd`, copies each `double`
+into its exact IEEE-754 bit pattern with `memcpy`, and records simulation stamp,
+delegated result, generation, and the first contiguous `write_seq`. The fake
+upstream creates both components lazily during `write()` and returns `ERROR`, so
+the test proves ordering as well as result parity. A separate RED/GREEN clears
+old ECM/entity bindings before a repeated failed `initSim()`; a later write
+cannot create evidence from the stale world.
+
+```text
+focused Adapter behavior: 10/10 passed
+warning-free focused build: passed
+voice_nav_sim package CTest: 12/12 passed
+scoped xUnit: 63 tests, 0 errors, 0 failures, 6 skipped
+Adapter static contract: passed
+protected Gazebo fingerprint before/after:
+  3631225|1|34712103|gz sim server (identical)
+root crash-stop checker: expected RED at missing crash_stop_policy.py
+```
+
+Independent review again found P0=0 and P1=0. Its remaining P2 is intentionally
+the next ledger slice, not a completed claim: missing/null/duplicate wheel
+entities, missing/empty command components, sequence exhaustion, and sink
+rejection must latch an oracle fault without changing the upstream hardware
+result. Product Xacro still selects only `gz_ros2_control/GazeboSimSystem`; the
+test transformer remains unimplemented and therefore cannot yet select the
+Adapter.
+
 ## VN-0011A observed crash evidence
 
 | Case | Expected threshold | Observed result |

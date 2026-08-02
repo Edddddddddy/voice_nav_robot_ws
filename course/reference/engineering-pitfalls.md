@@ -1397,7 +1397,28 @@ failed first command was `set -o pipefail`, so a later pipeline could also have
 hidden its real exit status.
 
 **Guardrail.** Do not pipe an implicitly encoded PowerShell here-string into
-WSL Bash for evidence-producing commands. Pass the script to `bash -lc`, or
-write a temporary script explicitly with `new UTF8Encoding(false)` and execute
-that file. Preserve and test the build or test process exit code independently;
-a green tail of output is not sufficient evidence when shell setup failed.
+WSL Bash for evidence-producing commands. A direct multiline native argument
+is also unsafe here: WSL/PowerShell re-quoting stripped shell variables from a
+`bash -lc` script, producing redirects such as `> 2>&1` and replacing `$?`
+before Bash owned it. Encode the UTF-8-no-BOM script bytes as Base64, pass only
+that safe token across the Windows boundary, then decode into an inner Bash;
+alternatively write an exact temporary script with `new UTF8Encoding(false)`.
+Preserve and test the build or test process exit code independently. A green
+tail is not evidence when shell setup or argument transport failed.
+
+## PIT-0056: WSL wall-clock correction makes `ps lstart` an unstable identity
+
+**Symptom.** A protected Gazebo process retained the same PID, PPID, and
+command line across a package gate, but `ps -o lstart` moved forward by 21
+seconds and falsely reported that the process identity changed.
+
+**Cause.** Linux stores process start time as ticks since boot. `ps lstart`
+converts those ticks into calendar time using the current boot/wall-clock
+relationship. WSL clock correction can change that conversion while the
+process itself remains unchanged.
+
+**Guardrail.** Fingerprint a protected WSL process with PID, PPID, field 22
+(`starttime`) from `/proc/<pid>/stat`, and `/proc/<pid>/cmdline`. Parse the stat
+line after its final `)` because the parenthesized command name may contain
+spaces. Compare the raw start ticks before and after the gate; use `lstart`
+only for human display, never as the teardown-safety identity oracle.
