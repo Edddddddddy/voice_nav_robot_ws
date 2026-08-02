@@ -40,6 +40,7 @@
   <test_depend>launch_testing</test_depend>
   <test_depend>launch_testing_ament_cmake</test_depend>
   <test_depend>nav_msgs</test_depend>
+  <test_depend>pal_statistics_msgs</test_depend>
   <test_depend>pluginlib</test_depend>
   <test_depend>python3-pytest</test_depend>
   <test_depend>rclcpp</test_depend>
