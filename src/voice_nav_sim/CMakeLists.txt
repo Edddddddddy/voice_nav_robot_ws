@@ -114,6 +114,19 @@ if(BUILD_TESTING)
     PRIVATE test_support
   )
 
+  ament_add_gtest(
+    hardware_write_ledger_test
+    test/hardware_write_ledger_test.cpp
+  )
+  target_compile_features(
+    hardware_write_ledger_test
+    PRIVATE cxx_std_17
+  )
+  target_include_directories(
+    hardware_write_ledger_test
+    PRIVATE test_support
+  )
+
   ament_add_pytest_test(
     crash_evidence_test
     test/test_crash_evidence.py
