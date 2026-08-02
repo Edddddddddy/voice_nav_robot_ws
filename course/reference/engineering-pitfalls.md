@@ -41,6 +41,7 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0031 | A “lossless” write log silently overwrites or omits records | Are sequence fences, capacity, overflow, and snapshot continuity executable invariants? | Specified |
 | PIT-0032 | A correct producer-death test fails while authority RENEWs continue | Is terminal `control_seq` compared with the final committed predecessor instead of the arming snapshot? | Specified |
 | PIT-0033 | Delayed DDS delivery makes a pre-death zero look post-death | Does a same-host monotonic Gate journal order the terminal commit after `ProcessExited`? | Specified |
+| PIT-0034 | A dynamically loaded test-support module fails while decorating a dataclass | Does the loader register the module, or does the support type avoid that hidden dependency? | Guarded |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -801,3 +802,23 @@ process-exit timestamp. DDS state receipt remains the latency endpoint, not the
 ordering oracle. Pre-death commit with post-death receipt and receipt-only
 mutations must fail. See
 [VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md).
+
+## PIT-0034: Dynamic `exec_module` may not satisfy decorator assumptions
+
+**Symptom.** A support file parses and is found, but pytest fails during
+collection inside `dataclasses._is_type` with `sys.modules.get(...)=None`.
+
+**Cause.** `importlib.util.module_from_spec()` plus
+`spec.loader.exec_module(module)` does not itself insert the temporary module
+into `sys.modules`. The `dataclass` decorator consults that registry while
+resolving annotations, so a loader pattern that works for plain classes can
+fail only after a decorator is added.
+
+**Diagnostic and guardrail.** Either register the module under the exact spec
+name before execution with failure-safe cleanup, or keep dynamically loaded
+support primitives independent of registration-sensitive decorators. The
+VN-0011A `CrashLedger` uses a small slotted internal record and its package
+pytest loads the file through the same dynamic path used by launch support.
+Collection failure is not accepted as tests-first RED or GREEN; the executable
+test body must run. See
+[Lesson 0010 evidence](../records/0010-crash-stop-and-safe-pause.md).

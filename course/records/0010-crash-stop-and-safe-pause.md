@@ -60,6 +60,38 @@ environment failure. It requires exact action identity even for distinct
 objects that compare equal, a closed `-SIGKILL`/zero exit set, rejection of
 unknown/duplicate/wrong exits, and exhaustive completion.
 
+Minimal GREEN:
+
+```text
+Command:
+python3 -m pytest -q src/voice_nav_sim/test/test_crash_evidence.py
+
+Exit status: 0
+Executed tests: 1
+Result: 1 passed in 0.20s
+```
+
+The first implementation attempt exposed a dynamic-loader/dataclass collection
+failure; it was rejected as GREEN. [PIT-0034](../reference/engineering-pitfalls.md#pit-0034-dynamic-exec_module-may-not-satisfy-decorator-assumptions)
+records the cause and the executable guard.
+
+Package registration was then verified through the actual ament/CTest path:
+
+```text
+Command:
+colcon build --packages-select voice_nav_sim --symlink-install
+colcon test --packages-select voice_nav_sim
+colcon test-result --test-result-base build/voice_nav_sim/test_results --verbose
+
+Build: 1 package finished
+CTest: 11/11 targets passed
+Result: 33 tests, 0 errors, 0 failures, 3 existing approved skips
+crash_evidence_test: 1 passed
+```
+
+The run used the repository's isolated ROS-domain and unique-partition launch
+contracts; it did not target the user's separately running Gazebo process.
+
 - [ ] Pure valid fixtures pass.
 - [ ] Negative/mutation fixtures fail for their expected reasons.
 - [ ] Repository assertion alone fails because crash-stop artifacts are absent.
