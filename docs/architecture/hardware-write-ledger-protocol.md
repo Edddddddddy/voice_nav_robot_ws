@@ -35,11 +35,20 @@ outstanding ticket, and Writer death leaves any ACTIVE interval invalid. A
 valid finish records or faults the observation before release-publishing its
 sequence as completed.
 
-These methods perform no allocation, filesystem I/O, logging, ROS call, wait,
-or transport publication. Attachment is outside the write seam: its constructor
-may throw `std::invalid_argument`, `std::system_error`, or allocation failure
-before returning a usable Writer. The POSIX Attached Adapter owns mapping RAII
-and delegates ledger policy to the Writer implementation. Its claimed-PID
+One lock-free lifecycle word serializes `IDLE -> BEGINNING -> OUTSTANDING ->
+FINISHING -> IDLE`. Admission and finish each use one compare/exchange; a
+conflict fails immediately, latches `PROTOCOL`, and never reads or mutates the
+other caller's ordinary ticket fields. A mismatched finish restores the exact
+OUTSTANDING ticket so its owner may still complete it.
+
+These methods perform no allocation, filesystem I/O, logging, ROS call,
+transport publication, explicit lock, retry loop, or blocking wait. Conflict
+paths are fail-fast and bounded. This lock-free-atomic contract is not a formal
+claim that the whole method is wait-free or immune to an OS page fault.
+Attachment and mapping are outside the write seam: its constructor may throw
+`std::invalid_argument`, `std::system_error`, or allocation failure before
+returning a usable Writer. The POSIX Attached Adapter owns mapping RAII and
+delegates ledger policy to the Writer implementation. Its claimed-PID
 inspection is a test diagnostic, not part of the Gazebo Writer Interface.
 
 The Parent Interface posts ARM/SEAL, polls the matching receipt, reads a sealed

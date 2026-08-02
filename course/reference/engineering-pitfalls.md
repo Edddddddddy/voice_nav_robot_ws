@@ -1465,3 +1465,19 @@ invocation owns `seal_fence` and remains inside the interval. VN-0011B also
 requires an exact trigger stamp and independently proves the matching
 World-Statistics single step; a skipped stamp, missing write, or extra step
 fails closed.
+
+## PIT-0059: WSL address randomization can make TSAN look like a product crash
+
+**Symptom.** An unchanged ThreadSanitizer test first reports the intended data
+race, then intermittently exits with `unexpected memory mapping` or a bare
+segmentation fault before executing the assertion.
+
+**Cause.** Under WSL2, a randomized executable mapping can collide with TSAN's
+reserved shadow-address layout. This is a sanitizer runtime failure, not
+evidence that the tested lifecycle still races.
+
+**Guardrail.** Build the dedicated TSAN executable as non-PIE and invoke only
+that test through `setarch <architecture> -R`; do not disable ASLR globally.
+Keep `halt_on_error=1` and a distinct race exit code, then repeat the focused
+test before accepting GREEN. The ordinary production target remains
+unsanitized and retains normal platform policy.
