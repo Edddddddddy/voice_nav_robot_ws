@@ -371,10 +371,12 @@ simulation time.
 
 The test-only Node seam is disabled unless both read-only parameters
 `test_gate_event_journal_name` and `test_gate_event_journal_descriptor` are
-non-empty; partial or malformed configuration fails before ROS endpoints are
-created. The versioned descriptor supplies UID, generation, capacity, and the
-complete nonce out of band, so the attacher never derives expected identity
-from unpublished shared memory. One package-private
+non-empty; partial or malformed configuration fails before any MotionGate
+product publisher, service, subscription, or timer is created. The `rclcpp`
+Node base may already own framework parameter, time-source, or logging entities.
+The versioned descriptor supplies UID, generation, capacity, and the complete
+nonce out of band, so the attacher never derives expected identity from
+unpublished shared memory. One package-private
 `MotionGateProcessRuntime` object inside the existing `motion_gate_node`
 process constructs the Attached Journal before the Core and destroys the Core
 before the Attached Journal. It also owns the single final-output transaction,

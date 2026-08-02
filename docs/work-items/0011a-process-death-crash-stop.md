@@ -314,8 +314,10 @@ hex digits and is not all zero. The name remains
 and is not required to equal the descriptor nonce. The parser consumes only
 these out-of-band parameters and never reads ordinary mapped Header fields
 before the Journal's `READY` acquire. A malformed descriptor, wrong object, or
-partial configuration fails before any ROS publisher, service, subscription,
-or timer is created.
+partial configuration fails before any MotionGate product publisher, service,
+subscription, or timer is created. The `rclcpp::Node` base may already own
+framework parameter, time-source, or logging entities; those are not part of
+the product endpoint claim.
 
 Each successful terminal transition exposes its committed `journal_seq` in
 the Core snapshot as `output_cause_transition_journal_seq`; Prepared/Armed

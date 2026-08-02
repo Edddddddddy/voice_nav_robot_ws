@@ -55,6 +55,9 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0045 | Shared-memory identity is read before the producer publishes `READY` | Did the consumer acquire `READY` before reading any ordinary payload field? | Guarded |
 | PIT-0046 | A checksum covers a field, but every producer record still writes zero | Does a non-zero golden test prove the producer API accepts and serializes the semantic value? | Guarded |
 | PIT-0047 | A newly declared CMake target reports “No rule to make target” | Was the cached package explicitly reconfigured before interpreting a target-level RED? | Guarded |
+| PIT-0048 | A read-only parameter test passes although the parameter is undeclared | Did `describe_parameters` prove the exact name, string type, and read-only descriptor before testing mutation? | Guarded |
+| PIT-0049 | A direct package install leaves a manifest in the repository root | Was installation run through `colcon`, followed by a clean-worktree check? | Guarded |
+| PIT-0050 | A static checker rejects the correct implementation after a field refactor | Do both the synthetic fixture and real-repository positive controls use the current semantic token? | Guarded |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -1191,3 +1194,51 @@ Accept a TDD RED only after output proves the intended source or assertion was
 reached. Commit `5314866` was accepted only after the forced configure reached
 the precise missing `motion_gate_process_runtime.hpp` include; `639e1f1` then
 made that focused test green.
+
+## PIT-0048: Mutation rejection does not prove a parameter is read-only
+
+**Symptom.** A test sets a safety-relevant test parameter, sees an unsuccessful
+result, and reports that the parameter is immutable. The Node may never have
+declared that parameter at all; ROS rejects both cases.
+
+**Cause.** The negative mutation path collapses two different contracts:
+“declared and read-only” and “unknown name”. It therefore cannot prove the
+parameter exists, has string type, or defaults to the disabled value.
+
+**Guardrail.** First call `describe_parameters` and assert the exact ordered
+names, `PARAMETER_STRING`, and `read_only=true`. Then call `get_parameters` and
+assert both values are empty before testing mutation rejection. Commit
+`12671d8` preserved the undeclared-parameter RED; `f0ed0f7` declared the two
+default-off parameters and made the launch test green.
+
+## PIT-0049: Direct symlink installation can leak a manifest into source
+
+**Symptom.** Running `cmake --install build/voice_nav_mission` from the
+repository root creates an untracked `symlink_install_manifest.txt` beside the
+source tree even though all actual install links target `install/`.
+
+**Cause.** The ament symlink-install override writes its auxiliary manifest
+relative to the install command's working directory. A technically successful
+install can therefore violate the clean-worktree boundary.
+
+**Guardrail.** Prefer `colcon build --packages-select ... --symlink-install`
+for package installation. If a direct CMake install is diagnostically
+necessary, run it from the package build directory and immediately inspect
+`git status --short`. The observed root manifest was verified as generated
+install-path inventory and removed explicitly; it was never staged.
+
+## PIT-0050: A guard can become stale while the invariant stays correct
+
+**Symptom.** The real Core correctly renews with
+`config_.authority_lease`, but `check_motion_gate_contract.py` fails because it
+still searches for the older `authority_lease` spelling.
+
+**Cause.** A source-token checker is coupled to implementation vocabulary as
+well as behavior. Its synthetic “valid” fixture retained the old spelling, so
+that positive control passed while the real-repository positive control failed.
+
+**Guardrail.** After a guarded refactor, run both the synthetic valid fixture
+and the checker against the actual repository, plus at least one mutation that
+must still fail. Commit `b1a562a` aligned the token and fixture with
+`config_.authority_lease`; the two positive controls and the
+candidate-must-not-renew mutation then passed together.
