@@ -90,9 +90,14 @@ JournaledGazeboSimSystemAdapter::on_configure(
   return upstream_->on_configure(previous_state);
 }
 
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
 std::vector<hardware_interface::StateInterface>
 JournaledGazeboSimSystemAdapter::export_state_interfaces()
 {
+  // gz_ros2_control 1.2.19 exports through these legacy overrides.
   return upstream_->export_state_interfaces();
 }
 
@@ -101,6 +106,9 @@ JournaledGazeboSimSystemAdapter::export_command_interfaces()
 {
   return upstream_->export_command_interfaces();
 }
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 hardware_interface::CallbackReturn
 JournaledGazeboSimSystemAdapter::on_activate(

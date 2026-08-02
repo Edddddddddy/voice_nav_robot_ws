@@ -85,7 +85,7 @@ public:
   }
 
   std::vector<hardware_interface::StateInterface> export_state_interfaces()
-    override
+  override
   {
     ++export_state_interfaces_calls;
     std::vector<hardware_interface::StateInterface> interfaces;
