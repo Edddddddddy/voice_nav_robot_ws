@@ -18,6 +18,7 @@
 #include <gz_ros2_control/gz_system_interface.hpp>
 #include <pluginlib/class_loader.hpp>
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
@@ -26,6 +27,23 @@
 namespace voice_nav_sim
 {
 
+struct HardwareWriteRecord
+{
+  std::uint64_t generation;
+  std::uint64_t write_seq;
+  std::int64_t sim_stamp_ns;
+  std::uint8_t delegated_result;
+  std::uint64_t left_command_bits;
+  std::uint64_t right_command_bits;
+};
+
+class HardwareWriteSink
+{
+public:
+  virtual ~HardwareWriteSink() = default;
+  virtual bool append(const HardwareWriteRecord & record) noexcept = 0;
+};
+
 class JournaledGazeboSimSystemAdapter final
   : public gz_ros2_control::GazeboSimSystemInterface
 {
@@ -33,6 +51,10 @@ public:
   JournaledGazeboSimSystemAdapter();
   explicit JournaledGazeboSimSystemAdapter(
     std::shared_ptr<gz_ros2_control::GazeboSimSystemInterface> upstream);
+  JournaledGazeboSimSystemAdapter(
+    std::shared_ptr<gz_ros2_control::GazeboSimSystemInterface> upstream,
+    std::shared_ptr<HardwareWriteSink> write_sink,
+    std::uint64_t generation);
 
   hardware_interface::CallbackReturn on_init(
     const hardware_interface::HardwareInfo & hardware_info) override;
@@ -76,10 +98,20 @@ public:
     const rclcpp::Duration & period) override;
 
 private:
+  void journal_after_delegated_write(
+    const rclcpp::Time & time,
+    hardware_interface::return_type delegated_result) noexcept;
+
   pluginlib::ClassLoader<
     gz_ros2_control::GazeboSimSystemInterface> upstream_loader_;
   std::shared_ptr<
     gz_ros2_control::GazeboSimSystemInterface> upstream_;
+  std::shared_ptr<HardwareWriteSink> write_sink_;
+  gz::sim::EntityComponentManager * entity_component_manager_{nullptr};
+  gz::sim::Entity left_wheel_entity_{gz::sim::kNullEntity};
+  gz::sim::Entity right_wheel_entity_{gz::sim::kNullEntity};
+  std::uint64_t generation_{0U};
+  std::uint64_t next_write_seq_{1U};
 };
 
 }  // namespace voice_nav_sim

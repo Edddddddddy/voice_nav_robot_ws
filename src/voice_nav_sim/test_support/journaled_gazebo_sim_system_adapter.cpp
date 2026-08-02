@@ -14,12 +14,31 @@
 
 #include "journaled_gazebo_sim_system_adapter.hpp"
 
+#include <gz/sim/EntityComponentManager.hh>
+#include <gz/sim/components/JointVelocityCmd.hh>
 #include <pluginlib/class_list_macros.hpp>
 
+#include <cstring>
 #include <utility>
 
 namespace voice_nav_sim
 {
+
+namespace
+{
+
+constexpr char kLeftWheelJoint[] = "left_wheel_joint";
+constexpr char kRightWheelJoint[] = "right_wheel_joint";
+
+std::uint64_t double_bits(double value) noexcept
+{
+  static_assert(sizeof(value) == sizeof(std::uint64_t));
+  std::uint64_t bits{0U};
+  std::memcpy(&bits, &value, sizeof(bits));
+  return bits;
+}
+
+}  // namespace
 
 JournaledGazeboSimSystemAdapter::JournaledGazeboSimSystemAdapter()
 : upstream_loader_(
@@ -32,10 +51,21 @@ JournaledGazeboSimSystemAdapter::JournaledGazeboSimSystemAdapter()
 
 JournaledGazeboSimSystemAdapter::JournaledGazeboSimSystemAdapter(
   std::shared_ptr<gz_ros2_control::GazeboSimSystemInterface> upstream)
+: JournaledGazeboSimSystemAdapter(
+    std::move(upstream), std::shared_ptr<HardwareWriteSink>{}, 0U)
+{
+}
+
+JournaledGazeboSimSystemAdapter::JournaledGazeboSimSystemAdapter(
+  std::shared_ptr<gz_ros2_control::GazeboSimSystemInterface> upstream,
+  std::shared_ptr<HardwareWriteSink> write_sink,
+  std::uint64_t generation)
 : upstream_loader_(
     "gz_ros2_control",
     "gz_ros2_control::GazeboSimSystemInterface"),
-  upstream_(std::move(upstream))
+  upstream_(std::move(upstream)),
+  write_sink_(std::move(write_sink)),
+  generation_(generation)
 {
 }
 
@@ -111,12 +141,22 @@ bool JournaledGazeboSimSystemAdapter::initSim(
   gz::sim::EntityComponentManager & entity_component_manager,
   unsigned int update_rate)
 {
-  return upstream_->initSim(
+  const bool initialized = upstream_->initSim(
     model_node,
     joints,
     hardware_info,
     entity_component_manager,
     update_rate);
+  if (initialized && write_sink_ != nullptr) {
+    const auto left_joint = joints.find(kLeftWheelJoint);
+    const auto right_joint = joints.find(kRightWheelJoint);
+    if (left_joint != joints.end() && right_joint != joints.end()) {
+      entity_component_manager_ = &entity_component_manager;
+      left_wheel_entity_ = left_joint->second;
+      right_wheel_entity_ = right_joint->second;
+    }
+  }
+  return initialized;
 }
 
 hardware_interface::return_type JournaledGazeboSimSystemAdapter::read(
@@ -130,7 +170,43 @@ hardware_interface::return_type JournaledGazeboSimSystemAdapter::write(
   const rclcpp::Time & time,
   const rclcpp::Duration & period)
 {
-  return upstream_->write(time, period);
+  const auto delegated_result = upstream_->write(time, period);
+  journal_after_delegated_write(time, delegated_result);
+  return delegated_result;
+}
+
+void JournaledGazeboSimSystemAdapter::journal_after_delegated_write(
+  const rclcpp::Time & time,
+  hardware_interface::return_type delegated_result) noexcept
+{
+  if (
+    write_sink_ == nullptr || entity_component_manager_ == nullptr ||
+    left_wheel_entity_ == gz::sim::kNullEntity ||
+    right_wheel_entity_ == gz::sim::kNullEntity)
+  {
+    return;
+  }
+  const auto * left_command =
+    entity_component_manager_->Component<
+    gz::sim::components::JointVelocityCmd>(left_wheel_entity_);
+  const auto * right_command =
+    entity_component_manager_->Component<
+    gz::sim::components::JointVelocityCmd>(right_wheel_entity_);
+  if (
+    left_command == nullptr || left_command->Data().empty() ||
+    right_command == nullptr || right_command->Data().empty())
+  {
+    return;
+  }
+
+  const HardwareWriteRecord record{
+    generation_,
+    next_write_seq_++,
+    time.nanoseconds(),
+    static_cast<std::uint8_t>(delegated_result),
+    double_bits(left_command->Data()[0]),
+    double_bits(right_command->Data()[0])};
+  (void)write_sink_->append(record);
 }
 
 }  // namespace voice_nav_sim
