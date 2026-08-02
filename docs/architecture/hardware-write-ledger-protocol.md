@@ -38,8 +38,10 @@ sequence as completed.
 One lock-free lifecycle word serializes `IDLE -> BEGINNING -> OUTSTANDING ->
 FINISHING -> IDLE`. Admission and finish each use one compare/exchange; a
 conflict fails immediately, latches `PROTOCOL`, and never reads or mutates the
-other caller's ordinary ticket fields. A mismatched finish restores the exact
-OUTSTANDING ticket so its owner may still complete it.
+other caller's ordinary ticket fields. The synchronous hardware Interface owns
+the only legitimate finish call. A mismatched finish restores OUTSTANDING only
+to preserve the evidence state; any foreign or concurrent finish is a terminal
+protocol violation and the harness must restart rather than depend on a retry.
 
 These methods perform no allocation, filesystem I/O, logging, ROS call,
 transport publication, explicit lock, retry loop, or blocking wait. Conflict
@@ -56,6 +58,23 @@ page, and ACKs an exact sealed identity. Only one request may be outstanding.
 The monotonically increasing request ticket is its idempotency identity; a
 duplicate with identical checksum returns the original receipt, while reuse
 with different payload, a gap, or wrap latches a protocol fault.
+
+One owned request envelope prevents either role from reading ordinary fields
+while the other role may write them:
+
+```text
+IDLE -> WRITING -> READY -> READING -> IDLE
+```
+
+Parent claims `IDLE -> WRITING`, fills the complete request, then
+release-publishes READY. Writer claims `READY -> READING`, copies the request
+to a local snapshot, and release-publishes IDLE; checksum validation and all
+later processing use only that snapshot. IDLE means the bytes are reusable,
+not that a response exists. Parent waits for the matching response ticket,
+which Writer publishes last with release semantics, before publishing a
+different ticket. A pending request retry must republish the same ticket and
+payload through a new WRITING/READY handoff. The response stores the consumed
+request checksum, so its CRC never depends on a mutable request word.
 
 ## Linearization and interval semantics
 
@@ -130,7 +149,7 @@ of the Interface and are checked by a C translation unit.
 | Structure | Bytes | Purpose |
 | --- | ---: | --- |
 | region header | 192 | static layout/identity plus init, Writer claim, global sequence/fault state |
-| control mailbox | 128 | one request payload plus its bounded response |
+| control mailbox | 192 | one owned request envelope plus its bounded response |
 | bank header | 128 | lifecycle, identity, fences, budgets, counts, predicate, faults, root checksum |
 | segment | 64 | generation, sequence range/count, stamp, observation/result, exact command bits |
 | snapshot page header | 192 | sealed identity, page/range/count chain and checksums |
@@ -145,7 +164,7 @@ bank[1] header + C segments
 ```
 
 Therefore `bank_stride = 128 + C * 64` and
-`region_bytes = 320 + 2 * bank_stride`. `C` is the fixed segment capacity per
+`region_bytes = 384 + 2 * bank_stride`. `C` is the fixed segment capacity per
 bank. The configured page segment limit is at most `C`; pages are immutable
 copies outside the mapping and contain at most that limit.
 
@@ -158,12 +177,12 @@ all static words and zero reserved words, but excludes mutable publication
 words and itself.
 
 The control mailbox contains operation, flags, interval, exact bank identity
-for SEAL, segment/invocation budgets, trigger stamp, and request checksum. Its
-response contains a bounded result, selected bank identity, fence, and
-checksum, followed by a release-published response ticket and the final
-release-published request ticket. Each checksum binds the header identity and
-ticket as well as its explicit fields; no CRC is calculated over raw struct
-padding.
+for SEAL, segment/invocation budgets, trigger stamp, request checksum, ticket,
+and ownership state. Its response contains a bounded result, selected bank
+identity, fence, consumed-request checksum, response checksum, and a final
+release-published response ticket. Six reserved words remain zero. Each
+checksum binds the header identity and ticket as well as its explicit fields;
+no CRC is calculated over raw struct padding.
 
 The bank checksum excludes the atomic state word and itself, and covers every
 other fixed bank word plus exactly the finalized segments. A page checksum

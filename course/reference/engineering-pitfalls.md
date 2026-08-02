@@ -65,6 +65,9 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0055 | A PowerShell-to-WSL script pipe prepends a UTF-8 BOM or strips Bash variables | Are UTF-8 bytes transported as Base64 before Bash decodes them? | Guarded |
 | PIT-0056 | A protected WSL process appears to change its start time | Is identity based on raw `/proc/<pid>/stat` start ticks instead of `ps lstart`? | Guarded |
 | PIT-0057 | A drive-letter regex rejects an ordinary source URL | Does the path detector require a token boundary and test both URLs and real machine paths? | Guarded |
+| PIT-0058 | Entry-time SEAL excludes the write being proved | Is SEAL deferred until the qualifying write is recorded? | Guarded |
+| PIT-0059 | TSAN intermittently crashes before the test under WSL | Does only the TSAN executable run non-PIE with per-process ASLR disabled? | Guarded |
+| PIT-0060 | A mailbox replay races or binds its response to changed request bytes | Does each retry perform a fresh owned-state handoff and bind the consumed snapshot? | Guarded |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -1481,3 +1484,23 @@ that test through `setarch <architecture> -R`; do not disable ASLR globally.
 Keep `halt_on_error=1` and a distinct race exit code, then repeat the focused
 test before accepting GREEN. The ordinary production target remains
 unsanitized and retains normal platform policy.
+
+## PIT-0060: Reusing a publication ticket does not republish mutable payload
+
+**Symptom.** A same-ticket retry is sometimes accepted with the wrong payload,
+faults only under concurrency, or produces a valid-looking response CRC that
+depends on request bytes changed after Writer began consuming them.
+
+**Cause.** Release-storing the same numeric ticket again does not establish a
+new ownership handoff while ordinary request fields are still mutable. Writer
+could copy those fields while Parent prepared or retried the slot. Binding the
+response CRC to the live request checksum repeated the same race on the return
+path.
+
+**Guardrail.** Use the single owned-envelope state machine from
+[ADR-0007](../../docs/adr/0007-own-hardware-ledger-request-publication.md).
+Parent writes only while it owns WRITING; Writer reads only after claiming
+READY, snapshots locally, then releases IDLE. The response stores and checksums
+the consumed request checksum. A cross-process regression test deliberately
+holds WRITING across a Writer `begin_write()` and proves there is no receipt,
+bank activation, or protocol fault until Parent release-publishes READY.

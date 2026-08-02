@@ -67,6 +67,8 @@ Interface contract.
 
 The fixed ABI and linearization details are normative in
 [Hardware-write ledger protocol](../architecture/hardware-write-ledger-protocol.md).
+Exclusive publication ownership for each control request is decided separately
+in [ADR-0007](0007-own-hardware-ledger-request-publication.md).
 
 ## Considered options
 
