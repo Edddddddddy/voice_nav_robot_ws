@@ -352,4 +352,26 @@ TEST(HardwareWriteLedger, LatchesASequenceFaultForADuplicateWrite)
   EXPECT_EQ(snapshot->page_checksum, independent_page_checksum(*snapshot));
 }
 
+TEST(HardwareWriteLedger, LatchesAStickyGenerationFault)
+{
+  voice_nav_sim::HardwareWriteLedger ledger({45U, 12U, 0U, 1U, 1U});
+  const voice_nav_sim::HardwareWriteRecord stale{
+    46U, 1U, 6'000'000, 0U, UINT64_C(7), UINT64_C(8)};
+  EXPECT_FALSE(ledger.append(stale));
+  EXPECT_EQ(
+    ledger.oracle_faults(),
+    voice_nav_sim::kHardwareWriteOracleFaultGeneration);
+
+  auto current = stale;
+  current.generation = 45U;
+  ASSERT_TRUE(ledger.append(current));
+  ASSERT_TRUE(ledger.seal());
+  const auto snapshot = ledger.snapshot_page(0U);
+  ASSERT_TRUE(snapshot.has_value());
+  EXPECT_EQ(
+    snapshot->oracle_faults,
+    voice_nav_sim::kHardwareWriteOracleFaultGeneration);
+  EXPECT_EQ(snapshot->page_checksum, independent_page_checksum(*snapshot));
+}
+
 }  // namespace
