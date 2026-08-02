@@ -112,6 +112,23 @@ if(BUILD_TESTING)
     gate_event_journal
   )
 
+  ament_add_gtest(
+    attached_gate_event_journal_test
+    test/attached_gate_event_journal_test.cpp
+  )
+  target_compile_features(
+    attached_gate_event_journal_test PUBLIC cxx_std_17
+  )
+  target_include_directories(
+    attached_gate_event_journal_test
+    PRIVATE src
+  )
+  target_link_libraries(
+    attached_gate_event_journal_test
+    gate_event_journal
+    rt
+  )
+
   add_executable(
     gate_event_journal_c_abi_test
     test/gate_event_journal_c_abi_test.c
