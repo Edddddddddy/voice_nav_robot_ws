@@ -26,6 +26,7 @@ from hardware_write_ledger_test_support import (
     CONTROL_OP_ARM,
     CONTROL_RESPONSE_OK,
     FAULT_PROTOCOL,
+    FAULT_SIM_STAMP,
     GLOBAL_ORACLE_FAULTS_WORD,
     HardwareWriteLedgerRegionOwner,
     WRITER_PID_WORD,
@@ -496,6 +497,96 @@ def test_same_ticket_different_payload_replay_latches_fault(probe):
             close_owned_process_pipes(process)
 
 
+def test_decreasing_sim_stamp_latches_fault_without_overwrite(probe):
+    """Prove time regression faults an interval and preserves both writes."""
+    with HardwareWriteLedgerRegionOwner(
+        generation=77,
+        segment_capacity=4,
+        page_segment_limit=2,
+    ) as owner:
+        process = spawn_probe(probe, owner)
+        try:
+            require(
+                owner.wait_for_writer(process.pid) == process.pid,
+                'stamp probe Writer PID mismatch',
+            )
+            require(
+                read_owned_line(process, 'READY') == 'READY',
+                'stamp probe did not publish READY',
+            )
+            owner.unlink_name()
+            request_ticket = owner.post_arm(
+                interval_id=95,
+                segment_budget=3,
+                invocation_budget=3,
+                require_zero_commands=False,
+            )
+
+            process.stdin.write('BEGIN 200\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 1',
+                'stamp setup write did not begin',
+            )
+            response = owner.wait_response(request_ticket)
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 1',
+                'stamp setup write did not finish',
+            )
+            require(owner.wait_completed_write(1) == 1, 'stamp setup lost')
+
+            process.stdin.write('BEGIN 100\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 2',
+                'regressed-stamp write did not begin',
+            )
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 2',
+                'regressed-stamp write did not finish',
+            )
+            require(owner.wait_completed_write(2) == 2, 'stamp fault lost')
+
+            global_faults = owner.load_header_word(GLOBAL_ORACLE_FAULTS_WORD)
+            bank = owner.snapshot_bank(response[10])
+            require(
+                global_faults & FAULT_SIM_STAMP,
+                'decreasing simulation stamp was accepted globally',
+            )
+            require(
+                bank[13] & FAULT_SIM_STAMP,
+                'decreasing simulation stamp did not fault the interval',
+            )
+            require(
+                bank[9:13] == (2, 2, 1, 2),
+                f'stamp fault lost invocation evidence: {bank!r}',
+            )
+            require(
+                owner.snapshot_segment(response[10], 0)[4] == 200,
+                'stamp fault overwrote the first segment',
+            )
+            require(
+                owner.snapshot_segment(response[10], 1)[4] == 100,
+                'stamp fault did not retain the offending segment',
+            )
+
+            process.stdin.write('EXIT\n')
+            process.stdin.flush()
+            return_code = process.wait(timeout=3.0)
+            stderr = process.stderr.read()
+            require(
+                return_code == 0,
+                f'stamp probe exited {return_code}: {stderr}',
+            )
+        finally:
+            terminate_owned_process(process)
+            close_owned_process_pipes(process)
+
+
 def main():
     """Run the bounded cross-process ledger behavior slices."""
     if len(sys.argv) != 2:
@@ -506,6 +597,7 @@ def main():
     test_arm_linearizes_before_first_write(probe)
     test_arm_excludes_prior_write_and_preserves_multiple_records(probe)
     test_same_ticket_different_payload_replay_latches_fault(probe)
+    test_decreasing_sim_stamp_latches_fault_without_overwrite(probe)
 
 
 if __name__ == '__main__':
