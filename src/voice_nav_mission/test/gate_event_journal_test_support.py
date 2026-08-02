@@ -28,10 +28,16 @@ ABI_VERSION = 1
 HEADER_BYTES = 128
 SLOT_BYTES = 256
 INIT_READY = 1
+PHASE_FREE = 0
+PHASE_INTENT = 1
+PHASE_COMMITTED = 2
+KIND_CONTROL_TRANSITION = 1
+KIND_OUTPUT_ATTEMPT = 2
 CRC64_ECMA_POLYNOMIAL = 0x42F0E1EBA9EA3693
 UINT64_MASK = (1 << 64) - 1
 HEADER_FORMAT = '<16Q'
 SLOT_FORMAT = '<32Q'
+CLAIMED_SLOTS_HEADER_WORD = 11
 
 
 def crc64_ecma_words(words):
@@ -216,14 +222,48 @@ class GateEventJournalOwner:
         """Acquire-load a dynamic header word by ABI index."""
         return self.atomic.load_acquire(self.region, index * 8)
 
-    def load_slot_phase(self):
-        """Acquire-load the first slot's phase word."""
-        return self.atomic.load_acquire(self.region, HEADER_BYTES)
+    def _slot_offset(self, index):
+        if index < 0 or index >= self.capacity:
+            raise IndexError('journal slot index is outside the region')
+        return HEADER_BYTES + index * SLOT_BYTES
+
+    def load_slot_phase(self, index=0):
+        """Acquire-load one slot's phase word."""
+        return self.atomic.load_acquire(
+            self.region,
+            self._slot_offset(index),
+        )
+
+    def snapshot_slot(self, index=0):
+        """Read an arbitrary slot after its caller's acquire observation."""
+        return struct.unpack_from(
+            SLOT_FORMAT,
+            self.region,
+            self._slot_offset(index),
+        )
+
+    def scan_committed_slots(self):
+        """Acquire-scan every currently claimed and committed slot."""
+        claimed_slots = self.load_header_word(CLAIMED_SLOTS_HEADER_WORD)
+        if claimed_slots > self.capacity:
+            raise RuntimeError('journal claimed_slots exceeds capacity')
+
+        committed = []
+        for index in range(claimed_slots):
+            if self.load_slot_phase(index) != PHASE_COMMITTED:
+                continue
+            slot = self.snapshot_slot(index)
+            if slot[0] != PHASE_COMMITTED:
+                raise RuntimeError(
+                    'committed journal slot changed phase after acquire',
+                )
+            committed.append((index, slot))
+        return committed
 
     def snapshot(self):
         """Read header and slot after an acquire synchronization point."""
         header = struct.unpack_from(HEADER_FORMAT, self.region, 0)
-        slot = struct.unpack_from(SLOT_FORMAT, self.region, HEADER_BYTES)
+        slot = self.snapshot_slot()
         return header, slot
 
     def open_existing(self):

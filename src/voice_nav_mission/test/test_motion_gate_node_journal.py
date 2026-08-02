@@ -57,6 +57,7 @@ WRITER_PID_HEADER_WORD = 13
 JOURNAL_CAPACITY = 512
 WAIT_TIMEOUT_SECONDS = 5.0
 POLL_SECONDS = 0.005
+FINAL_COMMAND_PUBLISH_EVENT = 1
 PARTIAL_CONFIGURATION_ERROR = (
     'Gate event journal test parameters must be all-or-none'
 )
@@ -196,14 +197,14 @@ class MotionGateNodeJournalTest(unittest.TestCase):
                     0,
                 )
 
-    def test_full_configuration_claims_exact_pid_and_mapping_survives_exit(
+    def test_full_configuration_journals_zero_output_and_survives_exit(
         self,
         proc_info,
         proc_output,
         fixtures,
         valid_gate,
     ):
-        """Claim the launch PID and preserve the parent mapping after exit."""
+        """Commit the initial zero output and preserve its parent mapping."""
         proc_info.assertWaitForStartup(
             valid_gate,
             timeout=WAIT_TIMEOUT_SECONDS,
@@ -236,6 +237,20 @@ class MotionGateNodeJournalTest(unittest.TestCase):
                 'timed out waiting for the valid MotionGate writer claim',
             )
 
+        output_record = None
+        deadline = time.monotonic() + WAIT_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            for slot_index, slot in fixtures.valid.scan_committed_slots():
+                if (
+                    slot[1] == journal_support.KIND_OUTPUT_ATTEMPT and
+                    slot[9] == FINAL_COMMAND_PUBLISH_EVENT
+                ):
+                    output_record = (slot_index, slot)
+                    break
+            if output_record is not None:
+                break
+            time.sleep(POLL_SECONDS)
+
         os.kill(launched_pid, signal.SIGINT)
         proc_info.assertWaitForShutdown(
             valid_gate,
@@ -259,6 +274,29 @@ class MotionGateNodeJournalTest(unittest.TestCase):
         self.assertEqual(header[0], journal_support.MAGIC)
         self.assertEqual(header[7], fixtures.valid.generation)
         self.assertEqual(header[13], launched_pid)
+
+        self.assertIsNotNone(
+            output_record,
+            'timed out waiting for a committed GateOutput event_code=1',
+        )
+        slot_index, slot = output_record
+        self.assertEqual(slot[0], journal_support.PHASE_COMMITTED)
+        self.assertEqual(slot[1], journal_support.KIND_OUTPUT_ATTEMPT)
+        self.assertEqual(slot[2], slot_index + 1)
+        self.assertEqual(slot[3], fixtures.valid.generation)
+        self.assertEqual(slot[9], FINAL_COMMAND_PUBLISH_EVENT)
+        self.assertEqual(slot[17], 0)
+        self.assertEqual(slot[18], 0)
+        self.assertEqual(slot[19], 0)
+        self.assertEqual(slot[20], 0)
+        self.assertEqual(
+            slot[7],
+            journal_support.intent_checksum(slot),
+        )
+        self.assertEqual(
+            slot[8],
+            journal_support.commit_checksum(slot),
+        )
 
 
 @launch_testing.post_shutdown_test()
