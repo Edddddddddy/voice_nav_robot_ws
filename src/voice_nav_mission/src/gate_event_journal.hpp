@@ -76,6 +76,33 @@ struct GateOutputOutcome
   std::uint64_t slot_index;
 };
 
+struct GateTransitionIntent
+{
+  std::uint64_t event_code;
+  std::uint64_t reason;
+  std::uint64_t before_state_seq;
+  std::uint64_t before_control_seq;
+  std::uint64_t before_lease_hi;
+  std::uint64_t before_lease_lo;
+  std::uint64_t gate_instance_hi;
+  std::uint64_t gate_instance_lo;
+  std::uint64_t flags;
+};
+
+struct GateTransitionAfter
+{
+  std::uint64_t after_state_seq;
+  std::uint64_t after_control_seq;
+  std::uint64_t after_lease_hi;
+  std::uint64_t after_lease_lo;
+};
+
+struct GateTransitionOutcome
+{
+  std::uint64_t journal_seq;
+  std::uint64_t slot_index;
+};
+
 std::uint64_t gate_event_journal_header_checksum(
   const GateEventJournalHeader & header) noexcept;
 
@@ -116,6 +143,18 @@ public:
     return commit_output(reservation);
   }
 
+  template<typename Transition>
+  GateTransitionOutcome apply_transition(
+    const GateTransitionIntent & intent,
+    Transition && transition)
+  {
+    const auto reservation = begin_transition(intent);
+    mark_transition_linearization(reservation);
+    const GateTransitionAfter after =
+      std::forward<Transition>(transition)();
+    return commit_transition(reservation, after);
+  }
+
 private:
   struct Reservation
   {
@@ -126,6 +165,11 @@ private:
 
   Reservation begin_output(const GateOutputIntent & intent);
   GateOutputOutcome commit_output(const Reservation & reservation);
+  Reservation begin_transition(const GateTransitionIntent & intent);
+  void mark_transition_linearization(const Reservation & reservation);
+  GateTransitionOutcome commit_transition(
+    const Reservation & reservation,
+    const GateTransitionAfter & after);
 
   GateEventJournalHeader * header_;
   GateEventJournalSlot * slots_;

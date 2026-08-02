@@ -326,4 +326,25 @@ GateOutputOutcome GateEventJournal::commit_output(
   return {reservation.journal_seq, reservation.slot_index};
 }
 
+GateEventJournal::Reservation GateEventJournal::begin_transition(
+  const GateTransitionIntent & intent)
+{
+  (void)intent;
+  throw std::logic_error("VN-0011A transition journal tests-first RED");
+}
+
+void GateEventJournal::mark_transition_linearization(
+  const Reservation & reservation)
+{
+  (void)reservation;
+}
+
+GateTransitionOutcome GateEventJournal::commit_transition(
+  const Reservation & reservation,
+  const GateTransitionAfter & after)
+{
+  (void)after;
+  return {reservation.journal_seq, reservation.slot_index};
+}
+
 }  // namespace voice_nav_mission

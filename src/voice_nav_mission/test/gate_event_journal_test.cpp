@@ -90,7 +90,7 @@ static_assert(offsetof(OneSlotRegion, slot) == 128U);
 
 struct FakeClock
 {
-  std::array<std::uint64_t, 2U> values{100U, 200U};
+  std::array<std::uint64_t, 3U> values{100U, 200U, UINT64_MAX};
   std::size_t next{0U};
 
   static std::uint64_t read(void * context) noexcept
@@ -561,6 +561,83 @@ TEST(GateEventJournal, RejectsMalformedOrMismatchedAttach)
       gate_event_journal_load_acquire(region.header.writer_pid),
       12345U);
   }
+}
+
+TEST(
+  GateEventJournal,
+  TransitionIntentPrecedesMutationAndCommitCapturesAfterImage)
+{
+  OneSlotRegion region;
+  const auto identity = initialize_region(region);
+  FakeClock clock{{100U, 150U, 200U}, 0U};
+  GateEventJournal journal(
+    &region,
+    sizeof(region),
+    identity,
+    GateEventJournalClock{&FakeClock::read, &clock});
+  const GateTransitionIntent intent{
+    5U,
+    8U,
+    10U,
+    20U,
+    0x1111222233334444U,
+    0x5555666677778888U,
+    0x9999aaaabbbbccccU,
+    0xddddeeeeffff0000U,
+    0x5aU};
+  std::uint64_t transition_calls = 0U;
+
+  const auto outcome = journal.apply_transition(
+    intent,
+    [&region, &transition_calls]() {
+      ++transition_calls;
+      EXPECT_EQ(
+        gate_event_journal_load_acquire(region.header.claimed_slots),
+        1U);
+      EXPECT_EQ(
+        gate_event_journal_load_acquire(region.slot.phase),
+        VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_INTENT);
+      EXPECT_EQ(region.slot.intent_monotonic_ns, 100U);
+      EXPECT_EQ(region.slot.transition_linearization_ns, 150U);
+      return GateTransitionAfter{11U, 21U, 0U, 0U};
+    });
+
+  EXPECT_EQ(transition_calls, 1U);
+  EXPECT_EQ(clock.next, 3U);
+  EXPECT_EQ(outcome.journal_seq, 1U);
+  EXPECT_EQ(outcome.slot_index, 0U);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(region.slot.phase),
+    VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_COMMITTED);
+  EXPECT_EQ(
+    region.slot.record_kind,
+    VOICE_NAV_GATE_EVENT_JOURNAL_KIND_CONTROL_TRANSITION);
+  EXPECT_EQ(region.slot.journal_seq, 1U);
+  EXPECT_EQ(region.slot.generation, region.header.generation);
+  EXPECT_EQ(region.slot.intent_monotonic_ns, 100U);
+  EXPECT_EQ(region.slot.transition_linearization_ns, 150U);
+  EXPECT_EQ(region.slot.commit_monotonic_ns, 200U);
+  EXPECT_EQ(region.slot.event_code, intent.event_code);
+  EXPECT_EQ(region.slot.reason, intent.reason);
+  EXPECT_EQ(region.slot.before_state_seq, intent.before_state_seq);
+  EXPECT_EQ(region.slot.after_state_seq, 11U);
+  EXPECT_EQ(region.slot.before_control_seq, intent.before_control_seq);
+  EXPECT_EQ(region.slot.after_control_seq, 21U);
+  EXPECT_EQ(region.slot.before_lease_hi, intent.before_lease_hi);
+  EXPECT_EQ(region.slot.before_lease_lo, intent.before_lease_lo);
+  EXPECT_EQ(region.slot.after_lease_hi, 0U);
+  EXPECT_EQ(region.slot.after_lease_lo, 0U);
+  EXPECT_EQ(region.slot.gate_instance_hi, intent.gate_instance_hi);
+  EXPECT_EQ(region.slot.gate_instance_lo, intent.gate_instance_lo);
+  EXPECT_EQ(region.slot.flags, intent.flags);
+  EXPECT_NE(region.slot.intent_checksum, 0U);
+  EXPECT_NE(region.slot.commit_checksum, 0U);
+  EXPECT_EQ(
+    region.slot.intent_checksum,
+    gate_event_journal_intent_checksum(region.slot));
+  EXPECT_EQ(
+    region.slot.commit_checksum,
+    gate_event_journal_commit_checksum(region.slot));
 }
 
 TEST(GateEventJournal, ChecksumCoverageMatchesAbiV1)
