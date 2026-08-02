@@ -67,7 +67,7 @@ public:
     init_hardware_info = &hardware_info;
     init_entity_component_manager = &entity_component_manager;
     init_update_rate = update_rate;
-    return true;
+    return init_result;
   }
 
   hardware_interface::CallbackReturn on_init(
@@ -179,6 +179,7 @@ public:
   const hardware_interface::HardwareInfo * init_hardware_info{nullptr};
   gz::sim::EntityComponentManager * init_entity_component_manager{nullptr};
   unsigned int init_update_rate{0U};
+  bool init_result{true};
   const hardware_interface::HardwareInfo * on_init_hardware_info{nullptr};
   const rclcpp_lifecycle::State * on_configure_previous_state{nullptr};
   std::size_t export_state_interfaces_calls{0U};
@@ -400,6 +401,51 @@ TEST(
   EXPECT_EQ(
     sink->last_record->right_command_bits,
     double_bits(upstream->delegated_right_command));
+}
+
+TEST(
+  JournaledGazeboSimSystemAdapter,
+  DoesNotObserveFromBindingBeforeFailedReinitialization)
+{
+  auto upstream = std::make_shared<RecordingGazeboSystem>();
+  auto sink = std::make_shared<RecordingHardwareWriteSink>();
+  voice_nav_sim::JournaledGazeboSimSystemAdapter adapter(upstream, sink, 1U);
+  rclcpp::Node::SharedPtr model_node;
+  const hardware_interface::HardwareInfo hardware_info{};
+  gz::sim::EntityComponentManager first_entity_component_manager;
+  const auto first_left = first_entity_component_manager.CreateEntity();
+  const auto first_right = first_entity_component_manager.CreateEntity();
+  std::map<std::string, gz::sim::Entity> first_joints{
+    {"left_wheel_joint", first_left},
+    {"right_wheel_joint", first_right}};
+  ASSERT_TRUE(
+    adapter.initSim(
+      model_node,
+      first_joints,
+      hardware_info,
+      first_entity_component_manager,
+      50U));
+
+  upstream->init_result = false;
+  gz::sim::EntityComponentManager second_entity_component_manager;
+  std::map<std::string, gz::sim::Entity> second_joints;
+  ASSERT_FALSE(
+    adapter.initSim(
+      model_node,
+      second_joints,
+      hardware_info,
+      second_entity_component_manager,
+      50U));
+  upstream->write_entity_component_manager =
+    &first_entity_component_manager;
+  upstream->write_left_entity = first_left;
+  upstream->write_right_entity = first_right;
+
+  const auto result = adapter.write(
+    rclcpp::Time(2, 0, RCL_ROS_TIME), rclcpp::Duration(0, 20'000'000));
+
+  EXPECT_EQ(result, hardware_interface::return_type::OK);
+  EXPECT_FALSE(sink->last_record.has_value());
 }
 
 }  // namespace
