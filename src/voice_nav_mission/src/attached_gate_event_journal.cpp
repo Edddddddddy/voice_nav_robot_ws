@@ -36,7 +36,7 @@ namespace
 
 constexpr char kSharedMemoryNamePrefix[] = "/voice_nav_gate_";
 constexpr std::size_t kIdentifierHexCharacters = 32U;
-constexpr std::size_t kMaximumCapacity = 16384U;
+constexpr std::uint64_t kMaximumCapacity = 16384U;
 
 std::system_error system_error(const char * message)
 {
@@ -68,76 +68,81 @@ void validate_name(const std::string & name)
   }
 }
 
-std::uint64_t parse_hex_word(
-  const std::string & value,
-  std::size_t offset)
+std::size_t validate_config(
+  const GateEventJournalAttachmentConfig & config)
 {
-  std::uint64_t word = 0U;
-  for (std::size_t index = offset; index < offset + 16U; ++index) {
-    const auto character = value[index];
-    if (!is_lower_hex(character)) {
-      throw std::invalid_argument(
-              "Gate event journal nonce must be 32 lowercase hex characters");
-    }
-    const auto nibble = character <= '9' ?
-      static_cast<std::uint64_t>(character - '0') :
-      static_cast<std::uint64_t>(character - 'a' + 10);
-    word = (word << 4U) | nibble;
+  validate_name(config.shared_memory_name);
+  if (config.clock.read == nullptr) {
+    throw std::invalid_argument("Gate event journal clock is missing");
   }
-  return word;
-}
-
-GateEventJournalIdentity expected_identity(
-  const std::string & nonce_hex,
-  const GateEventJournalHeader & header)
-{
-  if (nonce_hex.size() != kIdentifierHexCharacters) {
+  if (
+    config.expected_identity.owner_uid !=
+    static_cast<std::uint64_t>(geteuid()))
+  {
     throw std::invalid_argument(
-            "Gate event journal nonce must be 32 lowercase hex characters");
+            "Gate event journal expected owner UID must match the process");
   }
-  return {
-    static_cast<std::uint64_t>(geteuid()),
-    header.generation,
-    parse_hex_word(nonce_hex, 0U),
-    parse_hex_word(nonce_hex, 16U)};
+  if (config.expected_identity.generation == 0U) {
+    throw std::invalid_argument(
+            "Gate event journal expected generation must be nonzero");
+  }
+  if (
+    config.expected_identity.nonce_hi == 0U &&
+    config.expected_identity.nonce_lo == 0U)
+  {
+    throw std::invalid_argument(
+            "Gate event journal expected nonce must be nonzero");
+  }
+  if (
+    config.expected_capacity == 0U ||
+    config.expected_capacity > kMaximumCapacity)
+  {
+    throw std::invalid_argument(
+            "Gate event journal expected capacity is out of bounds");
+  }
+  constexpr auto header_bytes = sizeof(GateEventJournalHeader);
+  constexpr auto slot_bytes = sizeof(GateEventJournalSlot);
+  if (
+    config.expected_capacity >
+    (std::numeric_limits<std::size_t>::max() - header_bytes) / slot_bytes)
+  {
+    throw std::invalid_argument(
+            "Gate event journal expected byte size overflows");
+  }
+  return header_bytes +
+         static_cast<std::size_t>(config.expected_capacity) * slot_bytes;
 }
 
-std::size_t validate_status(const struct stat & status)
+void validate_status(
+  const struct stat & status,
+  const GateEventJournalAttachmentConfig & config,
+  std::size_t expected_region_bytes)
 {
   if (!S_ISREG(status.st_mode)) {
     throw std::invalid_argument("Gate event journal is not a regular object");
   }
-  if (status.st_uid != geteuid()) {
+  if (
+    static_cast<std::uint64_t>(status.st_uid) !=
+    config.expected_identity.owner_uid)
+  {
     throw std::invalid_argument("Gate event journal owner UID mismatch");
   }
-  if ((status.st_mode & 0777) != 0600) {
+  if ((status.st_mode & 07777) != 0600) {
     throw std::invalid_argument("Gate event journal mode must be exactly 0600");
+  }
+  if (status.st_nlink != 1) {
+    throw std::invalid_argument("Gate event journal link count must be one");
   }
   if (status.st_size < 0) {
     throw std::invalid_argument("Gate event journal has a negative size");
   }
-
-  constexpr std::size_t kMinimumBytes =
-    sizeof(GateEventJournalHeader) + sizeof(GateEventJournalSlot);
-  constexpr std::size_t kMaximumBytes =
-    sizeof(GateEventJournalHeader) +
-    kMaximumCapacity * sizeof(GateEventJournalSlot);
   const auto size = static_cast<std::uintmax_t>(status.st_size);
   if (
-    size < kMinimumBytes ||
-    size > kMaximumBytes ||
-    size > std::numeric_limits<std::size_t>::max())
+    size != static_cast<std::uintmax_t>(expected_region_bytes))
   {
-    throw std::invalid_argument("Gate event journal size is out of bounds");
+    throw std::invalid_argument(
+            "Gate event journal size does not match expected capacity");
   }
-  const auto region_bytes = static_cast<std::size_t>(size);
-  if (
-    (region_bytes - sizeof(GateEventJournalHeader)) %
-    sizeof(GateEventJournalSlot) != 0U)
-  {
-    throw std::invalid_argument("Gate event journal size is not slot aligned");
-  }
-  return region_bytes;
 }
 
 }  // namespace
@@ -145,16 +150,12 @@ std::size_t validate_status(const struct stat & status)
 struct AttachedGateEventJournal::Impl
 {
   Impl(
-    const std::string & name,
-    const std::string & nonce_hex,
-    GateEventJournalClock clock)
+    GateEventJournalAttachmentConfig config)
   {
-    validate_name(name);
-    if (clock.read == nullptr) {
-      throw std::invalid_argument("Gate event journal clock is missing");
-    }
+    region_bytes = validate_config(config);
 
-    fd = shm_open(name.c_str(), O_RDWR | O_CLOEXEC, 0);
+    fd = shm_open(
+      config.shared_memory_name.c_str(), O_RDWR | O_CLOEXEC, 0);
     if (fd < 0) {
       throw system_error("shm_open Gate event journal attach failed");
     }
@@ -164,7 +165,7 @@ struct AttachedGateEventJournal::Impl
       if (fstat(fd, &status) != 0) {
         throw system_error("fstat Gate event journal failed");
       }
-      region_bytes = validate_status(status);
+      validate_status(status, config, region_bytes);
       region = mmap(
         nullptr,
         region_bytes,
@@ -176,12 +177,11 @@ struct AttachedGateEventJournal::Impl
         region = nullptr;
         throw system_error("mmap Gate event journal failed");
       }
-      const auto & header = *static_cast<GateEventJournalHeader *>(region);
       journal = std::make_unique<GateEventJournal>(
         region,
         region_bytes,
-        expected_identity(nonce_hex, header),
-        clock);
+        config.expected_identity,
+        config.clock);
     } catch (...) {
       cleanup();
       throw;
@@ -212,30 +212,15 @@ struct AttachedGateEventJournal::Impl
   std::unique_ptr<GateEventJournal> journal;
 };
 
-AttachedGateEventJournal AttachedGateEventJournal::open_existing(
-  const std::string & name,
-  const std::string & nonce_hex,
-  GateEventJournalClock clock)
-{
-  return AttachedGateEventJournal(
-    std::make_unique<Impl>(name, nonce_hex, clock));
-}
-
 AttachedGateEventJournal::AttachedGateEventJournal(
-  std::unique_ptr<Impl> impl) noexcept
-: impl_(std::move(impl))
+  GateEventJournalAttachmentConfig config)
+: impl_(std::make_unique<Impl>(std::move(config)))
 {
 }
 
 AttachedGateEventJournal::~AttachedGateEventJournal() = default;
 
-AttachedGateEventJournal::AttachedGateEventJournal(
-  AttachedGateEventJournal &&) noexcept = default;
-
-AttachedGateEventJournal & AttachedGateEventJournal::operator=(
-  AttachedGateEventJournal &&) noexcept = default;
-
-GateEventJournal & AttachedGateEventJournal::writer() noexcept
+GateEventJournal & AttachedGateEventJournal::journal() noexcept
 {
   return *impl_->journal;
 }

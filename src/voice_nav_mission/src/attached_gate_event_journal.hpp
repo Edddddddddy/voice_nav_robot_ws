@@ -15,6 +15,7 @@
 #ifndef ATTACHED_GATE_EVENT_JOURNAL_HPP_
 #define ATTACHED_GATE_EVENT_JOURNAL_HPP_
 
+#include <cstdint>
 #include <memory>
 #include <string>
 
@@ -23,29 +24,33 @@
 namespace voice_nav_mission
 {
 
+struct GateEventJournalAttachmentConfig
+{
+  std::string shared_memory_name;
+  GateEventJournalIdentity expected_identity;
+  std::uint64_t expected_capacity;
+  GateEventJournalClock clock;
+};
+
 class AttachedGateEventJournal
 {
 public:
-  static AttachedGateEventJournal open_existing(
-    const std::string & name,
-    const std::string & nonce_hex,
-    GateEventJournalClock clock);
+  explicit AttachedGateEventJournal(
+    GateEventJournalAttachmentConfig config);
 
   ~AttachedGateEventJournal();
 
   AttachedGateEventJournal(const AttachedGateEventJournal &) = delete;
   AttachedGateEventJournal & operator=(
     const AttachedGateEventJournal &) = delete;
-  AttachedGateEventJournal(AttachedGateEventJournal &&) noexcept;
+  AttachedGateEventJournal(AttachedGateEventJournal &&) = delete;
   AttachedGateEventJournal & operator=(
-    AttachedGateEventJournal &&) noexcept;
+    AttachedGateEventJournal &&) = delete;
 
-  [[nodiscard]] GateEventJournal & writer() noexcept;
+  [[nodiscard]] GateEventJournal & journal() noexcept;
 
 private:
   struct Impl;
-
-  explicit AttachedGateEventJournal(std::unique_ptr<Impl> impl) noexcept;
 
   std::unique_ptr<Impl> impl_;
 };
