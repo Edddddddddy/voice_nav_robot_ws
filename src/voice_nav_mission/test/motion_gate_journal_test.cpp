@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
 #include "gate_event_journal.hpp"
 #include "voice_nav_mission/motion_gate_core.hpp"
@@ -26,6 +27,11 @@ namespace voice_nav_mission
 {
 namespace
 {
+
+static_assert(!std::is_copy_constructible_v<MotionGateCore>);
+static_assert(!std::is_copy_assignable_v<MotionGateCore>);
+static_assert(!std::is_move_constructible_v<MotionGateCore>);
+static_assert(!std::is_move_assignable_v<MotionGateCore>);
 
 constexpr char kGateId[] = "0123456789abcdef0123456789abcdef";
 
