@@ -96,6 +96,24 @@ if(BUILD_TESTING)
     gate_event_journal
   )
 
+  add_executable(
+    gate_event_journal_c_abi_test
+    test/gate_event_journal_c_abi_test.c
+  )
+  target_compile_features(gate_event_journal_c_abi_test PUBLIC c_std_11)
+  target_include_directories(
+    gate_event_journal_c_abi_test
+    PRIVATE src
+  )
+  add_test(
+    NAME gate_event_journal_c_abi_test
+    COMMAND gate_event_journal_c_abi_test
+  )
+  set_tests_properties(
+    gate_event_journal_c_abi_test
+    PROPERTIES LABELS "c_abi"
+  )
+
   ament_add_gtest(
     writer_observation_test
     test/writer_observation_test.cpp

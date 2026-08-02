@@ -101,6 +101,28 @@ struct FakeClock
   }
 };
 
+template<typename Record, typename Checksum>
+void expect_checksum_changes(
+  const Record & baseline,
+  std::uint64_t Record::* field,
+  Checksum checksum)
+{
+  auto mutated = baseline;
+  mutated.*field ^= UINT64_C(0x9e3779b97f4a7c15);
+  EXPECT_NE(checksum(mutated), checksum(baseline));
+}
+
+template<typename Record, typename Checksum>
+void expect_checksum_ignores(
+  const Record & baseline,
+  std::uint64_t Record::* field,
+  Checksum checksum)
+{
+  auto mutated = baseline;
+  mutated.*field ^= UINT64_C(0x9e3779b97f4a7c15);
+  EXPECT_EQ(checksum(mutated), checksum(baseline));
+}
+
 TEST(
   GateEventJournal,
   SuccessfulOutputIsIntentDuringPublishAndCommittedAfterReturn)
@@ -118,6 +140,9 @@ TEST(
   region.header.nonce_lo = 0x0fedcba987654321U;
   region.header.header_checksum =
     gate_event_journal_header_checksum(region.header);
+  ASSERT_EQ(
+    region.header.header_checksum,
+    UINT64_C(0xc5a43daf135b254d));
   gate_event_journal_store_release(
     region.header.init_state,
     VOICE_NAV_GATE_EVENT_JOURNAL_INIT_READY);
@@ -196,8 +221,147 @@ TEST(
     region.slot.intent_checksum,
     gate_event_journal_intent_checksum(region.slot));
   EXPECT_EQ(
+    region.slot.intent_checksum,
+    UINT64_C(0x1ab28ffd4e031df7));
+  EXPECT_EQ(
     region.slot.commit_checksum,
     gate_event_journal_commit_checksum(region.slot));
+  EXPECT_EQ(
+    region.slot.commit_checksum,
+    UINT64_C(0x24237a46d3cccb33));
+}
+
+TEST(GateEventJournal, ChecksumCoverageMatchesAbiV1)
+{
+  using HeaderField = std::uint64_t GateEventJournalHeader::*;
+  const std::array<HeaderField, 11U> header_included{
+    &GateEventJournalHeader::magic,
+    &GateEventJournalHeader::abi_version,
+    &GateEventJournalHeader::header_bytes,
+    &GateEventJournalHeader::slot_bytes,
+    &GateEventJournalHeader::region_bytes,
+    &GateEventJournalHeader::capacity,
+    &GateEventJournalHeader::owner_uid,
+    &GateEventJournalHeader::generation,
+    &GateEventJournalHeader::nonce_hi,
+    &GateEventJournalHeader::nonce_lo,
+    &GateEventJournalHeader::reserved};
+  const std::array<HeaderField, 5U> header_excluded{
+    &GateEventJournalHeader::init_state,
+    &GateEventJournalHeader::claimed_slots,
+    &GateEventJournalHeader::overflow_latched,
+    &GateEventJournalHeader::writer_pid,
+    &GateEventJournalHeader::header_checksum};
+  const GateEventJournalHeader header{};
+
+  for (const auto field : header_included) {
+    expect_checksum_changes(
+      header,
+      field,
+      &gate_event_journal_header_checksum);
+  }
+  for (const auto field : header_excluded) {
+    expect_checksum_ignores(
+      header,
+      field,
+      &gate_event_journal_header_checksum);
+  }
+
+  using SlotField = std::uint64_t GateEventJournalSlot::*;
+  const std::array<SlotField, 20U> intent_included{
+    &GateEventJournalSlot::record_kind,
+    &GateEventJournalSlot::journal_seq,
+    &GateEventJournalSlot::generation,
+    &GateEventJournalSlot::intent_monotonic_ns,
+    &GateEventJournalSlot::event_code,
+    &GateEventJournalSlot::reason,
+    &GateEventJournalSlot::before_state_seq,
+    &GateEventJournalSlot::before_control_seq,
+    &GateEventJournalSlot::output_attempt_seq,
+    &GateEventJournalSlot::intended_output_seq,
+    &GateEventJournalSlot::ros_stamp_sec_bits,
+    &GateEventJournalSlot::ros_stamp_nanosec,
+    &GateEventJournalSlot::linear_x_bits,
+    &GateEventJournalSlot::angular_z_bits,
+    &GateEventJournalSlot::before_lease_hi,
+    &GateEventJournalSlot::before_lease_lo,
+    &GateEventJournalSlot::gate_instance_hi,
+    &GateEventJournalSlot::gate_instance_lo,
+    &GateEventJournalSlot::cause_transition_journal_seq,
+    &GateEventJournalSlot::flags};
+  const std::array<SlotField, 12U> intent_excluded{
+    &GateEventJournalSlot::phase,
+    &GateEventJournalSlot::transition_linearization_ns,
+    &GateEventJournalSlot::commit_monotonic_ns,
+    &GateEventJournalSlot::intent_checksum,
+    &GateEventJournalSlot::commit_checksum,
+    &GateEventJournalSlot::after_state_seq,
+    &GateEventJournalSlot::after_control_seq,
+    &GateEventJournalSlot::after_lease_hi,
+    &GateEventJournalSlot::after_lease_lo,
+    &GateEventJournalSlot::reserved0,
+    &GateEventJournalSlot::reserved1,
+    &GateEventJournalSlot::reserved2};
+  const std::array<SlotField, 27U> commit_included{
+    &GateEventJournalSlot::intent_checksum,
+    &GateEventJournalSlot::record_kind,
+    &GateEventJournalSlot::journal_seq,
+    &GateEventJournalSlot::generation,
+    &GateEventJournalSlot::intent_monotonic_ns,
+    &GateEventJournalSlot::event_code,
+    &GateEventJournalSlot::reason,
+    &GateEventJournalSlot::before_state_seq,
+    &GateEventJournalSlot::before_control_seq,
+    &GateEventJournalSlot::output_attempt_seq,
+    &GateEventJournalSlot::intended_output_seq,
+    &GateEventJournalSlot::ros_stamp_sec_bits,
+    &GateEventJournalSlot::ros_stamp_nanosec,
+    &GateEventJournalSlot::linear_x_bits,
+    &GateEventJournalSlot::angular_z_bits,
+    &GateEventJournalSlot::before_lease_hi,
+    &GateEventJournalSlot::before_lease_lo,
+    &GateEventJournalSlot::gate_instance_hi,
+    &GateEventJournalSlot::gate_instance_lo,
+    &GateEventJournalSlot::cause_transition_journal_seq,
+    &GateEventJournalSlot::flags,
+    &GateEventJournalSlot::transition_linearization_ns,
+    &GateEventJournalSlot::commit_monotonic_ns,
+    &GateEventJournalSlot::after_state_seq,
+    &GateEventJournalSlot::after_control_seq,
+    &GateEventJournalSlot::after_lease_hi,
+    &GateEventJournalSlot::after_lease_lo};
+  const std::array<SlotField, 5U> commit_excluded{
+    &GateEventJournalSlot::phase,
+    &GateEventJournalSlot::commit_checksum,
+    &GateEventJournalSlot::reserved0,
+    &GateEventJournalSlot::reserved1,
+    &GateEventJournalSlot::reserved2};
+  const GateEventJournalSlot slot{};
+
+  for (const auto field : intent_included) {
+    expect_checksum_changes(
+      slot,
+      field,
+      &gate_event_journal_intent_checksum);
+  }
+  for (const auto field : intent_excluded) {
+    expect_checksum_ignores(
+      slot,
+      field,
+      &gate_event_journal_intent_checksum);
+  }
+  for (const auto field : commit_included) {
+    expect_checksum_changes(
+      slot,
+      field,
+      &gate_event_journal_commit_checksum);
+  }
+  for (const auto field : commit_excluded) {
+    expect_checksum_ignores(
+      slot,
+      field,
+      &gate_event_journal_commit_checksum);
+  }
 }
 
 }  // namespace
