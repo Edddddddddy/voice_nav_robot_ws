@@ -17,8 +17,8 @@ class CrashStopContractError(ValueError):
 
 
 ARTIFACTS = {
-    "write_sink": (
-        "src/voice_nav_sim/test_support/hardware_write_sink.hpp"
+    "write_journal": (
+        "src/voice_nav_sim/test_support/hardware_write_ledger_writer.hpp"
     ),
     "adapter_header": (
         "src/voice_nav_sim/test_support/"
@@ -125,11 +125,11 @@ def required_artifacts(root: Path) -> dict[str, Path]:
 def validate_adapter(
     header_path: Path,
     source_path: Path,
-    write_sink_path: Path,
+    write_journal_path: Path,
 ) -> None:
     header = read_text(header_path)
     source = read_text(source_path)
-    write_sink = read_text(write_sink_path)
+    write_journal = read_text(write_journal_path)
     combined = header + "\n" + source
 
     direct_concrete_base = re.search(
@@ -222,50 +222,120 @@ def validate_adapter(
             + ", ".join(missing_delegations)
         )
 
-    record_match = re.search(
-        r"struct\s+HardwareWriteRecord\s*\{(?P<body>.*?)\};",
-        write_sink,
+    journal_match = re.search(
+        r"class\s+HardwareWriteJournal\b.*?\{(?P<body>.*?)\};",
+        write_journal,
         flags=re.DOTALL,
     )
-    if record_match is None:
+    if journal_match is None:
         raise CrashStopContractError(
-            "hardware write sink must define HardwareWriteRecord"
+            "hardware write journal must define HardwareWriteJournal"
         )
-    record_body = record_match.group("body")
-    if re.search(r"\biterations?\b", record_body, re.IGNORECASE):
+    journal_body = journal_match.group("body")
+    if any(
+        re.search(rf"\b{method}\s*\(", journal_body) is None
+        for method in ("begin_write", "finish_write")
+    ):
         raise CrashStopContractError(
-            "hardware write record must not claim per-write Gazebo "
-            "iteration; World Statistics owns iteration evidence"
+            "HardwareWriteJournal must define begin_write and finish_write"
         )
-    required_record_fields = {
-        "generation",
+
+    ticket_match = re.search(
+        r"struct\s+HardwareWriteTicket\s*\{(?P<body>.*?)\};",
+        write_journal,
+        flags=re.DOTALL,
+    )
+    if ticket_match is None:
+        raise CrashStopContractError(
+            "hardware write journal must define HardwareWriteTicket"
+        )
+    required_ticket_fields = {
         "write_seq",
         "sim_stamp_ns",
-        "delegated_result",
+        "bank_index",
+        "bank_epoch",
+        "included",
+    }
+    ticket_body = ticket_match.group("body")
+    missing_ticket_fields = sorted(
+        field
+        for field in required_ticket_fields
+        if re.search(rf"\b{re.escape(field)}\b", ticket_body) is None
+    )
+    if missing_ticket_fields:
+        raise CrashStopContractError(
+            "Hardware write ticket is missing Writer-owned facts: "
+            + ", ".join(missing_ticket_fields)
+        )
+
+    observation_match = re.search(
+        r"struct\s+HardwareWriteWheelObservation\s*"
+        r"\{(?P<body>.*?)\};",
+        write_journal,
+        flags=re.DOTALL,
+    )
+    if observation_match is None:
+        raise CrashStopContractError(
+            "hardware write journal must define wheel observation facts"
+        )
+    required_observation_fields = {
+        "status",
         "left_command_bits",
         "right_command_bits",
     }
-    missing_fields = sorted(
+    observation_body = observation_match.group("body")
+    missing_observation_fields = sorted(
         field
-        for field in required_record_fields
-        if re.search(rf"\b{re.escape(field)}\b", record_body) is None
+        for field in required_observation_fields
+        if re.search(rf"\b{re.escape(field)}\b", observation_body) is None
     )
-    if missing_fields:
+    if missing_observation_fields:
         raise CrashStopContractError(
-            "HardwareWriteRecord is missing observable write facts: "
-            + ", ".join(missing_fields)
+            "HardwareWriteWheelObservation is missing facts: "
+            + ", ".join(missing_observation_fields)
         )
 
-    delegated_write = source.find("upstream_->write(")
-    journal_write = source.find("journal_after_delegated_write(")
-    if (
-        delegated_write < 0
-        or journal_write < 0
-        or journal_write <= delegated_write
-    ):
+    journal_member = re.search(
+        r"std::shared_ptr\s*<\s*HardwareWriteJournal\s*>\s*"
+        r"write_journal_\s*;",
+        header,
+    )
+    if journal_member is None:
         raise CrashStopContractError(
-            "hardware journal instrumentation must run only after the "
-            "delegated upstream write"
+            "Adapter must depend on the HardwareWriteJournal interface"
+        )
+    forbidden_adapter_ownership = sorted(
+        token
+        for token in (
+            "generation_",
+            "next_write_seq_",
+            "HardwareWriteRecord",
+            "HardwareWriteSink",
+        )
+        if re.search(rf"\b{re.escape(token)}\b", combined) is not None
+    )
+    if forbidden_adapter_ownership:
+        if any(
+            token in {"HardwareWriteRecord", "HardwareWriteSink"}
+            for token in forbidden_adapter_ownership
+        ):
+            raise CrashStopContractError(
+                "Adapter must not use legacy sink or record ownership"
+            )
+        raise CrashStopContractError(
+            "Adapter must not own Writer sequence or generation state"
+        )
+
+    begin_write = source.find("write_journal_->begin_write(")
+    delegated_write = source.find("upstream_->write(")
+    finish_write = source.find("write_journal_->finish_write(")
+    if begin_write < 0 or delegated_write < 0 or begin_write >= delegated_write:
+        raise CrashStopContractError(
+            "Adapter must begin before the delegated upstream write"
+        )
+    if finish_write < 0 or finish_write <= delegated_write:
+        raise CrashStopContractError(
+            "Adapter must finish after the delegated upstream write"
         )
 
 
@@ -598,7 +668,11 @@ def validate_adapter_behavior_test(path: Path) -> None:
         "ForwardsCommandModeSwitches",
         "ForwardsReadAndWriteCycles",
         "ObservesActualWheelCommandsAfterDelegatedWrite",
-        "DoesNotObserveFromBindingBeforeFailedReinitialization",
+        "ReportsMissingEntityAfterFailedReinitialization",
+        "ReportsMissingWheelCommandComponent",
+        "ReportsRemovedWheelEntity",
+        "ReportsEmptyWheelCommandComponent",
+        "FinishesJournalCycleWhenDelegatedWriteThrows",
     }
     missing = sorted(
         test_name
@@ -760,7 +834,7 @@ def validate_contract(root: Path) -> None:
     validate_adapter(
         paths["adapter_header"],
         paths["adapter_source"],
-        paths["write_sink"],
+        paths["write_journal"],
     )
     validate_plugin_description(paths["adapter_plugin"])
     validate_adapter_behavior_test(paths["adapter_test"])
