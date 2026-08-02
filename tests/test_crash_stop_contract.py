@@ -605,7 +605,7 @@ class CrashStopContractTest(unittest.TestCase):
             completed.stderr,
         )
 
-    def test_product_launch_cannot_enable_the_crash_journal(self) -> None:
+    def test_product_launch_cannot_enable_gate_event_journal_pair(self) -> None:
         def mutation(root: Path) -> None:
             self.replace(
                 root,
@@ -615,8 +615,12 @@ class CrashStopContractTest(unittest.TestCase):
                 ),
                 "parameters=['motion_gate.yaml'],",
                 (
-                    "parameters=['motion_gate.yaml', "
-                    "{'crash_journal_name': '/unsafe'}],"
+                    "parameters=['motion_gate.yaml', {"
+                    "'test_gate_event_journal_name': "
+                    "'/voice_nav_gate_00112233445566778899aabbccddeeff', "
+                    "'test_gate_event_journal_descriptor': "
+                    "'v1:1000:7:16:123456789abcdef00fedcba987654321'"
+                    "}],"
                 ),
             )
 
@@ -624,6 +628,8 @@ class CrashStopContractTest(unittest.TestCase):
 
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("product launch must not expose", completed.stderr)
+        self.assertIn("test_gate_event_journal_name", completed.stderr)
+        self.assertIn("test_gate_event_journal_descriptor", completed.stderr)
 
     def test_product_simulation_launch_cannot_select_test_adapter(self) -> None:
         def mutation(root: Path) -> None:
@@ -646,7 +652,7 @@ class CrashStopContractTest(unittest.TestCase):
             completed.stderr,
         )
 
-    def test_product_yaml_cannot_enable_hardware_journaling(self) -> None:
+    def test_product_yaml_cannot_enable_gate_event_journal_pair(self) -> None:
         def mutation(root: Path) -> None:
             self.replace(
                 root,
@@ -656,7 +662,10 @@ class CrashStopContractTest(unittest.TestCase):
                 "    output_frequency_hz: 50.0",
                 (
                     "    output_frequency_hz: 50.0\n"
-                    "    hardware_journal_name: /unsafe"
+                    "    test_gate_event_journal_name: "
+                    "/voice_nav_gate_00112233445566778899aabbccddeeff\n"
+                    "    test_gate_event_journal_descriptor: "
+                    "v1:1000:7:16:123456789abcdef00fedcba987654321"
                 ),
             )
 
@@ -664,6 +673,8 @@ class CrashStopContractTest(unittest.TestCase):
 
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("product MotionGate YAML must not expose", completed.stderr)
+        self.assertIn("test_gate_event_journal_name", completed.stderr)
+        self.assertIn("test_gate_event_journal_descriptor", completed.stderr)
 
     def test_producer_barrier_does_not_require_unique_marker(self) -> None:
         def mutation(root: Path) -> None:

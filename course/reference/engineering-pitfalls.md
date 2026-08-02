@@ -234,6 +234,14 @@ contract, Work Item, and lesson. When a closed set changes, update all five in
 one corrective slice and retain the old evidence as pre-final rather than
 silently relabeling it.
 
+**Recurrence evidence.** VN-0011A froze the test-only Node keys as
+`test_gate_event_journal_name` and `test_gate_event_journal_descriptor` in the
+Work Item, safety architecture, and implementation, while the crash-stop
+product-isolation checker and its mutations still exercised an obsolete
+`crash_journal_name` spelling. The closed-set review therefore continued at
+the stale-guard boundary described in PIT-0050 instead of treating a rejection
+of the unused spelling as product evidence.
+
 ## PIT-0010: An absolute deadline surrounds the RPC
 
 **Symptom.** A convergence helper checks the remaining budget before an RPC,
@@ -1242,3 +1250,15 @@ and the checker against the actual repository, plus at least one mutation that
 must still fail. Commit `b1a562a` aligned the token and fixture with
 `config_.authority_lease`; the two positive controls and the
 candidate-must-not-renew mutation then passed together.
+
+**Recurrence evidence.** The VN-0011A product-isolation checker still searched
+for the obsolete generic `crash_journal` marker after the governing contract had
+frozen `test_gate_event_journal_name` and
+`test_gate_event_journal_descriptor`. Its old mutation was green because it
+injected a key the Node never declared, while complete frozen-key pairs in
+both product launch and YAML were incorrectly accepted. Focused RED tests now
+inject both exact keys and require both in the diagnostic; replacing the stale
+marker with those two keys made all 17 non-topology crash-contract fixture
+cases pass. The repository-root checker remains separately RED for the
+not-yet-implemented Gazebo Adapter and was not counted as this correction's
+failure.

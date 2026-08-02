@@ -86,11 +86,12 @@ PRODUCT_SEAM_MARKERS = {
     "journaledgazebosimsystemadapter",
     "journaledgazebosystem",
     "journaled_gazebo",
-    "crash_journal",
     "hardware_journal",
     "journal_shared_memory",
     "journal_nonce",
     "shm_open",
+    "test_gate_event_journal_name",
+    "test_gate_event_journal_descriptor",
 }
 
 
