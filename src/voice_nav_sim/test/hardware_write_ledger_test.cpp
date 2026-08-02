@@ -411,6 +411,7 @@ TEST(HardwareWriteLedger, LatchesAStickyGenerationFault)
 
   auto current = stale;
   current.generation = 45U;
+  current.write_seq = 2U;
   ASSERT_TRUE(ledger.append(current));
   ASSERT_TRUE(ledger.seal());
   const auto snapshot = ledger.snapshot_page(0U);
@@ -438,6 +439,7 @@ TEST(HardwareWriteLedger, LatchesANonFiniteWheelCommandFault)
     voice_nav_sim::kHardwareWriteOracleFaultNonFiniteCommand);
 
   auto finite = non_finite;
+  finite.write_seq = 2U;
   finite.left_command_bits = UINT64_C(0x3ff0000000000000);
   ASSERT_TRUE(ledger.append(finite));
   ASSERT_TRUE(ledger.seal());
@@ -495,6 +497,7 @@ TEST(HardwareWriteLedger, LatchesASimulationStampRegression)
     voice_nav_sim::kHardwareWriteOracleFaultSimulationStamp);
 
   auto nondecreasing = regressed;
+  nondecreasing.write_seq = 3U;
   nondecreasing.sim_stamp_ns = first.sim_stamp_ns;
   ASSERT_TRUE(ledger.append(nondecreasing));
   ASSERT_TRUE(ledger.seal());
@@ -530,8 +533,9 @@ TEST(HardwareWriteLedger, LatchesCapacityExhaustionBeforeLosingASegment)
   EXPECT_EQ(
     snapshot->oracle_faults,
     voice_nav_sim::kHardwareWriteOracleFaultCapacity);
+  EXPECT_EQ(snapshot->seal_fence_write_seq, 2U);
   EXPECT_EQ(snapshot->total_segment_count, 1U);
-  EXPECT_EQ(snapshot->total_invocation_count, 1U);
+  EXPECT_EQ(snapshot->total_invocation_count, 2U);
   ASSERT_EQ(snapshot->segments.size(), 1U);
   EXPECT_EQ(snapshot->segments.front().first_write_seq, 1U);
   EXPECT_EQ(snapshot->segments.front().last_write_seq, 1U);
@@ -554,6 +558,7 @@ TEST(HardwareWriteLedger, LatchesNonzeroWritesInAZeroRequiredInterval)
     voice_nav_sim::kHardwareWriteOracleFaultZeroRequired);
 
   auto signed_zeros = nonzero;
+  signed_zeros.write_seq = 2U;
   signed_zeros.left_command_bits = UINT64_C(0x0000000000000000);
   signed_zeros.right_command_bits = UINT64_C(0x8000000000000000);
   ASSERT_TRUE(ledger.append(signed_zeros));
