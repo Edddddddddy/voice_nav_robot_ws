@@ -163,6 +163,7 @@ private:
     std::uint64_t slot_index;
   };
 
+  Reservation reserve_slot();
   Reservation begin_output(const GateOutputIntent & intent);
   GateOutputOutcome commit_output(const Reservation & reservation);
   Reservation begin_transition(const GateTransitionIntent & intent);

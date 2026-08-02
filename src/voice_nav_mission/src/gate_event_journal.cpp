@@ -254,8 +254,7 @@ GateEventJournal::GateEventJournal(
   }
 }
 
-GateEventJournal::Reservation GateEventJournal::begin_output(
-  const GateOutputIntent & intent)
+GateEventJournal::Reservation GateEventJournal::reserve_slot()
 {
   std::uint64_t slot_index = gate_event_journal_load_acquire(
     header_->claimed_slots);
@@ -290,8 +289,17 @@ GateEventJournal::Reservation GateEventJournal::begin_output(
     &slot.record_kind,
     0,
     sizeof(GateEventJournalSlot) - offsetof(GateEventJournalSlot, record_kind));
+
+  return {&slot, slot_index + 1U, slot_index};
+}
+
+GateEventJournal::Reservation GateEventJournal::begin_output(
+  const GateOutputIntent & intent)
+{
+  const auto reservation = reserve_slot();
+  auto & slot = *reservation.slot;
   slot.record_kind = VOICE_NAV_GATE_EVENT_JOURNAL_KIND_OUTPUT_ATTEMPT;
-  slot.journal_seq = slot_index + 1U;
+  slot.journal_seq = reservation.journal_seq;
   slot.generation = header_->generation;
   slot.intent_monotonic_ns = clock_.read(clock_.context);
   slot.event_code = intent.event_code;
@@ -311,7 +319,7 @@ GateEventJournal::Reservation GateEventJournal::begin_output(
     slot.phase,
     VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_INTENT);
 
-  return {&slot, slot.journal_seq, slot_index};
+  return reservation;
 }
 
 GateOutputOutcome GateEventJournal::commit_output(
@@ -329,21 +337,49 @@ GateOutputOutcome GateEventJournal::commit_output(
 GateEventJournal::Reservation GateEventJournal::begin_transition(
   const GateTransitionIntent & intent)
 {
-  (void)intent;
-  throw std::logic_error("VN-0011A transition journal tests-first RED");
+  const auto reservation = reserve_slot();
+  auto & slot = *reservation.slot;
+  slot.record_kind = VOICE_NAV_GATE_EVENT_JOURNAL_KIND_CONTROL_TRANSITION;
+  slot.journal_seq = reservation.journal_seq;
+  slot.generation = header_->generation;
+  slot.intent_monotonic_ns = clock_.read(clock_.context);
+  slot.event_code = intent.event_code;
+  slot.reason = intent.reason;
+  slot.before_state_seq = intent.before_state_seq;
+  slot.before_control_seq = intent.before_control_seq;
+  slot.before_lease_hi = intent.before_lease_hi;
+  slot.before_lease_lo = intent.before_lease_lo;
+  slot.gate_instance_hi = intent.gate_instance_hi;
+  slot.gate_instance_lo = intent.gate_instance_lo;
+  slot.flags = intent.flags;
+  slot.intent_checksum = gate_event_journal_intent_checksum(slot);
+  return reservation;
 }
 
 void GateEventJournal::mark_transition_linearization(
   const Reservation & reservation)
 {
-  (void)reservation;
+  reservation.slot->transition_linearization_ns =
+    clock_.read(clock_.context);
+  gate_event_journal_store_release(
+    reservation.slot->phase,
+    VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_INTENT);
 }
 
 GateTransitionOutcome GateEventJournal::commit_transition(
   const Reservation & reservation,
   const GateTransitionAfter & after)
 {
-  (void)after;
+  reservation.slot->after_state_seq = after.after_state_seq;
+  reservation.slot->after_control_seq = after.after_control_seq;
+  reservation.slot->after_lease_hi = after.after_lease_hi;
+  reservation.slot->after_lease_lo = after.after_lease_lo;
+  reservation.slot->commit_monotonic_ns = clock_.read(clock_.context);
+  reservation.slot->commit_checksum =
+    gate_event_journal_commit_checksum(*reservation.slot);
+  gate_event_journal_store_release(
+    reservation.slot->phase,
+    VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_COMMITTED);
   return {reservation.journal_seq, reservation.slot_index};
 }
 
