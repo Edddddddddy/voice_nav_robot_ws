@@ -27,8 +27,8 @@ import launch_testing.actions
 from launch_testing.asserts import assertExitCodes
 import launch_testing.markers
 import pytest
-import rclpy
 from rcl_interfaces.msg import ParameterType
+import rclpy
 from rclpy.duration import Duration
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.parameter import Parameter

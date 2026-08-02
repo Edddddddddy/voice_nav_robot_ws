@@ -38,6 +38,7 @@
 #include <geometry_msgs/msg/twist_stamped.hpp>
 #include <rclcpp/rclcpp.hpp>
 
+#include "motion_gate_process_runtime.hpp"  // NOLINT(build/include_subdir)
 #include "voice_nav_mission/motion_gate_core.hpp"
 #include "voice_nav_mission/msg/internal_motion_gate_state.hpp"
 #include "voice_nav_mission/srv/internal_motion_gate_control.hpp"
@@ -246,6 +247,7 @@ private:
   struct NodeConfig
   {
     MotionGateConfig core;
+    GateEventJournalTestParameters journal_parameters;
     std::chrono::milliseconds writer_graph_timeout{1000};
     std::string expected_candidate_writer_fqn{"/collision_monitor"};
   };
@@ -304,6 +306,12 @@ private:
     config.core.angular_z_max =
       declare_read_only_parameter<double>(
       "angular_z_max", 1.20);
+    config.journal_parameters.name =
+      declare_read_only_parameter<std::string>(
+      "test_gate_event_journal_name", "");
+    config.journal_parameters.descriptor =
+      declare_read_only_parameter<std::string>(
+      "test_gate_event_journal_descriptor", "");
 
     if (
       !std::isfinite(output_frequency_hz) ||
