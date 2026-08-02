@@ -326,4 +326,30 @@ TEST(HardwareWriteLedger, PaginatesSealedSegmentsWithAChecksumChain)
     independent_page_checksum(*second_page));
 }
 
+TEST(HardwareWriteLedger, LatchesASequenceFaultForADuplicateWrite)
+{
+  voice_nav_sim::HardwareWriteLedger ledger({44U, 11U, 0U, 2U, 2U});
+  const voice_nav_sim::HardwareWriteRecord first{
+    44U, 1U, 5'000'000, 0U, UINT64_C(5), UINT64_C(6)};
+  ASSERT_TRUE(ledger.append(first));
+
+  EXPECT_FALSE(ledger.append(first));
+  EXPECT_EQ(
+    ledger.oracle_faults(),
+    voice_nav_sim::kHardwareWriteOracleFaultSequence);
+  ASSERT_TRUE(ledger.seal());
+
+  const auto snapshot = ledger.snapshot_page(0U);
+  ASSERT_TRUE(snapshot.has_value());
+  EXPECT_EQ(
+    snapshot->oracle_faults,
+    voice_nav_sim::kHardwareWriteOracleFaultSequence);
+  EXPECT_EQ(snapshot->total_invocation_count, 1U);
+  ASSERT_EQ(snapshot->segments.size(), 1U);
+  EXPECT_EQ(snapshot->segments.front().first_write_seq, 1U);
+  EXPECT_EQ(snapshot->segments.front().last_write_seq, 1U);
+  EXPECT_EQ(snapshot->segments.front().invocation_count, 1U);
+  EXPECT_EQ(snapshot->page_checksum, independent_page_checksum(*snapshot));
+}
+
 }  // namespace
