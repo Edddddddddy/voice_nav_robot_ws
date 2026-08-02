@@ -589,9 +589,16 @@ def validate_robot_transformer(path: Path) -> None:
 def validate_adapter_behavior_test(path: Path) -> None:
     source = read_text(path)
     required_tests = {
-        "ForwardsLifecycleArgumentsAndResults",
-        "ForwardsInterfacesModeSwitchAndIoArgumentsAndResults",
-        "LoadsExportedAdapterPlugin",
+        "LoadsExportedAdapterAndItsPinnedUpstream",
+        "ForwardsInitSimArgumentsAndResult",
+        "ForwardsOnInitArgumentAndResult",
+        "ForwardsOnConfigureArgumentAndResult",
+        "ForwardsExportedInterfaceCollections",
+        "ForwardsActivationTransitions",
+        "ForwardsCommandModeSwitches",
+        "ForwardsReadAndWriteCycles",
+        "ObservesActualWheelCommandsAfterDelegatedWrite",
+        "DoesNotObserveFromBindingBeforeFailedReinitialization",
     }
     missing = sorted(
         test_name
