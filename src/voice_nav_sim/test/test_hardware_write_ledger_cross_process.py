@@ -422,6 +422,97 @@ def test_arm_excludes_prior_write_and_preserves_multiple_records(probe):
             close_owned_process_pipes(process)
 
 
+def test_writing_request_is_invisible_until_ready(probe):
+    """Prove Writer never consumes a Parent-owned partial request."""
+    with HardwareWriteLedgerRegionOwner(
+        generation=84,
+        segment_capacity=4,
+        page_segment_limit=2,
+    ) as owner:
+        process = spawn_probe(probe, owner)
+        try:
+            require(
+                owner.wait_for_writer(process.pid) == process.pid,
+                'request-ownership probe Writer PID mismatch',
+            )
+            require(
+                read_owned_line(process, 'READY') == 'READY',
+                'request-ownership probe did not publish READY',
+            )
+            owner.unlink_name()
+
+            request_ticket = owner.begin_arm_preparation(
+                interval_id=98,
+                segment_budget=2,
+                invocation_budget=3,
+                require_zero_commands=False,
+            )
+            process.stdin.write('BEGIN 100\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 1',
+                'Writer stalled on a Parent-owned request',
+            )
+            require(
+                owner.load_response_ticket() == 0,
+                'Writer acknowledged an uncommitted request',
+            )
+            require(
+                owner.load_header_word(GLOBAL_ORACLE_FAULTS_WORD) == 0,
+                'Writer faulted on a valid request still being prepared',
+            )
+            require(
+                owner.snapshot_bank(0)[0] == BANK_STATE_FREE and
+                owner.snapshot_bank(1)[0] == BANK_STATE_FREE,
+                'Writer activated a bank from a partial request',
+            )
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 1',
+                'unarmed write did not finish',
+            )
+
+            owner.commit_prepared_request(request_ticket)
+            process.stdin.write('BEGIN 200\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 2',
+                'committed request did not admit the next write',
+            )
+            response = owner.wait_response(request_ticket)
+            require(
+                response[9] == CONTROL_RESPONSE_OK,
+                'committed request was not acknowledged',
+            )
+            require(
+                response[12] == 1,
+                'committed ARM included the preparation-time write',
+            )
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 2',
+                'first armed write did not finish',
+            )
+            require(
+                owner.snapshot_segment(response[10], 0)[1] == 2,
+                'first armed segment did not start after the ARM fence',
+            )
+
+            process.stdin.write('EXIT\n')
+            process.stdin.flush()
+            return_code = process.wait(timeout=3.0)
+            stderr = process.stderr.read()
+            require(
+                return_code == 0,
+                f'request-ownership probe exited {return_code}: {stderr}',
+            )
+        finally:
+            terminate_owned_process(process)
+            close_owned_process_pipes(process)
+
+
 def test_same_ticket_different_payload_replay_latches_fault(probe):
     """Prove an acknowledged ticket cannot be reused for another payload."""
     with HardwareWriteLedgerRegionOwner(
@@ -735,6 +826,7 @@ def main():
     test_exec_attach_survives_unlink(probe)
     test_arm_linearizes_before_first_write(probe)
     test_arm_excludes_prior_write_and_preserves_multiple_records(probe)
+    test_writing_request_is_invisible_until_ready(probe)
     test_same_ticket_different_payload_replay_latches_fault(probe)
     test_decreasing_sim_stamp_latches_fault_without_overwrite(probe)
     test_sequence_exhaustion_rejects_arm_before_bank_activation(probe)
