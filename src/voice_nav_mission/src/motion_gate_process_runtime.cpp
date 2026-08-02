@@ -22,8 +22,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <system_error>
 
 namespace voice_nav_mission
@@ -218,6 +220,35 @@ parse_gate_event_journal_test_parameters(
       nonce_lo},
     capacity,
     GateEventJournalClock{&read_monotonic_nanoseconds, nullptr}};
+}
+
+MotionGateProcessRuntime::MotionGateProcessRuntime(
+  MotionGateConfig config,
+  std::string gate_instance_id,
+  GateEventJournalTestParameters journal_parameters)
+{
+  auto attachment_config =
+    parse_gate_event_journal_test_parameters(journal_parameters);
+  if (attachment_config.has_value()) {
+    attached_journal_ = std::make_unique<AttachedGateEventJournal>(
+      std::move(*attachment_config));
+    core_ = std::make_unique<MotionGateCore>(
+      std::move(config),
+      std::move(gate_instance_id),
+      0U,
+      attached_journal_->journal().claim_transition_binding());
+    return;
+  }
+
+  core_ = std::make_unique<MotionGateCore>(
+    std::move(config), std::move(gate_instance_id));
+}
+
+MotionGateProcessRuntime::~MotionGateProcessRuntime() = default;
+
+MotionGateCore & MotionGateProcessRuntime::core() noexcept
+{
+  return *core_;
 }
 
 }  // namespace voice_nav_mission

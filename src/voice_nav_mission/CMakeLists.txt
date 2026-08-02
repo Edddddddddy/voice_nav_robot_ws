@@ -54,10 +54,6 @@ target_include_directories(
   PUBLIC
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
 )
-target_link_libraries(
-  motion_gate_process_runtime
-  PUBLIC attached_gate_event_journal
-)
 
 add_library(
   motion_gate_core STATIC
@@ -70,6 +66,12 @@ target_include_directories(
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
 )
 target_link_libraries(motion_gate_core PRIVATE gate_event_journal)
+target_link_libraries(
+  motion_gate_process_runtime
+  PUBLIC
+    attached_gate_event_journal
+    motion_gate_core
+)
 
 add_executable(
   motion_gate_node

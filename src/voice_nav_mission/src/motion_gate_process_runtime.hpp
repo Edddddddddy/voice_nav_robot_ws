@@ -15,10 +15,12 @@
 #ifndef MOTION_GATE_PROCESS_RUNTIME_HPP_
 #define MOTION_GATE_PROCESS_RUNTIME_HPP_
 
+#include <memory>
 #include <optional>
 #include <string>
 
 #include "attached_gate_event_journal.hpp"  // NOLINT(build/include_subdir)
+#include "voice_nav_mission/motion_gate_core.hpp"
 
 namespace voice_nav_mission
 {
@@ -32,6 +34,30 @@ struct GateEventJournalTestParameters
 [[nodiscard]] std::optional<GateEventJournalAttachmentConfig>
 parse_gate_event_journal_test_parameters(
   const GateEventJournalTestParameters & parameters);
+
+class MotionGateProcessRuntime
+{
+public:
+  MotionGateProcessRuntime(
+    MotionGateConfig config,
+    std::string gate_instance_id,
+    GateEventJournalTestParameters journal_parameters);
+
+  ~MotionGateProcessRuntime();
+
+  MotionGateProcessRuntime(const MotionGateProcessRuntime &) = delete;
+  MotionGateProcessRuntime & operator=(
+    const MotionGateProcessRuntime &) = delete;
+  MotionGateProcessRuntime(MotionGateProcessRuntime &&) = delete;
+  MotionGateProcessRuntime & operator=(
+    MotionGateProcessRuntime &&) = delete;
+
+  [[nodiscard]] MotionGateCore & core() noexcept;
+
+private:
+  std::unique_ptr<AttachedGateEventJournal> attached_journal_;
+  std::unique_ptr<MotionGateCore> core_;
+};
 
 }  // namespace voice_nav_mission
 
