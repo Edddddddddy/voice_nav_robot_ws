@@ -17,15 +17,40 @@
 #include "journaled_gazebo_sim_system_adapter.hpp"
 
 #include <gz/sim/EntityComponentManager.hh>
+#include <gz/sim/components/JointVelocityCmd.hh>
 #include <gz_ros2_control/gz_system_interface.hpp>
 #include <pluginlib/class_loader.hpp>
 
+#include <cstring>
 #include <memory>
+#include <optional>
 
 namespace
 {
 
 using GazeboSystemInterface = gz_ros2_control::GazeboSimSystemInterface;
+
+std::uint64_t double_bits(double value)
+{
+  static_assert(sizeof(value) == sizeof(std::uint64_t));
+  std::uint64_t bits{0U};
+  std::memcpy(&bits, &value, sizeof(bits));
+  return bits;
+}
+
+class RecordingHardwareWriteSink final
+  : public voice_nav_sim::HardwareWriteSink
+{
+public:
+  bool append(
+    const voice_nav_sim::HardwareWriteRecord & record) noexcept override
+  {
+    last_record = record;
+    return true;
+  }
+
+  std::optional<voice_nav_sim::HardwareWriteRecord> last_record;
+};
 
 class RecordingGazeboSystem final : public GazeboSystemInterface
 {
@@ -124,6 +149,20 @@ public:
   {
     write_time = &time;
     write_period = &period;
+    if (write_entity_component_manager != nullptr) {
+      auto * left_command =
+        write_entity_component_manager->Component<
+        gz::sim::components::JointVelocityCmd>(write_left_entity);
+      auto * right_command =
+        write_entity_component_manager->Component<
+        gz::sim::components::JointVelocityCmd>(write_right_entity);
+      if (left_command != nullptr && !left_command->Data().empty()) {
+        left_command->Data()[0] = delegated_left_command;
+      }
+      if (right_command != nullptr && !right_command->Data().empty()) {
+        right_command->Data()[0] = delegated_right_command;
+      }
+    }
     return write_result;
   }
 
@@ -146,6 +185,11 @@ public:
   const rclcpp::Duration * read_period{nullptr};
   const rclcpp::Time * write_time{nullptr};
   const rclcpp::Duration * write_period{nullptr};
+  gz::sim::EntityComponentManager * write_entity_component_manager{nullptr};
+  gz::sim::Entity write_left_entity{gz::sim::kNullEntity};
+  gz::sim::Entity write_right_entity{gz::sim::kNullEntity};
+  double delegated_left_command{0.0};
+  double delegated_right_command{0.0};
   hardware_interface::return_type read_result{
     hardware_interface::return_type::ERROR};
   hardware_interface::return_type write_result{
@@ -297,6 +341,67 @@ TEST(JournaledGazeboSimSystemAdapter, ForwardsReadAndWriteCycles)
   EXPECT_EQ(upstream->write_time, &write_time);
   EXPECT_EQ(upstream->write_period, &write_period);
   EXPECT_EQ(write_result, hardware_interface::return_type::OK);
+}
+
+TEST(
+  JournaledGazeboSimSystemAdapter,
+  ObservesActualWheelCommandsAfterDelegatedWrite)
+{
+  auto upstream = std::make_shared<RecordingGazeboSystem>();
+  auto sink = std::make_shared<RecordingHardwareWriteSink>();
+  constexpr std::uint64_t generation = 41U;
+  voice_nav_sim::JournaledGazeboSimSystemAdapter adapter(
+    upstream, sink, generation);
+  rclcpp::Node::SharedPtr model_node;
+  gz::sim::EntityComponentManager entity_component_manager;
+  const auto left_entity = entity_component_manager.CreateEntity();
+  const auto right_entity = entity_component_manager.CreateEntity();
+  ASSERT_NE(
+    entity_component_manager.CreateComponent(
+      left_entity,
+      gz::sim::components::JointVelocityCmd({0.0})),
+    nullptr);
+  ASSERT_NE(
+    entity_component_manager.CreateComponent(
+      right_entity,
+      gz::sim::components::JointVelocityCmd({0.0})),
+    nullptr);
+  std::map<std::string, gz::sim::Entity> joints{
+    {"left_wheel_joint", left_entity},
+    {"right_wheel_joint", right_entity}};
+  const hardware_interface::HardwareInfo hardware_info{};
+  ASSERT_TRUE(
+    adapter.initSim(
+      model_node,
+      joints,
+      hardware_info,
+      entity_component_manager,
+      50U));
+  upstream->write_entity_component_manager = &entity_component_manager;
+  upstream->write_left_entity = left_entity;
+  upstream->write_right_entity = right_entity;
+  upstream->delegated_left_command = -1.25;
+  upstream->delegated_right_command = 2.5;
+  upstream->write_result = hardware_interface::return_type::ERROR;
+  const rclcpp::Time time(123, 456, RCL_ROS_TIME);
+  const rclcpp::Duration period(0, 20'000'000);
+
+  const auto result = adapter.write(time, period);
+
+  EXPECT_EQ(result, hardware_interface::return_type::ERROR);
+  ASSERT_TRUE(sink->last_record.has_value());
+  EXPECT_EQ(sink->last_record->generation, generation);
+  EXPECT_EQ(sink->last_record->write_seq, 1U);
+  EXPECT_EQ(sink->last_record->sim_stamp_ns, time.nanoseconds());
+  EXPECT_EQ(
+    sink->last_record->delegated_result,
+    static_cast<std::uint8_t>(hardware_interface::return_type::ERROR));
+  EXPECT_EQ(
+    sink->last_record->left_command_bits,
+    double_bits(upstream->delegated_left_command));
+  EXPECT_EQ(
+    sink->last_record->right_command_bits,
+    double_bits(upstream->delegated_right_command));
 }
 
 }  // namespace
