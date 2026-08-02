@@ -237,4 +237,45 @@ TEST(HardwareWriteLedger, FoldsIdenticalConsecutiveWritesWithoutLosingCount)
   EXPECT_EQ(snapshot->page_checksum, UINT64_C(0x20e6650a8c19bb32));
 }
 
+TEST(HardwareWriteLedger, FinalizesASegmentWhenTheWriteTupleChanges)
+{
+  voice_nav_sim::HardwareWriteLedger ledger({42U, 9U, 0U, 2U, 2U});
+  const voice_nav_sim::HardwareWriteRecord first{
+    42U,
+    1U,
+    3'000'000,
+    0U,
+    UINT64_C(0x3fe0000000000000),
+    UINT64_C(0x3fe0000000000000)};
+  const voice_nav_sim::HardwareWriteRecord second{
+    42U,
+    2U,
+    3'010'000,
+    1U,
+    UINT64_C(0x0000000000000000),
+    UINT64_C(0x0000000000000000)};
+
+  ASSERT_TRUE(ledger.append(first));
+  ASSERT_TRUE(ledger.append(second));
+  ASSERT_TRUE(ledger.seal());
+
+  const auto snapshot = ledger.snapshot_page(0U);
+  ASSERT_TRUE(snapshot.has_value());
+  EXPECT_EQ(snapshot->seal_fence_write_seq, 2U);
+  EXPECT_EQ(snapshot->total_segment_count, 2U);
+  EXPECT_EQ(snapshot->total_invocation_count, 2U);
+  EXPECT_EQ(snapshot->page_segment_count, 2U);
+  EXPECT_EQ(snapshot->page_invocation_count, 2U);
+  EXPECT_EQ(snapshot->page_first_write_seq, 1U);
+  EXPECT_EQ(snapshot->page_last_write_seq, 2U);
+  ASSERT_EQ(snapshot->segments.size(), 2U);
+  EXPECT_EQ(snapshot->segments[0U].first_write_seq, 1U);
+  EXPECT_EQ(snapshot->segments[0U].last_write_seq, 1U);
+  EXPECT_EQ(snapshot->segments[0U].invocation_count, 1U);
+  EXPECT_EQ(snapshot->segments[1U].first_write_seq, 2U);
+  EXPECT_EQ(snapshot->segments[1U].last_write_seq, 2U);
+  EXPECT_EQ(snapshot->segments[1U].invocation_count, 1U);
+  EXPECT_EQ(snapshot->page_checksum, independent_page_checksum(*snapshot));
+}
+
 }  // namespace
