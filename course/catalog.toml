@@ -62,3 +62,10 @@ slug = "independent-motion-gate"
 status = "completed"
 lesson = "course/lessons/0009-build-independent-motion-gate.md"
 record = "course/records/0009-independent-motion-gate.md"
+
+[[lessons]]
+id = "0010"
+slug = "crash-stop-and-safe-pause"
+status = "in_progress"
+lesson = "course/lessons/0010-prove-crash-stop-and-safe-pause.md"
+record = "course/records/0010-crash-stop-and-safe-pause.md"

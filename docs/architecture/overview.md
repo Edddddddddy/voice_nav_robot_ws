@@ -89,6 +89,13 @@ Lesson 0009 uses a test authority/candidate harness and does not claim
 MissionRuntime, smoother, Collision Monitor, process-kill crash-stop, or
 Gazebo pause/resume completion. Crash-stop and pause recovery are Lesson 0010.
 
+Lesson 0010 is intentionally split: VN-0011A will prove exact-process
+authority/candidate/Gate crash-stop and ros2_control wheel-command evidence;
+VN-0011B will implement the tokenized managed-pause policy accepted by
+ADR-0005. Both remain planned until their own tests, review, and delivery
+records close; the published `course/0010-start` freezes only the cumulative
+pre-implementation baseline.
+
 ## Target v1.0 topology
 
 ```text
@@ -260,6 +267,7 @@ contracts:
 - [ADR-0002: migrate to ros2_control](../adr/0002-migrate-to-gz-ros2-control.md)
 - [ADR-0003: one deep Mission Runtime](../adr/0003-use-one-deep-mission-runtime.md)
 - [ADR-0004: separate mapping and navigation modes](../adr/0004-separate-mapping-and-navigation-modes.md)
+- [ADR-0005: tokenized Managed Safe Pause](../adr/0005-use-tokenized-managed-safe-pause.md)
 
 Release compatibility follows the
 [release policy](../process/release-policy.md).

@@ -225,23 +225,108 @@ death or pause recovery:
 
 Package-private IDL is an encapsulation boundary, not DDS security. Lesson 0009
 uses a test authority/candidate harness. It does not count an authority,
-candidate, or MotionGate process kill, managed pause token, first-resume zero,
-or unmanaged-pause recovery as completed.
+candidate, or MotionGate process kill, Managed Safe Pause token,
+first-resume zero, or Unmanaged Pause recovery as completed.
 
 ### Lesson 0010 crash-stop and pause slice
 
-Lesson 0010 / VN-0011 supplies the process-death and Gazebo-time evidence:
+Lesson 0010 / VN-0011 is split into two delivery slices. VN-0011A supplies the
+process-death evidence; VN-0011B supplies the Managed Safe Pause / Unmanaged
+Pause evidence.
+These bullets are required acceptance, not a claim that either slice is
+already complete:
 
 - killing the authority while valid-looking candidates continue still expires
-  the independent Gate lease;
-- killing the candidate producer still expires candidate freshness;
+  the independent Gate lease within 300 ms steady time after exact
+  `ProcessExited`; one <=40 ms steady arming barrier has both validity flags
+  and a unique non-zero Gate marker, its final Gate receipt is <=20 ms old at
+  signal dispatch, independently advancing/non-zero simulation surfaces are
+  <=30 ms old in simulation time, and a parent-owned Gate event journal proves
+  the terminal retirement plus bound zero-publication commit occur no earlier
+  than exact `ProcessExited`; the first matching same-instance state has an
+  empty retired lease, the journaled terminal `control_seq`, and newly
+  advanced/equal zero/output publish sequences;
+- killing the candidate producer still expires candidate freshness within
+  200 ms steady time after the same bounded arming and exact event ordering;
+  authority RENEWs remain active, every accepted RENEW is journaled, and the
+  terminal transition is exactly one non-wrapping step after the journal's
+  final committed predecessor rather than after the older arming snapshot;
 - killing MotionGate causes `diff_drive_controller.cmd_vel_timeout` to select
-  zero on the first control update after 0.35 seconds of advancing simulation
-  time;
-- managed pause proves Gate, controller, and wheel zero before minting a token,
-  then proves the first resumed wheel command is zero;
-- unmanaged GUI/Transport pause has no token and requires a full
-  simulation/control restart rather than in-place resume.
+  zero on the first update where the Gate event journal output lane's final unambiguous COMMITTED
+  input, whose unique marker is ACKed by non-zero controller output, is older
+  than 0.35 seconds of advancing simulation time; a side observer's publisher
+  disappearance plus 100 ms quiet barrier is cleanup evidence, not acceptance
+  evidence;
+- Managed Safe Pause proves Gate, controller, and wheel zero before minting a
+  token, then uses exact pause+single-step/re-pause transactions to prove the
+  next controller update zero and one additional lossless post-update write
+  before continuous unpause;
+- Unmanaged Pause has no token, returns `RESTART_REQUIRED`, and shuts down the
+  old generation rather than resuming it in place.
+
+VN-0011A must subscribe to ros2_control's
+`/controller_manager/introspection_data/full` diagnostic stream and observe
+both `command_interface.<wheel>/velocity` values separately from the matching
+`state_interface.<wheel>/velocity` values. `/cmd_vel_out` is controller body
+output, `/joint_states` is state, and `/odom` is a physical stationarity proxy;
+none may stand in for another. The introspection subscriber must use compatible
+`BEST_EFFORT + TRANSIENT_LOCAL + KEEP_LAST(1)` QoS and establish complete,
+finite, strictly increasing, non-zero pre-fault command samples before the
+fault is armed. Introspection is mandatory corroboration, but its lossy stream
+cannot prove exact first-wheel-zero or that no intermediate non-zero write was
+dropped. A default-off lossless hardware-write ledger accounts for every actual
+write after the arming barrier and proves first both-wheel zero plus no command
+regression through the final 0.20 s shared wheel-state/odom stationary window.
+It uses monotonic non-wrapping `write_seq`, atomic ARM/SEAL fences, finalized
+segments, and immutable bounded snapshot pages. One active accumulator may be
+atomically extended only when generation, iteration/stamp, and exact
+wheel-command bits are identical; its sequence range and invocation count must
+agree. A tuple change or `SEAL` finalizes it and makes it immutable. Capacity is
+proven from the bounded iteration/transition budget, while overflow/overwrite,
+an unaccounted invocation, or a non-zero write in a zero-required interval
+latches failure. Checksums, contiguous sequence ranges/generation, and
+nondecreasing iteration complete the validation. In VN-0011A,
+simulation is continuously running and iteration follows observed world
+progress. In VN-0011B's paused probe, iteration may repeat while the runner
+writes at one iteration, and only an acknowledged exact single-step request
+whose World Statistics commit is observed may produce one `N -> N+1` change.
+“Reliable topic” or overwrite-on-full is not lossless proof.
+The stationarity clock starts at the later of first controller-output zero and
+the first lossless both-wheel-zero write; the first shared stationary sample
+must be within 1.2 s of that point. All controller/wheel/odom windows use
+strictly increasing simulation stamps. Gate process-death latency uses the
+observer's steady receipt of exact `ProcessExited`; the same host's
+`CLOCK_MONOTONIC` timestamps in the Gate journal prove that the terminal
+transition and zero commit did not precede it. DDS receipt order is not that
+proof. Wall time is only the outer test watchdog.
+
+The candidate helper emits finite safe marker tuples whose spacing exceeds the
+comparison tolerance and which are unique throughout the armed/crash window.
+A parent-owned Gate event journal records each Gate output publish in a
+crash-resilient two-phase INTENT/COMMITTED lane. After exact Gate exit, the final record must be an
+unambiguous non-zero COMMITTED marker with no trailing intent or later publish;
+that marker must be ACKed by non-zero `/cmd_vel_out`. Its journaled input stamp
+is therefore the final published-and-accepted timeout origin. Duplicate or
+unmatched markers, limiter changes, trailing intent, journal gaps/overflow, or
+a side-observer fallback fail the case.
+
+Managed resume is a project policy boundary, not Gazebo Transport access
+control. A missing/stale/replayed token must return `RESTART_REQUIRED` without
+sending `pause:false`. VN-0011B proves structured shutdown of the unsafe old
+generation; automatic replacement launch remains a future supervisor outcome.
+VN-0011B delivers the package-private coordinator and test Adapter protocol,
+not a user-facing pause endpoint. Because the introspection stream is
+asynchronous BEST_EFFORT, the same default-off test-only lossless oracle at the
+actual hardware-write seam accounts for every invocation, generation,
+iteration, and both `JointVelocityCmd` values using the same sequence-range
+segments; valid repeated writes at one paused iteration fold only when their
+exact values agree. Without enabling continuous run, every request is
+exactly `{pause: true, multi_step: 1}`; its ACK is only queued intent and World
+Statistics must prove one transition plus re-pause. Bounded single steps first
+reach a same-stamp zero controller-output/introspection update, then one
+additional step must losslessly write the post-update zeros. Omitted/false
+pause, duplicate request, retained old value, non-zero/missing update, journal
+gap, or wrong ordering fails closed before continuous `pause:false`.
 
 The later Mission and voice milestones inherit these v1.0 quantitative
 acceptance criteria:
@@ -253,26 +338,28 @@ acceptance criteria:
 - From maximum configured speed, STOP causes odometry to enter the stationary tolerance within 1.2 seconds and remain there for 200 ms.
 - Killing MissionRuntime causes the independent MotionGate lease to expire and automatically select zero velocity.
 - Killing MotionGate causes `diff_drive_controller.cmd_vel_timeout` to select
-  zero on the first control update after 0.35 seconds of advancing simulation
-  time. The configured 100 Hz period gives the measurement one 10 ms
-  scheduling tolerance; physical stationarity is a separate assertion.
+  zero on the first control update after the Gate event journal output lane's final unambiguous
+  COMMITTED Gate input, ACKed by its non-zero controller marker, becomes more
+  than 0.35 seconds old in advancing simulation time. The
+  configured 100 Hz period gives the measurement one 10 ms scheduling
+  tolerance; physical stationarity is a separate assertion.
 - Candidate samples never renew Runtime authority; a test continues feeding
   valid-looking smoother output after killing Runtime and still observes Gate
   inhibition.
 - Every step handover recreates the candidate data plane. Tests inject samples
   from the old topic generation and an unbound Gate-local writer after the new
   lease opens and prove they are rejected.
-- Managed Gazebo safe-pause first proves Gate output, controller output, and
+- Managed Safe Pause first proves Gate output, controller output, and
   wheel command are zero while simulation still advances, then pauses and
   records a token. After MotionGate dies during that pause, the first resumed
   wheel command is still asserted to be zero.
 - A fault-injection case kills MotionGate before zero proof. Controller
   inactivity or released command interfaces are insufficient: the harness
   issues a token only after directly observing zero wheel command for the
-  configured periods; otherwise it selects full restart.
-- A direct GUI/Transport pause has no safe-pause token; in-place resume is
-  refused and the tested recovery is a full simulation/control restart from
-  an inactive zero-command state.
+  configured periods; otherwise it returns `RESTART_REQUIRED` and shuts down
+  the old generation.
+- An Unmanaged Pause has no Safe-Pause Token; in-place resume is refused and
+  the test proves old-generation shutdown without claiming automatic relaunch.
 
 These command-inhibition thresholds do not claim that the system is a functionally certified emergency stop.
 

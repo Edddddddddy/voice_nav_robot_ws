@@ -32,11 +32,21 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0022 | Canonical verification rejects an xUnit file that changed during evidence collection | Did another reviewer or test process write the same shared build tree? | Guarded |
 | PIT-0023 | Current lesson content no longer matches its frozen solution tag | Was later material marked as post-tag errata with a new cumulative checkpoint? | Guarded |
 | PIT-0024 | Delivery closure creates another closure PR | Is the tree being asked to contain its own future tag or public identity? | Guarded |
+| PIT-0025 | Controller deadman appears to fire in one update instead of 0.35 s | Was latency measured from a periodic output instead of the final input stamp used for command age? | Specified |
+| PIT-0026 | A crash/pause test sees zero but may have dropped a non-zero wheel write | Is a lossy diagnostic stream being used to prove exact first-write or no-regression? | Specified |
+| PIT-0027 | A process-kill test passes although the deadman had already expired | Were all live/non-zero facts captured in one bounded arming barrier immediately before SIGKILL? | Specified |
+| PIT-0028 | A side observer's last input is treated as the controller's final accepted input | Does a crash-resilient final source commit also have a controller-output ACK? | Specified |
+| PIT-0029 | A resume probe writes old zero but never crosses a controller update | Did exact pause+single-step transactions prove update zero and then write it? | Specified |
+| PIT-0030 | A steady-time arming deadline flakes when simulation RTF falls | Were steady Gate freshness and simulation-sample freshness constrained on separate clocks? | Specified |
+| PIT-0031 | A “lossless” write log silently overwrites or omits records | Are sequence fences, capacity, overflow, and snapshot continuity executable invariants? | Specified |
+| PIT-0032 | A correct producer-death test fails while authority RENEWs continue | Is terminal `control_seq` compared with the final committed predecessor instead of the arming snapshot? | Specified |
+| PIT-0033 | Delayed DDS delivery makes a pre-death zero look post-death | Does a same-host monotonic Gate journal order the terminal commit after `ProcessExited`? | Specified |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
 **Symptom.** A valid-looking Bash command fails near `(`, a commit message is
-split, or `$variable`/command substitution executes before Bash receives it.
+split, `$variable`/command substitution executes before Bash receives it, or a
+multi-line GitHub body fetched by PowerShell is expanded into many CLI flags.
 
 **Cause.** PowerShell parses the outer command line before `bash -lc` parses the
 inner script. Nested double quotes and `$()` therefore have two interpreters.
@@ -55,7 +65,12 @@ prefer `ctest --repeat until-fail:20` over a shell loop. A quoting failure is
 not evidence that any Git mutation occurred; inspect `git status` immediately.
 Regex characters such as `()|` are shell metacharacters too; either quote them
 inside one controlled Linux shell or run the small complete CTest set instead
-of building a fragile cross-shell filter.
+of building a fragile cross-shell filter. PowerShell captures native command
+output as a line array; before passing multi-line text to another native
+command, join it explicitly to one string and quote the argument, or prefer the
+tool's stdin/file option. If an edit command rejects the first body line as an
+unknown flag, verify the remote object before retrying; do not assume a partial
+mutation.
 
 ## PIT-0002: WSL transport warnings are not the command result
 
@@ -578,3 +593,211 @@ the [Work Item template](../../docs/work-items/TEMPLATE.md), and the
 [PR template](../../.github/PULL_REQUEST_TEMPLATE.md); PR
 [#13](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/13) is the bounded
 incident that exposed the cycle.
+
+## PIT-0025: Periodic output time is not command-age origin
+
+**Symptom.** A proposed `diff_drive_controller` crash-stop metric measures from
+the last non-zero `/cmd_vel_out` sample to the first zero sample and therefore
+expects roughly 0.35 s, even though the topic is stamped and republished on
+every controller update. In practice that delta is about one update period.
+
+**Cause.** The pinned Jazzy controller computes age from the stored input
+`TwistStamped.header.stamp`, but stamps `/cmd_vel_out` with the current update
+time. Output-to-output delta therefore measures the zero transition period,
+not how old the last input was.
+
+**Diagnostic and planned guardrail.** Give every safe Gate input in the crash
+window a unique marker. The parent-owned Gate event journal's two-phase output
+lane must survive SIGKILL with one final unambiguous non-zero COMMITTED publish and no later
+intent/commit; matching non-zero `/cmd_vel_out` ACKs that exact final publish.
+Use its input stamp as the start and the first controller zero stamp as the
+timeout end. Wheel writes are a separate lossless-ledger assertion. Mutations
+must fail if the origin is rebound to periodic output time, an older ACK, or a
+side observer's last receipt. This is
+specified in [VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md)
+and [Lesson 0010](../lessons/0010-prove-crash-stop-and-safe-pause.md). The
+[pinned controller source](https://github.com/ros-controls/ros2_controllers/blob/jazzy/diff_drive_controller/src/diff_drive_controller.cpp)
+is the primary semantic reference. Change this entry to `Guarded` only after
+the VN-0011A executable contract lands.
+
+## PIT-0026: Lossy introspection cannot prove exact or continuous writes
+
+**Symptom.** A pause-resume test observes a zero wheel command on
+`/controller_manager/introspection_data/full` and claims either that the first
+resumed hardware write was zero or that wheel commands never regressed during
+a final window, although an earlier/intermediate non-zero sample could have
+been dropped.
+
+**Cause.** ros2_control's full introspection stream is asynchronous,
+`BEST_EFFORT`, and `KEEP_LAST(1)`. It is mandatory sampled corroboration, but
+delivery preserves neither an exact first-sample boundary nor every
+intermediate write, so it cannot prove a universal no-regression claim.
+Furthermore, a default reliable rclpy subscription is incompatible and may
+receive nothing, while a retained initial zero can create a false positive if
+the fault is not armed by a non-zero baseline.
+
+**Diagnostic and planned guardrail.** VN-0011A uses compatible QoS, waits for
+discovery, and requires complete finite, strictly increasing, non-zero
+pre-fault samples, but a default-off lossless ledger at the actual hardware
+write seam proves first both-wheel zero and no later regression. VN-0011B uses
+the same journal across its controller-update and post-update-write probe;
+`/joint_states` and odometry remain separate physical evidence. See
+[Jazzy ros2_control introspection](https://control.ros.org/jazzy/doc/ros2_control/doc/introspection.html),
+[VN-0011](../../docs/work-items/0011-crash-stop-and-safe-pause.md), and
+[ADR-0005](../../docs/adr/0005-use-tokenized-managed-safe-pause.md). Change this
+entry to `Guarded` only after the corresponding executable contracts land.
+
+## PIT-0027: A stale baseline is not a fault-arming barrier
+
+**Symptom.** A process-death test observes a live/non-zero sample, waits long
+enough for a lease or freshness deadline to expire naturally, then sends
+SIGKILL and credits the already-occurring zero to the crash path.
+
+**Cause.** Independent booleans and command samples collected at unrelated
+times do not establish one causal pre-fault state. Without a bounded barrier
+and event ordering, `ProcessExited` need not precede the terminal zero being
+measured.
+
+**Diagnostic and planned guardrail.** VN-0011A uses a <=40 ms steady-clock
+barrier for both Gate validity flags and a unique non-zero Gate input; the final
+Gate receipt is <=20 ms old at signal dispatch. Independently, strictly
+advancing non-zero simulation surfaces are <=30 ms old in simulation time.
+No invalid/zero event intervenes. A parent-owned Gate event journal uses the
+same host's monotonic clock to prove terminal retirement and its bound zero
+commit do not precede exact `ProcessExited`; DDS receipt order is not used as
+that proof. The matching state keeps the Gate instance but intentionally
+clears the retired lease, matches the journaled terminal `control_seq`, and
+advances `zero_publish_seq == output_publish_seq`; requiring the old lease or
+accepting a stale zero are both errors. Stale-baseline, delayed-kill,
+cross-topic-order, and zero-first mutations must fail. See
+[VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md).
+
+## PIT-0028: A side subscriber is not a consumer-acceptance oracle
+
+**Symptom.** A MotionGate crash test starts the controller timeout from the
+last input seen by an observer, even though the controller's separate reader
+and callback may have consumed a different final sample.
+
+**Cause.** Reliable DDS delivery and publisher-count convergence do not make
+two independent readers advance or execute callbacks in lockstep. A 100 ms
+quiet period can drain the observer while still saying nothing exact about the
+controller callback's accepted command.
+
+**Diagnostic and planned guardrail.** Emit a bounded unique safe marker
+sequence and record every source publish in a crash-resilient INTENT/COMMITTED
+journal. Only a final unambiguous COMMITTED record with no later record and a
+matching non-zero controller-output ACK supplies the timeout origin. A trailing
+intent covers the kill-between-publish-and-commit ambiguity and invalidates the
+generation. Duplicate/unmatched markers, limiter changes, gaps, or overflow
+fail closed. Publisher disappearance and 100 ms quiet remain cleanup only.
+Mutations must make the side-observer shortcut fail. See
+[VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md).
+
+## PIT-0029: A single paused step may not cross a controller update
+
+**Symptom.** A test advances one paused Gazebo iteration, observes an old zero
+hardware write, and declares resume safe although the 100 Hz controller has
+not yet consumed a buffered command.
+
+**Cause.** Pinned `gz_ros2_control` writes in every `PreUpdate`, but performs
+controller read/update in `PostUpdate` only when the control period is due.
+With the default 1 ms simulation step and 10 ms controller period, one step
+usually writes pre-pause state and does not test the post-update command.
+Also, Gazebo processes the `pause` field before `multi_step`; protobuf's
+default false can turn a request lacking `pause:true` into continuous unpause.
+
+**Diagnostic and planned guardrail.** Keep continuous run disabled and send
+only exact `{pause:true,multi_step:1}` requests. After every queued ACK, World
+Statistics must prove one step and re-pause. Step within the computed bound
+until same-stamp controller output and introspection prove a new zero update;
+then step once more and require the entire lossless interval plus post-update
+write to stay zero. Only then send continuous `pause:false`. Omitted/false
+pause, duplicate request, non-zero/missing update, gap, or wrong ordering must
+fail. See
+[ADR-0005](../../docs/adr/0005-use-tokenized-managed-safe-pause.md).
+
+## PIT-0030: A cross-clock arming window smuggles in real-time factor
+
+**Symptom.** A correct crash test fails on a slow WSL/CI runner because it
+requires a 50 Hz simulation-time controller publication to arrive inside a
+40 ms wall/steady interval.
+
+**Cause.** Gate lease/output deadlines use steady time, while controller,
+wheel, and odometry samples advance in simulation time. Constraining both with
+one steady deadline silently assumes a minimum Gazebo real-time factor.
+
+**Diagnostic and planned guardrail.** Keep the <=40/20 ms bounds only on Gate
+steady-clock state/output freshness. Separately require `/clock` to advance and
+simulation surfaces to be non-zero, monotonic, and <=30 ms old in simulation
+time; wall time is only the bounded outer watchdog. Mutate low RTF without
+weakening either domain's own freshness rule. See
+[VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md).
+
+## PIT-0031: “Lossless” needs a completeness protocol
+
+**Symptom.** A hardware-write ring or reliable topic reports an apparently
+continuous zero window even though it overwrote, dropped, reordered, or mixed
+records from another generation.
+
+**Cause.** Transport labels do not prove a complete interval. Without sequence
+fences and capacity/overflow semantics, absence of a record is indistinguishable
+from absence of a write. Capacity based only on advancing iterations is also
+invalid: a paused runner can invoke the write seam repeatedly without advancing
+iteration.
+
+**Diagnostic and planned guardrail.** The write seam owns a non-wrapping
+`uint64 write_seq`; atomic ARM/SEAL fences close the analyzed interval. Every
+invocation advances the sequence. Only consecutive calls with identical
+generation, iteration/stamp, and exact command bits may fold into a segment;
+its first/last sequence and invocation count must agree. Prove segment capacity
+from the bounded iteration/transition budget before arming, latch
+overflow/overwrite, unaccounted calls, and zero-window nonzero writes as
+failure, retain sealed segments until acknowledgement, and validate immutable
+bounded pages by checksum plus contiguous generation/sequence ranges. In A's
+continuous run, iteration follows observed world progress. In B's paused probe
+it may repeat during runner loops without consuming one slot per identical
+write, and only an acknowledged,
+World-Statistics-confirmed exact single step may create one `N -> N+1`
+transition. Applying the paused-only rule to continuous A is itself a failing
+mutation. DDS BEST_EFFORT and overwrite-on-full are forbidden for the proof
+channel. See
+[VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md).
+
+## PIT-0032: Heartbeats make an arming-snapshot `control_seq + 1` false
+
+**Symptom.** Candidate-death evidence rejects a correct terminal state because
+its `control_seq` is greater than `armed_control_seq + 1`, or the test stops
+authority RENEWs to make that assertion pass.
+
+**Cause.** Every accepted RENEW advances the Gate-wide compare-and-swap
+sequence. The terminal retirement advances it once more. RENEWs deliberately
+continue during candidate loss, and a request already in flight may also be
+accepted around process exit, so the arming snapshot is not the terminal
+transition's immediate predecessor.
+
+**Diagnostic and planned guardrail.** The parent-owned Gate event journal
+records every applied same-generation control transition with its before/after
+sequence. The terminal retirement must be exactly one non-wrapping step after
+the final committed predecessor, and the received terminal state must match
+that journal record. Missing an intervening RENEW, freezing authority traffic,
+or comparing directly with the arming snapshot must fail. See
+[VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md).
+
+## PIT-0033: DDS receipt order is not cross-process event order
+
+**Symptom.** The observer receives `ProcessExited` and then a zero/state sample,
+so the test credits the zero to process death even though MotionGate published
+it earlier and DDS delivered it late.
+
+**Cause.** Reliable and transient-local QoS preserve a writer's stream but do
+not establish causal order between a launch event and separate DDS topics.
+Observer receipt timestamps can therefore invert the actual Gate commit order.
+
+**Diagnostic and planned guardrail.** Timestamp exact `ProcessExited` receipt
+and Gate terminal/output commits with Linux `CLOCK_MONOTONIC` on the same host.
+The crash-resilient Gate event journal binds the retirement, resulting output
+sequence, and zero `COMMITTED` record; both commits must be no earlier than the
+process-exit timestamp. DDS state receipt remains the latency endpoint, not the
+ordering oracle. Pre-death commit with post-death receipt and receipt-only
+mutations must fail. See
+[VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md).

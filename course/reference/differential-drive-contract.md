@@ -109,6 +109,28 @@ MissionRuntime、smoother、Collision Monitor 的完整串接属于后续纵向�
 - `diff_drive_controller.cmd_vel_timeout` 被配置为 MotionGate 进程崩溃后的
   消费端第二道 deadman；其 process-kill 实测属于 Lesson 0010，不能用配置
   存在代替证据。
+- Lesson 0010 的轮端证据必须订阅 ros2_control
+  `/controller_manager/introspection_data/full`，分别检查左右轮
+  `command_interface.<joint>/velocity` 与 `state_interface.<joint>/velocity`。
+  订阅 QoS 必须兼容其 `BEST_EFFORT + TRANSIENT_LOCAL + KEEP_LAST(1)` publisher，
+  并在故障前先建立完整、有限、严格递增、左右 command 非零的 baseline。
+  command-interface 值表示下一次同步 hardware write 将消费的值，不是 Gazebo
+  已执行回执；这个有损 topic 既不能证明 exact first write，也不能证明中间没有
+  command regression。A/B 都必须使用默认关闭的 test-only lossless
+  hardware-write ledger 在实际 write seam 逐次计入调用、generation、iteration 和
+  左右轮值；ledger 必须有单调 `write_seq`、atomic ARM/SEAL fences、容量证明、
+  overflow/overwrite fail-closed 与分页 checksum/连续性验证。只有 generation、
+  iteration/stamp 和轮速位模式完全相同的连续调用才能折叠成带 sequence range/count
+  的 segment；paused 时合法重复写不无限占槽，但每次调用仍被计数；introspection 仍作为 mandatory
+  corroboration。
+  Gate process death 后，旁路 observer 看到的最后 input 不能代表 controller
+  callback 真正接受的最后 input。测试必须让每个安全 command tuple 唯一，用
+  parent-owned Gate event journal 的 INTENT/COMMITTED output lane 在 SIGKILL 后证明 final Gate publish
+  无歧义且无后续记录，再用匹配 non-zero `/cmd_vel_out` ACK 证明 controller 接受；
+  publisher 消失和 100 ms quiet 只作 cleanup evidence。
+  `/cmd_vel_out` 是 controller 底盘命令，`/joint_states` 是状态，`/odom` 是
+  物理静止代理；不能把任何一层冒充另一层。该 process-kill 验收目前仍为
+  VN-0011A planned contract，尚未倒写成 Lesson 0009 已完成能力。
 - 上层任务超时不能代替底层速度 lease。
 - Stop 确认只表示 Gate 已禁止运动并发布零速度，不表示机器人已经物理停稳。
 - 本项目的“停止”是高优先级 operational stop，不宣称为经过功能安全认证的急停系统。

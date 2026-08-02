@@ -269,51 +269,142 @@ Lesson 0009 publicly delivers the normal-running Core, private seam,
 Gate-local binding, barriers, final ownership, and deadline expiry with an
 in-process test authority/candidate harness. It does not claim the complete
 Runtime/smoother/Collision Monitor integration. Process-kill crash-stop,
-consumer-deadman proof, and managed/unmanaged Gazebo pause behavior are
+consumer-deadman proof, and Managed Safe Pause / Unmanaged Pause behavior are
 reserved for Lesson 0010 / VN-0011.
 
-### Gazebo managed safe-pause and resume
+### Gazebo Managed Safe Pause and resume
+
+**Status boundary:** the following is the accepted VN-0011B target contract,
+not current Lesson 0009 behavior. VN-0011A first proves process crash-stop;
+VN-0011B later implements and verifies the coordinator and token policy.
 
 The controller timeout alone cannot prove “no replay” across a pause:
 Jazzy `diff_drive_controller`
 [computes command age from controller time and the Twist stamp](https://github.com/ros-controls/ros2_controllers/blob/jazzy/diff_drive_controller/src/diff_drive_controller.cpp#L94-L116).
 When simulation time is stopped, its 0.35 s timeout does not advance.
 
-The supported product and test path therefore uses a two-phase safe-pause
-transaction while simulation updates are still advancing:
+The accepted package-private coordinator/test-Adapter path therefore uses a
+two-phase Managed Safe Pause transaction while simulation updates are still
+advancing. VN-0011B proves this protocol but does not yet expose a user-facing
+product pause function:
 
-1. reject new Missions, stop renewing Runtime authority, inhibit MotionGate,
-   and receive its zero-output acknowledgement;
+1. reject new test admissions, stop renewing the current test authority,
+   inhibit MotionGate, and receive its zero-output acknowledgement; a future
+   Runtime/supervisor integration owns the equivalent product admission step;
 2. observe `diff_drive_controller`'s limited command output and the wheel
    command/velocity state at zero for a configured number of complete control
    periods;
-3. if Gate fails before that proof, let the consumer timeout or deactivate the
-   controller while the update loop is still advancing, but still require
-   direct observation of zero wheel command for the configured control
-   periods; inactive or released interfaces alone are not zero proof;
-4. only after the zero proof pause Gazebo and record an opaque safe-pause token
+3. if Gate fails before that proof, let the active consumer timeout while the
+   update loop is still advancing and still require direct observation of zero
+   wheel command for the configured control periods; controller deactivation,
+   inactivity, or released interfaces cannot mint a token and select
+   `RESTART_REQUIRED` instead;
+4. only after the zero proof pause Gazebo and record an opaque Safe-Pause Token
    containing the world iteration and Gate/controller instance state.
 
-This is an operational `voice_nav_bringup`/test-harness transaction, not a
-public Mission pause endpoint and not a fifth self-written resident process.
-If zero cannot be observed by the bounded pause deadline, no token is minted
-and the harness terminates/restarts simulation and control from a known zero
-state instead of freezing an unproved command.
+Wheel command is observed through ros2_control's diagnostic
+`/controller_manager/introspection_data/full` stream, not inferred from
+`/joint_states`. The required finite fields are
+`command_interface.left_wheel_joint/velocity`,
+`command_interface.right_wheel_joint/velocity`,
+`state_interface.left_wheel_joint/velocity`, and
+`state_interface.right_wheel_joint/velocity`. Controller body output, wheel
+command, wheel state, and odometry remain separate evidence surfaces.
+The subscriber uses `BEST_EFFORT + TRANSIENT_LOCAL + KEEP_LAST(1)`, waits for
+discovery, and arms a fault only after complete finite, strictly increasing
+samples corroborate that both wheel commands are non-zero. Delivery is lossy,
+so this topic cannot prove an exact first write or the absence of an
+intermediate non-zero regression. A default-off test-only lossless ledger at
+the actual hardware-write seam accounts for each invocation, generation,
+Gazebo iteration/stamp, and both wheel commands. Crash-stop and pause tests use
+that ledger to prove exact wheel-write transitions and no regression, while
+introspection remains mandatory independent corroboration. The ledger owns a
+non-wrapping `write_seq` and atomic ARM/SEAL fences at the write seam. It may
+fold only consecutive invocations with identical generation, iteration/stamp,
+and exact wheel-command bits into one atomically extended active accumulator
+whose sequence range and invocation count agree. A tuple change or `SEAL`
+finalizes it; only finalized segments and snapshot pages are immutable.
+Segment capacity is proven before arming from the
+bounded iteration/transition budget; valid same-iteration repeats therefore do
+not consume unbounded slots. Overflow/overwrite, an unaccounted invocation, or
+a non-zero write in a zero-required interval latches failure. Sealed segments
+are retained, and bounded immutable pages must have valid checksums plus
+contiguous generation/`write_seq` ranges; iteration is nondecreasing and may
+repeat while the paused runner calls the write seam. A reliable topic or
+overwrite-on-full ring is not lossless evidence. VN-0011A separately uses a
+parent-owned Gate event journal for applied control/terminal transitions and
+crash-resilient output INTENT/COMMITTED records. Only its final unambiguous
+committed marker with no later record plus a matching non-zero
+controller-output ACK can define the consumer timeout origin. For
+authority/candidate death, the same journal includes every accepted
+intervening RENEW; terminal retirement advances exactly once from its final
+committed predecessor, and same-host monotonic timestamps prove retirement and
+the bound zero commit did not precede exact `ProcessExited`. DDS receipt order
+cannot provide that causal proof. Wheel states and
+odometry must remain stationary for a shared final window of at least 0.20 s
+simulation time.
 
-Managed resume requires that token and verifies the recorded controller state
-has not changed. The wheel command is therefore already proven zero before the
-first resumed `PreUpdate`, whether the controller remains active or was also
-deactivated. A deactivated controller is activated later only after an
-inhibited Gate and zero path are healthy. The first resumed wheel command is
-explicitly tested as zero.
+This is an operational `voice_nav_bringup` package-private coordinator and
+test-Adapter transaction, not a public Mission pause endpoint and not a fifth
+self-written resident process. The test Adapter is the current caller and
+receives `RESTART_REQUIRED`; future product integration belongs to a lifecycle
+supervisor.
+
+If zero cannot be observed by the bounded pause deadline, no token is minted
+and the test Adapter structurally shuts down the old simulation/control
+generation instead of freezing an unproved command. Automatic replacement
+launch is not part of VN-0011B.
+
+Managed resume requires that token and verifies partition, world, exact Gazebo
+process identity, paused iteration/time, fixed step/controller period,
+controller generation/state/update stamp, Gate instance/control
+sequence/final-publisher identity, and zero-proof stamp/sequence plus
+lossless-oracle generation/sealed fence. The original Gate
+may remain present and inhibited with the same identities, or it may be proven
+to have exited after token creation while the final-command topic has zero
+publishers. Any replacement Gate, changed Gate tuple, oracle generation/fence,
+or new/different final publisher invalidates the token and returns
+`RESTART_REQUIRED`.
+
+VN-0011B mints a token only while `diff_drive_controller` remains ACTIVE; its
+generation/state/update stamp are token-bound. A deactivated, inactive, or
+replaced controller cannot satisfy the bounded update probe and returns
+`RESTART_REQUIRED`; activation recovery belongs to a future supervisor.
+Because ros2_control introspection is asynchronous BEST_EFFORT, it cannot
+alone prove that the first resumed write was zero. Without enabling
+continuous run, VN-0011B sends only exact
+`{pause: true, multi_step: 1}` requests. Omitting `pause`, sending false, or
+duplicating a request is a fault: Gazebo processes the pause field before the
+step field, so the protobuf default would otherwise enable continuous run.
+The positive response means queued intent only. World Statistics must confirm
+exactly one iteration of progress and re-paused state after every request.
+
+The fixed simulation step is smaller than the 100 Hz controller period. The
+coordinator steps one iteration at a time until, within
+`ceil(control_period / step_size) + 1` requests, a new same-stamp
+`/cmd_vel_out` and complete introspection sample prove a controller update and
+zero controller/wheel commands. A non-zero or missing observation fails before
+the updated command can be written. It then performs one additional exact
+single-step transaction. The lossless journal must prove that every write in
+the armed probe stayed zero and that the first write after the controller
+update wrote both post-update zeros. Only then may the coordinator send
+`pause:false` for continuous execution. Iteration may repeat during paused
+runner loops; `write_seq` orders those writes, while each controlled request
+must cause exactly one `N -> N+1` transition.
 
 A direct GUI or Gazebo Transport pause taken before this barrier has no
-safe-pause token. Managed resume refuses to unpause it in place; the supported
-recovery is a full simulation/control restart from a known inactive,
-zero-command state. This is required because paused `gz_ros2_control` cannot
+Safe-Pause Token. Managed resume refuses to unpause it in place and returns
+`RESTART_REQUIRED`; the test Adapter terminates the old simulation/control
+generation without claiming that it reached inactive/zero before shutdown. A
+future supervisor may start a replacement from a known inactive, zero-command
+state. This is required because paused `gz_ros2_control` cannot
 process a controller switch or consume a newly buffered zero before the first
 resumed write. The project does not claim arbitrary external pause/resume as a
-functional-safety mechanism.
+functional-safety mechanism. This refusal is only a project Adapter policy; it
+does not prevent a local operator from directly sending Gazebo Transport
+`pause:false`. VN-0011B may return `RESTART_REQUIRED` and structurally shut
+down the old generation. Automatically launching a replacement generation
+requires a later supervisor and is not part of this contract.
 
 ## StopMission ownership and ordering
 
@@ -391,10 +482,10 @@ above. Every Goal receives exactly one terminal result.
 | Dependency unavailable during whole-plan validation | reject before an earlier step starts |
 | Candidate stale or authority lease expired | Gate inhibits, latches the old lease closed, and continuously publishes zero |
 | Runtime disappears | Gate lease expires independently |
-| MotionGate disappears while simulation advances | controller consumes no fresh command and times out within 0.35 s of advancing simulation |
-| MotionGate disappears after a managed safe-pause | the wheel command was directly proven zero before the token was issued; token-checked resume preserves it |
-| Gazebo safe-pause and managed resume | first resumed wheel command is zero; stale non-zero command is never replayed |
-| Direct external pause without a safe-pause token | in-place resume is refused; restart simulation/control from a known zero state |
+| MotionGate disappears while simulation advances | the final crash-resilient COMMITTED Gate marker has no later source record and is ACKed by a non-zero controller output; controller selects zero on the first update where that input is older than 0.35 s simulation time |
+| MotionGate disappears after a Managed Safe Pause | exact original-Gate exit plus zero final publishers remains admissible; any replacement identity invalidates the token |
+| Managed Safe Pause and resume | exact single-step/re-pause transactions reach and prove the next controller update zero; one additional step losslessly writes that post-update zero before continuous `pause:false` |
+| Unmanaged Pause without a Safe-Pause Token | in-place resume is refused; return `RESTART_REQUIRED` and shut down the old generation |
 | Nav2 abort or step deadline | Gate zero, cancel child, fail step, skip remainder |
 | Map save partial failure | publish no completed logical map directory |
 | Late callback after cancel | discard callback by epoch/generation; discard velocity through the inhibited handover barrier |
@@ -428,18 +519,24 @@ above. Every Goal receives exactly one terminal result.
 - Runtime tests cover cancel/STOP/success races and exactly-one Result.
 - Process-death tests kill Runtime and MotionGate separately to prove both
   deadman layers.
-- Managed safe-pause/resume tests prove that an old non-zero command cannot
+- Managed Safe Pause/resume tests prove that an old non-zero command cannot
   resume motion within the documented boundary.
 - Handover tests inject old-writer candidates before, during, and after full
   pipeline recreation and prove that channel/GID binding rejects all of them.
-- Pause tests request safe-pause while moving, prove the controller and wheel
-  command reach zero before `/clock` stops, kill MotionGate while paused, and
-  assert the first resumed wheel command is zero.
+- Pause tests request Managed Safe Pause while moving, prove the controller and
+  wheel command reach zero before `/clock` stops, kill MotionGate while paused,
+  send only exact `{pause: true, multi_step: 1}` requests until the next
+  controller update is observed zero, then perform one additional step and
+  require every armed write plus the post-update write to be zero before
+  continuous unpause. BEST_EFFORT introspection alone, a retained zero,
+  omitted/false pause, duplicate request, or incomplete write interval cannot
+  satisfy this assertion.
 - Pause tests also kill MotionGate before zero proof; interface release or
   controller inactivity never mints a token without observed zero, and a
-  failed bounded proof selects full restart.
-- Unmanaged-pause tests prove that a missing or mismatched safe-pause token
-  refuses in-place resume and selects the full-restart recovery path.
+  failed bounded proof selects `RESTART_REQUIRED` and old-generation shutdown.
+- Unmanaged Pause tests prove that a missing or mismatched Safe-Pause Token
+  refuses in-place resume and selects `RESTART_REQUIRED` without claiming an
+  automatic replacement launch.
 - Odometry tests distinguish command-zero latency from physical stationarity.
 - No test exits while either Gate or controller can retain an authorized
   non-zero command.
