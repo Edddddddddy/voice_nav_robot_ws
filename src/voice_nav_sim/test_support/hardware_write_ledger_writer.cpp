@@ -285,6 +285,17 @@ struct HardwareWriteLedgerWriter::Impl
       return;
     }
 
+    if (last_completed_write_seq == std::numeric_limits<std::uint64_t>::max()) {
+      latch_global_fault(VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_SEQUENCE);
+      publish_response(
+        request_ticket,
+        VOICE_NAV_HARDWARE_WRITE_LEDGER_RESPONSE_INVALID,
+        kInvalidBankIndex,
+        0U,
+        last_completed_write_seq);
+      return;
+    }
+
     std::uint64_t free_bank_index{kInvalidBankIndex};
     for (std::uint64_t bank_index = 0U;
       bank_index < VOICE_NAV_HARDWARE_WRITE_LEDGER_BANK_COUNT;
