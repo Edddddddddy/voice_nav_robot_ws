@@ -109,6 +109,10 @@ if(BUILD_TESTING)
     voice_nav_sim_journaled_gazebo_sim_system_adapter
     gz-sim8::gz-sim8
   )
+  target_include_directories(
+    journaled_gazebo_sim_system_adapter_test
+    PRIVATE test_support
+  )
 
   ament_add_pytest_test(
     crash_evidence_test
