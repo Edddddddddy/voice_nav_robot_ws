@@ -34,6 +34,7 @@ from hardware_write_ledger_test_support import (
     CONTROL_RESPONSE_OK,
     crc64_ecma_words,
     FAULT_CAPACITY,
+    FAULT_OBSERVATION,
     FAULT_PROTOCOL,
     FAULT_SEQUENCE,
     FAULT_SIM_STAMP,
@@ -1045,6 +1046,145 @@ def test_qualifying_fault_preserves_attempted_fence_count(probe):
             close_owned_process_pipes(process)
 
 
+def test_fault_only_gap_preserves_later_valid_segment(probe):
+    """Prove invalid attempts stay counted without becoming segments."""
+    with HardwareWriteLedgerRegionOwner(
+        generation=89,
+        segment_capacity=1,
+        page_segment_limit=1,
+    ) as owner:
+        process = spawn_probe(probe, owner)
+        try:
+            require(
+                owner.wait_for_writer(process.pid) == process.pid,
+                'fault-gap probe Writer PID mismatch',
+            )
+            require(
+                read_owned_line(process, 'READY') == 'READY',
+                'fault-gap probe did not publish READY',
+            )
+            owner.unlink_name()
+            arm_ticket = owner.post_arm(
+                interval_id=103,
+                segment_budget=1,
+                invocation_budget=3,
+                require_zero_commands=False,
+            )
+            process.stdin.write('BEGIN 100\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 1',
+                'fault-gap invalid write did not begin',
+            )
+            arm_response = owner.wait_response(arm_ticket)
+            process.stdin.write('FINISH 0 2 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 1',
+                'fault-gap invalid write did not finish',
+            )
+
+            process.stdin.write('BEGIN 200\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 2',
+                'fault-gap valid write did not begin',
+            )
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 2',
+                'fault-gap valid write did not finish',
+            )
+
+            seal_ticket = owner.post_seal(
+                interval_id=103,
+                bank_index=arm_response[10],
+                bank_epoch=arm_response[11],
+                not_before_sim_stamp_ns=300,
+                require_exact_stamp=True,
+            )
+            process.stdin.write('BEGIN 300\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 3',
+                'fault-gap qualifying write did not begin',
+            )
+            process.stdin.write('FINISH 0 0 4607182418800017408 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 3',
+                'fault-gap qualifying write did not finish',
+            )
+            seal_response = owner.wait_response(seal_ticket)
+
+            expected_faults = FAULT_OBSERVATION | FAULT_CAPACITY
+            bank = owner.snapshot_bank(seal_response[10])
+            require(
+                bank[0:15] == (
+                    BANK_STATE_SEALED_FAULT,
+                    1,
+                    103,
+                    0,
+                    3,
+                    1,
+                    3,
+                    CONTROL_FLAG_EXACT_SEAL_STAMP,
+                    300,
+                    1,
+                    3,
+                    1,
+                    3,
+                    expected_faults,
+                    1,
+                ),
+                f'fault-gap bank accounting changed: {bank!r}',
+            )
+            retained_segment = owner.snapshot_segment(seal_response[10], 0)
+            require(
+                retained_segment == (
+                    89,
+                    2,
+                    2,
+                    1,
+                    200,
+                    0,
+                    0,
+                    0,
+                ),
+                f'fault-gap retained the wrong segment: {retained_segment!r}',
+            )
+            expected_bank_checksum = crc64_ecma_words(
+                (*bank[1:15], *retained_segment),
+            )
+            require(
+                bank[15] == expected_bank_checksum,
+                'fault-gap root checksum does not bind its evidence',
+            )
+            require(
+                owner.load_header_word(GLOBAL_ORACLE_FAULTS_WORD) ==
+                expected_faults,
+                'fault-gap added a derived SEQUENCE or PROTOCOL fault',
+            )
+            require(
+                seal_response[9] == CONTROL_RESPONSE_OK and
+                seal_response[12] == 3,
+                f'fault-gap receipt changed: {seal_response!r}',
+            )
+
+            process.stdin.write('EXIT\n')
+            process.stdin.flush()
+            return_code = process.wait(timeout=3.0)
+            stderr = process.stderr.read()
+            require(
+                return_code == 0,
+                f'fault-gap probe exited {return_code}: {stderr}',
+            )
+        finally:
+            terminate_owned_process(process)
+            close_owned_process_pipes(process)
+
+
 def test_same_ticket_different_payload_replay_latches_fault(probe):
     """Prove an acknowledged ticket cannot be reused for another payload."""
     with HardwareWriteLedgerRegionOwner(
@@ -1363,6 +1503,7 @@ def main():
     test_exact_seal_skip_includes_write_and_seals_fault(probe)
     test_corrupt_segment_count_does_not_escape_mapping(probe)
     test_qualifying_fault_preserves_attempted_fence_count(probe)
+    test_fault_only_gap_preserves_later_valid_segment(probe)
     test_same_ticket_different_payload_replay_latches_fault(probe)
     test_decreasing_sim_stamp_latches_fault_without_overwrite(probe)
     test_sequence_exhaustion_rejects_arm_before_bank_activation(probe)
