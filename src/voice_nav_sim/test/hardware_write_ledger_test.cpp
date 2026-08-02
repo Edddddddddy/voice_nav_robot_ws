@@ -432,4 +432,32 @@ TEST(HardwareWriteLedger, LatchesASimulationStampRegression)
   EXPECT_EQ(snapshot->page_checksum, independent_page_checksum(*snapshot));
 }
 
+TEST(HardwareWriteLedger, LatchesCapacityExhaustionBeforeLosingASegment)
+{
+  voice_nav_sim::HardwareWriteLedger ledger({49U, 15U, 0U, 1U, 1U});
+  const voice_nav_sim::HardwareWriteRecord first{
+    49U, 1U, 9'000'000, 0U, UINT64_C(13), UINT64_C(14)};
+  const voice_nav_sim::HardwareWriteRecord transition{
+    49U, 2U, 9'010'000, 0U, UINT64_C(15), UINT64_C(16)};
+  ASSERT_TRUE(ledger.append(first));
+
+  EXPECT_FALSE(ledger.append(transition));
+  EXPECT_EQ(
+    ledger.oracle_faults(),
+    voice_nav_sim::kHardwareWriteOracleFaultCapacity);
+  ASSERT_TRUE(ledger.seal());
+
+  const auto snapshot = ledger.snapshot_page(0U);
+  ASSERT_TRUE(snapshot.has_value());
+  EXPECT_EQ(
+    snapshot->oracle_faults,
+    voice_nav_sim::kHardwareWriteOracleFaultCapacity);
+  EXPECT_EQ(snapshot->total_segment_count, 1U);
+  EXPECT_EQ(snapshot->total_invocation_count, 1U);
+  ASSERT_EQ(snapshot->segments.size(), 1U);
+  EXPECT_EQ(snapshot->segments.front().first_write_seq, 1U);
+  EXPECT_EQ(snapshot->segments.front().last_write_seq, 1U);
+  EXPECT_EQ(snapshot->page_checksum, independent_page_checksum(*snapshot));
+}
+
 }  // namespace
