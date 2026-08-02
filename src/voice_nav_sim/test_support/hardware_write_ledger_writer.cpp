@@ -146,6 +146,21 @@ bool zero_command_bits(std::uint64_t bits) noexcept
   return (bits & UINT64_C(0x7fffffffffffffff)) == 0U;
 }
 
+bool segment_tuple_matches(
+  const voice_nav_hardware_write_ledger_segment_v1 & segment,
+  std::uint64_t generation,
+  std::int64_t sim_stamp_ns,
+  std::uint64_t observation_and_result,
+  const HardwareWriteWheelObservation & observation) noexcept
+{
+  return segment.generation == generation &&
+         segment.sim_stamp_ns_bits ==
+         static_cast<std::uint64_t>(sim_stamp_ns) &&
+         segment.observation_and_result == observation_and_result &&
+         segment.left_command_bits == observation.left_command_bits &&
+         segment.right_command_bits == observation.right_command_bits;
+}
+
 }  // namespace
 
 struct HardwareWriteLedgerWriter::Impl
@@ -402,19 +417,38 @@ struct HardwareWriteLedgerWriter::Impl
     }
 
     if (ticket.included) {
-      auto * active_bank = bank(ticket.bank_index);
-      std::uint64_t faults{0U};
-      if (
-        atomic_load_acquire(active_bank->state) !=
-        VOICE_NAV_HARDWARE_WRITE_LEDGER_BANK_ACTIVE ||
-        active_bank->bank_epoch != ticket.bank_epoch ||
-        active_bank->invocation_count != 0U ||
-        active_bank->segment_count != 0U ||
-        active_bank->invocation_budget == 0U ||
-        active_bank->segment_budget == 0U)
-      {
-        faults |= VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_PROTOCOL;
+      const bool bank_index_valid =
+        ticket.bank_index < VOICE_NAV_HARDWARE_WRITE_LEDGER_BANK_COUNT;
+      auto * active_bank = bank_index_valid ? bank(ticket.bank_index) : nullptr;
+      const bool bank_structure_valid = bank_index_valid &&
+        atomic_load_acquire(active_bank->state) ==
+        VOICE_NAV_HARDWARE_WRITE_LEDGER_BANK_ACTIVE &&
+        active_bank->bank_epoch == ticket.bank_epoch &&
+        active_bank->segment_budget != 0U &&
+        active_bank->segment_budget <= header->segment_capacity_per_bank &&
+        active_bank->invocation_budget != 0U &&
+        active_bank->segment_count <= active_bank->segment_budget &&
+        active_bank->segment_count <= header->segment_capacity_per_bank &&
+        ((active_bank->invocation_count == 0U &&
+        active_bank->segment_count == 0U &&
+        active_bank->first_write_seq == 0U &&
+        active_bank->last_write_seq == 0U) ||
+        (active_bank->invocation_count != 0U &&
+        active_bank->segment_count != 0U &&
+        active_bank->first_write_seq ==
+        active_bank->arm_fence_write_seq + 1U &&
+        active_bank->last_write_seq >= active_bank->first_write_seq &&
+        active_bank->invocation_count ==
+        active_bank->last_write_seq - active_bank->arm_fence_write_seq));
+      if (!bank_structure_valid) {
+        latch_global_fault(VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_PROTOCOL);
+        atomic_store_release(
+          header->last_completed_write_seq, ticket.write_seq);
+        has_outstanding_ticket = false;
+        return;
       }
+
+      std::uint64_t faults{0U};
       const auto observation_value =
         static_cast<std::uint64_t>(observation.status);
       if (
@@ -445,21 +479,93 @@ struct HardwareWriteLedgerWriter::Impl
         }
       }
 
-      auto * first_segment = segment(ticket.bank_index, 0U);
-      first_segment->generation = header->generation;
-      first_segment->first_write_seq = ticket.write_seq;
-      first_segment->last_write_seq = ticket.write_seq;
-      first_segment->invocation_count = 1U;
-      first_segment->sim_stamp_ns_bits =
-        static_cast<std::uint64_t>(ticket.sim_stamp_ns);
-      first_segment->observation_and_result =
+      const auto packed_observation_and_result =
         (observation_value << 8U) | (delegated_result & UINT64_C(0xff));
-      first_segment->left_command_bits = observation.left_command_bits;
-      first_segment->right_command_bits = observation.right_command_bits;
-      active_bank->segment_count = 1U;
-      active_bank->invocation_count = 1U;
-      active_bank->first_write_seq = ticket.write_seq;
-      active_bank->last_write_seq = ticket.write_seq;
+      const bool sequence_is_contiguous =
+        active_bank->invocation_count == 0U ?
+        ticket.write_seq == active_bank->arm_fence_write_seq + 1U :
+        active_bank->last_write_seq !=
+        std::numeric_limits<std::uint64_t>::max() &&
+        ticket.write_seq == active_bank->last_write_seq + 1U;
+      if (!sequence_is_contiguous) {
+        faults |= VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_SEQUENCE;
+      }
+      if (active_bank->invocation_count >= active_bank->invocation_budget) {
+        faults |= VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_CAPACITY;
+      }
+
+      bool record_appended{false};
+      if (
+        sequence_is_contiguous &&
+        active_bank->invocation_count < active_bank->invocation_budget)
+      {
+        if (active_bank->segment_count == 0U) {
+          auto * first_segment = segment(ticket.bank_index, 0U);
+          *first_segment = voice_nav_hardware_write_ledger_segment_v1{
+            header->generation,
+            ticket.write_seq,
+            ticket.write_seq,
+            1U,
+            static_cast<std::uint64_t>(ticket.sim_stamp_ns),
+            packed_observation_and_result,
+            observation.left_command_bits,
+            observation.right_command_bits};
+          active_bank->segment_count = 1U;
+          record_appended = true;
+        } else {
+          auto * last_segment = segment(
+            ticket.bank_index, active_bank->segment_count - 1U);
+          const bool last_segment_valid =
+            last_segment->generation == header->generation &&
+            last_segment->invocation_count != 0U &&
+            last_segment->last_write_seq == active_bank->last_write_seq &&
+            last_segment->last_write_seq >= last_segment->first_write_seq &&
+            last_segment->invocation_count ==
+            last_segment->last_write_seq -
+            last_segment->first_write_seq + 1U;
+          if (!last_segment_valid) {
+            faults |= VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_PROTOCOL;
+          } else if (
+            segment_tuple_matches(
+              *last_segment,
+              header->generation,
+              ticket.sim_stamp_ns,
+              packed_observation_and_result,
+              observation))
+          {
+            last_segment->last_write_seq = ticket.write_seq;
+            ++last_segment->invocation_count;
+            record_appended = true;
+          } else if (
+            active_bank->segment_count < active_bank->segment_budget &&
+            active_bank->segment_count < header->segment_capacity_per_bank)
+          {
+            auto * next_segment = segment(
+              ticket.bank_index, active_bank->segment_count);
+            *next_segment = voice_nav_hardware_write_ledger_segment_v1{
+              header->generation,
+              ticket.write_seq,
+              ticket.write_seq,
+              1U,
+              static_cast<std::uint64_t>(ticket.sim_stamp_ns),
+              packed_observation_and_result,
+              observation.left_command_bits,
+              observation.right_command_bits};
+            ++active_bank->segment_count;
+            record_appended = true;
+          } else {
+            faults |= VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_CAPACITY;
+          }
+        }
+      }
+
+      if (record_appended) {
+        if (active_bank->invocation_count == 0U) {
+          active_bank->first_write_seq = ticket.write_seq;
+        }
+        ++active_bank->invocation_count;
+        active_bank->last_write_seq = ticket.write_seq;
+      }
       active_bank->oracle_faults |= faults;
       if (faults != 0U) {
         latch_global_fault(faults);
