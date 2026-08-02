@@ -70,6 +70,7 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0060 | A mailbox replay races or binds its response to changed request bytes | Does a pending request retain Writer ownership and bind the consumed snapshot? | Guarded |
 | PIT-0061 | A fail-closed checksum path reads beyond fixed evidence storage | Was untrusted count geometry rejected before traversal? | Guarded |
 | PIT-0062 | An invalid write becomes a fake segment or makes the next valid write look out of sequence | Are attempted metadata and recordable segment coverage validated separately? | Guarded |
+| PIT-0063 | An INVALID receipt appears to select an existing terminal bank | Does rejection use the canonical invalid identity without touching bank evidence? | Guarded |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -1549,3 +1550,22 @@ otherwise recordable offending tuple as a separate forensic segment and
 latches `SIM_STAMP`. Cross-process tracers cover an observation-only gap,
 later valid evidence, capacity exhaustion, and a clean segment-count mutation
 that must become `PROTOCOL/SEALED_FAULT`.
+
+## PIT-0063: A rejected control request must not echo a bank identity
+
+**Symptom.** A checksummed but invalid SEAL against retained terminal evidence
+returns `INVALID` while its receipt still names that real bank and epoch. The
+bank bytes happen to remain unchanged, but the response looks as though Writer
+selected or validated the terminal identity.
+
+**Cause.** The rejection branch copied `bank_index` and `bank_epoch` from the
+untrusted request into the response instead of publishing the protocol's
+no-selection identity.
+
+**Guardrail.** Every invalid control response uses the public all-ones
+`INVALID_BANK_INDEX`, epoch zero, and the completed-write fence observed before
+the new write sequence is assigned. It binds the exact consumed request and
+response by CRC, latches global `PROTOCOL`, and never changes ACTIVE,
+`SEALED_OK`, or `SEALED_FAULT` bank bytes. Cross-process coverage mutates every
+SEAL field independently, corrupts the request checksum, and compares all bank
+words plus the full fixed segment capacity before and after unarmed FINISH.

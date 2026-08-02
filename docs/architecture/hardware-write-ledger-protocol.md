@@ -59,6 +59,15 @@ The monotonically increasing request ticket is its idempotency identity; a
 duplicate with identical checksum returns the original receipt, while reuse
 with different payload, a gap, or wrap latches a protocol fault.
 
+Every rejected request publishes `INVALID` with the canonical response
+identity `{bank_index=INVALID_BANK_INDEX, bank_epoch=0}` and the
+`last_completed_write_seq` observed when control was consumed. It never echoes
+an unselected request identity. A bad checksum or invalid SEAL field latches
+the global `PROTOCOL` fault but does not mutate an ACTIVE or terminal bank;
+the Parent may issue a new correctly checksummed request only with the next
+ticket. Tests cover every SEAL field, request checksum, and byte-for-byte
+immutability of both `SEALED_OK` and `SEALED_FAULT` evidence.
+
 One owned request envelope prevents either role from reading ordinary fields
 while the other role may write them:
 
@@ -203,6 +212,10 @@ identity, fence, consumed-request checksum, response checksum, and a final
 release-published response ticket. Six reserved words remain zero. Each
 checksum binds the header identity and ticket as well as its explicit fields;
 no CRC is calculated over raw struct padding.
+
+`INVALID_BANK_INDEX` is the public all-ones `uint64_t` sentinel used only when
+no bank was selected. A canonical invalid response always pairs it with epoch
+zero; valid bank indexes remain in `[0, BANK_COUNT)`.
 
 The bank checksum excludes the atomic state word and itself, and covers every
 other fixed bank word plus exactly the finalized segments. A page checksum

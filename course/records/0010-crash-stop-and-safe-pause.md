@@ -739,6 +739,36 @@ package/full-repository/Gazebo runtime gates: not run for this checkpoint
 root crash-stop checker: expected RED at missing crash_stop_policy.py
 ```
 
+### Invalid-SEAL and terminal-immutability checkpoint
+
+A terminal-bank tracer found that `process_seal()` correctly rejected an
+invalid request but echoed the request's real bank/epoch in its receipt. RED
+commit `ce4598a` proved the misleading identity while also snapshotting every
+bank word and the full fixed segment capacity around both BEGIN and FINISH.
+GREEN `ec693da` returns the canonical no-selection identity instead.
+
+Follow-up coverage names the all-ones sentinel in ABI v1, rejects a corrupted
+request checksum with an independently verified response CRC, mutates every
+SEAL field against an ACTIVE bank, and then proves a correct next-ticket SEAL
+still succeeds. Equivalent post-terminal requests leave both `SEALED_OK` and
+`SEALED_FAULT` evidence byte-for-byte unchanged; only the global `PROTOCOL`
+fault records the invalid control attempt. PIT-0063 captures the reusable
+failure pattern.
+
+```text
+canonical INVALID RED/GREEN: ce4598a, ec693da
+checksum/sentinel coverage: b0cf723
+field matrix and both terminal states: 84f9bda
+focused C ABI/concurrency/cross-process/core CTests: 4/4 passed
+cross-process CTest: 5/5 consecutive executions passed
+Writer TSAN CTest: 10/10 consecutive executions passed
+cppcheck/flake8/lint_cmake/pep257/uncrustify: 5/5 passed
+repository contract: passed
+protected Gazebo: 3631225|1|34712103|gz sim server (unchanged)
+package/full-repository/Gazebo runtime gates: not run for this checkpoint
+root crash-stop checker: expected RED at missing crash_stop_policy.py
+```
+
 ## VN-0011A observed crash evidence
 
 | Case | Expected threshold | Observed result |

@@ -426,6 +426,12 @@ and [ADR-0006](../adr/0006-use-fenced-dual-bank-hardware-write-ledger.md).
   sequence. If that call receives sequence `s`, `arm_fence_write_seq=s-1` and
   `s` is the first included invocation. Only that linearization may publish the
   ARM receipt; posting or polling the request is not a fence;
+- an invalid checksummed control field or request checksum latches global
+  `PROTOCOL` and returns `INVALID` with canonical
+  `{INVALID_BANK_INDEX, epoch=0}` plus the pre-entry completed-write fence. It
+  cannot claim, fault, or otherwise modify ACTIVE or terminal bank evidence;
+  mutation coverage includes every SEAL field, checksum failure, and both
+  terminal states;
 - `SEAL(generation, interval_id, bank identity, request_ticket,
   not_before_sim_stamp)` is deferred and inclusive. Stamps below the threshold
   leave it pending. For the first qualifying invocation `s`, ordering is
