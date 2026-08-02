@@ -1596,8 +1596,35 @@ def validate_node(path: Path) -> None:
             "use_sim_time runtime invariant was violated",
             "ros_time_is_active()",
             "command.header.stamp.sec = 0",
+            '"test_gate_event_journal_name"',
+            '"test_gate_event_journal_descriptor"',
         ),
         "motion_gate_node",
+    )
+    runtime_member_start = source.find("NodeConfig node_config_;")
+    if runtime_member_start < 0:
+        raise MotionGateContractError(
+            "motion_gate_node must retain its validated NodeConfig"
+        )
+    validate_order(
+        source[runtime_member_start:],
+        (
+            "NodeConfig node_config_;",
+            "MotionGateProcessRuntime runtime_;",
+            "MotionGateCore & core_;",
+            "rclcpp::CallbackGroup::SharedPtr callback_group_;",
+        ),
+        "MotionGate process Runtime member lifetime",
+    )
+    validate_order(
+        source,
+        (
+            "node_config_(load_node_config())",
+            "runtime_(",
+            "core_(runtime_.core())",
+            "callback_group_(",
+        ),
+        "MotionGate process Runtime construction",
     )
     if re.search(r"\bget_gid\s*\(", source):
         raise MotionGateContractError(
@@ -2055,6 +2082,21 @@ def validate_mission_cmake(path: Path) -> None:
             "motion_gate_core must be one internal STATIC target built from "
             "src/motion_gate_core.cpp"
         )
+    runtime_library_calls = [
+        cmake_arguments(body)
+        for body in cmake_call_bodies(source, "add_library")
+        if cmake_arguments(body)[:1] == ["motion_gate_process_runtime"]
+    ]
+    expected_runtime_library = [
+        "motion_gate_process_runtime",
+        "STATIC",
+        "src/motion_gate_process_runtime.cpp",
+    ]
+    if runtime_library_calls != [expected_runtime_library]:
+        raise MotionGateContractError(
+            "motion_gate_process_runtime must be one internal STATIC target "
+            "built from src/motion_gate_process_runtime.cpp"
+        )
 
     for body in cmake_call_bodies(source, "install"):
         arguments = cmake_arguments(body)
@@ -2073,6 +2115,13 @@ def validate_mission_cmake(path: Path) -> None:
                 )
             raise MotionGateContractError(
                 "motion_gate_core must not be installed"
+            )
+        if any(
+            "motion_gate_process_runtime" in argument
+            for argument in arguments
+        ):
+            raise MotionGateContractError(
+                "motion_gate_process_runtime must not be installed"
             )
         if (
             arguments[:1] == ["DIRECTORY"]
@@ -2100,6 +2149,13 @@ def validate_mission_cmake(path: Path) -> None:
                 raise MotionGateContractError(
                     "motion_gate_core must not be exported"
                 )
+            if any(
+                "motion_gate_process_runtime" in argument
+                for argument in arguments
+            ):
+                raise MotionGateContractError(
+                    "motion_gate_process_runtime must not be exported"
+                )
             if (
                 command == "ament_export_include_directories"
                 and any(
@@ -2126,6 +2182,24 @@ def validate_mission_cmake(path: Path) -> None:
         raise MotionGateContractError(
             "motion_gate_node must compile the private "
             "src/writer_observation.cpp adapter"
+        )
+    node_link_calls = [
+        cmake_arguments(body)
+        for body in cmake_call_bodies(source, "target_link_libraries")
+        if cmake_arguments(body)[:1] == ["motion_gate_node"]
+    ]
+    if len(node_link_calls) != 1:
+        raise MotionGateContractError(
+            "motion_gate_node must have one explicit link contract"
+        )
+    node_links = node_link_calls[0][1:]
+    if (
+        "motion_gate_process_runtime" not in node_links
+        or "motion_gate_core" in node_links
+    ):
+        raise MotionGateContractError(
+            "motion_gate_node must link the process Runtime and must not "
+            "bypass it by linking MotionGate Core directly"
         )
 
     writer_test_calls = [

@@ -687,6 +687,13 @@ class MotionGateNode : public rclcpp::Node
 public:
   MotionGateNode()
   : Node("motion_gate_node"),
+    node_config_(load_node_config()),
+    runtime_(
+      node_config_.core,
+      make_gate_instance_id(),
+      node_config_.journal_parameters),
+    core_(runtime_.core()),
+    callback_group_(create_callback_group()),
     writer_observation_session_({
       "geometry_msgs/msg/TwistStamped",
       "/collision_monitor"})
@@ -704,6 +711,8 @@ public:
     (void)"/motion_gate/internal/state";
     (void)"/voice_nav_internal/motion_gate/candidate/lease_";
     (void)"/diff_drive_controller/cmd_vel";
+    (void)"test_gate_event_journal_name";
+    (void)"test_gate_event_journal_descriptor";
     use_sim_time_guard_ = add_on_set_parameters_callback(
       [](const auto &) {
         SetParametersResult result;
@@ -882,6 +891,10 @@ public:
   }
 
 private:
+  NodeConfig node_config_;
+  MotionGateProcessRuntime runtime_;
+  MotionGateCore & core_;
+  rclcpp::CallbackGroup::SharedPtr callback_group_;
   std::mutex publication_mutex_;
   WriterObservationSession writer_observation_session_;
   MotionGateCore::SteadyTimePoint writer_observation_started_at_{};
@@ -938,6 +951,13 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 )
 
 add_library(motion_gate_core STATIC src/motion_gate_core.cpp)
+add_library(
+  motion_gate_process_runtime STATIC
+  src/motion_gate_process_runtime.cpp
+)
+target_link_libraries(
+  motion_gate_process_runtime PUBLIC motion_gate_core
+)
 add_executable(
   motion_gate_node
   src/motion_gate_node.cpp
@@ -948,7 +968,11 @@ rosidl_get_typesupport_target(
   ${PROJECT_NAME}
   rosidl_typesupport_cpp
 )
-target_link_libraries(motion_gate_node motion_gate_core "${motion_gate_typesupport}")
+target_link_libraries(
+  motion_gate_node
+  motion_gate_process_runtime
+  "${motion_gate_typesupport}"
+)
 
 if(BUILD_TESTING)
   ament_add_gtest(motion_gate_core_test test/motion_gate_core_test.cpp)
