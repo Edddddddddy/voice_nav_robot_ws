@@ -218,6 +218,45 @@ void expect_automatic_retirement(
   EXPECT_EQ(slot.commit_checksum, gate_event_journal_commit_checksum(slot));
 }
 
+void expect_same_snapshot(const Snapshot & actual, const Snapshot & expected)
+{
+  EXPECT_EQ(actual.gate_instance_id, expected.gate_instance_id);
+  EXPECT_EQ(actual.state_seq, expected.state_seq);
+  EXPECT_EQ(actual.control_seq, expected.control_seq);
+  EXPECT_EQ(
+    actual.output_cause_transition_journal_seq,
+    expected.output_cause_transition_journal_seq);
+  EXPECT_EQ(actual.state, expected.state);
+  EXPECT_EQ(actual.lease_id, expected.lease_id);
+  EXPECT_EQ(actual.candidate_topic, expected.candidate_topic);
+  EXPECT_EQ(actual.bound_writer_gid, expected.bound_writer_gid);
+  EXPECT_EQ(actual.motion_inhibited, expected.motion_inhibited);
+  EXPECT_EQ(actual.authority_live, expected.authority_live);
+  EXPECT_EQ(actual.candidate_fresh, expected.candidate_fresh);
+  EXPECT_EQ(actual.writer_bound, expected.writer_bound);
+  EXPECT_EQ(actual.zero_selected, expected.zero_selected);
+  EXPECT_EQ(actual.reason, expected.reason);
+  EXPECT_EQ(actual.detail, expected.detail);
+}
+
+void expect_terminal_fault(
+  const GateEventJournalSlot & slot,
+  Reason reason,
+  std::uint64_t journal_seq)
+{
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(slot.phase),
+    VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_COMMITTED);
+  EXPECT_EQ(
+    slot.record_kind,
+    VOICE_NAV_GATE_EVENT_JOURNAL_KIND_CONTROL_TRANSITION);
+  EXPECT_EQ(slot.event_code, 6U);
+  EXPECT_EQ(slot.reason, static_cast<std::uint64_t>(reason));
+  EXPECT_EQ(slot.journal_seq, journal_seq);
+  EXPECT_EQ(slot.intent_checksum, gate_event_journal_intent_checksum(slot));
+  EXPECT_EQ(slot.commit_checksum, gate_event_journal_commit_checksum(slot));
+}
+
 TEST(MotionGateJournal, OneJournalGenerationCannotBindTwoCores)
 {
   JournalRegion<1U> region;
@@ -1158,6 +1197,10 @@ TEST(MotionGateJournal, EveryAutomaticRetirementReasonUsesEventFive)
     const auto now = MotionGateCore::SteadyTimePoint{};
     ASSERT_EQ(harness.prepare(now).code, ResultCode::Applied);
     ASSERT_EQ(harness.open(now).code, ResultCode::Applied);
+    ASSERT_TRUE(
+      harness.gate.accept_candidate(
+        harness.candidate(),
+        now + std::chrono::milliseconds{149}).accepted);
 
     EXPECT_TRUE(
       harness.gate.tick(
@@ -1217,10 +1260,11 @@ TEST(MotionGateJournal, FullJournalSeparatesAdmissionFromSafetyMutation)
       std::overflow_error);
 
     const auto after = harness.gate.snapshot();
-    EXPECT_EQ(after.state, State::Prepared);
-    EXPECT_EQ(after.state_seq, before.state_seq);
-    EXPECT_EQ(after.control_seq, before.control_seq);
-    EXPECT_EQ(after.lease_id, before.lease_id);
+    expect_same_snapshot(after, before);
+    EXPECT_EQ(
+      gate_event_journal_load_acquire(
+        harness.region.header.claimed_slots),
+      1U);
     EXPECT_EQ(
       gate_event_journal_load_acquire(
         harness.region.header.overflow_latched),
@@ -1232,7 +1276,15 @@ TEST(MotionGateJournal, FullJournalSeparatesAdmissionFromSafetyMutation)
     const auto now = MotionGateCore::SteadyTimePoint{};
     ASSERT_EQ(harness.prepare(now).code, ResultCode::Applied);
     ASSERT_EQ(harness.open(now).code, ResultCode::Applied);
+    ASSERT_TRUE(
+      harness.gate.accept_candidate(
+        harness.candidate(),
+        now + std::chrono::milliseconds{5}).accepted);
     const auto before = harness.gate.snapshot();
+    const auto before_command = harness.gate.selected_command();
+    ASSERT_FALSE(before.zero_selected);
+    ASSERT_DOUBLE_EQ(before_command.linear_x, 0.10);
+    ASSERT_DOUBLE_EQ(before_command.angular_z, 0.20);
 
     EXPECT_THROW(
       (void)harness.gate.renew(
@@ -1246,16 +1298,25 @@ TEST(MotionGateJournal, FullJournalSeparatesAdmissionFromSafetyMutation)
       std::overflow_error);
 
     const auto after = harness.gate.snapshot();
-    EXPECT_EQ(after.state, State::Armed);
-    EXPECT_EQ(after.state_seq, before.state_seq);
-    EXPECT_EQ(after.control_seq, before.control_seq);
-    EXPECT_EQ(after.lease_id, before.lease_id);
+    const auto after_command = harness.gate.selected_command();
+    expect_same_snapshot(after, before);
+    EXPECT_DOUBLE_EQ(after_command.linear_x, before_command.linear_x);
+    EXPECT_DOUBLE_EQ(after_command.angular_z, before_command.angular_z);
+    EXPECT_EQ(
+      gate_event_journal_load_acquire(
+        harness.region.header.claimed_slots),
+      2U);
+    EXPECT_EQ(
+      gate_event_journal_load_acquire(
+        harness.region.header.overflow_latched),
+      1U);
   }
 
   {
     JournalGateHarness<1U> harness;
     const auto now = MotionGateCore::SteadyTimePoint{};
     ASSERT_EQ(harness.prepare(now).code, ResultCode::Applied);
+    const auto before = harness.gate.snapshot();
 
     EXPECT_NO_THROW(
       (void)harness.gate.tick(
@@ -1265,7 +1326,23 @@ TEST(MotionGateJournal, FullJournalSeparatesAdmissionFromSafetyMutation)
     EXPECT_EQ(state.state, State::Inhibited);
     EXPECT_EQ(state.reason, Reason::PrepareExpired);
     EXPECT_EQ(state.output_cause_transition_journal_seq, 0U);
+    EXPECT_EQ(state.state_seq, before.state_seq + 1U);
+    EXPECT_EQ(state.control_seq, before.control_seq + 1U);
+    EXPECT_TRUE(state.lease_id.empty());
+    EXPECT_TRUE(state.motion_inhibited);
+    EXPECT_FALSE(state.authority_live);
+    EXPECT_FALSE(state.candidate_fresh);
+    EXPECT_FALSE(state.writer_bound);
     EXPECT_TRUE(state.zero_selected);
+    EXPECT_TRUE(harness.gate.selected_command().is_zero());
+    EXPECT_EQ(
+      gate_event_journal_load_acquire(
+        harness.region.header.claimed_slots),
+      1U);
+    EXPECT_EQ(
+      gate_event_journal_load_acquire(
+        harness.region.header.overflow_latched),
+      1U);
   }
 
   {
@@ -1275,6 +1352,7 @@ TEST(MotionGateJournal, FullJournalSeparatesAdmissionFromSafetyMutation)
     ASSERT_EQ(harness.open(now).code, ResultCode::Applied);
     auto candidate = harness.candidate();
     candidate.linear_y = 0.01;
+    const auto before = harness.gate.snapshot();
 
     CandidateResult result;
     EXPECT_NO_THROW(
@@ -1282,10 +1360,26 @@ TEST(MotionGateJournal, FullJournalSeparatesAdmissionFromSafetyMutation)
 
     EXPECT_TRUE(result.retired);
     EXPECT_EQ(result.reason, Reason::InvalidCandidate);
-    EXPECT_EQ(harness.gate.snapshot().state, State::Inhibited);
+    const auto state = harness.gate.snapshot();
+    EXPECT_EQ(state.state, State::Inhibited);
+    EXPECT_EQ(state.output_cause_transition_journal_seq, 0U);
+    EXPECT_EQ(state.state_seq, before.state_seq + 1U);
+    EXPECT_EQ(state.control_seq, before.control_seq + 1U);
+    EXPECT_TRUE(state.lease_id.empty());
+    EXPECT_TRUE(state.motion_inhibited);
+    EXPECT_FALSE(state.authority_live);
+    EXPECT_FALSE(state.candidate_fresh);
+    EXPECT_FALSE(state.writer_bound);
+    EXPECT_TRUE(state.zero_selected);
+    EXPECT_TRUE(harness.gate.selected_command().is_zero());
     EXPECT_EQ(
-      harness.gate.snapshot().output_cause_transition_journal_seq,
-      0U);
+      gate_event_journal_load_acquire(
+        harness.region.header.claimed_slots),
+      2U);
+    EXPECT_EQ(
+      gate_event_journal_load_acquire(
+        harness.region.header.overflow_latched),
+      1U);
   }
 }
 
@@ -1317,10 +1411,11 @@ TEST(MotionGateJournal, ProviderFaultsCommitOneTerminalRecordAndReplayNone)
     EXPECT_EQ(
       gate_event_journal_load_acquire(harness.region.header.claimed_slots),
       1U);
-    EXPECT_EQ(harness.region.slots[0U].event_code, 6U);
     EXPECT_EQ(
-      harness.region.slots[0U].reason,
-      static_cast<std::uint64_t>(Reason::InternalFailure));
+      harness.gate.snapshot().output_cause_transition_journal_seq,
+      1U);
+    expect_terminal_fault(
+      harness.region.slots[0U], Reason::InternalFailure, 1U);
   }
 
   {
@@ -1350,10 +1445,11 @@ TEST(MotionGateJournal, ProviderFaultsCommitOneTerminalRecordAndReplayNone)
     EXPECT_EQ(
       gate_event_journal_load_acquire(harness.region.header.claimed_slots),
       2U);
-    EXPECT_EQ(harness.region.slots[1U].event_code, 6U);
     EXPECT_EQ(
-      harness.region.slots[1U].reason,
-      static_cast<std::uint64_t>(Reason::InternalFailure));
+      harness.gate.snapshot().output_cause_transition_journal_seq,
+      2U);
+    expect_terminal_fault(
+      harness.region.slots[1U], Reason::InternalFailure, 2U);
   }
 }
 
@@ -1394,7 +1490,10 @@ TEST(MotionGateJournal, NonTransitionsNeverConsumeJournalSlots)
     2U);
 
   harness.gate.force_fault(Reason::PublishFailed, "publisher failed");
+  const auto first_fault = harness.gate.snapshot();
   harness.gate.force_fault(Reason::InternalFailure, "late fault");
+  const auto repeated_fault = harness.gate.snapshot();
+  expect_same_snapshot(repeated_fault, first_fault);
   EXPECT_EQ(
     gate_event_journal_load_acquire(harness.region.header.claimed_slots),
     3U);

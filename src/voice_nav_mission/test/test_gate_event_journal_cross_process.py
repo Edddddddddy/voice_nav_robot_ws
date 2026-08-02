@@ -345,7 +345,6 @@ class GateEventJournalCrossProcessTest(unittest.TestCase):
                 self.assertEqual(stdout, b'')
                 self.assertEqual(stderr, b'')
 
-                self.assertEqual(owner.load_slot_phase(), PHASE_COMMITTED)
                 self._assert_committed_generation(owner, process.pid)
                 owner.assert_name_missing(self)
             finally:
@@ -354,6 +353,7 @@ class GateEventJournalCrossProcessTest(unittest.TestCase):
                     process.communicate(timeout=WAIT_TIMEOUT_SECONDS)
 
     def _assert_committed_generation(self, owner, child_pid):
+        self.assertEqual(owner.load_slot_phase(), PHASE_COMMITTED)
         self.assertEqual(owner.load_header_word(11), 1)
         self.assertEqual(owner.load_header_word(12), 0)
         self.assertEqual(owner.load_header_word(13), child_pid)
