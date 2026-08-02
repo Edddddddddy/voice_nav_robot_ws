@@ -21,6 +21,7 @@
 #include <limits>
 #include <sstream>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 
 #include "gate_event_journal.hpp"  // NOLINT(build/include_subdir)
@@ -109,6 +110,10 @@ void MotionGateCore::apply_transition(
   Reason reason,
   Mutation && mutation)
 {
+  static_assert(
+    std::is_nothrow_invocable_v<Mutation &>,
+    "a journaled Core mutation must be bounded and noexcept");
+
   if (event_journal_ == nullptr) {
     std::forward<Mutation>(mutation)();
     return;
@@ -129,7 +134,7 @@ void MotionGateCore::apply_transition(
 
   (void)event_journal_->apply_transition(
     intent,
-    [this, &mutation]() {
+    [this, &mutation]() noexcept {
       std::forward<Mutation>(mutation)();
       const auto after_lease_words = identifier_words(lease_id_);
       return GateTransitionAfter{
@@ -234,7 +239,7 @@ ControlResult MotionGateCore::prepare(
   apply_transition(
     kTransitionEventPrepare,
     Reason::None,
-    [this, now, &next_lease_id, &next_candidate_topic, &next_detail]() {
+    [this, now, &next_lease_id, &next_candidate_topic, &next_detail]() noexcept {
       ++control_seq_;
       lease_id_.swap(next_lease_id);
       candidate_topic_.swap(next_candidate_topic);
@@ -361,7 +366,7 @@ ControlResult MotionGateCore::open(
   apply_transition(
     kTransitionEventOpen,
     Reason::None,
-    [this, now, &binding, &next_detail]() {
+    [this, now, &binding, &next_detail]() noexcept {
       ++control_seq_;
       bound_writer_gid_ = binding.writer_gid;
       writer_bound_ = true;

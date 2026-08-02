@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 #include <type_traits>
 
 #include "gate_event_journal.hpp"
@@ -212,6 +213,54 @@ TEST(MotionGateJournal, SuccessfulOpenUsesTheSameCoreOwnedFence)
   EXPECT_EQ(slot.flags, 0U);
   EXPECT_EQ(slot.intent_checksum, gate_event_journal_intent_checksum(slot));
   EXPECT_EQ(slot.commit_checksum, gate_event_journal_commit_checksum(slot));
+}
+
+TEST(MotionGateJournal, ReservationFailureLeavesPrepareFailClosedAndUnchanged)
+{
+  JournalRegion<1U> region;
+  const auto identity = initialize_region(region);
+  FakeClock clock;
+  GateEventJournal journal(
+    &region,
+    sizeof(region),
+    identity,
+    GateEventJournalClock{&FakeClock::read, &clock});
+  (void)journal.publish_output(
+    GateOutputIntent{
+        99U, 0U, 1U, 1U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U},
+    []() noexcept {});
+  MotionGateCore gate(MotionGateConfig{}, kGateId, 0U, &journal);
+  const auto before = gate.snapshot();
+
+  EXPECT_THROW(
+    (void)gate.prepare(
+      ControlRequest{
+        Operation::Prepare,
+        "00000000000000000000000000000001",
+        kGateId,
+        0U,
+        ""},
+      MotionGateCore::SteadyTimePoint{}),
+    std::overflow_error);
+
+  const auto after = gate.snapshot();
+  EXPECT_EQ(after.state, before.state);
+  EXPECT_EQ(after.state_seq, before.state_seq);
+  EXPECT_EQ(after.control_seq, before.control_seq);
+  EXPECT_EQ(after.lease_id, before.lease_id);
+  EXPECT_EQ(after.candidate_topic, before.candidate_topic);
+  EXPECT_EQ(after.reason, before.reason);
+  EXPECT_EQ(after.detail, before.detail);
+  EXPECT_TRUE(after.motion_inhibited);
+  EXPECT_TRUE(after.zero_selected);
+  EXPECT_TRUE(gate.selected_command().is_zero());
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(region.header.claimed_slots),
+    1U);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(region.header.overflow_latched),
+    1U);
+  EXPECT_EQ(clock.samples, 2U);
 }
 
 }  // namespace
