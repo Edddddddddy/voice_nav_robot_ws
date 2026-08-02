@@ -1201,6 +1201,11 @@ TEST(MotionGateJournal, EveryAutomaticRetirementReasonUsesEventFive)
       harness.gate.accept_candidate(
         harness.candidate(),
         now + std::chrono::milliseconds{149}).accepted);
+    EXPECT_FALSE(
+      harness.gate.tick(
+        now + std::chrono::milliseconds{249}).is_zero());
+    EXPECT_EQ(harness.gate.snapshot().state, State::Armed);
+    EXPECT_TRUE(harness.gate.snapshot().candidate_fresh);
 
     EXPECT_TRUE(
       harness.gate.tick(
@@ -1491,9 +1496,16 @@ TEST(MotionGateJournal, NonTransitionsNeverConsumeJournalSlots)
 
   harness.gate.force_fault(Reason::PublishFailed, "publisher failed");
   const auto first_fault = harness.gate.snapshot();
+  const auto overflow_before_repeat = gate_event_journal_load_acquire(
+    harness.region.header.overflow_latched);
+  ASSERT_EQ(overflow_before_repeat, 0U);
   harness.gate.force_fault(Reason::InternalFailure, "late fault");
   const auto repeated_fault = harness.gate.snapshot();
   expect_same_snapshot(repeated_fault, first_fault);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(
+      harness.region.header.overflow_latched),
+    overflow_before_repeat);
   EXPECT_EQ(
     gate_event_journal_load_acquire(harness.region.header.claimed_slots),
     3U);
