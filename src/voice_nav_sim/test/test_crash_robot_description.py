@@ -38,7 +38,7 @@ def load_crash_robot_description_support():
 crash_robot_description = load_crash_robot_description_support()
 
 
-PRODUCT_URDF = '''\
+PRODUCT_URDF = """\
 <robot name="voice_nav_robot">
   <link name="base_link" />
   <ros2_control name="GazeboSimSystem" type="system">
@@ -51,7 +51,7 @@ PRODUCT_URDF = '''\
   </ros2_control>
   <gazebo reference="base_link"><gravity>true</gravity></gazebo>
 </robot>
-'''
+"""
 
 
 def element_signature(element):
