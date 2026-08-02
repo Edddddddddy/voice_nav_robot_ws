@@ -52,6 +52,23 @@ if(BUILD_TESTING)
     test_support/journaled_gazebo_sim_system_adapter_plugins.xml
   )
 
+  add_library(
+    voice_nav_sim_hardware_write_ledger STATIC
+    test_support/hardware_write_ledger.cpp
+  )
+  set_target_properties(
+    voice_nav_sim_hardware_write_ledger
+    PROPERTIES POSITION_INDEPENDENT_CODE ON
+  )
+  target_compile_features(
+    voice_nav_sim_hardware_write_ledger
+    PRIVATE cxx_std_17
+  )
+  target_include_directories(
+    voice_nav_sim_hardware_write_ledger
+    PUBLIC test_support
+  )
+
   install(
     TARGETS voice_nav_sim_journaled_gazebo_sim_system_adapter
     DESTINATION lib
@@ -125,6 +142,10 @@ if(BUILD_TESTING)
   target_include_directories(
     hardware_write_ledger_test
     PRIVATE test_support
+  )
+  target_link_libraries(
+    hardware_write_ledger_test
+    voice_nav_sim_hardware_write_ledger
   )
 
   ament_add_pytest_test(

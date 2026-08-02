@@ -183,6 +183,15 @@ TEST(HardwareWriteLedger, SealsOneWriteAsAnImmutableChecksummedPage)
   EXPECT_EQ(
     first_snapshot->page_checksum,
     independent_page_checksum(*first_snapshot));
+  EXPECT_EQ(
+    first_snapshot->page_checksum,
+    UINT64_C(0x923c0457d54721c3));
+
+  auto corrupted_snapshot = *first_snapshot;
+  corrupted_snapshot.interval_id ^= 1U;
+  EXPECT_NE(
+    corrupted_snapshot.page_checksum,
+    independent_page_checksum(corrupted_snapshot));
 
   const auto repeated_snapshot = ledger.snapshot_page(0U);
   ASSERT_TRUE(repeated_snapshot.has_value());
