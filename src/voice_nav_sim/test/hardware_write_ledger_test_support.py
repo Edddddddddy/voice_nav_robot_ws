@@ -36,8 +36,19 @@ INIT_READY = 1
 CRC64_ECMA_POLYNOMIAL = 0x42F0E1EBA9EA3693
 UINT64_MASK = (1 << 64) - 1
 HEADER_FORMAT = '<24Q'
+CONTROL_FORMAT = '<16Q'
+BANK_FORMAT = '<16Q'
+SEGMENT_FORMAT = '<8Q'
 INIT_STATE_WORD = 17
 WRITER_PID_WORD = 18
+LAST_COMPLETED_WRITE_SEQ_WORD = 19
+CONTROL_OFFSET = HEADER_BYTES
+CONTROL_RESPONSE_TICKET_WORD = 14
+CONTROL_REQUEST_TICKET_WORD = 15
+BANK_STATE_ACTIVE = 1
+CONTROL_OP_ARM = 1
+CONTROL_FLAG_ZERO_REQUIRED = 1
+CONTROL_RESPONSE_OK = 1
 
 
 def crc64_ecma_words(words):
@@ -57,6 +68,34 @@ def crc64_ecma_words(words):
 def header_checksum(header):
     """Bind immutable ABI geometry, identity, features, and reserved zeros."""
     return crc64_ecma_words((*header[0:17], header[21], header[22]))
+
+
+def control_request_checksum(owner, control, request_ticket):
+    """Bind one Parent request to the region identity and ticket."""
+    return crc64_ecma_words(
+        (
+            owner.owner_uid,
+            owner.generation,
+            owner.nonce_hi,
+            owner.nonce_lo,
+            *control[0:8],
+            request_ticket,
+        ),
+    )
+
+
+def control_response_checksum(owner, control, response_ticket):
+    """Bind one Writer response to its request and region identity."""
+    return crc64_ecma_words(
+        (
+            owner.owner_uid,
+            owner.generation,
+            owner.nonce_hi,
+            owner.nonce_lo,
+            response_ticket,
+            *control[9:13],
+        ),
+    )
 
 
 class AtomicUint64:
@@ -230,6 +269,122 @@ class HardwareWriteLedgerRegionOwner:
             time.sleep(0.005)
         raise TimeoutError('ledger Writer did not claim the region')
 
+    def post_arm(
+        self,
+        interval_id,
+        segment_budget,
+        invocation_budget,
+        require_zero_commands,
+    ):
+        """Release-publish the first checksummed ARM request."""
+        if self.atomic.load_acquire(
+            self.region,
+            CONTROL_OFFSET + CONTROL_REQUEST_TICKET_WORD * 8,
+        ) != 0:
+            raise AssertionError('test owner supports one request in this slice')
+        flags = CONTROL_FLAG_ZERO_REQUIRED if require_zero_commands else 0
+        control = [
+            CONTROL_OP_ARM,
+            flags,
+            interval_id,
+            0,
+            0,
+            segment_budget,
+            invocation_budget,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ]
+        request_ticket = 1
+        control[8] = control_request_checksum(
+            self,
+            control,
+            request_ticket,
+        )
+        struct.pack_into(CONTROL_FORMAT, self.region, CONTROL_OFFSET, *control)
+        self.atomic.store_release(
+            self.region,
+            CONTROL_OFFSET + CONTROL_REQUEST_TICKET_WORD * 8,
+            request_ticket,
+        )
+        return request_ticket
+
+    def wait_response(self, request_ticket, timeout=3.0):
+        """Acquire one exact Writer response and validate its checksum."""
+        deadline = time.monotonic() + timeout
+        response_offset = (
+            CONTROL_OFFSET + CONTROL_RESPONSE_TICKET_WORD * 8
+        )
+        while time.monotonic() < deadline:
+            response_ticket = self.atomic.load_acquire(
+                self.region,
+                response_offset,
+            )
+            if response_ticket == request_ticket:
+                control = struct.unpack_from(
+                    CONTROL_FORMAT,
+                    self.region,
+                    CONTROL_OFFSET,
+                )
+                if control[13] != control_response_checksum(
+                    self,
+                    control,
+                    response_ticket,
+                ):
+                    raise AssertionError('ledger response checksum mismatch')
+                return control
+            if response_ticket != 0:
+                raise AssertionError(
+                    f'unexpected response ticket {response_ticket}',
+                )
+            time.sleep(0.005)
+        raise TimeoutError('ledger Writer did not publish a response')
+
+    def wait_completed_write(self, expected_write_seq, timeout=3.0):
+        """Acquire the global completion publication for one write."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            write_seq = self.load_header_word(
+                LAST_COMPLETED_WRITE_SEQ_WORD,
+            )
+            if write_seq == expected_write_seq:
+                return write_seq
+            if write_seq > expected_write_seq:
+                raise AssertionError(f'unexpected completed seq {write_seq}')
+            time.sleep(0.005)
+        raise TimeoutError('ledger Writer did not complete the write')
+
+    def bank_offset(self, bank_index):
+        """Return one checked bank offset."""
+        if bank_index < 0 or bank_index >= BANK_COUNT:
+            raise IndexError('ledger bank index is outside the region')
+        return HEADER_BYTES + CONTROL_BYTES + bank_index * self.bank_stride
+
+    def snapshot_bank(self, bank_index):
+        """Read one ACTIVE bank after an external acquire publication."""
+        return struct.unpack_from(
+            BANK_FORMAT,
+            self.region,
+            self.bank_offset(bank_index),
+        )
+
+    def snapshot_segment(self, bank_index, segment_index):
+        """Read one preallocated segment after completion publication."""
+        if segment_index < 0 or segment_index >= self.segment_capacity:
+            raise IndexError('ledger segment index is outside the bank')
+        offset = (
+            self.bank_offset(bank_index)
+            + BANK_BYTES
+            + segment_index * SEGMENT_BYTES
+        )
+        return struct.unpack_from(SEGMENT_FORMAT, self.region, offset)
+
     def unlink_name(self):
         """Retire the POSIX name while retaining this mapping."""
         if self.linked:
@@ -238,18 +393,23 @@ class HardwareWriteLedgerRegionOwner:
 
     def cleanup(self):
         """Release only resources owned by this test object."""
-        if self.region is not None:
-            self.region.close()
-            self.region = None
-        if self.fd >= 0:
-            os.close(self.fd)
-            self.fd = -1
-        if self.linked:
+        try:
+            if self.linked:
+                try:
+                    self.api.unlink(self.name)
+                except FileNotFoundError:
+                    pass
+                finally:
+                    self.linked = False
+        finally:
             try:
-                self.api.unlink(self.name)
-            except FileNotFoundError:
-                pass
-            self.linked = False
+                if self.region is not None:
+                    self.region.close()
+                    self.region = None
+            finally:
+                if self.fd >= 0:
+                    os.close(self.fd)
+                    self.fd = -1
 
     def __enter__(self):
         return self

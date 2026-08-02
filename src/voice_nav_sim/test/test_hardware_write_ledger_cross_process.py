@@ -16,10 +16,23 @@
 
 import errno
 import os
+import selectors
 import subprocess
 import sys
 
-from hardware_write_ledger_test_support import HardwareWriteLedgerRegionOwner
+from hardware_write_ledger_test_support import (
+    BANK_STATE_ACTIVE,
+    CONTROL_FLAG_ZERO_REQUIRED,
+    CONTROL_OP_ARM,
+    CONTROL_RESPONSE_OK,
+    HardwareWriteLedgerRegionOwner,
+)
+
+
+def require(condition, message):
+    """Raise explicitly even when Python assertions are optimized out."""
+    if not condition:
+        raise AssertionError(message)
 
 
 def terminate_owned_process(process):
@@ -34,42 +47,76 @@ def terminate_owned_process(process):
         process.wait(timeout=2.0)
 
 
-def main():
-    """Prove exec attach, unique claim, unlink, and mapped access."""
-    if len(sys.argv) != 2:
-        raise SystemExit('expected the attach probe executable')
-    probe = os.path.abspath(sys.argv[1])
+def close_owned_process_pipes(process):
+    """Close only the three pipes allocated for the exact child."""
+    for stream in (process.stdin, process.stdout, process.stderr):
+        if stream is not None:
+            stream.close()
 
+
+def read_owned_line(process, description, timeout=3.0):
+    """Bound one read from the exact child so local cleanup always runs."""
+    selector = selectors.DefaultSelector()
+    try:
+        selector.register(process.stdout, selectors.EVENT_READ)
+        if not selector.select(timeout):
+            raise TimeoutError(f'timed out waiting for probe {description}')
+        line = process.stdout.readline()
+        if line == '':
+            raise RuntimeError(
+                f'probe closed stdout before {description}',
+            )
+        return line.strip()
+    finally:
+        selector.close()
+
+
+def spawn_probe(probe, owner):
+    """Start only the exact child used by one region test."""
+    return subprocess.Popen(
+        [
+            probe,
+            owner.name,
+            str(owner.owner_uid),
+            str(owner.generation),
+            str(owner.nonce_hi),
+            str(owner.nonce_lo),
+            str(owner.segment_capacity),
+            str(owner.page_segment_limit),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        close_fds=True,
+    )
+
+
+def test_exec_attach_survives_unlink(probe):
+    """Prove exec attach, unique claim, unlink, and mapped access."""
     with HardwareWriteLedgerRegionOwner(
         generation=73,
         segment_capacity=4,
         page_segment_limit=2,
     ) as owner:
-        process = subprocess.Popen(
-            [
-                probe,
-                owner.name,
-                str(owner.owner_uid),
-                str(owner.generation),
-                str(owner.nonce_hi),
-                str(owner.nonce_lo),
-                str(owner.segment_capacity),
-                str(owner.page_segment_limit),
-            ],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            close_fds=True,
-        )
+        process = spawn_probe(probe, owner)
         try:
-            assert owner.wait_for_writer(process.pid) == process.pid
-            assert process.stdout.readline().strip() == 'READY'
+            require(
+                owner.wait_for_writer(process.pid) == process.pid,
+                'attach probe Writer PID mismatch',
+            )
+            require(
+                read_owned_line(process, 'READY') == 'READY',
+                'attach probe did not publish READY',
+            )
             owner.unlink_name()
             try:
                 descriptor = owner.api.open_object(owner.name, os.O_RDWR)
             except OSError as error:
-                assert error.errno == errno.ENOENT
+                require(
+                    error.errno == errno.ENOENT,
+                    f'retired name failed with errno {error.errno}',
+                )
             else:
                 os.close(descriptor)
                 raise AssertionError('retired ledger name remained openable')
@@ -78,11 +125,122 @@ def main():
             process.stdin.flush()
             return_code = process.wait(timeout=3.0)
             stderr = process.stderr.read()
-            assert return_code == 0, (
-                f'attach probe exited {return_code}: {stderr}'
+            require(
+                return_code == 0,
+                f'attach probe exited {return_code}: {stderr}',
             )
         finally:
             terminate_owned_process(process)
+            close_owned_process_pipes(process)
+
+
+def test_arm_linearizes_before_first_write(probe):
+    """Prove ARM fence, first sequence, receipt, and first active record."""
+    with HardwareWriteLedgerRegionOwner(
+        generation=74,
+        segment_capacity=4,
+        page_segment_limit=2,
+    ) as owner:
+        process = spawn_probe(probe, owner)
+        try:
+            require(
+                owner.wait_for_writer(process.pid) == process.pid,
+                'ARM probe Writer PID mismatch',
+            )
+            require(
+                read_owned_line(process, 'READY') == 'READY',
+                'ARM probe did not publish READY',
+            )
+            owner.unlink_name()
+            request_ticket = owner.post_arm(
+                interval_id=91,
+                segment_budget=2,
+                invocation_budget=4,
+                require_zero_commands=True,
+            )
+            process.stdin.write(
+                'WRITE 1000000 0 0 0 9223372036854775808\n',
+            )
+            process.stdin.flush()
+
+            response = owner.wait_response(request_ticket)
+            require(response[0] == CONTROL_OP_ARM, 'ARM operation changed')
+            require(
+                response[1] == CONTROL_FLAG_ZERO_REQUIRED,
+                'ARM predicate flags changed',
+            )
+            require(
+                response[9] == CONTROL_RESPONSE_OK,
+                f'ARM response code was {response[9]}',
+            )
+            require(response[10] == 0, 'ARM selected the wrong bank')
+            require(response[11] == 1, 'ARM bank epoch was not one')
+            require(response[12] == 0, 'ARM fence was not zero')
+            require(
+                owner.wait_completed_write(1) == 1,
+                'first ARM write did not publish sequence one',
+            )
+
+            bank = owner.snapshot_bank(response[10])
+            expected_bank = (
+                BANK_STATE_ACTIVE,
+                1,
+                91,
+                0,
+                0,
+                2,
+                4,
+                CONTROL_FLAG_ZERO_REQUIRED,
+                0,
+                1,
+                1,
+                1,
+                1,
+                0,
+                0,
+                0,
+            )
+            require(
+                bank == expected_bank,
+                f'ARM bank mismatch: {bank!r}',
+            )
+            segment = owner.snapshot_segment(0, 0)
+            expected_segment = (
+                74,
+                1,
+                1,
+                1,
+                1000000,
+                0,
+                0,
+                9223372036854775808,
+            )
+            require(
+                segment == expected_segment,
+                f'first ARM segment mismatch: {segment!r}',
+            )
+            require(
+                read_owned_line(process, 'WROTE') == 'WROTE 1',
+                'ARM probe did not report sequence one',
+            )
+            return_code = process.wait(timeout=3.0)
+            stderr = process.stderr.read()
+            require(
+                return_code == 0,
+                f'ARM probe exited {return_code}: {stderr}',
+            )
+        finally:
+            terminate_owned_process(process)
+            close_owned_process_pipes(process)
+
+
+def main():
+    """Run the bounded cross-process ledger behavior slices."""
+    if len(sys.argv) != 2:
+        raise SystemExit('expected the attach probe executable')
+    probe = os.path.abspath(sys.argv[1])
+    test_exec_attach_survives_unlink(probe)
+    test_arm_linearizes_before_first_write(probe)
 
 
 if __name__ == '__main__':

@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -32,6 +33,45 @@ std::uint64_t parse_word(const char * text)
     throw std::invalid_argument("invalid numeric probe argument");
   }
   return value;
+}
+
+int execute_command(
+  voice_nav_sim::AttachedHardwareWriteLedger & ledger,
+  const std::string & command)
+{
+  if (command == "CHECK") {
+    return ledger.claimed_writer_pid() ==
+           static_cast<std::uint64_t>(getpid()) ? 0 : 66;
+  }
+
+  std::istringstream input{command};
+  std::string operation;
+  std::int64_t sim_stamp_ns{0};
+  std::uint64_t delegated_result{0U};
+  std::uint64_t observation_status{0U};
+  std::uint64_t left_command_bits{0U};
+  std::uint64_t right_command_bits{0U};
+  std::string trailing;
+  if (
+    !(input >> operation >> sim_stamp_ns >> delegated_result >>
+    observation_status >> left_command_bits >> right_command_bits) ||
+    operation != "WRITE" || (input >> trailing))
+  {
+    return 67;
+  }
+
+  auto & writer = ledger.writer();
+  const auto ticket = writer.begin_write(sim_stamp_ns);
+  writer.finish_write(
+    ticket,
+    delegated_result,
+    voice_nav_sim::HardwareWriteWheelObservation{
+      static_cast<voice_nav_sim::HardwareWriteObservationStatus>(
+        observation_status),
+      left_command_bits,
+      right_command_bits});
+  std::cout << "WROTE " << ticket.write_seq << std::endl;
+  return 0;
 }
 
 }  // namespace
@@ -57,18 +97,12 @@ int main(int argc, char ** argv)
 
     std::cout << "READY" << std::endl;
     std::string command;
-    if (!std::getline(std::cin, command) || command != "CHECK") {
+    if (!std::getline(std::cin, command)) {
       return 65;
     }
-    if (
-      ledger.claimed_writer_pid() !=
-      static_cast<std::uint64_t>(getpid()))
-    {
-      return 66;
-    }
+    return execute_command(ledger, command);
   } catch (const std::exception & error) {
     std::cerr << error.what() << '\n';
     return 1;
   }
-  return 0;
 }
