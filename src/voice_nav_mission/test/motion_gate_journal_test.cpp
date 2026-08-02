@@ -29,33 +29,38 @@ namespace
 
 constexpr char kGateId[] = "0123456789abcdef0123456789abcdef";
 
-struct alignas(64) OneSlotRegion
+template<std::size_t Capacity>
+struct alignas(64) JournalRegion
 {
   GateEventJournalHeader header{};
-  GateEventJournalSlot slot{};
+  std::array<GateEventJournalSlot, Capacity> slots{};
 };
 
 struct FakeClock
 {
-  std::array<std::uint64_t, 4U> values{100U, 200U, 300U, UINT64_MAX};
-  std::size_t next{0U};
+  std::uint64_t next_value{100U};
+  std::size_t samples{0U};
 
   static std::uint64_t read(void * context) noexcept
   {
     auto & clock = *static_cast<FakeClock *>(context);
-    return clock.values.at(clock.next++);
+    const auto value = clock.next_value;
+    clock.next_value += 100U;
+    ++clock.samples;
+    return value;
   }
 };
 
-GateEventJournalIdentity initialize_region(OneSlotRegion & region)
+template<std::size_t Capacity>
+GateEventJournalIdentity initialize_region(JournalRegion<Capacity> & region)
 {
-  region = OneSlotRegion{};
+  region = JournalRegion<Capacity>{};
   region.header.magic = VOICE_NAV_GATE_EVENT_JOURNAL_MAGIC;
   region.header.abi_version = VOICE_NAV_GATE_EVENT_JOURNAL_ABI_VERSION;
   region.header.header_bytes = sizeof(GateEventJournalHeader);
   region.header.slot_bytes = sizeof(GateEventJournalSlot);
   region.header.region_bytes = sizeof(region);
-  region.header.capacity = 1U;
+  region.header.capacity = Capacity;
   region.header.owner_uid = 1000U;
   region.header.generation = 7U;
   region.header.nonce_hi = 0x123456789abcdef0U;
@@ -74,7 +79,7 @@ GateEventJournalIdentity initialize_region(OneSlotRegion & region)
 
 TEST(MotionGateJournal, SuccessfulPrepareOwnsItsLinearizationFence)
 {
-  OneSlotRegion region;
+  JournalRegion<1U> region;
   const auto identity = initialize_region(region);
   FakeClock clock;
   GateEventJournal journal(
@@ -95,37 +100,112 @@ TEST(MotionGateJournal, SuccessfulPrepareOwnsItsLinearizationFence)
 
   ASSERT_EQ(result.code, ResultCode::Applied);
   ASSERT_EQ(result.state, State::Prepared);
-  EXPECT_EQ(clock.next, 3U);
+  EXPECT_EQ(clock.samples, 3U);
   EXPECT_EQ(
-    gate_event_journal_load_acquire(region.slot.phase),
+    gate_event_journal_load_acquire(region.slots.front().phase),
+    VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_COMMITTED);
+  const auto & slot = region.slots.front();
+  EXPECT_EQ(
+    slot.record_kind,
+    VOICE_NAV_GATE_EVENT_JOURNAL_KIND_CONTROL_TRANSITION);
+  EXPECT_EQ(slot.journal_seq, 1U);
+  EXPECT_EQ(slot.generation, identity.generation);
+  EXPECT_EQ(slot.intent_monotonic_ns, 100U);
+  EXPECT_EQ(slot.transition_linearization_ns, 200U);
+  EXPECT_EQ(slot.commit_monotonic_ns, 300U);
+  EXPECT_EQ(slot.event_code, 1U);  // PREPARE
+  EXPECT_EQ(slot.reason, static_cast<std::uint64_t>(Reason::None));
+  EXPECT_EQ(slot.before_state_seq, 0U);
+  EXPECT_EQ(slot.before_control_seq, 0U);
+  EXPECT_EQ(slot.after_state_seq, 1U);
+  EXPECT_EQ(slot.after_control_seq, 1U);
+  EXPECT_EQ(slot.before_lease_hi, 0U);
+  EXPECT_EQ(slot.before_lease_lo, 0U);
+  EXPECT_EQ(slot.after_lease_hi, UINT64_C(0x0123456789abcdef));
+  EXPECT_EQ(slot.after_lease_lo, UINT64_C(0x0123456789abcdee));
+  EXPECT_EQ(slot.gate_instance_hi, UINT64_C(0x0123456789abcdef));
+  EXPECT_EQ(slot.gate_instance_lo, UINT64_C(0x0123456789abcdef));
+  EXPECT_EQ(slot.flags, 0U);
+  EXPECT_EQ(
+    slot.intent_checksum,
+    gate_event_journal_intent_checksum(slot));
+  EXPECT_EQ(
+    slot.commit_checksum,
+    gate_event_journal_commit_checksum(slot));
+}
+
+TEST(MotionGateJournal, SuccessfulOpenUsesTheSameCoreOwnedFence)
+{
+  JournalRegion<2U> region;
+  const auto identity = initialize_region(region);
+  FakeClock clock;
+  GateEventJournal journal(
+    &region,
+    sizeof(region),
+    identity,
+    GateEventJournalClock{&FakeClock::read, &clock});
+  MotionGateCore gate(MotionGateConfig{}, kGateId, 0U, &journal);
+  const auto now = MotionGateCore::SteadyTimePoint{};
+  ASSERT_EQ(
+    gate.prepare(
+      ControlRequest{
+          Operation::Prepare,
+          "00000000000000000000000000000001",
+          kGateId,
+          0U,
+          ""},
+      now).code,
+    ResultCode::Applied);
+  const auto prepared = gate.snapshot();
+  WriterGid writer{};
+  writer.front() = 0x42U;
+  writer.back() = 0xe7U;
+
+  const auto result = gate.open(
+    ControlRequest{
+      Operation::Open,
+      "00000000000000000000000000000002",
+      kGateId,
+      prepared.control_seq,
+      prepared.lease_id},
+    now,
+    [writer]() {
+      return OpenBinding{true, Reason::None, writer, "writer ready"};
+    });
+
+  ASSERT_EQ(result.code, ResultCode::Applied);
+  ASSERT_EQ(result.state, State::Armed);
+  EXPECT_EQ(clock.samples, 6U);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(region.header.claimed_slots),
+    2U);
+  const auto & slot = region.slots[1U];
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(slot.phase),
     VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_COMMITTED);
   EXPECT_EQ(
-    region.slot.record_kind,
+    slot.record_kind,
     VOICE_NAV_GATE_EVENT_JOURNAL_KIND_CONTROL_TRANSITION);
-  EXPECT_EQ(region.slot.journal_seq, 1U);
-  EXPECT_EQ(region.slot.generation, identity.generation);
-  EXPECT_EQ(region.slot.intent_monotonic_ns, 100U);
-  EXPECT_EQ(region.slot.transition_linearization_ns, 200U);
-  EXPECT_EQ(region.slot.commit_monotonic_ns, 300U);
-  EXPECT_EQ(region.slot.event_code, 1U);  // PREPARE
-  EXPECT_EQ(region.slot.reason, static_cast<std::uint64_t>(Reason::None));
-  EXPECT_EQ(region.slot.before_state_seq, 0U);
-  EXPECT_EQ(region.slot.before_control_seq, 0U);
-  EXPECT_EQ(region.slot.after_state_seq, 1U);
-  EXPECT_EQ(region.slot.after_control_seq, 1U);
-  EXPECT_EQ(region.slot.before_lease_hi, 0U);
-  EXPECT_EQ(region.slot.before_lease_lo, 0U);
-  EXPECT_EQ(region.slot.after_lease_hi, UINT64_C(0x0123456789abcdef));
-  EXPECT_EQ(region.slot.after_lease_lo, UINT64_C(0x0123456789abcdee));
-  EXPECT_EQ(region.slot.gate_instance_hi, UINT64_C(0x0123456789abcdef));
-  EXPECT_EQ(region.slot.gate_instance_lo, UINT64_C(0x0123456789abcdef));
-  EXPECT_EQ(region.slot.flags, 0U);
-  EXPECT_EQ(
-    region.slot.intent_checksum,
-    gate_event_journal_intent_checksum(region.slot));
-  EXPECT_EQ(
-    region.slot.commit_checksum,
-    gate_event_journal_commit_checksum(region.slot));
+  EXPECT_EQ(slot.journal_seq, 2U);
+  EXPECT_EQ(slot.generation, identity.generation);
+  EXPECT_EQ(slot.intent_monotonic_ns, 400U);
+  EXPECT_EQ(slot.transition_linearization_ns, 500U);
+  EXPECT_EQ(slot.commit_monotonic_ns, 600U);
+  EXPECT_EQ(slot.event_code, 2U);  // OPEN
+  EXPECT_EQ(slot.reason, static_cast<std::uint64_t>(Reason::None));
+  EXPECT_EQ(slot.before_state_seq, 1U);
+  EXPECT_EQ(slot.before_control_seq, 1U);
+  EXPECT_EQ(slot.after_state_seq, 2U);
+  EXPECT_EQ(slot.after_control_seq, 2U);
+  EXPECT_EQ(slot.before_lease_hi, UINT64_C(0x0123456789abcdef));
+  EXPECT_EQ(slot.before_lease_lo, UINT64_C(0x0123456789abcdee));
+  EXPECT_EQ(slot.after_lease_hi, UINT64_C(0x0123456789abcdef));
+  EXPECT_EQ(slot.after_lease_lo, UINT64_C(0x0123456789abcdee));
+  EXPECT_EQ(slot.gate_instance_hi, UINT64_C(0x0123456789abcdef));
+  EXPECT_EQ(slot.gate_instance_lo, UINT64_C(0x0123456789abcdef));
+  EXPECT_EQ(slot.flags, 0U);
+  EXPECT_EQ(slot.intent_checksum, gate_event_journal_intent_checksum(slot));
+  EXPECT_EQ(slot.commit_checksum, gate_event_journal_commit_checksum(slot));
 }
 
 }  // namespace
