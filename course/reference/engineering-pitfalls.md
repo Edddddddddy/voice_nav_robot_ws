@@ -59,6 +59,7 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0049 | A direct package install leaves a manifest in the repository root | Was installation run through `colcon`, followed by a clean-worktree check? | Guarded |
 | PIT-0050 | A static checker rejects the correct implementation after a field refactor | Do both the synthetic fixture and real-repository positive controls use the current semantic token? | Guarded |
 | PIT-0051 | One launch test intentionally starts both valid and invalid processes | Are exit codes asserted per exact launch action instead of globally? | Guarded |
+| PIT-0052 | An evidence/DDS failure prevents the direct safety-zero fallback | Can fault recording itself throw before the zero publisher is called? | Guarded |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -1304,3 +1305,24 @@ expected outcome. Also bind stderr and PID assertions to that same action so an
 unrelated process cannot satisfy the oracle. The Node-journal acceptance test
 requires code 0 for the fully configured Gate and code 1 for each partial
 configuration, both during the live test and again in post-shutdown evidence.
+
+## PIT-0052: Fault recording cannot be a prerequisite for stopping
+
+**Symptom.** A journal reservation or DDS publish fails, but the intended
+direct zero is never attempted because execution exits while trying to record
+the resulting Core fault.
+
+**Cause.** Safety logic often treats `force_fault()` as an infallible state
+assignment. Its detail path uses `std::string`, however, and can allocate or
+otherwise throw before the bounded safety mutation. Placing it before the
+fallback makes observability/state recording a hidden prerequisite for the
+actual stopping attempt.
+
+**Guardrail.** `MotionGateProcessRuntime` retires the output evidence lane
+first, calls fault recording through a catch-all best-effort boundary, and then
+attempts exactly one direct zero regardless of that outcome. A package-private
+fault Adapter injects `std::bad_alloc`: the test proves the Core may remain
+Armed with its old non-zero selection while Runtime still publishes zero and
+permanently routes every later output through the direct-zero path. The
+Adapter is a unit-test seam and canonical product composition must leave it
+empty.
