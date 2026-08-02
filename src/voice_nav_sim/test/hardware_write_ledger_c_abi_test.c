@@ -35,21 +35,31 @@ _Static_assert(
   "Hardware-write ledger header checksum offset changed");
 
 _Static_assert(
-  sizeof(voice_nav_hardware_write_ledger_control_v1) == 128U,
-  "Hardware-write ledger control ABI must remain 128 bytes");
+  sizeof(voice_nav_hardware_write_ledger_control_v1) == 192U,
+  "Hardware-write ledger control ABI must remain 192 bytes");
 _Static_assert(
   _Alignof(voice_nav_hardware_write_ledger_control_v1) == _Alignof(uint64_t),
   "Hardware-write ledger control must retain uint64_t alignment");
 _Static_assert(
   offsetof(
     voice_nav_hardware_write_ledger_control_v1,
-    response_code) == 72U,
+    request_state) == 80U,
+  "Hardware-write ledger request state offset changed");
+_Static_assert(
+  offsetof(
+    voice_nav_hardware_write_ledger_control_v1,
+    response_code) == 88U,
   "Hardware-write ledger response offset changed");
 _Static_assert(
   offsetof(
     voice_nav_hardware_write_ledger_control_v1,
-    request_ticket) == 120U,
-  "Hardware-write ledger request publication offset changed");
+    response_request_checksum) == 120U,
+  "Hardware-write ledger consumed-request checksum offset changed");
+_Static_assert(
+  offsetof(
+    voice_nav_hardware_write_ledger_control_v1,
+    response_ticket) == 136U,
+  "Hardware-write ledger response publication offset changed");
 
 _Static_assert(
   sizeof(voice_nav_hardware_write_ledger_bank_v1) == 128U,
@@ -109,7 +119,7 @@ int main(void)
     VOICE_NAV_HARDWARE_WRITE_LEDGER_ENDIAN_TAG !=
     UINT64_C(0x0102030405060708) ||
     VOICE_NAV_HARDWARE_WRITE_LEDGER_HEADER_BYTES != UINT64_C(192) ||
-    VOICE_NAV_HARDWARE_WRITE_LEDGER_CONTROL_BYTES != UINT64_C(128) ||
+    VOICE_NAV_HARDWARE_WRITE_LEDGER_CONTROL_BYTES != UINT64_C(192) ||
     VOICE_NAV_HARDWARE_WRITE_LEDGER_BANK_BYTES != UINT64_C(128) ||
     VOICE_NAV_HARDWARE_WRITE_LEDGER_SEGMENT_BYTES != UINT64_C(64) ||
     VOICE_NAV_HARDWARE_WRITE_LEDGER_PAGE_BYTES != UINT64_C(192) ||
