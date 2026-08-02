@@ -68,6 +68,13 @@ simulation/control/Gate generation and its zero evidence. It is not public ROS
 IDL, a credential, or persistent storage.
 _Avoid_: Pause ID, resume password, lease
 
+**Hardware-Write Ledger**:
+A default-off, test-only, lossless proof Module at the real Gazebo hardware
+`write()` seam. It owns global write sequence, ARM/SEAL fences, immutable
+dual-bank retention, checksummed pages, and exact ACK. It is not a ROS topic,
+product telemetry stream, Gazebo iteration source, or safety-certified logger.
+_Avoid_: Hardware journal, command topic, ring buffer, audit log
+
 **RESTART_REQUIRED**:
 The package-private Managed Safe Pause outcome meaning the old generation must
 not resume and must be structurally shut down. It does not mean that a

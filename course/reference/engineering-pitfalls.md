@@ -1444,3 +1444,24 @@ before a drive letter or Unix absolute-path marker. Test both sides of the
 classifier: ordinary `http://` and `https://` source text must pass, while
 quoted or commented `C:/`, `C:\\`, `/home/...`, and `/mnt/c/...` examples must
 still fail. Never remove a license header to satisfy a faulty source checker.
+
+## PIT-0058: Entry-time SEAL can exclude the write being proved
+
+**Symptom.** A paused single-step test receives a valid SEAL receipt and an
+exact World Statistics `N -> N+1`, but the sealed interval ends before the
+post-controller-update hardware write. Proving that write would require a
+second bookkeeping step before `pause:false`.
+
+**Cause.** SEAL was linearized at the next hardware `write()` entry and closed
+the old interval immediately. The invocation that triggered SEAL was therefore
+outside `(arm_fence, seal_fence]`, even though Managed Safe Pause allows only
+one final exact step to write and prove the updated zeros.
+
+**Guardrail.** SEAL is deferred and inclusive. Its request carries
+`not_before_sim_stamp`; the first qualifying invocation delegates upstream,
+captures the actual command observation, appends and validates it, finalizes
+the segment, then release-publishes the immutable bank and receipt. That
+invocation owns `seal_fence` and remains inside the interval. VN-0011B also
+requires an exact trigger stamp and independently proves the matching
+World-Statistics single step; a skipped stamp, missing write, or extra step
+fails closed.

@@ -403,11 +403,44 @@ late-traffic evidence only; it is never the timeout origin.
 
 ### Lossless hardware-write ledger protocol
 
+The normative cross-process layout and ordering are defined in
+[Hardware-write ledger protocol](../architecture/hardware-write-ledger-protocol.md)
+and [ADR-0006](../adr/0006-use-fenced-dual-bank-hardware-write-ledger.md).
+
 “Lossless” is executable, not an adjective:
 
-- the write seam owns a monotonically increasing, non-wrapping
-  `uint64 write_seq`; every invocation obtains exactly one sequence value and
-  checks both finite wheel commands against the currently armed predicate;
+- the Writer Module, not the Gazebo Adapter, owns a monotonically increasing,
+  non-wrapping global `uint64 write_seq`. Every enabled upstream `write()`
+  invocation obtains exactly one sequence at entry, including calls made while
+  no interval is armed and calls whose entity/component observation later
+  fails. Missing entities, missing/empty components, sequence exhaustion, or a
+  rejected ledger append are explicit fail-closed observations; the Adapter
+  must never silently return or invent generation/sequence values;
+- `ARM(generation, interval_id, request_ticket, budgets, predicate)` is
+  release-published through one checksummed, single-outstanding mailbox. The
+  Writer consumes it at the next `write()` entry before assigning that call's
+  sequence. If that call receives sequence `s`, `arm_fence_write_seq=s-1` and
+  `s` is the first included invocation. Only that linearization may publish the
+  ARM receipt; posting or polling the request is not a fence;
+- `SEAL(generation, interval_id, bank identity, request_ticket,
+  not_before_sim_stamp)` is deferred and inclusive. Stamps below the threshold
+  leave it pending. For the first qualifying invocation `s`, ordering is
+  upstream return, capture delegated result and exact wheel observation,
+  append/validate, finalize the accumulator, publish the immutable bank with
+  release semantics, then publish the SEAL receipt. Thus
+  `seal_fence_write_seq=s` and the triggering write belongs to the closed
+  interval `(arm_fence_write_seq, seal_fence_write_seq]`. VN-0011B additionally
+  requires the trigger stamp to equal the expected final `N -> N+1` stamp;
+  jumping past it fails closed. Immediate entry-time sealing, which would
+  exclude the required post-controller-update write, is forbidden;
+- a successful interval is non-empty, has exactly
+  `seal_fence_write_seq-arm_fence_write_seq` invocations, and contains no
+  sequence gaps. If the qualifying write violates generation, observation,
+  capacity, stamp, finite-command, or armed-predicate rules, it still consumes
+  its sequence and terminalizes an immutable faulted interval. No qualifying
+  write means no fabricated SEALED state; the bounded caller selects
+  `RESTART_REQUIRED` on timeout. The first terminal transition fixes the
+  fences, faults, pages, and receipt; late or replayed requests cannot move it;
 - one active accumulator contains generation, first/last `write_seq`,
   invocation count, simulation stamp, delegated return result, and exact
   wheel-command bit patterns. Only a consecutive invocation with the
@@ -416,9 +449,6 @@ late-traffic evidence only; it is never the timeout origin.
   must equal
   `last_seq - first_seq + 1`, so repeated paused writes remain individually
   accounted without consuming one slot each;
-- `ARM` and `SEAL` create atomic sequence fences at that same seam; the test
-  analyzes the closed inclusive interval and never infers boundaries from
-  receipt time;
 - preallocated segment capacity is proven before arming from the bounded
   write-invocation/command-transition budget; valid identical-stamp repeats
   fold into the current segment. Any value/stamp/result change that cannot
@@ -434,7 +464,16 @@ late-traffic evidence only; it is never the timeout origin.
   proves continuous progress, while VN-0011B correlates ARM/SEAL with one
   acknowledged, World-Statistics-confirmed exact `N -> N+1` step; and
 - a sealed interval is retained until the test explicitly acknowledges it;
-  later writes use separate storage/fences and cannot mutate its pages;
+  two fixed banks permit later intervals to use separate storage/fences and
+  cannot mutate retained pages. ACK is allowed only after complete checksum,
+  identity, fence, page-chain, and predicate validation and must match the
+  exact generation, interval, bank epoch, seal fence, and root checksum. The
+  reader stops accessing the bank before the release ACK transition; a future
+  Writer acquire may then reuse it. With one ACTIVE bank and no FREE bank, ARM
+  returns `NO_FREE_BANK` rather than overwriting evidence;
+  one Writer PID may claim a generation. Writer death with an ACTIVE/pending
+  interval invalidates it, while a release-published SEALED bank remains
+  readable after Writer death. Parent death never implies ACK;
   neither DDS BEST_EFFORT nor an overwrite-on-full ring is an admissible
   implementation of the proof channel.
 
