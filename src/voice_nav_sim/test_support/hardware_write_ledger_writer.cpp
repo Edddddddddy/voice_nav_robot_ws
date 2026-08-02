@@ -513,8 +513,8 @@ struct HardwareWriteLedgerWriter::Impl
         request.ticket,
         request.checksum,
         VOICE_NAV_HARDWARE_WRITE_LEDGER_RESPONSE_INVALID,
-        request.bank_index,
-        request.bank_epoch,
+        kInvalidBankIndex,
+        0U,
         atomic_load_acquire(header->last_completed_write_seq));
       return;
     }
