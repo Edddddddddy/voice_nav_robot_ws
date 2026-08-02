@@ -167,10 +167,11 @@ private:
   Reservation begin_output(const GateOutputIntent & intent);
   GateOutputOutcome commit_output(const Reservation & reservation);
   Reservation begin_transition(const GateTransitionIntent & intent);
-  void mark_transition_linearization(const Reservation & reservation);
+  void mark_transition_linearization(
+    const Reservation & reservation) noexcept;
   GateTransitionOutcome commit_transition(
     const Reservation & reservation,
-    const GateTransitionAfter & after);
+    const GateTransitionAfter & after) noexcept;
 
   GateEventJournalHeader * header_;
   GateEventJournalSlot * slots_;

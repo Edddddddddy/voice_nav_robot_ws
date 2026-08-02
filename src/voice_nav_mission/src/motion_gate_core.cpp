@@ -115,6 +115,7 @@ template<typename Mutation>
 void MotionGateCore::apply_transition(
   std::uint64_t event_code,
   Reason reason,
+  JournalFailurePolicy failure_policy,
   Mutation && mutation)
 {
   static_assert(
@@ -139,17 +140,27 @@ void MotionGateCore::apply_transition(
     gate_words.lo,
     0U};
 
-  (void)event_journal_->apply_transition(
-    intent,
-    [this, &mutation]() noexcept {
+  try {
+    (void)event_journal_->apply_transition(
+      intent,
+      [this, &mutation]() noexcept {
+        std::forward<Mutation>(mutation)();
+        const auto after_lease_words = identifier_words(lease_id_);
+        return GateTransitionAfter{
+          state_seq_,
+          control_seq_,
+          after_lease_words.hi,
+          after_lease_words.lo};
+      });
+  } catch (...) {
+    // For a noexcept Core callback, Journal transition marking and commit are
+    // noexcept too. Therefore an exception can only precede the mutation.
+    if (failure_policy == JournalFailurePolicy::ApplySafetyMutation) {
       std::forward<Mutation>(mutation)();
-      const auto after_lease_words = identifier_words(lease_id_);
-      return GateTransitionAfter{
-        state_seq_,
-        control_seq_,
-        after_lease_words.hi,
-        after_lease_words.lo};
-    });
+      return;
+    }
+    throw;
+  }
 }
 
 ControlResult MotionGateCore::prepare(
@@ -246,6 +257,7 @@ ControlResult MotionGateCore::prepare(
   apply_transition(
     kTransitionEventPrepare,
     Reason::None,
+    JournalFailurePolicy::RejectMutation,
     [this, now, &next_lease_id, &next_candidate_topic, &next_detail]() noexcept {
       ++control_seq_;
       lease_id_.swap(next_lease_id);
@@ -376,6 +388,7 @@ ControlResult MotionGateCore::open(
   apply_transition(
     kTransitionEventOpen,
     Reason::None,
+    JournalFailurePolicy::RejectMutation,
     [this, now, &binding, &next_detail]() noexcept {
       ++control_seq_;
       bound_writer_gid_ = binding.writer_gid;
@@ -461,6 +474,7 @@ ControlResult MotionGateCore::renew(
   apply_transition(
     kTransitionEventRenew,
     Reason::None,
+    JournalFailurePolicy::RejectMutation,
     [this, now, &next_detail]() noexcept {
       ++control_seq_;
       authority_deadline_ = now + config_.authority_lease;
@@ -878,6 +892,7 @@ void MotionGateCore::retire_lease(
   apply_transition(
     event_code,
     reason,
+    JournalFailurePolicy::ApplySafetyMutation,
     [this, reason, &next_detail]() noexcept {
       ++control_seq_;
       state_ = State::Inhibited;

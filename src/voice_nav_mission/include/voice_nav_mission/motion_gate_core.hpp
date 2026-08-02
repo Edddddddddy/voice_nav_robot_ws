@@ -230,6 +230,12 @@ public:
   void force_fault(Reason reason, std::string detail);
 
 private:
+  enum class JournalFailurePolicy : std::uint8_t
+  {
+    RejectMutation = 0,
+    ApplySafetyMutation = 1,
+  };
+
   struct CachedRequest
   {
     std::string request_fingerprint;
@@ -263,6 +269,7 @@ private:
   void apply_transition(
     std::uint64_t event_code,
     Reason reason,
+    JournalFailurePolicy failure_policy,
     Mutation && mutation);
   void reconcile_deadlines(SteadyTimePoint now);
   void retire_lease(

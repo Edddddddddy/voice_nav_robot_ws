@@ -357,7 +357,7 @@ GateEventJournal::Reservation GateEventJournal::begin_transition(
 }
 
 void GateEventJournal::mark_transition_linearization(
-  const Reservation & reservation)
+  const Reservation & reservation) noexcept
 {
   reservation.slot->transition_linearization_ns =
     clock_.read(clock_.context);
@@ -368,7 +368,7 @@ void GateEventJournal::mark_transition_linearization(
 
 GateTransitionOutcome GateEventJournal::commit_transition(
   const Reservation & reservation,
-  const GateTransitionAfter & after)
+  const GateTransitionAfter & after) noexcept
 {
   reservation.slot->after_state_seq = after.after_state_seq;
   reservation.slot->after_control_seq = after.after_control_seq;
