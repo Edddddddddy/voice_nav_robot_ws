@@ -16,6 +16,8 @@
 
 import ctypes
 import ctypes.util
+from dataclasses import dataclass, field
+import math
 import mmap
 import os
 import struct
@@ -42,6 +44,7 @@ CONTROL_FORMAT = '<24Q'
 CONTROL_REQUEST_FORMAT = '<10Q'
 BANK_FORMAT = '<16Q'
 SEGMENT_FORMAT = '<8Q'
+PAGE_FORMAT = '<24Q'
 INIT_STATE_WORD = 17
 WRITER_PID_WORD = 18
 LAST_COMPLETED_WRITE_SEQ_WORD = 19
@@ -67,10 +70,27 @@ CONTROL_FLAG_EXACT_SEAL_STAMP = 2
 CONTROL_RESPONSE_OK = 1
 CONTROL_RESPONSE_INVALID = 2
 FAULT_SEQUENCE = 1 << 0
+FAULT_GENERATION = 1 << 1
+FAULT_NONFINITE = 1 << 2
 FAULT_SIM_STAMP = 1 << 3
 FAULT_CAPACITY = 1 << 4
+FAULT_ZERO_REQUIRED = 1 << 5
 FAULT_OBSERVATION = 1 << 6
 FAULT_PROTOCOL = 1 << 7
+KNOWN_FAULTS = (
+    FAULT_SEQUENCE |
+    FAULT_GENERATION |
+    FAULT_NONFINITE |
+    FAULT_SIM_STAMP |
+    FAULT_CAPACITY |
+    FAULT_ZERO_REQUIRED |
+    FAULT_OBSERVATION |
+    FAULT_PROTOCOL
+)
+KNOWN_PREDICATE_FLAGS = (
+    CONTROL_FLAG_ZERO_REQUIRED |
+    CONTROL_FLAG_EXACT_SEAL_STAMP
+)
 
 
 def crc64_ecma_words(words):
@@ -119,6 +139,57 @@ def control_response_checksum(owner, control, response_ticket):
             *control[11:15],
         ),
     )
+
+
+@dataclass(frozen=True)
+class HardwareWriteLedgerSnapshotPage:
+    """One immutable Parent copy of a bounded sealed evidence page."""
+
+    page_magic: int
+    abi_version: int
+    page_bytes: int
+    segment_bytes: int
+    bank_index: int
+    bank_epoch: int
+    generation: int
+    interval_id: int
+    arm_fence_write_seq: int
+    seal_fence_write_seq: int
+    seal_not_before_sim_stamp_ns_bits: int
+    predicate_flags: int
+    page_index: int
+    page_count: int
+    total_segment_count: int
+    total_invocation_count: int
+    page_segment_count: int
+    page_invocation_count: int
+    page_first_write_seq: int
+    page_last_write_seq: int
+    previous_page_checksum: int
+    oracle_faults: int
+    bank_checksum: int
+    page_checksum: int
+    segments: tuple
+
+
+@dataclass(frozen=True)
+class SealedHardwareWriteLedgerInterval:
+    """Complete validated evidence retained until one exact ACK."""
+
+    generation: int
+    interval_id: int
+    bank_index: int
+    bank_epoch: int
+    terminal_state: int
+    arm_fence_write_seq: int
+    seal_fence_write_seq: int
+    bank_checksum: int
+    oracle_faults: int
+    pages: tuple
+    _owner_token: object = field(repr=False, compare=False)
+    _ack_token: object = field(repr=False, compare=False)
+    _bank_words: tuple = field(repr=False, compare=False)
+    _segments: tuple = field(repr=False, compare=False)
 
 
 class AtomicUint64:
@@ -248,6 +319,8 @@ class HardwareWriteLedgerRegionOwner:
         self.fd = -1
         self.region = None
         self.linked = False
+        self._evidence_owner_token = object()
+        self._registered_snapshots = {}
 
         try:
             flags = os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_CLOEXEC
@@ -301,6 +374,414 @@ class HardwareWriteLedgerRegionOwner:
             INIT_STATE_WORD * 8,
             INIT_READY,
         )
+
+    @staticmethod
+    def _signed_int64(bits):
+        """Interpret one ABI uint64 word as its signed int64 payload."""
+        if bits & (1 << 63):
+            return bits - (1 << 64)
+        return bits
+
+    @staticmethod
+    def _finite_command_bits(bits):
+        """Return whether exact IEEE-754 command bits encode a finite value."""
+        value = struct.unpack('<d', struct.pack('<Q', bits))[0]
+        return math.isfinite(value)
+
+    @staticmethod
+    def _zero_command_bits(bits):
+        """Accept both signed IEEE-754 zero encodings."""
+        return (bits & 0x7FFFFFFFFFFFFFFF) == 0
+
+    @staticmethod
+    def _require_uint64(value, field_name, nonzero=False):
+        """Reject values that cannot be one exact ABI uint64 identity word."""
+        if not isinstance(value, int) or value < 0 or value > UINT64_MASK:
+            raise AssertionError(f'{field_name} is not one uint64 word')
+        if nonzero and value == 0:
+            raise AssertionError(f'{field_name} must be non-zero')
+
+    def _validate_static_header(self):
+        """Validate the complete immutable region identity and geometry."""
+        if self.region is None:
+            raise AssertionError('ledger region is closed')
+        header = struct.unpack_from(HEADER_FORMAT, self.region, 0)
+        expected_prefix = (
+            MAGIC,
+            ABI_VERSION,
+            ENDIAN_TAG,
+            HEADER_BYTES,
+            CONTROL_BYTES,
+            BANK_BYTES,
+            SEGMENT_BYTES,
+            PAGE_BYTES,
+            self.region_bytes,
+            BANK_COUNT,
+            self.segment_capacity,
+            self.page_segment_limit,
+            self.owner_uid,
+            self.generation,
+            self.nonce_hi,
+            self.nonce_lo,
+            0,
+        )
+        if header[0:17] != expected_prefix:
+            raise AssertionError('ledger immutable header identity changed')
+        if self.page_segment_limit <= 0:
+            raise AssertionError('ledger page segment limit is zero')
+        if self.page_segment_limit > self.segment_capacity:
+            raise AssertionError('ledger page segment limit exceeds capacity')
+        if self.segment_capacity <= 0:
+            raise AssertionError('ledger segment capacity is zero')
+        if (self.nonce_hi | self.nonce_lo) == 0:
+            raise AssertionError('ledger nonce is zero')
+        if header[21:23] != (0, 0):
+            raise AssertionError('ledger header reserved words changed')
+        if header[23] != header_checksum(header):
+            raise AssertionError('ledger header checksum mismatch')
+        if self.atomic.load_acquire(
+            self.region,
+            INIT_STATE_WORD * 8,
+        ) != INIT_READY:
+            raise AssertionError('ledger region is not READY')
+
+    def _validate_terminal_bank(self, bank_index, terminal_state, bank):
+        """Validate one copied sealed bank before any segment traversal."""
+        if bank[0] != terminal_state:
+            raise AssertionError('ledger bank state changed during copy')
+        if bank[1] == 0 or bank[2] == 0:
+            raise AssertionError('ledger sealed identity contains zero')
+        if bank[3] == UINT64_MASK or bank[4] <= bank[3]:
+            raise AssertionError('ledger seal fence does not follow ARM')
+        if bank[5] == 0 or bank[5] > self.segment_capacity:
+            raise AssertionError('ledger segment budget is outside capacity')
+        if bank[6] == 0:
+            raise AssertionError('ledger invocation budget is zero')
+        if bank[7] & ~KNOWN_PREDICATE_FLAGS:
+            raise AssertionError('ledger predicate flags are unknown')
+        if self._signed_int64(bank[8]) < 0:
+            raise AssertionError('ledger seal stamp is negative')
+        if bank[9] > bank[5] or bank[9] > self.segment_capacity:
+            raise AssertionError('ledger segment count exceeds capacity')
+        if bank[10] == 0 or bank[10] > bank[6]:
+            raise AssertionError('ledger invocation count exceeds its budget')
+        if bank[11] != bank[3] + 1:
+            raise AssertionError('ledger first write does not follow ARM')
+        if bank[12] != bank[4]:
+            raise AssertionError('ledger last write does not equal SEAL')
+        if bank[10] != bank[4] - bank[3]:
+            raise AssertionError('ledger attempt count does not cover fences')
+        if bank[13] & ~KNOWN_FAULTS:
+            raise AssertionError('ledger bank contains unknown fault bits')
+        if terminal_state == BANK_STATE_SEALED_OK and bank[13] != 0:
+            raise AssertionError('SEALED_OK bank contains sticky faults')
+        if terminal_state == BANK_STATE_SEALED_FAULT and bank[13] == 0:
+            raise AssertionError('SEALED_FAULT bank has no sticky fault')
+        expected_page_count = max(
+            1,
+            (bank[9] + self.page_segment_limit - 1) //
+            self.page_segment_limit,
+        )
+        if bank[14] != expected_page_count:
+            raise AssertionError('ledger page count does not match geometry')
+        if bank_index < 0 or bank_index >= BANK_COUNT:
+            raise AssertionError('ledger bank index is outside the region')
+
+    def _validate_segments(self, bank, segments):
+        """Validate bounded stored tuples without inventing missing attempts."""
+        recorded_invocations = 0
+        previous_segment = None
+        previous_stamp = None
+        clean_bank = bank[13] == 0
+        for segment_index, segment in enumerate(segments):
+            if segment[0] != self.generation:
+                raise AssertionError('ledger segment generation changed')
+            if segment[3] == 0 or segment[2] < segment[1]:
+                raise AssertionError('ledger segment range is empty')
+            if segment[3] != segment[2] - segment[1] + 1:
+                raise AssertionError('ledger segment count differs from range')
+            if segment[1] < bank[11] or segment[2] > bank[12]:
+                raise AssertionError('ledger segment escapes attempt range')
+            if previous_segment is not None:
+                if segment[1] <= previous_segment[2]:
+                    raise AssertionError('ledger segments overlap or regress')
+                if clean_bank and segment[1] != previous_segment[2] + 1:
+                    raise AssertionError('clean ledger segment coverage has gap')
+            elif clean_bank and segment[1] != bank[11]:
+                raise AssertionError('clean ledger coverage starts after first')
+            if recorded_invocations > bank[10] - segment[3]:
+                raise AssertionError('ledger recorded count exceeds attempts')
+            recorded_invocations += segment[3]
+
+            stamp = self._signed_int64(segment[4])
+            if (
+                previous_stamp is not None and
+                stamp < previous_stamp and
+                not bank[13] & FAULT_SIM_STAMP
+            ):
+                raise AssertionError('ledger stamp regressed without fault')
+            if segment[5] > 0xFF:
+                raise AssertionError('ledger stored a non-VALID observation')
+            if not self._finite_command_bits(segment[6]):
+                raise AssertionError('ledger left command is non-finite')
+            if not self._finite_command_bits(segment[7]):
+                raise AssertionError('ledger right command is non-finite')
+            if bank[7] & CONTROL_FLAG_ZERO_REQUIRED:
+                if (
+                    not self._zero_command_bits(segment[6]) or
+                    not self._zero_command_bits(segment[7])
+                ):
+                    raise AssertionError('ledger stored a non-zero predicate')
+            if (
+                previous_segment is not None and
+                segment[1] == previous_segment[2] + 1 and
+                segment[4:8] == previous_segment[4:8]
+            ):
+                raise AssertionError('ledger retained an unfoldable tuple')
+            previous_segment = segment
+            previous_stamp = stamp
+
+        if clean_bank:
+            if not segments or segments[-1][2] != bank[12]:
+                raise AssertionError('clean ledger coverage ends before SEAL')
+            if recorded_invocations != bank[10]:
+                raise AssertionError('clean ledger omitted invocation evidence')
+            final_stamp = self._signed_int64(segments[-1][4])
+            seal_stamp = self._signed_int64(bank[8])
+            if final_stamp < seal_stamp:
+                raise AssertionError('clean ledger sealed before threshold')
+            if (
+                bank[7] & CONTROL_FLAG_EXACT_SEAL_STAMP and
+                final_stamp != seal_stamp
+            ):
+                raise AssertionError('clean exact seal stamp does not match')
+        elif recorded_invocations > bank[10]:
+            raise AssertionError('fault ledger records too many invocations')
+
+    def _build_snapshot_pages(self, bank_index, bank, segments):
+        """Build one local immutable CRC chain from exact sealed evidence."""
+        pages = []
+        previous_page_checksum = 0
+        page_count = bank[14]
+        for page_index in range(page_count):
+            first_segment_index = page_index * self.page_segment_limit
+            page_segments = segments[
+                first_segment_index:
+                first_segment_index + self.page_segment_limit
+            ]
+            if not segments or page_index == 0:
+                page_first_write_seq = bank[11]
+            else:
+                page_first_write_seq = page_segments[0][1]
+            if page_index + 1 < page_count:
+                next_segment_index = (
+                    first_segment_index + len(page_segments)
+                )
+                page_last_write_seq = (
+                    segments[next_segment_index][1] - 1
+                )
+            else:
+                page_last_write_seq = bank[12]
+            if page_last_write_seq < page_first_write_seq:
+                raise AssertionError('ledger page attempt range is empty')
+            page_invocation_count = (
+                page_last_write_seq - page_first_write_seq + 1
+            )
+            header_words = (
+                PAGE_MAGIC,
+                ABI_VERSION,
+                PAGE_BYTES,
+                SEGMENT_BYTES,
+                bank_index,
+                bank[1],
+                self.generation,
+                bank[2],
+                bank[3],
+                bank[4],
+                bank[8],
+                bank[7],
+                page_index,
+                page_count,
+                bank[9],
+                bank[10],
+                len(page_segments),
+                page_invocation_count,
+                page_first_write_seq,
+                page_last_write_seq,
+                previous_page_checksum,
+                bank[13],
+                bank[15],
+            )
+            page_checksum = crc64_ecma_words(
+                (
+                    *header_words,
+                    *(
+                        word
+                        for segment in page_segments
+                        for word in segment
+                    ),
+                ),
+            )
+            page = HardwareWriteLedgerSnapshotPage(
+                *header_words,
+                page_checksum,
+                tuple(page_segments),
+            )
+            pages.append(page)
+            previous_page_checksum = page_checksum
+        if sum(page.page_segment_count for page in pages) != bank[9]:
+            raise AssertionError('ledger pages omit stored segments')
+        if sum(page.page_invocation_count for page in pages) != bank[10]:
+            raise AssertionError('ledger pages omit attempted invocations')
+        return tuple(pages)
+
+    def _copy_validated_terminal_evidence(
+        self,
+        interval_id,
+        bank_index,
+        bank_epoch,
+        seal_fence_write_seq,
+    ):
+        """Copy, validate, and acquire-recheck one exact terminal bank."""
+        self._require_uint64(interval_id, 'interval_id', nonzero=True)
+        self._require_uint64(bank_index, 'bank_index')
+        self._require_uint64(bank_epoch, 'bank_epoch', nonzero=True)
+        self._require_uint64(
+            seal_fence_write_seq,
+            'seal_fence_write_seq',
+            nonzero=True,
+        )
+        self._validate_static_header()
+        bank_offset = self.bank_offset(bank_index)
+        terminal_state = self.atomic.load_acquire(
+            self.region,
+            bank_offset,
+        )
+        if terminal_state not in (
+            BANK_STATE_SEALED_OK,
+            BANK_STATE_SEALED_FAULT,
+        ):
+            raise AssertionError('ledger bank is not terminal')
+        bank = struct.unpack_from(BANK_FORMAT, self.region, bank_offset)
+        self._validate_terminal_bank(bank_index, terminal_state, bank)
+        if (
+            bank[1] != bank_epoch or
+            bank[2] != interval_id or
+            bank[4] != seal_fence_write_seq
+        ):
+            raise AssertionError('ledger sealed identity does not match')
+        segments = tuple(
+            self.snapshot_segment(bank_index, segment_index)
+            for segment_index in range(bank[9])
+        )
+        self._validate_segments(bank, segments)
+        calculated_bank_checksum = crc64_ecma_words(
+            (
+                *bank[1:15],
+                *(word for segment in segments for word in segment),
+            ),
+        )
+        if bank[15] != calculated_bank_checksum:
+            raise AssertionError('ledger bank checksum mismatch')
+        pages = self._build_snapshot_pages(bank_index, bank, segments)
+
+        rechecked_bank = struct.unpack_from(
+            BANK_FORMAT,
+            self.region,
+            bank_offset,
+        )
+        rechecked_segments = tuple(
+            self.snapshot_segment(bank_index, segment_index)
+            for segment_index in range(bank[9])
+        )
+        rechecked_state = self.atomic.load_acquire(
+            self.region,
+            bank_offset,
+        )
+        if (
+            rechecked_state != terminal_state or
+            rechecked_bank != bank or
+            rechecked_segments != segments
+        ):
+            raise AssertionError('ledger evidence changed during Parent copy')
+        return terminal_state, bank, segments, pages
+
+    def read_sealed_interval(
+        self,
+        interval_id,
+        bank_index,
+        bank_epoch,
+        seal_fence_write_seq,
+    ):
+        """Return a complete immutable snapshot without releasing its bank."""
+        terminal_state, bank, segments, pages = (
+            self._copy_validated_terminal_evidence(
+                interval_id,
+                bank_index,
+                bank_epoch,
+                seal_fence_write_seq,
+            )
+        )
+        ack_token = object()
+        snapshot = SealedHardwareWriteLedgerInterval(
+            generation=self.generation,
+            interval_id=interval_id,
+            bank_index=bank_index,
+            bank_epoch=bank_epoch,
+            terminal_state=terminal_state,
+            arm_fence_write_seq=bank[3],
+            seal_fence_write_seq=seal_fence_write_seq,
+            bank_checksum=bank[15],
+            oracle_faults=bank[13],
+            pages=pages,
+            _owner_token=self._evidence_owner_token,
+            _ack_token=ack_token,
+            _bank_words=bank,
+            _segments=segments,
+        )
+        self._registered_snapshots[bank_index] = snapshot
+        return snapshot
+
+    def acknowledge(self, snapshot):
+        """Release one exact fully validated snapshot with a single CAS."""
+        if not isinstance(snapshot, SealedHardwareWriteLedgerInterval):
+            return False
+        if snapshot._owner_token is not self._evidence_owner_token:
+            return False
+        if self._registered_snapshots.get(snapshot.bank_index) is not snapshot:
+            return False
+        try:
+            terminal_state, bank, segments, pages = (
+                self._copy_validated_terminal_evidence(
+                    snapshot.interval_id,
+                    snapshot.bank_index,
+                    snapshot.bank_epoch,
+                    snapshot.seal_fence_write_seq,
+                )
+            )
+        except (AssertionError, IndexError, struct.error):
+            self._registered_snapshots.pop(snapshot.bank_index, None)
+            return False
+        if (
+            snapshot.generation != self.generation or
+            snapshot.terminal_state != terminal_state or
+            snapshot.arm_fence_write_seq != bank[3] or
+            snapshot.bank_checksum != bank[15] or
+            snapshot.oracle_faults != bank[13] or
+            snapshot.pages != pages or
+            snapshot._bank_words != bank or
+            snapshot._segments != segments
+        ):
+            self._registered_snapshots.pop(snapshot.bank_index, None)
+            return False
+        self._registered_snapshots.pop(snapshot.bank_index, None)
+        exchanged, _observed = self.atomic.compare_exchange_acq_rel(
+            self.region,
+            self.bank_offset(snapshot.bank_index),
+            terminal_state,
+            BANK_STATE_FREE,
+        )
+        return exchanged
 
     def load_header_word(self, index):
         """Acquire-load one dynamic header word."""
@@ -722,6 +1203,7 @@ class HardwareWriteLedgerRegionOwner:
 
     def cleanup(self):
         """Release only resources owned by this test object."""
+        self._registered_snapshots.clear()
         try:
             if self.linked:
                 try:
