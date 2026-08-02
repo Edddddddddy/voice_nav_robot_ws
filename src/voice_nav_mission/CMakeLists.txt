@@ -86,6 +86,7 @@ target_link_libraries(
 )
 
 if(BUILD_TESTING)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_cmake_ros REQUIRED)
   find_package(ament_lint_auto REQUIRED)
@@ -161,6 +162,22 @@ if(BUILD_TESTING)
   set_tests_properties(
     gate_event_journal_c_abi_test
     PROPERTIES LABELS "c_abi"
+  )
+
+  add_test(
+    NAME gate_event_journal_cross_process_test
+    COMMAND
+      "${Python3_EXECUTABLE}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/test/test_gate_event_journal_cross_process.py"
+      "${CMAKE_CURRENT_BINARY_DIR}/gate_event_journal_attach_probe"
+  )
+  set_tests_properties(
+    gate_event_journal_cross_process_test
+    PROPERTIES
+      ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+      LABELS "cross_process"
+      RUN_SERIAL TRUE
+      TIMEOUT 15
   )
 
   ament_add_gtest(
