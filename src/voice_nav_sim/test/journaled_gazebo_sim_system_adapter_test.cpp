@@ -85,6 +85,24 @@ public:
     return hardware_interface::CallbackReturn::ERROR;
   }
 
+  hardware_interface::return_type prepare_command_mode_switch(
+    const std::vector<std::string> & start_interfaces,
+    const std::vector<std::string> & stop_interfaces) override
+  {
+    prepare_start_interfaces = &start_interfaces;
+    prepare_stop_interfaces = &stop_interfaces;
+    return hardware_interface::return_type::ERROR;
+  }
+
+  hardware_interface::return_type perform_command_mode_switch(
+    const std::vector<std::string> & start_interfaces,
+    const std::vector<std::string> & stop_interfaces) override
+  {
+    perform_start_interfaces = &start_interfaces;
+    perform_stop_interfaces = &stop_interfaces;
+    return hardware_interface::return_type::ERROR;
+  }
+
   hardware_interface::return_type read(
     const rclcpp::Time &,
     const rclcpp::Duration &) override
@@ -105,6 +123,10 @@ public:
   std::size_t export_command_interfaces_calls{0U};
   const rclcpp_lifecycle::State * on_activate_previous_state{nullptr};
   const rclcpp_lifecycle::State * on_deactivate_previous_state{nullptr};
+  const std::vector<std::string> * prepare_start_interfaces{nullptr};
+  const std::vector<std::string> * prepare_stop_interfaces{nullptr};
+  const std::vector<std::string> * perform_start_interfaces{nullptr};
+  const std::vector<std::string> * perform_stop_interfaces{nullptr};
   double state_value{1.0};
   double command_value{2.0};
 };
@@ -184,6 +206,28 @@ TEST(JournaledGazeboSimSystemAdapter, ForwardsActivationTransitions)
   EXPECT_EQ(
     upstream->on_deactivate_previous_state, &deactivation_previous_state);
   EXPECT_EQ(deactivation_result, hardware_interface::CallbackReturn::ERROR);
+}
+
+TEST(JournaledGazeboSimSystemAdapter, ForwardsCommandModeSwitches)
+{
+  auto upstream = std::make_shared<RecordingGazeboSystem>();
+  voice_nav_sim::JournaledGazeboSimSystemAdapter adapter(upstream);
+  const std::vector<std::string> prepare_start{"prepare_start"};
+  const std::vector<std::string> prepare_stop{"prepare_stop"};
+  const std::vector<std::string> perform_start{"perform_start"};
+  const std::vector<std::string> perform_stop{"perform_stop"};
+
+  const auto prepare_result =
+    adapter.prepare_command_mode_switch(prepare_start, prepare_stop);
+  const auto perform_result =
+    adapter.perform_command_mode_switch(perform_start, perform_stop);
+
+  EXPECT_EQ(upstream->prepare_start_interfaces, &prepare_start);
+  EXPECT_EQ(upstream->prepare_stop_interfaces, &prepare_stop);
+  EXPECT_EQ(prepare_result, hardware_interface::return_type::ERROR);
+  EXPECT_EQ(upstream->perform_start_interfaces, &perform_start);
+  EXPECT_EQ(upstream->perform_stop_interfaces, &perform_stop);
+  EXPECT_EQ(perform_result, hardware_interface::return_type::ERROR);
 }
 
 }  // namespace
