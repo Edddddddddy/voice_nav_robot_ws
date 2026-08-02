@@ -23,9 +23,25 @@
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
+#include <utility>
 
 namespace voice_nav_mission
 {
+
+class GateTransitionJournalTestAccess
+{
+public:
+  template<typename Transition>
+  static GateTransitionOutcome apply(
+    GateTransitionJournalBinding & binding,
+    const GateTransitionIntent & intent,
+    Transition && transition)
+  {
+    return binding.apply_transition(
+      intent, std::forward<Transition>(transition));
+  }
+};
+
 namespace
 {
 
@@ -588,7 +604,8 @@ TEST(
   std::uint64_t transition_calls = 0U;
   auto transition_binding = journal.claim_transition_binding();
 
-  const auto outcome = transition_binding->apply_transition(
+  const auto outcome = GateTransitionJournalTestAccess::apply(
+    *transition_binding,
     intent,
     [&region, &transition_calls]() {
       ++transition_calls;
@@ -665,7 +682,8 @@ TEST(GateEventJournal, TransitionFailureLeavesLinearizedIntent)
   auto transition_binding = journal.claim_transition_binding();
 
   EXPECT_THROW(
-    transition_binding->apply_transition(
+    GateTransitionJournalTestAccess::apply(
+      *transition_binding,
       intent,
       [&region, &transition_calls]() -> GateTransitionAfter {
         ++transition_calls;

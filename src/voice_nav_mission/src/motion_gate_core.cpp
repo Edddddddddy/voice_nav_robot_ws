@@ -20,6 +20,7 @@
 #include <iomanip>
 #include <limits>
 #include <sstream>
+#include <stdexcept>
 #include <string_view>
 #include <type_traits>
 #include <utility>
@@ -95,22 +96,8 @@ MotionGateCore::MotionGateCore(
   MotionGateConfig config,
   std::string gate_instance_id,
   std::uint64_t initial_control_seq)
-: MotionGateCore(
-    std::move(config),
-    std::move(gate_instance_id),
-    initial_control_seq,
-    std::unique_ptr<GateTransitionJournalBinding>{})
-{
-}
-
-MotionGateCore::MotionGateCore(
-  MotionGateConfig config,
-  std::string gate_instance_id,
-  std::uint64_t initial_control_seq,
-  std::unique_ptr<GateTransitionJournalBinding> transition_journal)
 : config_(std::move(config)),
   gate_instance_id_(std::move(gate_instance_id)),
-  transition_journal_(std::move(transition_journal)),
   control_seq_(initial_control_seq)
 {
   selected_ = zero_command();
@@ -122,6 +109,23 @@ MotionGateCore::MotionGateCore(
     detail_ = "invalid MotionGate configuration or Gate instance identifier";
     advance_state_seq();
   }
+}
+
+MotionGateCore::MotionGateCore(
+  MotionGateConfig config,
+  std::string gate_instance_id,
+  std::uint64_t initial_control_seq,
+  std::unique_ptr<GateTransitionJournalBinding> transition_journal)
+: MotionGateCore(
+    std::move(config),
+    std::move(gate_instance_id),
+    initial_control_seq)
+{
+  if (transition_journal == nullptr) {
+    throw std::invalid_argument(
+            "journal-bound MotionGateCore requires a transition binding");
+  }
+  transition_journal_ = std::move(transition_journal);
 }
 
 MotionGateCore::~MotionGateCore() = default;

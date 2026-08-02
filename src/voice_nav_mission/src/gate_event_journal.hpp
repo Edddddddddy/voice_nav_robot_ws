@@ -32,6 +32,8 @@ namespace voice_nav_mission
 {
 
 class GateTransitionJournalBinding;
+class GateTransitionJournalTestAccess;
+class MotionGateCore;
 
 using GateEventJournalHeader = voice_nav_gate_event_journal_header_v1;
 using GateEventJournalSlot = voice_nav_gate_event_journal_slot_v1;
@@ -205,6 +207,11 @@ public:
   GateTransitionJournalBinding & operator=(
     GateTransitionJournalBinding &&) = delete;
 
+private:
+  friend class GateEventJournal;
+  friend class GateTransitionJournalTestAccess;
+  friend class MotionGateCore;
+
   template<typename Transition>
   GateTransitionOutcome apply_transition(
     const GateTransitionIntent & intent,
@@ -217,9 +224,6 @@ public:
     return journal_->apply_transition(
       intent, std::forward<Transition>(transition));
   }
-
-private:
-  friend class GateEventJournal;
 
   GateTransitionJournalBinding() noexcept = default;
 

@@ -63,9 +63,9 @@ template<typename Binding>
 struct HasPublicTransitionEntryPoint<
   Binding,
   std::void_t<decltype(
-      std::declval<Binding &>().apply_transition(
+    std::declval<Binding &>().apply_transition(
         std::declval<const GateTransitionIntent &>(),
-        TransitionProbe{}))>> : std::true_type {};
+        TransitionProbe{}))>>: std::true_type {};
 
 static_assert(
   !HasPublicTransitionEntryPoint<GateTransitionJournalBinding>::value);
@@ -674,18 +674,18 @@ TEST(MotionGateJournal, TerminalCauseFlowsIntoTheFirstZeroOutputIntent)
 
   const auto output = journal.publish_output(
     GateOutputIntent{
-      41U,
-      static_cast<std::uint64_t>(Reason::None),
-      1U,
-      1U,
-      0U,
-      0U,
-      0U,
-      0U,
-      UINT64_C(0x0123456789abcdef),
-      UINT64_C(0x0123456789abcdef),
-      inhibited.output_cause_transition_journal_seq,
-      0U},
+        41U,
+        static_cast<std::uint64_t>(Reason::None),
+        1U,
+        1U,
+        0U,
+        0U,
+        0U,
+        0U,
+        UINT64_C(0x0123456789abcdef),
+        UINT64_C(0x0123456789abcdef),
+        inhibited.output_cause_transition_journal_seq,
+        0U},
     []() noexcept {});
 
   EXPECT_EQ(output.journal_seq, 3U);
