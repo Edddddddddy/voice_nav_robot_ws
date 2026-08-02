@@ -36,6 +36,9 @@ public:
   hardware_interface::CallbackReturn on_init(
     const hardware_interface::HardwareInfo & hardware_info) override;
 
+  hardware_interface::CallbackReturn on_configure(
+    const rclcpp_lifecycle::State & previous_state) override;
+
   bool initSim(
     rclcpp::Node::SharedPtr & model_node,
     std::map<std::string, gz::sim::Entity> & joints,

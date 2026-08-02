@@ -53,6 +53,13 @@ hardware_interface::CallbackReturn JournaledGazeboSimSystemAdapter::on_init(
 #pragma GCC diagnostic pop
 #endif
 
+hardware_interface::CallbackReturn
+JournaledGazeboSimSystemAdapter::on_configure(
+  const rclcpp_lifecycle::State & previous_state)
+{
+  return upstream_->on_configure(previous_state);
+}
+
 bool JournaledGazeboSimSystemAdapter::initSim(
   rclcpp::Node::SharedPtr & model_node,
   std::map<std::string, gz::sim::Entity> & joints,
