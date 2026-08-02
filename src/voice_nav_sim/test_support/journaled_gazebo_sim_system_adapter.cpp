@@ -184,7 +184,18 @@ hardware_interface::return_type JournaledGazeboSimSystemAdapter::write(
   if (journal_enabled) {
     ticket = write_journal_->begin_write(time.nanoseconds());
   }
-  const auto delegated_result = upstream_->write(time, period);
+  auto delegated_result = hardware_interface::return_type::ERROR;
+  try {
+    delegated_result = upstream_->write(time, period);
+  } catch (...) {
+    if (journal_enabled) {
+      write_journal_->finish_write(
+        ticket,
+        static_cast<std::uint64_t>(hardware_interface::return_type::ERROR),
+        observe_wheel_commands());
+    }
+    throw;
+  }
   if (journal_enabled) {
     write_journal_->finish_write(
       ticket,
