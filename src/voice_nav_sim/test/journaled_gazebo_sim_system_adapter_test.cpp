@@ -16,6 +16,7 @@
 
 #include "journaled_gazebo_sim_system_adapter.hpp"
 
+#include <gz/sim/EntityComponentManager.hh>
 #include <gz_ros2_control/gz_system_interface.hpp>
 #include <pluginlib/class_loader.hpp>
 
@@ -30,13 +31,18 @@ class RecordingGazeboSystem final : public GazeboSystemInterface
 {
 public:
   bool initSim(
-    rclcpp::Node::SharedPtr &,
-    std::map<std::string, gz::sim::Entity> &,
-    const hardware_interface::HardwareInfo &,
-    gz::sim::EntityComponentManager &,
-    unsigned int) override
+    rclcpp::Node::SharedPtr & model_node,
+    std::map<std::string, gz::sim::Entity> & joints,
+    const hardware_interface::HardwareInfo & hardware_info,
+    gz::sim::EntityComponentManager & entity_component_manager,
+    unsigned int update_rate) override
   {
-    return false;
+    init_model_node = &model_node;
+    init_joints = &joints;
+    init_hardware_info = &hardware_info;
+    init_entity_component_manager = &entity_component_manager;
+    init_update_rate = update_rate;
+    return true;
   }
 
   hardware_interface::CallbackReturn on_init(
@@ -117,6 +123,11 @@ public:
     return hardware_interface::return_type::ERROR;
   }
 
+  rclcpp::Node::SharedPtr * init_model_node{nullptr};
+  std::map<std::string, gz::sim::Entity> * init_joints{nullptr};
+  const hardware_interface::HardwareInfo * init_hardware_info{nullptr};
+  gz::sim::EntityComponentManager * init_entity_component_manager{nullptr};
+  unsigned int init_update_rate{0U};
   const hardware_interface::HardwareInfo * on_init_hardware_info{nullptr};
   const rclcpp_lifecycle::State * on_configure_previous_state{nullptr};
   std::size_t export_state_interfaces_calls{0U};
@@ -146,6 +157,32 @@ TEST(
   ASSERT_NE(adapter, nullptr);
 
   adapter.reset();
+}
+
+TEST(JournaledGazeboSimSystemAdapter, ForwardsInitSimArgumentsAndResult)
+{
+  auto upstream = std::make_shared<RecordingGazeboSystem>();
+  voice_nav_sim::JournaledGazeboSimSystemAdapter adapter(upstream);
+  rclcpp::Node::SharedPtr model_node;
+  std::map<std::string, gz::sim::Entity> joints;
+  const hardware_interface::HardwareInfo hardware_info{};
+  gz::sim::EntityComponentManager entity_component_manager;
+  constexpr unsigned int update_rate = 73U;
+
+  const bool result = adapter.initSim(
+    model_node,
+    joints,
+    hardware_info,
+    entity_component_manager,
+    update_rate);
+
+  EXPECT_EQ(upstream->init_model_node, &model_node);
+  EXPECT_EQ(upstream->init_joints, &joints);
+  EXPECT_EQ(upstream->init_hardware_info, &hardware_info);
+  EXPECT_EQ(
+    upstream->init_entity_component_manager, &entity_component_manager);
+  EXPECT_EQ(upstream->init_update_rate, update_rate);
+  EXPECT_TRUE(result);
 }
 
 TEST(JournaledGazeboSimSystemAdapter, ForwardsOnInitArgumentAndResult)
