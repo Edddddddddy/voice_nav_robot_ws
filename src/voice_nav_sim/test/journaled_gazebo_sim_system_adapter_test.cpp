@@ -110,17 +110,21 @@ public:
   }
 
   hardware_interface::return_type read(
-    const rclcpp::Time &,
-    const rclcpp::Duration &) override
+    const rclcpp::Time & time,
+    const rclcpp::Duration & period) override
   {
-    return hardware_interface::return_type::ERROR;
+    read_time = &time;
+    read_period = &period;
+    return read_result;
   }
 
   hardware_interface::return_type write(
-    const rclcpp::Time &,
-    const rclcpp::Duration &) override
+    const rclcpp::Time & time,
+    const rclcpp::Duration & period) override
   {
-    return hardware_interface::return_type::ERROR;
+    write_time = &time;
+    write_period = &period;
+    return write_result;
   }
 
   rclcpp::Node::SharedPtr * init_model_node{nullptr};
@@ -138,6 +142,14 @@ public:
   const std::vector<std::string> * prepare_stop_interfaces{nullptr};
   const std::vector<std::string> * perform_start_interfaces{nullptr};
   const std::vector<std::string> * perform_stop_interfaces{nullptr};
+  const rclcpp::Time * read_time{nullptr};
+  const rclcpp::Duration * read_period{nullptr};
+  const rclcpp::Time * write_time{nullptr};
+  const rclcpp::Duration * write_period{nullptr};
+  hardware_interface::return_type read_result{
+    hardware_interface::return_type::ERROR};
+  hardware_interface::return_type write_result{
+    hardware_interface::return_type::OK};
   double state_value{1.0};
   double command_value{2.0};
 };
@@ -265,6 +277,26 @@ TEST(JournaledGazeboSimSystemAdapter, ForwardsCommandModeSwitches)
   EXPECT_EQ(upstream->perform_start_interfaces, &perform_start);
   EXPECT_EQ(upstream->perform_stop_interfaces, &perform_stop);
   EXPECT_EQ(perform_result, hardware_interface::return_type::ERROR);
+}
+
+TEST(JournaledGazeboSimSystemAdapter, ForwardsReadAndWriteCycles)
+{
+  auto upstream = std::make_shared<RecordingGazeboSystem>();
+  voice_nav_sim::JournaledGazeboSimSystemAdapter adapter(upstream);
+  const rclcpp::Time read_time(11, 12, RCL_ROS_TIME);
+  const rclcpp::Duration read_period(13, 14);
+  const rclcpp::Time write_time(21, 22, RCL_ROS_TIME);
+  const rclcpp::Duration write_period(23, 24);
+
+  const auto read_result = adapter.read(read_time, read_period);
+  const auto write_result = adapter.write(write_time, write_period);
+
+  EXPECT_EQ(upstream->read_time, &read_time);
+  EXPECT_EQ(upstream->read_period, &read_period);
+  EXPECT_EQ(read_result, hardware_interface::return_type::ERROR);
+  EXPECT_EQ(upstream->write_time, &write_time);
+  EXPECT_EQ(upstream->write_period, &write_period);
+  EXPECT_EQ(write_result, hardware_interface::return_type::OK);
 }
 
 }  // namespace
