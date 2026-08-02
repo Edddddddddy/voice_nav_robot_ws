@@ -22,6 +22,7 @@
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <utility>
 
 #include "gate_event_journal.hpp"
 #include "voice_nav_mission/motion_gate_core.hpp"
@@ -46,6 +47,28 @@ static_assert(
     std::string,
     std::uint64_t,
     GateEventJournal *>);
+
+struct TransitionProbe
+{
+  GateTransitionAfter operator()() const noexcept
+  {
+    return GateTransitionAfter{};
+  }
+};
+
+template<typename Binding, typename = void>
+struct HasPublicTransitionEntryPoint : std::false_type {};
+
+template<typename Binding>
+struct HasPublicTransitionEntryPoint<
+  Binding,
+  std::void_t<decltype(
+      std::declval<Binding &>().apply_transition(
+        std::declval<const GateTransitionIntent &>(),
+        TransitionProbe{}))>> : std::true_type {};
+
+static_assert(
+  !HasPublicTransitionEntryPoint<GateTransitionJournalBinding>::value);
 
 constexpr char kGateId[] = "0123456789abcdef0123456789abcdef";
 
@@ -160,6 +183,17 @@ TEST(MotionGateJournal, BindingDetectsJournalLifetimeEndBeforeMutation)
   EXPECT_EQ(after.detail, before.detail);
   EXPECT_TRUE(after.motion_inhibited);
   EXPECT_TRUE(after.zero_selected);
+}
+
+TEST(MotionGateJournal, JournalBoundConstructionRejectsEmptyCapability)
+{
+  EXPECT_THROW(
+    (void)MotionGateCore(
+      MotionGateConfig{},
+      kGateId,
+      0U,
+      std::unique_ptr<GateTransitionJournalBinding>{}),
+    std::invalid_argument);
 }
 
 TEST(MotionGateJournal, SuccessfulPrepareOwnsItsLinearizationFence)
