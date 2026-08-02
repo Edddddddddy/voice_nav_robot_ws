@@ -24,25 +24,10 @@
 #include <string>
 #include <vector>
 
+#include "hardware_write_sink.hpp"
+
 namespace voice_nav_sim
 {
-
-struct HardwareWriteRecord
-{
-  std::uint64_t generation;
-  std::uint64_t write_seq;
-  std::int64_t sim_stamp_ns;
-  std::uint8_t delegated_result;
-  std::uint64_t left_command_bits;
-  std::uint64_t right_command_bits;
-};
-
-class HardwareWriteSink
-{
-public:
-  virtual ~HardwareWriteSink() = default;
-  virtual bool append(const HardwareWriteRecord & record) noexcept = 0;
-};
 
 class JournaledGazeboSimSystemAdapter final
   : public gz_ros2_control::GazeboSimSystemInterface
