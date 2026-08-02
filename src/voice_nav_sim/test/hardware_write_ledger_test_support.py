@@ -56,8 +56,11 @@ CONTROL_REQUEST_READY = 2
 CONTROL_REQUEST_READING = 3
 BANK_STATE_ACTIVE = 1
 BANK_STATE_FREE = 0
+BANK_STATE_SEALED_OK = 2
 CONTROL_OP_ARM = 1
+CONTROL_OP_SEAL = 2
 CONTROL_FLAG_ZERO_REQUIRED = 1
+CONTROL_FLAG_EXACT_SEAL_STAMP = 2
 CONTROL_RESPONSE_OK = 1
 CONTROL_RESPONSE_INVALID = 2
 FAULT_SEQUENCE = 1 << 0
@@ -360,15 +363,8 @@ class HardwareWriteLedgerRegionOwner:
         self._write_owned_request(request)
         self._release_request_mailbox(CONTROL_REQUEST_READY)
 
-    def begin_arm_preparation(
-        self,
-        interval_id,
-        segment_budget,
-        invocation_budget,
-        require_zero_commands,
-    ):
-        """Write one ARM request while retaining Parent mailbox ownership."""
-        flags = CONTROL_FLAG_ZERO_REQUIRED if require_zero_commands else 0
+    def _begin_request_preparation(self, request_fields):
+        """Own and populate one request without publishing it to Writer."""
         self._claim_request_mailbox()
         try:
             control = struct.unpack_from(
@@ -384,18 +380,7 @@ class HardwareWriteLedgerRegionOwner:
                     'ledger mailbox tickets differ while IDLE',
                 )
             request_ticket = response_ticket + 1
-            request = [
-                CONTROL_OP_ARM,
-                flags,
-                interval_id,
-                0,
-                0,
-                segment_budget,
-                invocation_budget,
-                0,
-                0,
-                request_ticket,
-            ]
+            request = [*request_fields, 0, request_ticket]
             request[8] = control_request_checksum(
                 self,
                 request,
@@ -406,6 +391,28 @@ class HardwareWriteLedgerRegionOwner:
         except BaseException:
             self._release_request_mailbox(CONTROL_REQUEST_IDLE)
             raise
+
+    def begin_arm_preparation(
+        self,
+        interval_id,
+        segment_budget,
+        invocation_budget,
+        require_zero_commands,
+    ):
+        """Write one ARM request while retaining Parent mailbox ownership."""
+        flags = CONTROL_FLAG_ZERO_REQUIRED if require_zero_commands else 0
+        return self._begin_request_preparation(
+            (
+                CONTROL_OP_ARM,
+                flags,
+                interval_id,
+                0,
+                0,
+                segment_budget,
+                invocation_budget,
+                0,
+            ),
+        )
 
     def commit_prepared_request(self, request_ticket):
         """Release-publish the exact request currently owned by Parent."""
@@ -438,6 +445,33 @@ class HardwareWriteLedgerRegionOwner:
             segment_budget,
             invocation_budget,
             require_zero_commands,
+        )
+        self.commit_prepared_request(request_ticket)
+        return request_ticket
+
+    def post_seal(
+        self,
+        interval_id,
+        bank_index,
+        bank_epoch,
+        not_before_sim_stamp_ns,
+        require_exact_stamp,
+    ):
+        """Prepare and release-publish one checksummed SEAL request."""
+        flags = (
+            CONTROL_FLAG_EXACT_SEAL_STAMP if require_exact_stamp else 0
+        )
+        request_ticket = self._begin_request_preparation(
+            (
+                CONTROL_OP_SEAL,
+                flags,
+                interval_id,
+                bank_index,
+                bank_epoch,
+                0,
+                0,
+                int(not_before_sim_stamp_ns) & UINT64_MASK,
+            ),
         )
         self.commit_prepared_request(request_ticket)
         return request_ticket
@@ -502,6 +536,21 @@ class HardwareWriteLedgerRegionOwner:
         return self.atomic.load_acquire(
             self.region,
             CONTROL_OFFSET + CONTROL_RESPONSE_TICKET_WORD * 8,
+        )
+
+    def load_request_state(self):
+        """Acquire-load current request-envelope ownership."""
+        return self.atomic.load_acquire(
+            self.region,
+            CONTROL_OFFSET + CONTROL_REQUEST_STATE_WORD * 8,
+        )
+
+    def force_bank_segment_count(self, bank_index, segment_count):
+        """Inject one impossible segment count for a bounded fault test."""
+        self.atomic.store_release(
+            self.region,
+            self.bank_offset(bank_index) + 9 * 8,
+            segment_count,
         )
 
     def wait_response(self, request_ticket, timeout=3.0):

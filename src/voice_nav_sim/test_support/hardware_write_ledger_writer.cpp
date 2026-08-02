@@ -254,6 +254,47 @@ struct HardwareWriteLedgerWriter::Impl
       segment_bytes);
   }
 
+  std::uint64_t calculate_bank_checksum(std::uint64_t bank_index) noexcept
+  {
+    const auto * sealed_bank = bank(bank_index);
+    const std::uint64_t bank_words[] = {
+      sealed_bank->bank_epoch,
+      sealed_bank->interval_id,
+      sealed_bank->arm_fence_write_seq,
+      sealed_bank->seal_fence_write_seq,
+      sealed_bank->segment_budget,
+      sealed_bank->invocation_budget,
+      sealed_bank->predicate_flags,
+      sealed_bank->seal_not_before_sim_stamp_ns_bits,
+      sealed_bank->segment_count,
+      sealed_bank->invocation_count,
+      sealed_bank->first_write_seq,
+      sealed_bank->last_write_seq,
+      sealed_bank->oracle_faults,
+      sealed_bank->page_count};
+    auto checksum = crc64_words(
+      std::begin(bank_words), std::end(bank_words));
+    for (std::uint64_t segment_index = 0U;
+      segment_index < sealed_bank->segment_count;
+      ++segment_index)
+    {
+      const auto * current_segment = segment(bank_index, segment_index);
+      const std::uint64_t segment_words[] = {
+        current_segment->generation,
+        current_segment->first_write_seq,
+        current_segment->last_write_seq,
+        current_segment->invocation_count,
+        current_segment->sim_stamp_ns_bits,
+        current_segment->observation_and_result,
+        current_segment->left_command_bits,
+        current_segment->right_command_bits};
+      for (const auto word : segment_words) {
+        checksum = crc64_word(checksum, word);
+      }
+    }
+    return checksum;
+  }
+
   void latch_global_fault(std::uint64_t fault) noexcept
   {
     atomic_fetch_or_release(header->global_oracle_faults, fault);
@@ -267,6 +308,9 @@ struct HardwareWriteLedgerWriter::Impl
     std::uint64_t bank_epoch,
     std::uint64_t fence_write_seq) noexcept
   {
+    atomic_store_release(
+      control->request_state,
+      VOICE_NAV_HARDWARE_WRITE_LEDGER_REQUEST_IDLE);
     control->response_code = response_code;
     control->response_bank_index = bank_index;
     control->response_bank_epoch = bank_epoch;
@@ -399,12 +443,134 @@ struct HardwareWriteLedgerWriter::Impl
       last_completed_write_seq);
   }
 
+  void process_seal(const ControlRequestSnapshot & request) noexcept
+  {
+    const auto allowed_flags =
+      VOICE_NAV_HARDWARE_WRITE_LEDGER_FLAG_EXACT_SEAL_STAMP;
+    const bool bank_index_valid =
+      request.bank_index < VOICE_NAV_HARDWARE_WRITE_LEDGER_BANK_COUNT;
+    const auto not_before_stamp =
+      sim_stamp_from_bits(request.not_before_sim_stamp_ns_bits);
+    const bool request_valid =
+      request.interval_id != 0U &&
+      (request.flags & ~allowed_flags) == 0U &&
+      bank_index_valid &&
+      request.bank_epoch != 0U &&
+      request.segment_budget == 0U &&
+      request.invocation_budget == 0U &&
+      not_before_stamp >= 0;
+    auto * selected_bank = bank_index_valid ? bank(request.bank_index) : nullptr;
+    const bool active_identity_matches = request_valid &&
+      active_bank_index == request.bank_index &&
+      active_bank_epoch == request.bank_epoch &&
+      atomic_load_acquire(selected_bank->state) ==
+      VOICE_NAV_HARDWARE_WRITE_LEDGER_BANK_ACTIVE &&
+      selected_bank->bank_epoch == request.bank_epoch &&
+      selected_bank->interval_id == request.interval_id;
+    if (!active_identity_matches) {
+      latch_global_fault(VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_PROTOCOL);
+      publish_response(
+        request.ticket,
+        request.checksum,
+        VOICE_NAV_HARDWARE_WRITE_LEDGER_RESPONSE_INVALID,
+        request.bank_index,
+        request.bank_epoch,
+        atomic_load_acquire(header->last_completed_write_seq));
+      return;
+    }
+
+    selected_bank->seal_not_before_sim_stamp_ns_bits =
+      request.not_before_sim_stamp_ns_bits;
+    selected_bank->predicate_flags |= request.flags;
+    pending_seal_ticket = request.ticket;
+    pending_seal_checksum = request.checksum;
+    pending_seal_bank_index = request.bank_index;
+    pending_seal_bank_epoch = request.bank_epoch;
+    pending_seal_not_before_sim_stamp_ns = not_before_stamp;
+    pending_seal_exact_stamp =
+      (request.flags &
+      VOICE_NAV_HARDWARE_WRITE_LEDGER_FLAG_EXACT_SEAL_STAMP) != 0U;
+    has_pending_seal = true;
+  }
+
+  void complete_pending_seal(HardwareWriteTicket ticket) noexcept
+  {
+    if (
+      !has_pending_seal || !ticket.included ||
+      ticket.bank_index != pending_seal_bank_index ||
+      ticket.bank_epoch != pending_seal_bank_epoch ||
+      ticket.sim_stamp_ns < pending_seal_not_before_sim_stamp_ns)
+    {
+      return;
+    }
+
+    auto * sealed_bank = bank(pending_seal_bank_index);
+    const auto page_limit = header->page_segment_limit;
+    if (
+      sealed_bank->segment_count >
+      header->segment_capacity_per_bank ||
+      page_limit == 0U ||
+      page_limit > header->segment_capacity_per_bank)
+    {
+      sealed_bank->oracle_faults |=
+        VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_PROTOCOL;
+      latch_global_fault(VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_PROTOCOL);
+      return;
+    }
+    if (
+      pending_seal_exact_stamp &&
+      ticket.sim_stamp_ns != pending_seal_not_before_sim_stamp_ns)
+    {
+      sealed_bank->oracle_faults |=
+        VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_SIM_STAMP;
+      latch_global_fault(VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_SIM_STAMP);
+    }
+    sealed_bank->seal_fence_write_seq = ticket.write_seq;
+    sealed_bank->page_count = sealed_bank->segment_count == 0U ? 1U :
+      sealed_bank->segment_count / page_limit +
+      (sealed_bank->segment_count % page_limit == 0U ? 0U : 1U);
+    sealed_bank->bank_checksum = calculate_bank_checksum(
+      pending_seal_bank_index);
+
+    const auto response_ticket = pending_seal_ticket;
+    const auto response_request_checksum = pending_seal_checksum;
+    const auto response_bank_index = pending_seal_bank_index;
+    const auto response_bank_epoch = pending_seal_bank_epoch;
+    has_pending_seal = false;
+    pending_seal_ticket = 0U;
+    pending_seal_checksum = 0U;
+    pending_seal_bank_index = kInvalidBankIndex;
+    pending_seal_bank_epoch = 0U;
+    pending_seal_not_before_sim_stamp_ns = 0;
+    pending_seal_exact_stamp = false;
+    active_bank_index = kInvalidBankIndex;
+    active_bank_epoch = 0U;
+
+    const auto terminal_state = sealed_bank->oracle_faults == 0U ?
+      VOICE_NAV_HARDWARE_WRITE_LEDGER_BANK_SEALED_OK :
+      VOICE_NAV_HARDWARE_WRITE_LEDGER_BANK_SEALED_FAULT;
+    atomic_store_release(sealed_bank->state, terminal_state);
+    publish_response(
+      response_ticket,
+      response_request_checksum,
+      VOICE_NAV_HARDWARE_WRITE_LEDGER_RESPONSE_OK,
+      response_bank_index,
+      response_bank_epoch,
+      ticket.write_seq);
+  }
+
   void process_control() noexcept
   {
     const auto request_state = atomic_load_acquire(control->request_state);
     if (
       request_state == VOICE_NAV_HARDWARE_WRITE_LEDGER_REQUEST_IDLE ||
       request_state == VOICE_NAV_HARDWARE_WRITE_LEDGER_REQUEST_WRITING)
+    {
+      return;
+    }
+    if (
+      request_state == VOICE_NAV_HARDWARE_WRITE_LEDGER_REQUEST_READING &&
+      has_pending_seal)
     {
       return;
     }
@@ -432,12 +598,22 @@ struct HardwareWriteLedgerWriter::Impl
       control->request_not_before_sim_stamp_ns_bits,
       control->request_checksum,
       control->request_ticket};
-    atomic_store_release(
-      control->request_state,
-      VOICE_NAV_HARDWARE_WRITE_LEDGER_REQUEST_IDLE);
 
     const auto response_ticket = atomic_load_acquire(control->response_ticket);
     const auto calculated_checksum = request_checksum(*header, request);
+    if (has_pending_seal) {
+      if (
+        request.ticket != pending_seal_ticket ||
+        request.checksum != pending_seal_checksum ||
+        request.checksum != calculated_checksum)
+      {
+        latch_global_fault(VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_PROTOCOL);
+        auto * active_bank = bank(pending_seal_bank_index);
+        active_bank->oracle_faults |=
+          VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_PROTOCOL;
+      }
+      return;
+    }
     if (request.ticket == response_ticket) {
       if (
         request.ticket == 0U ||
@@ -448,6 +624,9 @@ struct HardwareWriteLedgerWriter::Impl
       {
         latch_global_fault(VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_PROTOCOL);
       }
+      atomic_store_release(
+        control->request_state,
+        VOICE_NAV_HARDWARE_WRITE_LEDGER_REQUEST_IDLE);
       return;
     }
     if (
@@ -456,6 +635,9 @@ struct HardwareWriteLedgerWriter::Impl
       request.ticket != response_ticket + 1U)
     {
       latch_global_fault(VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_PROTOCOL);
+      atomic_store_release(
+        control->request_state,
+        VOICE_NAV_HARDWARE_WRITE_LEDGER_REQUEST_IDLE);
       return;
     }
 
@@ -477,6 +659,10 @@ struct HardwareWriteLedgerWriter::Impl
       atomic_load_acquire(header->last_completed_write_seq);
     if (request.op == VOICE_NAV_HARDWARE_WRITE_LEDGER_CONTROL_ARM) {
       process_arm(request, last_completed_write_seq);
+      return;
+    }
+    if (request.op == VOICE_NAV_HARDWARE_WRITE_LEDGER_CONTROL_SEAL) {
+      process_seal(request);
       return;
     }
     latch_global_fault(VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_PROTOCOL);
@@ -573,9 +759,12 @@ struct HardwareWriteLedgerWriter::Impl
         active_bank->invocation_count ==
         active_bank->last_write_seq - active_bank->arm_fence_write_seq));
       if (!bank_structure_valid) {
+        active_bank->oracle_faults |=
+          VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_PROTOCOL;
         latch_global_fault(VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_PROTOCOL);
         atomic_store_release(
           header->last_completed_write_seq, ticket.write_seq);
+        complete_pending_seal(ticket);
         atomic_store_release(lifecycle, kWriterIdle);
         return;
       }
@@ -715,6 +904,7 @@ struct HardwareWriteLedgerWriter::Impl
 
     atomic_store_release(
       header->last_completed_write_seq, ticket.write_seq);
+    complete_pending_seal(ticket);
     atomic_store_release(lifecycle, kWriterIdle);
   }
 
@@ -727,6 +917,13 @@ struct HardwareWriteLedgerWriter::Impl
   std::uint64_t active_bank_epoch{0U};
   std::uint64_t last_consumed_request_ticket{0U};
   std::uint64_t last_consumed_request_checksum{0U};
+  bool has_pending_seal{false};
+  std::uint64_t pending_seal_ticket{0U};
+  std::uint64_t pending_seal_checksum{0U};
+  std::uint64_t pending_seal_bank_index{kInvalidBankIndex};
+  std::uint64_t pending_seal_bank_epoch{0U};
+  std::int64_t pending_seal_not_before_sim_stamp_ns{0};
+  bool pending_seal_exact_stamp{false};
   std::uint64_t lifecycle{kWriterIdle};
   HardwareWriteTicket outstanding_ticket{
     0U, 0, kInvalidBankIndex, 0U, false};
