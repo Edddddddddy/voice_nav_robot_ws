@@ -72,6 +72,20 @@ JournaledGazeboSimSystemAdapter::export_command_interfaces()
   return upstream_->export_command_interfaces();
 }
 
+hardware_interface::CallbackReturn
+JournaledGazeboSimSystemAdapter::on_activate(
+  const rclcpp_lifecycle::State & previous_state)
+{
+  return upstream_->on_activate(previous_state);
+}
+
+hardware_interface::CallbackReturn
+JournaledGazeboSimSystemAdapter::on_deactivate(
+  const rclcpp_lifecycle::State & previous_state)
+{
+  return upstream_->on_deactivate(previous_state);
+}
+
 bool JournaledGazeboSimSystemAdapter::initSim(
   rclcpp::Node::SharedPtr & model_node,
   std::map<std::string, gz::sim::Entity> & joints,
