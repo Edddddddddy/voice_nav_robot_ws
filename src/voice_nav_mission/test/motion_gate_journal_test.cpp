@@ -185,6 +185,66 @@ TEST(MotionGateJournal, BindingDetectsJournalLifetimeEndBeforeMutation)
   EXPECT_TRUE(after.zero_selected);
 }
 
+TEST(MotionGateJournal, DetachedBindingCannotBlockAForcedSafetyFault)
+{
+  JournalRegion<1U> region;
+  const auto identity = initialize_region(region);
+  FakeClock clock;
+  std::unique_ptr<GateTransitionJournalBinding> binding;
+  {
+    GateEventJournal journal(
+      &region,
+      sizeof(region),
+      identity,
+      GateEventJournalClock{&FakeClock::read, &clock});
+    binding = journal.claim_transition_binding();
+  }
+  MotionGateCore gate(
+    MotionGateConfig{}, kGateId, 0U, std::move(binding));
+
+  EXPECT_NO_THROW(
+    gate.force_fault(Reason::PublishFailed, "publisher failed"));
+
+  const auto state = gate.snapshot();
+  EXPECT_EQ(state.state, State::Faulted);
+  EXPECT_EQ(state.reason, Reason::PublishFailed);
+  EXPECT_EQ(state.control_seq, 1U);
+  EXPECT_EQ(state.output_cause_transition_journal_seq, 0U);
+  EXPECT_TRUE(state.motion_inhibited);
+  EXPECT_TRUE(state.zero_selected);
+}
+
+TEST(MotionGateJournal, ConstructionFaultIsAnUnjournaledInitialState)
+{
+  JournalRegion<1U> region;
+  const auto identity = initialize_region(region);
+  FakeClock clock;
+  GateEventJournal journal(
+    &region,
+    sizeof(region),
+    identity,
+    GateEventJournalClock{&FakeClock::read, &clock});
+  auto invalid_config = MotionGateConfig{};
+  invalid_config.authority_lease = std::chrono::milliseconds{0};
+
+  MotionGateCore gate(
+    invalid_config,
+    kGateId,
+    0U,
+    journal.claim_transition_binding());
+
+  const auto state = gate.snapshot();
+  EXPECT_EQ(state.state, State::Faulted);
+  EXPECT_EQ(state.reason, Reason::ConfigurationInvalid);
+  EXPECT_EQ(state.control_seq, 0U);
+  EXPECT_EQ(state.output_cause_transition_journal_seq, 0U);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(region.header.claimed_slots),
+    0U);
+  EXPECT_TRUE(state.motion_inhibited);
+  EXPECT_TRUE(state.zero_selected);
+}
+
 TEST(MotionGateJournal, JournalBoundConstructionRejectsEmptyCapability)
 {
   EXPECT_THROW(
