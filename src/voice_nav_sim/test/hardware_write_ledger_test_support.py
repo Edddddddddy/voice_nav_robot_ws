@@ -465,6 +465,28 @@ class HardwareWriteLedgerRegionOwner:
         flags = (
             CONTROL_FLAG_EXACT_SEAL_STAMP if require_exact_stamp else 0
         )
+        return self.post_seal_fields(
+            flags=flags,
+            interval_id=interval_id,
+            bank_index=bank_index,
+            bank_epoch=bank_epoch,
+            segment_budget=0,
+            invocation_budget=0,
+            not_before_sim_stamp_ns=not_before_sim_stamp_ns,
+        )
+
+    def post_seal_fields(
+        self,
+        flags,
+        interval_id,
+        bank_index,
+        bank_epoch,
+        segment_budget,
+        invocation_budget,
+        not_before_sim_stamp_ns,
+        corrupt_checksum=False,
+    ):
+        """Publish one owned SEAL fixture with explicit ABI fields."""
         request_ticket = self._begin_request_preparation(
             (
                 CONTROL_OP_SEAL,
@@ -472,11 +494,21 @@ class HardwareWriteLedgerRegionOwner:
                 interval_id,
                 bank_index,
                 bank_epoch,
-                0,
-                0,
+                segment_budget,
+                invocation_budget,
                 int(not_before_sim_stamp_ns) & UINT64_MASK,
             ),
         )
+        if corrupt_checksum:
+            request = list(
+                struct.unpack_from(
+                    CONTROL_REQUEST_FORMAT,
+                    self.region,
+                    CONTROL_OFFSET,
+                ),
+            )
+            request[8] ^= 1
+            self._write_owned_request(request)
         self.commit_prepared_request(request_ticket)
         return request_ticket
 
@@ -489,20 +521,15 @@ class HardwareWriteLedgerRegionOwner:
         segment_budget,
     ):
         """Publish one checksummed SEAL with an invalid unused budget."""
-        request_ticket = self._begin_request_preparation(
-            (
-                CONTROL_OP_SEAL,
-                CONTROL_FLAG_EXACT_SEAL_STAMP,
-                interval_id,
-                bank_index,
-                bank_epoch,
-                segment_budget,
-                0,
-                int(not_before_sim_stamp_ns) & UINT64_MASK,
-            ),
+        return self.post_seal_fields(
+            flags=CONTROL_FLAG_EXACT_SEAL_STAMP,
+            interval_id=interval_id,
+            bank_index=bank_index,
+            bank_epoch=bank_epoch,
+            segment_budget=segment_budget,
+            invocation_budget=0,
+            not_before_sim_stamp_ns=not_before_sim_stamp_ns,
         )
-        self.commit_prepared_request(request_ticket)
-        return request_ticket
 
     def post_seal_with_corrupt_checksum(
         self,
@@ -512,29 +539,16 @@ class HardwareWriteLedgerRegionOwner:
         not_before_sim_stamp_ns,
     ):
         """Publish one otherwise valid SEAL with a corrupted checksum."""
-        request_ticket = self._begin_request_preparation(
-            (
-                CONTROL_OP_SEAL,
-                CONTROL_FLAG_EXACT_SEAL_STAMP,
-                interval_id,
-                bank_index,
-                bank_epoch,
-                0,
-                0,
-                int(not_before_sim_stamp_ns) & UINT64_MASK,
-            ),
+        return self.post_seal_fields(
+            flags=CONTROL_FLAG_EXACT_SEAL_STAMP,
+            interval_id=interval_id,
+            bank_index=bank_index,
+            bank_epoch=bank_epoch,
+            segment_budget=0,
+            invocation_budget=0,
+            not_before_sim_stamp_ns=not_before_sim_stamp_ns,
+            corrupt_checksum=True,
         )
-        request = list(
-            struct.unpack_from(
-                CONTROL_REQUEST_FORMAT,
-                self.region,
-                CONTROL_OFFSET,
-            ),
-        )
-        request[8] ^= 1
-        self._write_owned_request(request)
-        self.commit_prepared_request(request_ticket)
-        return request_ticket
 
     def replay_arm_with_interval(self, request_ticket, interval_id):
         """Release-republish one ticket with a different valid payload."""

@@ -818,6 +818,62 @@ def test_exact_seal_skip_includes_write_and_seals_fault(probe):
                 'exact-skip terminal response retained the request envelope',
             )
 
+            all_segments = tuple(
+                owner.snapshot_segment(seal_response[10], index)
+                for index in range(owner.segment_capacity)
+            )
+            invalid_ticket = owner.post_seal_with_segment_budget(
+                interval_id=102,
+                bank_index=seal_response[10],
+                bank_epoch=seal_response[11],
+                not_before_sim_stamp_ns=300,
+                segment_budget=1,
+            )
+            process.stdin.write('BEGIN 300\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 3',
+                'invalid SEAL did not reach the SEALED_FAULT Writer',
+            )
+            invalid_response = owner.wait_response(invalid_ticket)
+            require(
+                invalid_response[9:13] == (
+                    CONTROL_RESPONSE_INVALID,
+                    INVALID_BANK_INDEX,
+                    0,
+                    2,
+                ),
+                f'invalid SEALED_FAULT response changed: '
+                f'{invalid_response!r}',
+            )
+            require(
+                owner.snapshot_bank(seal_response[10]) == bank and
+                tuple(
+                    owner.snapshot_segment(seal_response[10], index)
+                    for index in range(owner.segment_capacity)
+                ) == all_segments,
+                'invalid SEAL mutated SEALED_FAULT evidence',
+            )
+            require(
+                owner.load_header_word(GLOBAL_ORACLE_FAULTS_WORD) ==
+                FAULT_SIM_STAMP | FAULT_PROTOCOL,
+                'invalid SEALED_FAULT request changed the sticky faults',
+            )
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 3',
+                'post-SEALED_FAULT unarmed write did not finish',
+            )
+            require(
+                owner.snapshot_bank(seal_response[10]) == bank and
+                tuple(
+                    owner.snapshot_segment(seal_response[10], index)
+                    for index in range(owner.segment_capacity)
+                ) == all_segments,
+                'post-SEALED_FAULT FINISH mutated terminal evidence',
+            )
+
             process.stdin.write('EXIT\n')
             process.stdin.flush()
             return_code = process.wait(timeout=3.0)
@@ -1001,6 +1057,171 @@ def test_clean_segment_coverage_gap_cannot_seal_ok(probe):
             require(
                 return_code == 0,
                 f'coverage-gap probe exited {return_code}: {stderr}',
+            )
+        finally:
+            terminate_owned_process(process)
+            close_owned_process_pipes(process)
+
+
+def test_invalid_active_seal_field_matrix_is_fail_closed(probe):
+    """Prove each invalid SEAL field leaves its ACTIVE bank untouched."""
+    with HardwareWriteLedgerRegionOwner(
+        generation=92,
+        segment_capacity=4,
+        page_segment_limit=2,
+    ) as owner:
+        process = spawn_probe(probe, owner)
+        try:
+            require(
+                owner.wait_for_writer(process.pid) == process.pid,
+                'invalid-field probe Writer PID mismatch',
+            )
+            require(
+                read_owned_line(process, 'READY') == 'READY',
+                'invalid-field probe did not publish READY',
+            )
+            owner.unlink_name()
+            arm_ticket = owner.post_arm(
+                interval_id=106,
+                segment_budget=4,
+                invocation_budget=16,
+                require_zero_commands=False,
+            )
+            process.stdin.write('BEGIN 100\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 1',
+                'invalid-field setup write did not begin',
+            )
+            arm_response = owner.wait_response(arm_ticket)
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 1',
+                'invalid-field setup write did not finish',
+            )
+
+            base_fields = {
+                'flags': CONTROL_FLAG_EXACT_SEAL_STAMP,
+                'interval_id': 106,
+                'bank_index': arm_response[10],
+                'bank_epoch': arm_response[11],
+                'segment_budget': 0,
+                'invocation_budget': 0,
+                'not_before_sim_stamp_ns': 200,
+            }
+            mutations = (
+                ('seal flags', {'flags': CONTROL_FLAG_ZERO_REQUIRED}),
+                ('zero interval', {'interval_id': 0}),
+                ('wrong interval', {'interval_id': 107}),
+                ('bank index', {'bank_index': INVALID_BANK_INDEX}),
+                ('bank epoch', {'bank_epoch': 0}),
+                ('segment budget', {'segment_budget': 1}),
+                ('invocation budget', {'invocation_budget': 1}),
+                ('negative stamp', {'not_before_sim_stamp_ns': -1}),
+            )
+            write_seq = 2
+            last_invalid_ticket = arm_ticket
+            for label, mutation in mutations:
+                request_fields = dict(base_fields)
+                request_fields.update(mutation)
+                bank_before = owner.snapshot_bank(arm_response[10])
+                last_invalid_ticket = owner.post_seal_fields(
+                    **request_fields,
+                )
+                process.stdin.write('BEGIN 100\n')
+                process.stdin.flush()
+                require(
+                    read_owned_line(process, 'BEGAN') ==
+                    f'BEGAN {write_seq}',
+                    f'{label} SEAL did not reach Writer',
+                )
+                invalid_response = owner.wait_response(last_invalid_ticket)
+                require(
+                    invalid_response[9:13] == (
+                        CONTROL_RESPONSE_INVALID,
+                        INVALID_BANK_INDEX,
+                        0,
+                        write_seq - 1,
+                    ),
+                    f'{label} SEAL response changed: {invalid_response!r}',
+                )
+                require(
+                    owner.load_request_state() == CONTROL_REQUEST_IDLE,
+                    f'{label} SEAL retained the request envelope',
+                )
+                require(
+                    owner.snapshot_bank(arm_response[10]) == bank_before,
+                    f'{label} SEAL mutated ACTIVE evidence at BEGIN',
+                )
+                process.stdin.write('FINISH 0 0 0 0\n')
+                process.stdin.flush()
+                require(
+                    read_owned_line(process, 'FINISHED') ==
+                    f'FINISHED {write_seq}',
+                    f'{label} follow-up write did not finish',
+                )
+                active_bank = owner.snapshot_bank(arm_response[10])
+                require(
+                    active_bank[0] == BANK_STATE_ACTIVE and
+                    active_bank[7:9] == (0, 0) and
+                    active_bank[13] == 0,
+                    f'{label} SEAL contaminated ACTIVE bank: '
+                    f'{active_bank!r}',
+                )
+                write_seq += 1
+
+            require(
+                owner.load_header_word(GLOBAL_ORACLE_FAULTS_WORD) ==
+                FAULT_PROTOCOL,
+                'invalid-field matrix did not latch exactly PROTOCOL',
+            )
+            seal_ticket = owner.post_seal(
+                interval_id=106,
+                bank_index=arm_response[10],
+                bank_epoch=arm_response[11],
+                not_before_sim_stamp_ns=200,
+                require_exact_stamp=True,
+            )
+            process.stdin.write('BEGIN 200\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == f'BEGAN {write_seq}',
+                'valid SEAL after invalid-field matrix did not begin',
+            )
+            require(
+                owner.load_response_ticket() == last_invalid_ticket,
+                'valid SEAL completed before its qualifying FINISH',
+            )
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') ==
+                f'FINISHED {write_seq}',
+                'valid SEAL after invalid-field matrix did not finish',
+            )
+            seal_response = owner.wait_response(seal_ticket)
+            terminal_bank = owner.snapshot_bank(seal_response[10])
+            require(
+                seal_response[9:13] == (
+                    CONTROL_RESPONSE_OK,
+                    arm_response[10],
+                    arm_response[11],
+                    write_seq,
+                ) and
+                terminal_bank[0] == BANK_STATE_SEALED_OK and
+                terminal_bank[10:14] == (write_seq, 1, write_seq, 0),
+                f'invalid-field matrix contaminated valid evidence: '
+                f'{terminal_bank!r}',
+            )
+
+            process.stdin.write('EXIT\n')
+            process.stdin.flush()
+            return_code = process.wait(timeout=3.0)
+            stderr = process.stderr.read()
+            require(
+                return_code == 0,
+                f'invalid-field probe exited {return_code}: {stderr}',
             )
         finally:
             terminate_owned_process(process)
@@ -1797,6 +2018,7 @@ def main():
     test_exact_seal_skip_includes_write_and_seals_fault(probe)
     test_corrupt_segment_count_does_not_escape_mapping(probe)
     test_clean_segment_coverage_gap_cannot_seal_ok(probe)
+    test_invalid_active_seal_field_matrix_is_fail_closed(probe)
     test_invalid_seal_cannot_claim_or_mutate_terminal_bank(probe)
     test_qualifying_fault_preserves_attempted_fence_count(probe)
     test_fault_only_gap_preserves_later_valid_segment(probe)
