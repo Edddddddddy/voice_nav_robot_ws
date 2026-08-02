@@ -19,6 +19,7 @@
 #include <chrono>
 #include <cstdint>
 #include <iomanip>
+#include <limits>
 #include <new>
 #include <sstream>
 #include <stdexcept>
@@ -31,6 +32,28 @@
 
 namespace voice_nav_mission
 {
+
+class MotionGateProcessRuntimeTestPeer
+{
+public:
+  static void seed_output_sequences(
+    MotionGateProcessRuntime & runtime,
+    std::uint64_t attempt_sequence,
+    std::uint64_t publish_sequence,
+    std::uint64_t zero_sequence)
+  {
+    runtime.output_attempt_seq_ = attempt_sequence;
+    runtime.output_publish_seq_ = publish_sequence;
+    runtime.zero_publish_seq_ = zero_sequence;
+  }
+
+  [[nodiscard]] static std::uint64_t output_attempt_sequence(
+    const MotionGateProcessRuntime & runtime) noexcept
+  {
+    return runtime.output_attempt_seq_;
+  }
+};
+
 namespace
 {
 
@@ -733,6 +756,83 @@ TEST(MotionGateProcessRuntimeTest, FaultRecordingFailureCannotVetoDirectZero)
   EXPECT_EQ(
     gate_event_journal_load_acquire(owner.header().claimed_slots),
     2U);
+}
+
+TEST(MotionGateProcessRuntimeTest, SuccessSequenceBoundaryNeverWraps)
+{
+  const std::string gate_instance_id =
+    "0123456789abcdef0123456789abcdef";
+  MotionGateProcessRuntime runtime(
+    MotionGateConfig{},
+    gate_instance_id,
+    GateEventJournalTestParameters{"", ""});
+  select_nonzero_command(runtime, gate_instance_id);
+  constexpr auto maximum = std::numeric_limits<std::uint64_t>::max();
+  MotionGateProcessRuntimeTestPeer::seed_output_sequences(
+    runtime, 0U, maximum, maximum - 1U);
+  RecordingFinalPublisher publisher{nullptr};
+
+  const auto result = runtime.publish_final_command(
+    FinalOutputTime{true, 81, 82U}, publisher.adapter());
+
+  ASSERT_EQ(publisher.frames.size(), 1U);
+  EXPECT_TRUE(publisher.frames[0].command.is_zero());
+  EXPECT_EQ(result.failure, FinalOutputFailure::SequenceExhausted);
+  EXPECT_TRUE(result.fallback_attempted);
+  EXPECT_TRUE(result.zero_published);
+  EXPECT_EQ(result.state.output_publish_seq, maximum);
+  EXPECT_EQ(result.state.zero_publish_seq, maximum);
+  EXPECT_EQ(runtime.core().snapshot().state, State::Faulted);
+  EXPECT_EQ(runtime.core().snapshot().reason, Reason::SequenceExhausted);
+}
+
+TEST(MotionGateProcessRuntimeTest, AttemptSequenceBoundaryRetiresJournal)
+{
+  const std::string gate_instance_id =
+    "0123456789abcdef0123456789abcdef";
+  OwnedJournalRegion owner(8U);
+  MotionGateProcessRuntime runtime(
+    MotionGateConfig{},
+    gate_instance_id,
+    GateEventJournalTestParameters{
+        owner.name(), descriptor_for(owner)});
+  select_nonzero_command(runtime, gate_instance_id);
+  constexpr auto maximum = std::numeric_limits<std::uint64_t>::max();
+  MotionGateProcessRuntimeTestPeer::seed_output_sequences(
+    runtime, maximum, 7U, 6U);
+  RecordingFinalPublisher publisher{&owner};
+
+  const auto result = runtime.publish_final_command(
+    FinalOutputTime{true, 83, 84U}, publisher.adapter());
+
+  ASSERT_EQ(publisher.frames.size(), 1U);
+  EXPECT_TRUE(publisher.frames[0].command.is_zero());
+  EXPECT_EQ(result.failure, FinalOutputFailure::SequenceExhausted);
+  EXPECT_TRUE(result.fallback_attempted);
+  EXPECT_TRUE(result.zero_published);
+  EXPECT_EQ(result.state.output_publish_seq, 8U);
+  EXPECT_EQ(result.state.zero_publish_seq, 8U);
+  EXPECT_EQ(result.locally_consumed_terminal_cause_seq, 3U);
+  EXPECT_EQ(
+    MotionGateProcessRuntimeTestPeer::output_attempt_sequence(runtime),
+    maximum);
+  ASSERT_EQ(
+    gate_event_journal_load_acquire(owner.header().claimed_slots),
+    3U);
+  EXPECT_EQ(
+    owner.slot(2U).record_kind,
+    VOICE_NAV_GATE_EVENT_JOURNAL_KIND_CONTROL_TRANSITION);
+  EXPECT_EQ(owner.slot(2U).event_code, 6U);
+
+  const auto retired = runtime.publish_final_command(
+    FinalOutputTime{true, 85, 86U}, publisher.adapter());
+  EXPECT_EQ(retired.failure, FinalOutputFailure::SequenceExhausted);
+  EXPECT_FALSE(retired.fallback_attempted);
+  EXPECT_EQ(retired.state.output_publish_seq, 9U);
+  EXPECT_EQ(retired.locally_consumed_terminal_cause_seq, 0U);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(owner.header().claimed_slots),
+    3U);
 }
 
 }  // namespace
