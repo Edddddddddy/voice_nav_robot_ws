@@ -55,13 +55,15 @@ the real package-private Gate protocol but are not product nodes.
   analysis, default-off crash-resilient Gate-event and hardware-write
   journals, and the minimum launch composition seam needed to retain an exact
   MotionGate ProcessAction.
-- The real `motion_gate_node` contains the Gate-event-journal test seam, but it is
-  inactive when both read-only journal parameters are empty. The crash harness
-  gives only that exact launch action a parent-owned POSIX-shared-memory name
-  and 128-bit nonce; partial configuration fails startup. MotionGate opens but
-  never creates or unlinks the object and validates ABI, size, UID, nonce,
+- The real `motion_gate_node` contains the Gate-event-journal test seam. Its two
+  read-only string parameters are exactly `test_gate_event_journal_name` and
+  `test_gate_event_journal_descriptor`, both defaulting to empty. Both empty
+  disables the seam; exactly one non-empty value fails startup. The crash
+  harness gives only that exact launch action a parent-owned POSIX shared-memory
+  name plus the complete versioned descriptor defined below. MotionGate opens
+  but never creates or unlinks the object and validates ABI, size, UID, nonce,
   capacity, and single-writer claim. Normal product composition passes neither
-  parameter; static contracts reject enabling the seam in a product launch.
+  parameter; static contracts reject either key in product launch or YAML.
   This is test instrumentation, not a ROS Interface or security boundary.
 - Only the crash/pause test model selects a journaled Adapter that inherits the
   public `gz_ros2_control::GazeboSimSystemInterface`. The Adapter owns a
@@ -242,10 +244,11 @@ explicit linearization time immediately before the bounded non-blocking state
 mutation, captures its after-image, and then marks the slot `COMMITTED`; Node
 callbacks never duplicate that protocol. Its output lane atomically appends an
 `INTENT` with a same-host monotonic pre-call timestamp before each final
-command publish containing non-wrapping `publish_seq`, intended output
-sequence, header stamp, marker, and checksum. Only after the DDS publish call
-succeeds does that same slot become `COMMITTED`; journal writes use release
-stores, and the parent reads them with acquire ordering only after
+command publish containing non-wrapping attempt and intended-success
+sequences, the exact pre-publish Core before-image, header stamp, marker, and
+checksum. Only after the DDS publish call succeeds does that same slot become
+`COMMITTED`; the post-publisher commit path is `noexcept`. Journal writes use
+release stores, and the parent reads them with acquire ordering only after
 `ProcessExited`. The bounded shared-memory journal survives exact SIGKILL.
 
 Control-transition `event_code` values are stable ABI facts:
@@ -297,12 +300,54 @@ claims its real PID, waits while the parent unlinks the name, and then commits
 through the surviving mapping. The parent acquire-loads `COMMITTED` and checks
 the complete record with an independent CRC64 implementation after child exit.
 
+The Node descriptor grammar is exactly:
+
+```text
+v1:<owner_uid_decimal>:<generation_decimal>:<capacity_decimal>:<nonce_32_lower_hex>
+```
+
+It contains no whitespace, signs, empty or extra fields. Decimal fields are
+canonical: only zero may begin with `0`. Owner UID must equal `geteuid()`;
+generation is non-zero; capacity is `1..16384`; nonce is exactly 32 lowercase
+hex digits and is not all zero. The name remains
+`/voice_nav_gate_<32-lower-hex>`; that suffix is an independent opaque locator
+and is not required to equal the descriptor nonce. The parser consumes only
+these out-of-band parameters and never reads ordinary mapped Header fields
+before the Journal's `READY` acquire. A malformed descriptor, wrong object, or
+partial configuration fails before any ROS publisher, service, subscription,
+or timer is created.
+
 Each successful terminal transition exposes its committed `journal_seq` in
 the Core snapshot as `output_cause_transition_journal_seq`; Prepared/Armed
-states and unjournaled safety fallback expose zero. The first final zero-output
-intent binds that exact cause. A constructor-time `ConfigurationInvalid` state
-is explicitly an initial state rather than a transition, consumes no slot, and
-has cause zero.
+states and unjournaled safety fallback expose zero. The first successful
+COMMITTED final-zero output binds and consumes that exact cause while the
+journal lane remains valid. A DDS failure retires that lane; the resulting
+Core fault establishes the post-failure terminal cause, and the first
+successful direct zero consumes it locally without claiming a COMMITTED cause
+binding. Later direct zeros use cause zero. A constructor-time
+`ConfigurationInvalid` state is explicitly an initial state rather than a
+transition, consumes no slot, and has cause zero.
+
+Output `event_code=1` means `FINAL_COMMAND_PUBLISH` within record kind
+`OUTPUT_ATTEMPT`; `flags=0` in ABI v1. `output_attempt_seq` starts at one and is
+consumed by every planned journal transaction, including a reservation or DDS
+failure. `intended_output_seq` is the next successful Node publish sequence and
+may be reused after a failed DDS call; successful publish and zero sequences
+never wrap. ROS signed seconds are widened to `int64_t` and then stored modulo
+2^64, nanoseconds are zero-extended, and command doubles use their exact IEEE
+754 bits. Reason, state/control sequences, lease words, Gate-instance words,
+and terminal cause all come from one post-fail-close, pre-publish Snapshot.
+
+Journal failure never vetoes stopping. A pre-publisher journal failure forbids
+the selected non-zero output, faults the Core, retires the journal lane, and
+attempts one unjournaled zero. A DDS exception leaves the slot at `INTENT`,
+faults the Core, retires the journal lane and that evidence generation, and
+also attempts one direct zero. A sequence boundary faults without wrap and
+continues direct zero attempts. Every successful DDS publish advances the
+successful Node output counters, including an unjournaled safety-zero fallback.
+While the journal lane is usable, its `noexcept` commit occurs before those
+counters advance; an unjournaled success invalidates crash evidence but does
+not erase the fact that the Node published a command.
 
 Gate journal ABI v1 is a little-endian C layout with a 128-byte header and
 256-byte fixed slots. All three checksums use CRC64-ECMA-182, polynomial

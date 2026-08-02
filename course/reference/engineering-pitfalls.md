@@ -53,6 +53,7 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0043 | A full evidence journal prevents MotionGate from inhibiting or faulting | Is evidence failure policy different for admission and safety-terminal mutations? | Guarded |
 | PIT-0044 | A non-copyable Core still shares one journal with another Core | Is ownership carried by a one-shot capability rather than an object trait? | Guarded |
 | PIT-0045 | Shared-memory identity is read before the producer publishes `READY` | Did the consumer acquire `READY` before reading any ordinary payload field? | Guarded |
+| PIT-0046 | A checksum covers a field, but every producer record still writes zero | Does a non-zero golden test prove the producer API accepts and serializes the semantic value? | Guarded |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -1149,4 +1150,25 @@ the parent unlinks the name, and the child still commits through its mapping;
 after child exit the parent acquire-loads `COMMITTED` and validates all CRCs
 with an independent implementation. Keep that test registered; do not regress
 the contract back to same-process evidence. See
+[VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md).
+
+## PIT-0046: Checksum coverage is not producer population
+
+**Symptom.** ABI v1 and its checksum include output `before_state_seq`,
+`before_control_seq`, and before-lease words, yet before `5afbebc` every
+produced output record contained zero there. The checksum suite remained green
+because it proved that mutating a slot field changes the checksum, not that the
+producer could supply that field.
+
+**Cause.** Layout/checksum coverage, typed producer input, and serialization
+mapping are three separate contracts. `GateOutputIntent` omitted the four
+before-image fields, and `begin_output()` therefore had nothing to copy even
+though the shared-memory slot already reserved and checksummed them.
+
+**Guardrail.** Give every normative semantic field a typed producer input and
+an explicit serialization assignment. Use a non-zero output fixture, assert
+the complete stored before-image, and bind it to an independently calculated
+CRC64 golden value. Keep C ABI offsets and cross-process zero fixtures as
+separate compatibility checks. Commit `2a8f31b` preserved the compile-time RED;
+`5afbebc` completed the mapping without changing the 256-byte ABI. See
 [VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md).

@@ -369,6 +369,19 @@ that proof either. Wheel states and
 odometry must remain stationary for a shared final window of at least 0.20 s
 simulation time.
 
+The test-only Node seam is disabled unless both read-only parameters
+`test_gate_event_journal_name` and `test_gate_event_journal_descriptor` are
+non-empty; partial or malformed configuration fails before ROS endpoints are
+created. The versioned descriptor supplies UID, generation, capacity, and the
+complete nonce out of band, so the attacher never derives expected identity
+from unpublished shared memory. One package-private
+`MotionGateProcessRuntime` object inside the existing `motion_gate_node`
+process constructs the Attached Journal before the Core and destroys the Core
+before the Attached Journal. It also owns the single final-output transaction,
+non-wrapping attempt/success counters, and the one-shot terminal-cause binding.
+Journal or DDS evidence failure may invalidate the test generation, but it
+cannot prevent a direct safety-zero attempt.
+
 This is an operational `voice_nav_bringup` package-private coordinator and
 test-Adapter transaction, not a public Mission pause endpoint and not a fifth
 self-written resident process. The test Adapter is the current caller and
