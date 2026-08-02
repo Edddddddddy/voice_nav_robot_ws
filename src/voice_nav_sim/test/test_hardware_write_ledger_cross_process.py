@@ -922,6 +922,90 @@ def test_corrupt_segment_count_does_not_escape_mapping(probe):
             close_owned_process_pipes(process)
 
 
+def test_clean_segment_coverage_gap_cannot_seal_ok(probe):
+    """Prove missing clean evidence cannot become a successful bank."""
+    with HardwareWriteLedgerRegionOwner(
+        generation=90,
+        segment_capacity=2,
+        page_segment_limit=1,
+    ) as owner:
+        process = spawn_probe(probe, owner)
+        try:
+            require(
+                owner.wait_for_writer(process.pid) == process.pid,
+                'coverage-gap probe Writer PID mismatch',
+            )
+            require(
+                read_owned_line(process, 'READY') == 'READY',
+                'coverage-gap probe did not publish READY',
+            )
+            owner.unlink_name()
+            arm_ticket = owner.post_arm(
+                interval_id=104,
+                segment_budget=2,
+                invocation_budget=2,
+                require_zero_commands=False,
+            )
+            process.stdin.write('BEGIN 100\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 1',
+                'coverage-gap setup write did not begin',
+            )
+            arm_response = owner.wait_response(arm_ticket)
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 1',
+                'coverage-gap setup write did not finish',
+            )
+            owner.force_bank_segment_count(arm_response[10], 0)
+
+            seal_ticket = owner.post_seal(
+                interval_id=104,
+                bank_index=arm_response[10],
+                bank_epoch=arm_response[11],
+                not_before_sim_stamp_ns=200,
+                require_exact_stamp=True,
+            )
+            process.stdin.write('BEGIN 200\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 2',
+                'coverage-gap qualifying write did not begin',
+            )
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 2',
+                'coverage-gap qualifying finish did not return',
+            )
+            seal_response = owner.wait_response(seal_ticket)
+            bank = owner.snapshot_bank(seal_response[10])
+            require(
+                bank[0] == BANK_STATE_SEALED_FAULT,
+                f'clean coverage gap sealed successfully: {bank!r}',
+            )
+            require(
+                bank[13] & FAULT_PROTOCOL and
+                owner.load_header_word(GLOBAL_ORACLE_FAULTS_WORD) &
+                FAULT_PROTOCOL,
+                'clean coverage gap did not latch PROTOCOL',
+            )
+
+            process.stdin.write('EXIT\n')
+            process.stdin.flush()
+            return_code = process.wait(timeout=3.0)
+            stderr = process.stderr.read()
+            require(
+                return_code == 0,
+                f'coverage-gap probe exited {return_code}: {stderr}',
+            )
+        finally:
+            terminate_owned_process(process)
+            close_owned_process_pipes(process)
+
+
 def test_qualifying_fault_preserves_attempted_fence_count(probe):
     """Prove a budget fault retains its qualifying invocation metadata."""
     with HardwareWriteLedgerRegionOwner(
@@ -1502,6 +1586,7 @@ def main():
     test_seal_is_deferred_and_includes_qualifying_write(probe)
     test_exact_seal_skip_includes_write_and_seals_fault(probe)
     test_corrupt_segment_count_does_not_escape_mapping(probe)
+    test_clean_segment_coverage_gap_cannot_seal_ok(probe)
     test_qualifying_fault_preserves_attempted_fence_count(probe)
     test_fault_only_gap_preserves_later_valid_segment(probe)
     test_same_ticket_different_payload_replay_latches_fault(probe)
