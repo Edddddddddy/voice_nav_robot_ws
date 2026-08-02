@@ -16,6 +16,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -98,6 +100,14 @@ std::uint64_t page_checksum(
   return checksum;
 }
 
+bool finite_command_bits(std::uint64_t bits) noexcept
+{
+  static_assert(sizeof(bits) == sizeof(double));
+  double value{0.0};
+  std::memcpy(&value, &bits, sizeof(value));
+  return std::isfinite(value);
+}
+
 }  // namespace
 
 class HardwareWriteLedger::Impl
@@ -146,6 +156,15 @@ bool HardwareWriteLedger::append(
   if (record.generation != impl_->config.generation) {
     impl_->oracle_faults.fetch_or(
       kHardwareWriteOracleFaultGeneration,
+      std::memory_order_release);
+    return false;
+  }
+  if (
+    !finite_command_bits(record.left_command_bits) ||
+    !finite_command_bits(record.right_command_bits))
+  {
+    impl_->oracle_faults.fetch_or(
+      kHardwareWriteOracleFaultNonFiniteCommand,
       std::memory_order_release);
     return false;
   }
