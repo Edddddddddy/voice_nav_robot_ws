@@ -145,6 +145,28 @@ GateOutputIntent make_output_intent()
     0xa5U};
 }
 
+void expect_invalid_attach_without_writer_claim(
+  void * region,
+  std::size_t region_bytes,
+  const GateEventJournalIdentity & identity,
+  GateEventJournalHeader * header)
+{
+  FakeClock clock;
+  EXPECT_THROW(
+      {
+        GateEventJournal journal(
+        region,
+        region_bytes,
+        identity,
+        GateEventJournalClock{&FakeClock::read, &clock});
+        (void)journal;
+      },
+    std::invalid_argument);
+  if (header != nullptr) {
+    EXPECT_EQ(gate_event_journal_load_acquire(header->writer_pid), 0U);
+  }
+}
+
 template<typename Record, typename Checksum>
 void expect_checksum_changes(
   const Record & baseline,
@@ -414,6 +436,130 @@ TEST(GateEventJournal, RejectsClaimlessOccupiedSlotBeforeWriterClaim)
     EXPECT_EQ(
       gate_event_journal_load_acquire(region.header.claimed_slots),
       0U);
+  }
+}
+
+TEST(GateEventJournal, RejectsMalformedOrMismatchedAttach)
+{
+  using AttachMutation = void (*)(
+    OneSlotRegion &,
+    GateEventJournalIdentity &);
+  const std::array<AttachMutation, 14U> invalid_mutations{
+    [](OneSlotRegion & region, GateEventJournalIdentity &) {
+      gate_event_journal_store_release(
+        region.header.init_state,
+        VOICE_NAV_GATE_EVENT_JOURNAL_INIT_EMPTY);
+    },
+    [](OneSlotRegion & region, GateEventJournalIdentity &) {
+      region.header.magic ^= 1U;
+    },
+    [](OneSlotRegion & region, GateEventJournalIdentity &) {
+      region.header.abi_version += 1U;
+    },
+    [](OneSlotRegion & region, GateEventJournalIdentity &) {
+      region.header.header_bytes += 8U;
+    },
+    [](OneSlotRegion & region, GateEventJournalIdentity &) {
+      region.header.slot_bytes += 8U;
+    },
+    [](OneSlotRegion & region, GateEventJournalIdentity &) {
+      region.header.region_bytes += 1U;
+    },
+    [](OneSlotRegion & region, GateEventJournalIdentity &) {
+      region.header.capacity = 0U;
+    },
+    [](OneSlotRegion & region, GateEventJournalIdentity &) {
+      region.header.capacity = 2U;
+    },
+    [](OneSlotRegion &, GateEventJournalIdentity & identity) {
+      identity.owner_uid += 1U;
+    },
+    [](OneSlotRegion &, GateEventJournalIdentity & identity) {
+      identity.generation += 1U;
+    },
+    [](OneSlotRegion &, GateEventJournalIdentity & identity) {
+      identity.nonce_hi ^= 1U;
+    },
+    [](OneSlotRegion &, GateEventJournalIdentity & identity) {
+      identity.nonce_lo ^= 1U;
+    },
+    [](OneSlotRegion & region, GateEventJournalIdentity &) {
+      region.header.reserved = 1U;
+    },
+    [](OneSlotRegion & region, GateEventJournalIdentity &) {
+      region.header.region_bytes = UINT64_MAX;
+      region.header.capacity = UINT64_MAX;
+    }};
+
+  for (std::size_t index = 0U; index < invalid_mutations.size(); ++index) {
+    SCOPED_TRACE(index);
+    OneSlotRegion region;
+    auto identity = initialize_region(region);
+    invalid_mutations[index](region, identity);
+    region.header.header_checksum =
+      gate_event_journal_header_checksum(region.header);
+    expect_invalid_attach_without_writer_claim(
+      &region,
+      sizeof(region),
+      identity,
+      &region.header);
+  }
+
+  {
+    OneSlotRegion region;
+    const auto identity = initialize_region(region);
+    region.header.header_checksum ^= 1U;
+    expect_invalid_attach_without_writer_claim(
+      &region,
+      sizeof(region),
+      identity,
+      &region.header);
+  }
+
+  {
+    OneSlotRegion region;
+    const auto identity = initialize_region(region);
+    expect_invalid_attach_without_writer_claim(
+      nullptr,
+      sizeof(region),
+      identity,
+      nullptr);
+    expect_invalid_attach_without_writer_claim(
+      &region,
+      sizeof(region) - 1U,
+      identity,
+      &region.header);
+  }
+
+  {
+    alignas(64) std::array<std::byte, sizeof(OneSlotRegion) + 1U> bytes{};
+    const GateEventJournalIdentity identity{};
+    expect_invalid_attach_without_writer_claim(
+      bytes.data() + 1U,
+      sizeof(OneSlotRegion),
+      identity,
+      nullptr);
+  }
+
+  {
+    OneSlotRegion region;
+    const auto identity = initialize_region(region);
+    gate_event_journal_store_release(region.header.writer_pid, 12345U);
+    FakeClock clock;
+
+    EXPECT_THROW(
+        {
+          GateEventJournal journal(
+          &region,
+          sizeof(region),
+          identity,
+          GateEventJournalClock{&FakeClock::read, &clock});
+          (void)journal;
+        },
+      std::runtime_error);
+    EXPECT_EQ(
+      gate_event_journal_load_acquire(region.header.writer_pid),
+      12345U);
   }
 }
 
