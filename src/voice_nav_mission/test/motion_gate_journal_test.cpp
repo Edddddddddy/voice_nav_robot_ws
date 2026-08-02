@@ -561,5 +561,156 @@ TEST(MotionGateJournal, ForceFaultCommitsOneTerminalTransition)
   EXPECT_EQ(slot.commit_checksum, gate_event_journal_commit_checksum(slot));
 }
 
+TEST(MotionGateJournal, CandidateExpiryCommitsAutomaticRetirement)
+{
+  JournalRegion<3U> region;
+  const auto identity = initialize_region(region);
+  FakeClock clock;
+  GateEventJournal journal(
+    &region,
+    sizeof(region),
+    identity,
+    GateEventJournalClock{&FakeClock::read, &clock});
+  MotionGateCore gate(MotionGateConfig{}, kGateId, 0U, &journal);
+  const auto now = MotionGateCore::SteadyTimePoint{};
+  ASSERT_EQ(
+    gate.prepare(
+      ControlRequest{
+        Operation::Prepare,
+        "00000000000000000000000000000001",
+        kGateId,
+        0U,
+        ""},
+      now).code,
+    ResultCode::Applied);
+  const auto prepared = gate.snapshot();
+  WriterGid writer{};
+  writer.front() = 0x42U;
+  writer.back() = 0xe7U;
+  ASSERT_EQ(
+    gate.open(
+      ControlRequest{
+        Operation::Open,
+        "00000000000000000000000000000002",
+        kGateId,
+        prepared.control_seq,
+        prepared.lease_id},
+      now,
+      [writer]() {
+        return OpenBinding{true, Reason::None, writer, "writer ready"};
+      }).code,
+    ResultCode::Applied);
+
+  EXPECT_TRUE(
+    gate.tick(now + std::chrono::milliseconds{150}).is_zero());
+
+  const auto state = gate.snapshot();
+  EXPECT_EQ(state.state, State::Inhibited);
+  EXPECT_EQ(state.state_seq, 3U);
+  EXPECT_EQ(state.control_seq, 3U);
+  EXPECT_EQ(state.reason, Reason::CandidateExpired);
+  EXPECT_TRUE(state.lease_id.empty());
+  const auto & slot = region.slots[2U];
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(slot.phase),
+    VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_COMMITTED);
+  EXPECT_EQ(slot.journal_seq, 3U);
+  EXPECT_EQ(slot.generation, identity.generation);
+  EXPECT_EQ(slot.intent_monotonic_ns, 700U);
+  EXPECT_EQ(slot.transition_linearization_ns, 800U);
+  EXPECT_EQ(slot.commit_monotonic_ns, 900U);
+  EXPECT_EQ(slot.event_code, 5U);  // AUTOMATIC_RETIRE
+  EXPECT_EQ(
+    slot.reason,
+    static_cast<std::uint64_t>(Reason::CandidateExpired));
+  EXPECT_EQ(slot.before_state_seq, 2U);
+  EXPECT_EQ(slot.before_control_seq, 2U);
+  EXPECT_EQ(slot.after_state_seq, 3U);
+  EXPECT_EQ(slot.after_control_seq, 3U);
+  EXPECT_EQ(slot.before_lease_hi, UINT64_C(0x0123456789abcdef));
+  EXPECT_EQ(slot.before_lease_lo, UINT64_C(0x0123456789abcdee));
+  EXPECT_EQ(slot.after_lease_hi, 0U);
+  EXPECT_EQ(slot.after_lease_lo, 0U);
+  EXPECT_EQ(slot.intent_checksum, gate_event_journal_intent_checksum(slot));
+  EXPECT_EQ(slot.commit_checksum, gate_event_journal_commit_checksum(slot));
+}
+
+TEST(MotionGateJournal, SequenceExhaustionFaultIsJournaledWithoutWrap)
+{
+  JournalRegion<1U> region;
+  const auto identity = initialize_region(region);
+  FakeClock clock;
+  GateEventJournal journal(
+    &region,
+    sizeof(region),
+    identity,
+    GateEventJournalClock{&FakeClock::read, &clock});
+  MotionGateCore gate(
+    MotionGateConfig{}, kGateId, UINT64_MAX, &journal);
+
+  const auto result = gate.prepare(
+    ControlRequest{
+        Operation::Prepare,
+        "00000000000000000000000000000001",
+        kGateId,
+        UINT64_MAX,
+        ""},
+    MotionGateCore::SteadyTimePoint{});
+
+  EXPECT_EQ(result.code, ResultCode::Faulted);
+  EXPECT_EQ(result.state, State::Faulted);
+  EXPECT_EQ(result.reason, Reason::SequenceExhausted);
+  EXPECT_EQ(result.control_seq, UINT64_MAX);
+  EXPECT_EQ(clock.samples, 3U);
+  const auto & slot = region.slots.front();
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(slot.phase),
+    VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_COMMITTED);
+  EXPECT_EQ(slot.event_code, 6U);  // FAULT
+  EXPECT_EQ(
+    slot.reason,
+    static_cast<std::uint64_t>(Reason::SequenceExhausted));
+  EXPECT_EQ(slot.before_state_seq, 0U);
+  EXPECT_EQ(slot.after_state_seq, 1U);
+  EXPECT_EQ(slot.before_control_seq, UINT64_MAX);
+  EXPECT_EQ(slot.after_control_seq, UINT64_MAX);
+  EXPECT_EQ(slot.intent_checksum, gate_event_journal_intent_checksum(slot));
+  EXPECT_EQ(slot.commit_checksum, gate_event_journal_commit_checksum(slot));
+}
+
+TEST(MotionGateJournal, FullJournalCannotPreventForceFault)
+{
+  JournalRegion<1U> region;
+  const auto identity = initialize_region(region);
+  FakeClock clock;
+  GateEventJournal journal(
+    &region,
+    sizeof(region),
+    identity,
+    GateEventJournalClock{&FakeClock::read, &clock});
+  (void)journal.publish_output(
+    GateOutputIntent{
+        99U, 0U, 1U, 1U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U},
+    []() noexcept {});
+  MotionGateCore gate(MotionGateConfig{}, kGateId, 0U, &journal);
+
+  EXPECT_NO_THROW(
+    gate.force_fault(Reason::PublishFailed, "publisher failed"));
+
+  const auto state = gate.snapshot();
+  EXPECT_EQ(state.state, State::Faulted);
+  EXPECT_EQ(state.control_seq, 1U);
+  EXPECT_EQ(state.reason, Reason::PublishFailed);
+  EXPECT_TRUE(state.motion_inhibited);
+  EXPECT_TRUE(state.zero_selected);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(region.header.claimed_slots),
+    1U);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(region.header.overflow_latched),
+    1U);
+  EXPECT_EQ(clock.samples, 2U);
+}
+
 }  // namespace
 }  // namespace voice_nav_mission
