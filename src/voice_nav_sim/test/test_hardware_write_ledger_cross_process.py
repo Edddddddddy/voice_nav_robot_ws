@@ -1995,6 +1995,27 @@ def test_qualifying_fault_preserves_attempted_fence_count(probe):
                 FAULT_CAPACITY,
                 'budget fault did not latch exactly CAPACITY',
             )
+            snapshot = owner.read_sealed_interval(
+                interval_id=101,
+                bank_index=seal_response[10],
+                bank_epoch=seal_response[11],
+                seal_fence_write_seq=seal_response[12],
+            )
+            require(
+                snapshot.terminal_state == BANK_STATE_SEALED_FAULT and
+                snapshot.oracle_faults == FAULT_CAPACITY and
+                len(snapshot.pages) == 1 and
+                snapshot.pages[0].total_invocation_count == 2 and
+                snapshot.pages[0].page_invocation_count == 2 and
+                snapshot.pages[0].page_segment_count == 1,
+                f'fault-count Parent page changed: {snapshot!r}',
+            )
+            require(
+                owner.acknowledge(snapshot) and
+                owner.snapshot_bank(snapshot.bank_index)[0] ==
+                BANK_STATE_FREE,
+                'validated fault-count evidence could not be acknowledged',
+            )
 
             process.stdin.write('EXIT\n')
             process.stdin.flush()
