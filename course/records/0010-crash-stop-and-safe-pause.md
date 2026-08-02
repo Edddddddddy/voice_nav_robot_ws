@@ -111,6 +111,15 @@ armed against one exact action but cannot satisfy completion; only a later
 same-host monotonic process-exit observation may do so. It also rejects an
 unarmed kill, inverted event time, arming a clean action, and an empty ledger.
 
+```text
+Minimal GREEN command:
+python3 -m pytest -q src/voice_nav_sim/test/test_crash_evidence.py
+
+Exit status: 0
+Executed tests: 2
+Result: 2 passed in 0.36s
+```
+
 - [ ] Pure valid fixtures pass.
 - [ ] Negative/mutation fixtures fail for their expected reasons.
 - [ ] Repository assertion alone fails because crash-stop artifacts are absent.

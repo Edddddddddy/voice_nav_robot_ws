@@ -62,6 +62,7 @@ class CrashLedgerTest(unittest.TestCase):
         ledger.expect_sigkill(authority, 'authority')
         ledger.expect_clean(candidate, 'candidate')
         ledger.expect_clean(gazebo, 'gazebo')
+        ledger.arm_sigkill(authority, signal_intent_monotonic_ns=1)
 
         with self.assertRaisesRegex(
             crash_evidence.CrashEvidenceError,
