@@ -30,6 +30,11 @@ class JournaledGazeboSimSystemAdapter final
 {
 public:
   JournaledGazeboSimSystemAdapter();
+  explicit JournaledGazeboSimSystemAdapter(
+    std::shared_ptr<gz_ros2_control::GazeboSimSystemInterface> upstream);
+
+  hardware_interface::CallbackReturn on_init(
+    const hardware_interface::HardwareInfo & hardware_info) override;
 
   bool initSim(
     rclcpp::Node::SharedPtr & model_node,

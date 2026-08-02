@@ -16,6 +16,8 @@
 
 #include <pluginlib/class_list_macros.hpp>
 
+#include <utility>
+
 namespace voice_nav_sim
 {
 
@@ -27,6 +29,29 @@ JournaledGazeboSimSystemAdapter::JournaledGazeboSimSystemAdapter()
       "gz_ros2_control/GazeboSimSystem"))
 {
 }
+
+JournaledGazeboSimSystemAdapter::JournaledGazeboSimSystemAdapter(
+  std::shared_ptr<gz_ros2_control::GazeboSimSystemInterface> upstream)
+: upstream_loader_(
+    "gz_ros2_control",
+    "gz_ros2_control::GazeboSimSystemInterface"),
+  upstream_(std::move(upstream))
+{
+}
+
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+hardware_interface::CallbackReturn JournaledGazeboSimSystemAdapter::on_init(
+  const hardware_interface::HardwareInfo & hardware_info)
+{
+  // gz_ros2_control 1.2.19 overrides this legacy overload; parity requires it.
+  return upstream_->on_init(hardware_info);
+}
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
 
 bool JournaledGazeboSimSystemAdapter::initSim(
   rclcpp::Node::SharedPtr & model_node,
