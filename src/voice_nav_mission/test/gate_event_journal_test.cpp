@@ -21,6 +21,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 
 namespace voice_nav_mission
 {
@@ -101,6 +102,48 @@ struct FakeClock
   }
 };
 
+GateEventJournalIdentity initialize_region(OneSlotRegion & region)
+{
+  region = OneSlotRegion{};
+  region.header.magic = VOICE_NAV_GATE_EVENT_JOURNAL_MAGIC;
+  region.header.abi_version = VOICE_NAV_GATE_EVENT_JOURNAL_ABI_VERSION;
+  region.header.header_bytes = sizeof(GateEventJournalHeader);
+  region.header.slot_bytes = sizeof(GateEventJournalSlot);
+  region.header.region_bytes = sizeof(region);
+  region.header.capacity = 1U;
+  region.header.owner_uid = 1000U;
+  region.header.generation = 7U;
+  region.header.nonce_hi = 0x123456789abcdef0U;
+  region.header.nonce_lo = 0x0fedcba987654321U;
+  region.header.header_checksum =
+    gate_event_journal_header_checksum(region.header);
+  gate_event_journal_store_release(
+    region.header.init_state,
+    VOICE_NAV_GATE_EVENT_JOURNAL_INIT_READY);
+  return {
+    region.header.owner_uid,
+    region.header.generation,
+    region.header.nonce_hi,
+    region.header.nonce_lo};
+}
+
+GateOutputIntent make_output_intent()
+{
+  return {
+    41U,
+    9U,
+    17U,
+    18U,
+    23U,
+    456789123U,
+    0x3fd0000000000000U,
+    0xbfc0000000000000U,
+    0x1111222233334444U,
+    0x5555666677778888U,
+    3U,
+    0xa5U};
+}
+
 template<typename Record, typename Checksum>
 void expect_checksum_changes(
   const Record & baseline,
@@ -128,49 +171,19 @@ TEST(
   SuccessfulOutputIsIntentDuringPublishAndCommittedAfterReturn)
 {
   OneSlotRegion region;
-  region.header.magic = VOICE_NAV_GATE_EVENT_JOURNAL_MAGIC;
-  region.header.abi_version = VOICE_NAV_GATE_EVENT_JOURNAL_ABI_VERSION;
-  region.header.header_bytes = sizeof(GateEventJournalHeader);
-  region.header.slot_bytes = sizeof(GateEventJournalSlot);
-  region.header.region_bytes = sizeof(region);
-  region.header.capacity = 1U;
-  region.header.owner_uid = 1000U;
-  region.header.generation = 7U;
-  region.header.nonce_hi = 0x123456789abcdef0U;
-  region.header.nonce_lo = 0x0fedcba987654321U;
-  region.header.header_checksum =
-    gate_event_journal_header_checksum(region.header);
+  const auto identity = initialize_region(region);
   ASSERT_EQ(
     region.header.header_checksum,
     UINT64_C(0xc5a43daf135b254d));
-  gate_event_journal_store_release(
-    region.header.init_state,
-    VOICE_NAV_GATE_EVENT_JOURNAL_INIT_READY);
 
   FakeClock clock;
   GateEventJournal journal(
     &region,
     sizeof(region),
-    GateEventJournalIdentity{
-        region.header.owner_uid,
-        region.header.generation,
-        region.header.nonce_hi,
-        region.header.nonce_lo},
+    identity,
     GateEventJournalClock{&FakeClock::read, &clock});
 
-  const GateOutputIntent intent{
-    41U,
-    9U,
-    17U,
-    18U,
-    23U,
-    456789123U,
-    0x3fd0000000000000U,
-    0xbfc0000000000000U,
-    0x1111222233334444U,
-    0x5555666677778888U,
-    3U,
-    0xa5U};
+  const auto intent = make_output_intent();
   std::uint64_t publisher_calls = 0U;
 
   const auto outcome = journal.publish_output(
@@ -180,6 +193,9 @@ TEST(
       EXPECT_EQ(
         gate_event_journal_load_acquire(region.slot.phase),
         VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_INTENT);
+      EXPECT_EQ(
+        gate_event_journal_load_acquire(region.header.claimed_slots),
+        1U);
     });
 
   EXPECT_EQ(publisher_calls, 1U);
@@ -229,6 +245,50 @@ TEST(
   EXPECT_EQ(
     region.slot.commit_checksum,
     UINT64_C(0x24237a46d3cccb33));
+}
+
+TEST(GateEventJournal, PublisherFailureLeavesTrailingIntent)
+{
+  OneSlotRegion region;
+  const auto identity = initialize_region(region);
+  FakeClock clock;
+  GateEventJournal journal(
+    &region,
+    sizeof(region),
+    identity,
+    GateEventJournalClock{&FakeClock::read, &clock});
+  const auto intent = make_output_intent();
+  std::uint64_t publisher_calls = 0U;
+
+  EXPECT_THROW(
+    journal.publish_output(
+      intent,
+      [&region, &publisher_calls]() {
+        ++publisher_calls;
+        EXPECT_EQ(
+          gate_event_journal_load_acquire(region.header.claimed_slots),
+          1U);
+        EXPECT_EQ(
+          gate_event_journal_load_acquire(region.slot.phase),
+          VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_INTENT);
+        throw std::runtime_error("injected publisher failure");
+      }),
+    std::runtime_error);
+
+  EXPECT_EQ(publisher_calls, 1U);
+  EXPECT_EQ(clock.next, 1U);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(region.header.claimed_slots),
+    1U);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(region.slot.phase),
+    VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_INTENT);
+  EXPECT_EQ(region.slot.intent_monotonic_ns, 100U);
+  EXPECT_EQ(region.slot.commit_monotonic_ns, 0U);
+  EXPECT_EQ(region.slot.commit_checksum, 0U);
+  EXPECT_EQ(
+    region.slot.intent_checksum,
+    gate_event_journal_intent_checksum(region.slot));
 }
 
 TEST(GateEventJournal, ChecksumCoverageMatchesAbiV1)
