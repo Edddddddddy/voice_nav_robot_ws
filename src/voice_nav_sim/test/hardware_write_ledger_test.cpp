@@ -139,6 +139,35 @@ void expect_same_page(
   }
 }
 
+TEST(HardwareWriteLedger, ArmsAPreallocatedBankAtTheWriteSeam)
+{
+  voice_nav_sim::HardwareWriteLedger ledger(
+    voice_nav_sim::HardwareWriteLedgerStorageConfig{52U, 2U, 2U});
+  const voice_nav_sim::HardwareWriteRecord record{
+    52U,
+    10U,
+    1'000'000,
+    0U,
+    UINT64_C(0x3ff0000000000000),
+    UINT64_C(0x3ff0000000000000)};
+  EXPECT_FALSE(ledger.append(record));
+  EXPECT_EQ(ledger.oracle_faults(), 0U);
+
+  ASSERT_TRUE(ledger.arm({21U, 9U, false}));
+  ASSERT_TRUE(ledger.append(record));
+  ASSERT_TRUE(ledger.seal());
+
+  const auto snapshot = ledger.snapshot_page(0U);
+  ASSERT_TRUE(snapshot.has_value());
+  EXPECT_EQ(snapshot->generation, 52U);
+  EXPECT_EQ(snapshot->interval_id, 21U);
+  EXPECT_EQ(snapshot->arm_fence_write_seq, 9U);
+  EXPECT_EQ(snapshot->seal_fence_write_seq, 10U);
+  EXPECT_EQ(snapshot->total_invocation_count, 1U);
+  EXPECT_EQ(snapshot->oracle_faults, 0U);
+  EXPECT_EQ(snapshot->page_checksum, independent_page_checksum(*snapshot));
+}
+
 TEST(HardwareWriteLedger, SealsOneWriteAsAnImmutableChecksummedPage)
 {
   voice_nav_sim::HardwareWriteLedger ledger({41U, 7U, 0U, 4U, 4U});
