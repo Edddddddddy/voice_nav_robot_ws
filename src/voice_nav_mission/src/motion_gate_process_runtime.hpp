@@ -123,6 +123,8 @@ public:
   [[nodiscard]] FinalOutputState output_state() const;
 
 private:
+  friend class MotionGateProcessRuntimeTestPeer;
+
   // Node confines Core mutations and output calls to one MutuallyExclusive
   // callback group. The Publisher Adapter must not re-enter this Runtime.
   enum class OutputJournalMode : std::uint8_t
