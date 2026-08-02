@@ -32,6 +32,10 @@ constexpr std::uint64_t kCrc64EcmaPolynomial =
   UINT64_C(0x42f0e1eba9ea3693);
 constexpr std::uint64_t kInvalidBankIndex =
   std::numeric_limits<std::uint64_t>::max();
+constexpr std::uint64_t kWriterIdle{0U};
+constexpr std::uint64_t kWriterBeginning{1U};
+constexpr std::uint64_t kWriterOutstanding{2U};
+constexpr std::uint64_t kWriterFinishing{3U};
 
 std::uint64_t atomic_load_acquire(const std::uint64_t & value) noexcept
 {
@@ -50,6 +54,20 @@ void atomic_fetch_or_release(
   std::uint64_t value) noexcept
 {
   (void)__atomic_fetch_or(&destination, value, __ATOMIC_RELEASE);
+}
+
+bool atomic_compare_exchange_acq_rel(
+  std::uint64_t & destination,
+  std::uint64_t & expected,
+  std::uint64_t desired) noexcept
+{
+  return __atomic_compare_exchange_n(
+    &destination,
+    &expected,
+    desired,
+    false,
+    __ATOMIC_ACQ_REL,
+    __ATOMIC_ACQUIRE);
 }
 
 std::uint64_t crc64_byte(
@@ -395,7 +413,10 @@ struct HardwareWriteLedgerWriter::Impl
 
   HardwareWriteTicket begin_write(std::int64_t sim_stamp_ns) noexcept
   {
-    if (has_outstanding_ticket) {
+    std::uint64_t expected_lifecycle{kWriterIdle};
+    if (!atomic_compare_exchange_acq_rel(
+        lifecycle, expected_lifecycle, kWriterBeginning))
+    {
       latch_global_fault(VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_PROTOCOL);
       return HardwareWriteTicket{
         0U, sim_stamp_ns, kInvalidBankIndex, 0U, false};
@@ -405,6 +426,7 @@ struct HardwareWriteLedgerWriter::Impl
       atomic_load_acquire(header->last_completed_write_seq);
     if (last_completed_write_seq == std::numeric_limits<std::uint64_t>::max()) {
       latch_global_fault(VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_SEQUENCE);
+      atomic_store_release(lifecycle, kWriterIdle);
       return HardwareWriteTicket{
         0U, sim_stamp_ns, kInvalidBankIndex, 0U, false};
     }
@@ -419,7 +441,7 @@ struct HardwareWriteLedgerWriter::Impl
       included ? active_bank_index : kInvalidBankIndex,
       included ? active_bank_epoch : 0U,
       included};
-    has_outstanding_ticket = true;
+    atomic_store_release(lifecycle, kWriterOutstanding);
     return outstanding_ticket;
   }
 
@@ -428,8 +450,15 @@ struct HardwareWriteLedgerWriter::Impl
     std::uint64_t delegated_result,
     HardwareWriteWheelObservation observation) noexcept
   {
+    std::uint64_t expected_lifecycle{kWriterOutstanding};
+    if (!atomic_compare_exchange_acq_rel(
+        lifecycle, expected_lifecycle, kWriterFinishing))
+    {
+      latch_global_fault(VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_PROTOCOL);
+      return;
+    }
     if (
-      !has_outstanding_ticket || ticket.write_seq == 0U ||
+      ticket.write_seq == 0U ||
       ticket.write_seq != outstanding_ticket.write_seq ||
       ticket.sim_stamp_ns != outstanding_ticket.sim_stamp_ns ||
       ticket.bank_index != outstanding_ticket.bank_index ||
@@ -437,6 +466,7 @@ struct HardwareWriteLedgerWriter::Impl
       ticket.included != outstanding_ticket.included)
     {
       latch_global_fault(VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_PROTOCOL);
+      atomic_store_release(lifecycle, kWriterOutstanding);
       return;
     }
 
@@ -468,7 +498,7 @@ struct HardwareWriteLedgerWriter::Impl
         latch_global_fault(VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_PROTOCOL);
         atomic_store_release(
           header->last_completed_write_seq, ticket.write_seq);
-        has_outstanding_ticket = false;
+        atomic_store_release(lifecycle, kWriterIdle);
         return;
       }
 
@@ -607,7 +637,7 @@ struct HardwareWriteLedgerWriter::Impl
 
     atomic_store_release(
       header->last_completed_write_seq, ticket.write_seq);
-    has_outstanding_ticket = false;
+    atomic_store_release(lifecycle, kWriterIdle);
   }
 
   void * region;
@@ -619,7 +649,7 @@ struct HardwareWriteLedgerWriter::Impl
   std::uint64_t active_bank_epoch{0U};
   std::uint64_t last_consumed_request_ticket{0U};
   std::uint64_t last_consumed_request_checksum{0U};
-  bool has_outstanding_ticket{false};
+  std::uint64_t lifecycle{kWriterIdle};
   HardwareWriteTicket outstanding_ticket{
     0U, 0, kInvalidBankIndex, 0U, false};
 };

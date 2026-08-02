@@ -99,11 +99,11 @@ if(BUILD_TESTING)
   )
   target_compile_options(
     hardware_write_ledger_writer_concurrency_test
-    PRIVATE -fsanitize=thread -fno-omit-frame-pointer
+    PRIVATE -fsanitize=thread -fno-omit-frame-pointer -fno-pie
   )
   target_link_options(
     hardware_write_ledger_writer_concurrency_test
-    PRIVATE -fsanitize=thread
+    PRIVATE -fsanitize=thread -no-pie
   )
   target_include_directories(
     hardware_write_ledger_writer_concurrency_test
@@ -113,9 +113,14 @@ if(BUILD_TESTING)
     hardware_write_ledger_writer_concurrency_test
     Threads::Threads
   )
+  find_program(SETARCH_EXECUTABLE setarch REQUIRED)
   add_test(
     NAME hardware_write_ledger_writer_concurrency_test
-    COMMAND $<TARGET_FILE:hardware_write_ledger_writer_concurrency_test>
+    COMMAND
+      "${SETARCH_EXECUTABLE}"
+      "${CMAKE_SYSTEM_PROCESSOR}"
+      -R
+      $<TARGET_FILE:hardware_write_ledger_writer_concurrency_test>
   )
   set_tests_properties(
     hardware_write_ledger_writer_concurrency_test
