@@ -104,6 +104,26 @@ class CrashRobotDescriptionTest(unittest.TestCase):
             element_signature(original),
         )
 
+    def test_rejects_preexisting_owned_journal_parameters(self):
+        for parameter_name in ('journal_name', 'journal_nonce'):
+            with self.subTest(parameter_name=parameter_name):
+                contaminated_urdf = PRODUCT_URDF.replace(
+                    '</hardware>',
+                    '<param name="{}">existing</param></hardware>'.format(
+                        parameter_name,
+                    ),
+                    1,
+                )
+                with self.assertRaisesRegex(
+                    crash_robot_description.CrashRobotDescriptionError,
+                    'must not already contain',
+                ):
+                    crash_robot_description.transform_product_urdf(
+                        contaminated_urdf,
+                        '/voice_nav_hardware_0011223344556677',
+                        '00112233445566778899aabbccddeeff',
+                    )
+
 
 if __name__ == '__main__':
     unittest.main()
