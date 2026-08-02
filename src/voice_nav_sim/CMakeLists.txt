@@ -303,6 +303,11 @@ if(BUILD_TESTING)
   )
 
   ament_add_pytest_test(
+    crash_stop_policy_test
+    test/test_crash_stop_policy.py
+    TIMEOUT 10
+  )
+  ament_add_pytest_test(
     crash_evidence_test
     test/test_crash_evidence.py
     TIMEOUT 10
