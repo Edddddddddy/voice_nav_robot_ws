@@ -23,6 +23,8 @@ import sys
 from hardware_write_ledger_test_support import (
     BANK_STATE_ACTIVE,
     BANK_STATE_FREE,
+    BANK_STATE_SEALED_OK,
+    CONTROL_FLAG_EXACT_SEAL_STAMP,
     CONTROL_FLAG_ZERO_REQUIRED,
     CONTROL_OP_ARM,
     CONTROL_RESPONSE_INVALID,
@@ -33,6 +35,7 @@ from hardware_write_ledger_test_support import (
     GLOBAL_ORACLE_FAULTS_WORD,
     HardwareWriteLedgerRegionOwner,
     WRITER_PID_WORD,
+    crc64_ecma_words,
 )
 
 
@@ -513,6 +516,163 @@ def test_writing_request_is_invisible_until_ready(probe):
             close_owned_process_pipes(process)
 
 
+def test_seal_is_deferred_and_includes_qualifying_write(probe):
+    """Prove SEAL publishes only after retaining its qualifying write."""
+    with HardwareWriteLedgerRegionOwner(
+        generation=85,
+        segment_capacity=4,
+        page_segment_limit=2,
+    ) as owner:
+        process = spawn_probe(probe, owner)
+        try:
+            require(
+                owner.wait_for_writer(process.pid) == process.pid,
+                'SEAL probe Writer PID mismatch',
+            )
+            require(
+                read_owned_line(process, 'READY') == 'READY',
+                'SEAL probe did not publish READY',
+            )
+            owner.unlink_name()
+
+            arm_ticket = owner.post_arm(
+                interval_id=99,
+                segment_budget=4,
+                invocation_budget=4,
+                require_zero_commands=False,
+            )
+            process.stdin.write('BEGIN 100\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 1',
+                'SEAL setup write did not begin',
+            )
+            arm_response = owner.wait_response(arm_ticket)
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 1',
+                'SEAL setup write did not finish',
+            )
+
+            seal_ticket = owner.post_seal(
+                interval_id=99,
+                bank_index=arm_response[10],
+                bank_epoch=arm_response[11],
+                not_before_sim_stamp_ns=200,
+                require_exact_stamp=True,
+            )
+            process.stdin.write('BEGIN 150\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 2',
+                'pre-threshold write did not begin',
+            )
+            require(
+                owner.load_response_ticket() == arm_ticket,
+                'SEAL acknowledged before its threshold',
+            )
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 2',
+                'pre-threshold write did not finish',
+            )
+            require(
+                owner.load_response_ticket() == arm_ticket,
+                'pre-threshold write prematurely sealed the bank',
+            )
+
+            process.stdin.write('BEGIN 200\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 3',
+                'qualifying SEAL write did not begin',
+            )
+            require(
+                owner.load_response_ticket() == arm_ticket,
+                'SEAL acknowledged before the qualifying write finished',
+            )
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 3',
+                'qualifying SEAL write did not finish',
+            )
+
+            seal_response = owner.wait_response(seal_ticket)
+            require(
+                seal_response[1] == CONTROL_FLAG_EXACT_SEAL_STAMP,
+                'SEAL response changed its exact-stamp flag',
+            )
+            require(
+                seal_response[9] == CONTROL_RESPONSE_OK,
+                f'SEAL response code was {seal_response[9]}',
+            )
+            require(
+                seal_response[10:13] == (arm_response[10], 1, 3),
+                f'SEAL receipt identity changed: {seal_response!r}',
+            )
+
+            bank = owner.snapshot_bank(seal_response[10])
+            expected_without_checksum = (
+                BANK_STATE_SEALED_OK,
+                1,
+                99,
+                0,
+                3,
+                4,
+                4,
+                0,
+                200,
+                3,
+                3,
+                1,
+                3,
+                0,
+                2,
+            )
+            require(
+                bank[0:15] == expected_without_checksum,
+                f'deferred SEAL bank mismatch: {bank!r}',
+            )
+            segments = tuple(
+                owner.snapshot_segment(seal_response[10], index)
+                for index in range(3)
+            )
+            require(
+                tuple(segment[1:5] for segment in segments) == (
+                    (1, 1, 1, 100),
+                    (2, 2, 1, 150),
+                    (3, 3, 1, 200),
+                ),
+                f'SEAL segments are not exact: {segments!r}',
+            )
+            expected_bank_checksum = crc64_ecma_words(
+                (*bank[1:15], *(word for segment in segments for word in segment)),
+            )
+            require(
+                bank[15] == expected_bank_checksum,
+                'SEALED bank root checksum does not bind all evidence',
+            )
+            require(
+                owner.load_header_word(GLOBAL_ORACLE_FAULTS_WORD) == 0,
+                'valid deferred SEAL latched an oracle fault',
+            )
+
+            process.stdin.write('EXIT\n')
+            process.stdin.flush()
+            return_code = process.wait(timeout=3.0)
+            stderr = process.stderr.read()
+            require(
+                return_code == 0,
+                f'SEAL probe exited {return_code}: {stderr}',
+            )
+        finally:
+            terminate_owned_process(process)
+            close_owned_process_pipes(process)
+
+
 def test_same_ticket_different_payload_replay_latches_fault(probe):
     """Prove an acknowledged ticket cannot be reused for another payload."""
     with HardwareWriteLedgerRegionOwner(
@@ -827,6 +987,7 @@ def main():
     test_arm_linearizes_before_first_write(probe)
     test_arm_excludes_prior_write_and_preserves_multiple_records(probe)
     test_writing_request_is_invisible_until_ready(probe)
+    test_seal_is_deferred_and_includes_qualifying_write(probe)
     test_same_ticket_different_payload_replay_latches_fault(probe)
     test_decreasing_sim_stamp_latches_fault_without_overwrite(probe)
     test_sequence_exhaustion_rejects_arm_before_bank_activation(probe)
