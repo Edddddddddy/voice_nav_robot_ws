@@ -148,6 +148,18 @@ def spawn_probe(probe, owner):
     )
 
 
+def spawn_discovery_probe(probe, owner, nonce=None):
+    """Attach using only the URDF-visible name and nonce identity."""
+    return subprocess.Popen(
+        [probe, owner.name, owner.nonce if nonce is None else nonce],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        close_fds=True,
+    )
+
+
 def seal_single_write_interval(
     process,
     owner,
@@ -282,6 +294,66 @@ def test_exec_attach_survives_unlink(probe):
             require(
                 return_code == 0,
                 f'attach probe exited {return_code}: {stderr}',
+            )
+        finally:
+            terminate_owned_process(process)
+            close_owned_process_pipes(process)
+
+
+def test_discovery_attach_derives_trusted_header_identity(probe):
+    """Prove the runtime path needs only name+nonce and still claims Writer."""
+    with HardwareWriteLedgerRegionOwner(
+        generation=96,
+        segment_capacity=4,
+        page_segment_limit=2,
+    ) as owner:
+        process = spawn_discovery_probe(probe, owner)
+        try:
+            require(
+                owner.wait_for_writer(process.pid) == process.pid,
+                'discovery attach Writer PID mismatch',
+            )
+            require(
+                read_owned_line(process, 'discovery READY') == 'READY',
+                'discovery attach did not publish READY',
+            )
+            process.stdin.write('CHECK\n')
+            process.stdin.flush()
+            return_code = process.wait(timeout=3.0)
+            stderr = process.stderr.read()
+            require(
+                return_code == 0,
+                f'discovery attach exited {return_code}: {stderr}',
+            )
+        finally:
+            terminate_owned_process(process)
+            close_owned_process_pipes(process)
+
+
+def test_discovery_attach_rejects_wrong_nonce_before_claim(probe):
+    """Prove URDF nonce authentication precedes the unique Writer claim."""
+    with HardwareWriteLedgerRegionOwner(
+        generation=97,
+        segment_capacity=4,
+        page_segment_limit=2,
+    ) as owner:
+        wrong_nonce = '00000000000000000000000000000001'
+        if wrong_nonce == owner.nonce:
+            wrong_nonce = '00000000000000000000000000000002'
+        process = spawn_discovery_probe(probe, owner, wrong_nonce)
+        try:
+            return_code = process.wait(timeout=3.0)
+            stdout = process.stdout.read()
+            stderr = process.stderr.read()
+            require(return_code != 0, 'wrong discovery nonce unexpectedly passed')
+            require(stdout == '', 'wrong discovery nonce published READY')
+            require(
+                owner.load_header_word(WRITER_PID_WORD) == 0,
+                'wrong discovery nonce obtained the Writer claim',
+            )
+            require(
+                'nonce mismatch' in stderr,
+                f'wrong discovery nonce diagnostic changed: {stderr}',
             )
         finally:
             terminate_owned_process(process)
@@ -2622,6 +2694,8 @@ def main():
     probe = os.path.abspath(sys.argv[1])
     test_corrupt_header_is_rejected_before_claim(probe)
     test_exec_attach_survives_unlink(probe)
+    test_discovery_attach_derives_trusted_header_identity(probe)
+    test_discovery_attach_rejects_wrong_nonce_before_claim(probe)
     test_arm_linearizes_before_first_write(probe)
     test_arm_excludes_prior_write_and_preserves_multiple_records(probe)
     test_writing_request_is_invisible_until_ready(probe)
