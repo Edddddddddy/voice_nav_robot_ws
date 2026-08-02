@@ -18,11 +18,13 @@
 #include <unistd.h>
 
 #include <array>
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 
 namespace voice_nav_mission
 {
@@ -76,25 +78,89 @@ std::array<std::string, 5U> split_descriptor(
   return fields;
 }
 
-std::uint64_t parse_unsigned(
+bool is_decimal_digit(char character) noexcept
+{
+  return character >= '0' && character <= '9';
+}
+
+bool is_lower_hex_digit(char character) noexcept
+{
+  return
+    is_decimal_digit(character) ||
+    (character >= 'a' && character <= 'f');
+}
+
+void validate_shared_memory_name(const std::string & name)
+{
+  constexpr char prefix[] = "/voice_nav_gate_";
+  constexpr std::size_t suffix_characters = 32U;
+  const std::string expected_prefix{prefix};
+  if (
+    name.size() != expected_prefix.size() + suffix_characters ||
+    name.compare(0U, expected_prefix.size(), expected_prefix) != 0)
+  {
+    throw std::invalid_argument(
+            "Invalid Gate event journal shared-memory name");
+  }
+  for (std::size_t index = expected_prefix.size(); index < name.size(); ++index) {
+    if (!is_lower_hex_digit(name[index])) {
+      throw std::invalid_argument(
+              "Invalid Gate event journal shared-memory name");
+    }
+  }
+}
+
+std::uint64_t parse_canonical_decimal(
   const std::string & text,
-  int base,
   const char * field_name)
 {
-  std::size_t consumed = 0U;
+  if (
+    text.empty() ||
+    (text.size() > 1U && text.front() == '0'))
+  {
+    throw std::invalid_argument(
+            std::string{"Invalid Gate event journal "} + field_name);
+  }
+  for (const auto character : text) {
+    if (!is_decimal_digit(character)) {
+      throw std::invalid_argument(
+              std::string{"Invalid Gate event journal "} + field_name);
+    }
+  }
+
   std::uint64_t value = 0U;
-  try {
-    value = static_cast<std::uint64_t>(
-      std::stoull(text, &consumed, base));
-  } catch (const std::exception &) {
+  const auto result = std::from_chars(
+    text.data(), text.data() + text.size(), value, 10);
+  if (
+    result.ec != std::errc{} ||
+    result.ptr != text.data() + text.size())
+  {
     throw std::invalid_argument(
             std::string{"Invalid Gate event journal "} + field_name);
   }
-  if (consumed != text.size()) {
-    throw std::invalid_argument(
-            std::string{"Invalid Gate event journal "} + field_name);
+  return value;
+}
+
+std::uint64_t parse_lower_hex_word(
+  const std::string & text)
+{
+  for (const auto character : text) {
+    if (!is_lower_hex_digit(character)) {
+      throw std::invalid_argument("Invalid Gate event journal nonce");
+    }
   }
-  return static_cast<std::uint64_t>(value);
+
+  std::uint64_t value = 0U;
+  const auto result = std::from_chars(
+    text.data(), text.data() + text.size(), value, 16);
+  if (
+    result.ec != std::errc{} ||
+    result.ptr != text.data() + text.size())
+  {
+    throw std::invalid_argument(
+            "Invalid Gate event journal nonce");
+  }
+  return value;
 }
 
 }  // namespace
@@ -111,14 +177,15 @@ parse_gate_event_journal_test_parameters(
             "Gate event journal test parameters must be all-or-none");
   }
 
+  validate_shared_memory_name(parameters.name);
   const auto fields = split_descriptor(parameters.descriptor);
   if (fields[0] != "v1") {
     throw std::invalid_argument(
             "Unsupported Gate event journal descriptor version");
   }
-  const auto owner_uid = parse_unsigned(fields[1], 10, "owner UID");
-  const auto generation = parse_unsigned(fields[2], 10, "generation");
-  const auto capacity = parse_unsigned(fields[3], 10, "capacity");
+  const auto owner_uid = parse_canonical_decimal(fields[1], "owner UID");
+  const auto generation = parse_canonical_decimal(fields[2], "generation");
+  const auto capacity = parse_canonical_decimal(fields[3], "capacity");
   if (owner_uid != static_cast<std::uint64_t>(geteuid())) {
     throw std::invalid_argument(
             "Gate event journal owner UID must match the process");
@@ -135,8 +202,8 @@ parse_gate_event_journal_test_parameters(
     throw std::invalid_argument(
             "Gate event journal nonce must contain 32 hex digits");
   }
-  const auto nonce_hi = parse_unsigned(fields[4].substr(0U, 16U), 16, "nonce");
-  const auto nonce_lo = parse_unsigned(fields[4].substr(16U), 16, "nonce");
+  const auto nonce_hi = parse_lower_hex_word(fields[4].substr(0U, 16U));
+  const auto nonce_lo = parse_lower_hex_word(fields[4].substr(16U));
   if (nonce_hi == 0U && nonce_lo == 0U) {
     throw std::invalid_argument(
             "Gate event journal nonce must be nonzero");

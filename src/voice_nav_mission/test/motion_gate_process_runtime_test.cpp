@@ -82,8 +82,10 @@ TEST(MotionGateProcessRuntimeTest, MalformedParametersAreRejected)
     {name, ""},
     {"", descriptor},
     {name, "v2:" + uid + ":7:16:" + nonce},
+    {name, "v1::7:16:" + nonce},
     {name, "v1:" + uid + ":7:16"},
     {name, "v1:" + uid + ":7:16:" + nonce + ":extra"},
+    {name, "v1:18446744073709551616:7:16:" + nonce},
     {name, "v1:0" + uid + ":7:16:" + nonce},
     {name, "v1:+" + uid + ":7:16:" + nonce},
     {name, "v1: " + uid + ":7:16:" + nonce},
@@ -97,12 +99,16 @@ TEST(MotionGateProcessRuntimeTest, MalformedParametersAreRejected)
     {name, "v1:" + uid + ":0:16:" + nonce},
     {name, "v1:" + uid + ":7:0:" + nonce},
     {name, "v1:" + uid + ":7:16385:" + nonce},
+    {name, "v1:" + uid + ":18446744073709551616:16:" + nonce},
     {name, "v1:" + uid + ":7:16:00000000000000000000000000000000"},
+    {name, "v1:" + uid + ":7:16:123456789abcdef00fedcba98765432"},
+    {name, "v1:" + uid + ":7:16:123456789abcdef00fedcba9876543210"},
     {name, "v1:" + uid + ":7:16:123456789ABCDEF00fedcba987654321"},
     {name, "v1:" + uid + ":7:16:123456789abcdef00fedcba98765432g"},
     {"/voice_nav_gate_00112233445566778899aabbccddeef", descriptor},
     {"/voice_nav_other_00112233445566778899aabbccddeeff", descriptor},
     {"/voice_nav_gate_00112233445566778899AABBCCDDEEFF", descriptor},
+    {"/voice_nav_gate_00112233445566778899aabbccddeefg", descriptor},
   };
 
   for (const auto & parameters : invalid) {
