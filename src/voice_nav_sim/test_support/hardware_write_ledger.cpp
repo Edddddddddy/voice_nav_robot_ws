@@ -120,18 +120,21 @@ bool zero_command_bits(std::uint64_t bits) noexcept
 class HardwareWriteLedger::Impl
 {
 public:
-  explicit Impl(HardwareWriteLedgerConfig ledger_config)
-  : config(std::move(ledger_config)),
-    last_observed_write_seq(config.arm_fence_write_seq)
+  explicit Impl(HardwareWriteLedgerStorageConfig storage_config)
+  : config{
+      storage_config.generation,
+      0U,
+      0U,
+      storage_config.segment_capacity,
+      storage_config.snapshot_page_segment_limit,
+      false}
   {
     if (
-      config.generation == 0U || config.interval_id == 0U ||
-      config.arm_fence_write_seq == std::numeric_limits<std::uint64_t>::max() ||
-      config.segment_capacity == 0U ||
+      config.generation == 0U || config.segment_capacity == 0U ||
       config.snapshot_page_segment_limit == 0U ||
       config.snapshot_page_segment_limit > config.segment_capacity)
     {
-      throw std::invalid_argument("invalid HardwareWriteLedger config");
+      throw std::invalid_argument("invalid HardwareWriteLedger storage config");
     }
     finalized_segments =
       std::make_unique<HardwareWriteSegment[]>(config.segment_capacity);
@@ -149,19 +152,65 @@ public:
   std::uint64_t sealed_oracle_faults{0U};
   std::atomic<std::uint64_t> oracle_faults{0U};
   std::atomic_bool sealed{false};
+  bool armed{false};
 };
 
-HardwareWriteLedger::HardwareWriteLedger(HardwareWriteLedgerConfig config)
+HardwareWriteLedger::HardwareWriteLedger(
+  HardwareWriteLedgerStorageConfig config)
 : impl_(std::make_unique<Impl>(std::move(config)))
 {
 }
 
+HardwareWriteLedger::HardwareWriteLedger(HardwareWriteLedgerConfig config)
+: HardwareWriteLedger(
+    HardwareWriteLedgerStorageConfig{
+    config.generation,
+    config.segment_capacity,
+    config.snapshot_page_segment_limit})
+{
+  if (!arm(
+      HardwareWriteLedgerArmRequest{
+      config.interval_id,
+      config.arm_fence_write_seq,
+      config.require_zero_commands}))
+  {
+    throw std::invalid_argument("invalid HardwareWriteLedger arm request");
+  }
+}
+
 HardwareWriteLedger::~HardwareWriteLedger() = default;
+
+bool HardwareWriteLedger::arm(
+  HardwareWriteLedgerArmRequest request) noexcept
+{
+  if (
+    impl_->armed || request.interval_id == 0U ||
+    request.arm_fence_write_seq == std::numeric_limits<std::uint64_t>::max())
+  {
+    return false;
+  }
+
+  impl_->config.interval_id = request.interval_id;
+  impl_->config.arm_fence_write_seq = request.arm_fence_write_seq;
+  impl_->config.require_zero_commands = request.require_zero_commands;
+  impl_->active_segment.reset();
+  impl_->finalized_segment_count = 0U;
+  impl_->total_invocation_count = 0U;
+  impl_->first_attempted_write_seq = 0U;
+  impl_->last_attempted_write_seq = 0U;
+  impl_->last_observed_write_seq = request.arm_fence_write_seq;
+  impl_->seal_fence_write_seq = 0U;
+  impl_->sealed_oracle_faults = 0U;
+  impl_->oracle_faults.store(0U, std::memory_order_relaxed);
+  impl_->sealed.store(false, std::memory_order_relaxed);
+  impl_->armed = true;
+  return true;
+}
 
 bool HardwareWriteLedger::append(
   const HardwareWriteRecord & record) noexcept
 {
-  if (impl_->sealed.load(std::memory_order_acquire)) {
+  if (!impl_->armed || impl_->sealed.load(std::memory_order_acquire)) {
     return false;
   }
   if (
@@ -275,7 +324,7 @@ bool HardwareWriteLedger::append(
 
 bool HardwareWriteLedger::seal() noexcept
 {
-  if (impl_->sealed.load(std::memory_order_acquire)) {
+  if (!impl_->armed || impl_->sealed.load(std::memory_order_acquire)) {
     return false;
   }
   if (impl_->active_segment.has_value()) {

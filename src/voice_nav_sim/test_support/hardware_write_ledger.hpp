@@ -49,6 +49,20 @@ struct HardwareWriteLedgerConfig
   bool require_zero_commands{false};
 };
 
+struct HardwareWriteLedgerStorageConfig
+{
+  std::uint64_t generation;
+  std::size_t segment_capacity;
+  std::size_t snapshot_page_segment_limit;
+};
+
+struct HardwareWriteLedgerArmRequest
+{
+  std::uint64_t interval_id;
+  std::uint64_t arm_fence_write_seq;
+  bool require_zero_commands{false};
+};
+
 struct HardwareWriteSegment
 {
   std::uint64_t generation;
@@ -81,13 +95,15 @@ struct HardwareWriteSnapshotPage
   std::vector<HardwareWriteSegment> segments;
 };
 
-// One writer owns append() and seal(). Readers may call snapshot_page() only
-// after observing a sealed page. The page checksum is CRC64-ECMA-182 over the
-// metadata fields before page_checksum, followed by each segment field, with
-// every integer encoded as eight least-significant-first bytes.
+// One writer owns arm(), append(), and seal(). Readers may call
+// snapshot_page() only after observing a sealed page. The page checksum is
+// CRC64-ECMA-182 over the metadata fields before page_checksum, followed by
+// each segment field, with every integer encoded as eight
+// least-significant-first bytes.
 class HardwareWriteLedger final : public HardwareWriteSink
 {
 public:
+  explicit HardwareWriteLedger(HardwareWriteLedgerStorageConfig config);
   explicit HardwareWriteLedger(HardwareWriteLedgerConfig config);
   ~HardwareWriteLedger() override;
 
@@ -96,6 +112,7 @@ public:
   HardwareWriteLedger(HardwareWriteLedger &&) = delete;
   HardwareWriteLedger & operator=(HardwareWriteLedger &&) = delete;
 
+  bool arm(HardwareWriteLedgerArmRequest request) noexcept;
   bool append(const HardwareWriteRecord & record) noexcept override;
   bool seal() noexcept;
 
