@@ -18,6 +18,17 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 )
 
 add_library(
+  gate_event_journal STATIC
+  src/gate_event_journal.cpp
+)
+target_compile_features(gate_event_journal PUBLIC cxx_std_17)
+target_include_directories(
+  gate_event_journal
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+
+add_library(
   motion_gate_core STATIC
   src/motion_gate_core.cpp
 )
@@ -73,6 +84,16 @@ if(BUILD_TESTING)
   target_link_libraries(
     motion_gate_core_test
     motion_gate_core
+  )
+
+  ament_add_gtest(
+    gate_event_journal_test
+    test/gate_event_journal_test.cpp
+  )
+  target_compile_features(gate_event_journal_test PUBLIC cxx_std_17)
+  target_link_libraries(
+    gate_event_journal_test
+    gate_event_journal
   )
 
   ament_add_gtest(
