@@ -71,6 +71,20 @@ public:
     return interfaces;
   }
 
+  hardware_interface::CallbackReturn on_activate(
+    const rclcpp_lifecycle::State & previous_state) override
+  {
+    on_activate_previous_state = &previous_state;
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  hardware_interface::CallbackReturn on_deactivate(
+    const rclcpp_lifecycle::State & previous_state) override
+  {
+    on_deactivate_previous_state = &previous_state;
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
   hardware_interface::return_type read(
     const rclcpp::Time &,
     const rclcpp::Duration &) override
@@ -89,6 +103,8 @@ public:
   const rclcpp_lifecycle::State * on_configure_previous_state{nullptr};
   std::size_t export_state_interfaces_calls{0U};
   std::size_t export_command_interfaces_calls{0U};
+  const rclcpp_lifecycle::State * on_activate_previous_state{nullptr};
+  const rclcpp_lifecycle::State * on_deactivate_previous_state{nullptr};
   double state_value{1.0};
   double command_value{2.0};
 };
@@ -148,6 +164,26 @@ TEST(JournaledGazeboSimSystemAdapter, ForwardsExportedInterfaceCollections)
   ASSERT_EQ(upstream->export_command_interfaces_calls, 1U);
   ASSERT_EQ(command_interfaces.size(), 1U);
   EXPECT_EQ(command_interfaces.front().get_name(), "recording_joint/command");
+}
+
+TEST(JournaledGazeboSimSystemAdapter, ForwardsActivationTransitions)
+{
+  auto upstream = std::make_shared<RecordingGazeboSystem>();
+  voice_nav_sim::JournaledGazeboSimSystemAdapter adapter(upstream);
+  const rclcpp_lifecycle::State activation_previous_state;
+  const rclcpp_lifecycle::State deactivation_previous_state;
+
+  const auto activation_result =
+    adapter.on_activate(activation_previous_state);
+  const auto deactivation_result =
+    adapter.on_deactivate(deactivation_previous_state);
+
+  EXPECT_EQ(
+    upstream->on_activate_previous_state, &activation_previous_state);
+  EXPECT_EQ(activation_result, hardware_interface::CallbackReturn::ERROR);
+  EXPECT_EQ(
+    upstream->on_deactivate_previous_state, &deactivation_previous_state);
+  EXPECT_EQ(deactivation_result, hardware_interface::CallbackReturn::ERROR);
 }
 
 }  // namespace
