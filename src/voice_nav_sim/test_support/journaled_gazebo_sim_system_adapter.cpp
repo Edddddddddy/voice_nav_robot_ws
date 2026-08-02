@@ -60,6 +60,18 @@ JournaledGazeboSimSystemAdapter::on_configure(
   return upstream_->on_configure(previous_state);
 }
 
+std::vector<hardware_interface::StateInterface>
+JournaledGazeboSimSystemAdapter::export_state_interfaces()
+{
+  return upstream_->export_state_interfaces();
+}
+
+std::vector<hardware_interface::CommandInterface>
+JournaledGazeboSimSystemAdapter::export_command_interfaces()
+{
+  return upstream_->export_command_interfaces();
+}
+
 bool JournaledGazeboSimSystemAdapter::initSim(
   rclcpp::Node::SharedPtr & model_node,
   std::map<std::string, gz::sim::Entity> & joints,

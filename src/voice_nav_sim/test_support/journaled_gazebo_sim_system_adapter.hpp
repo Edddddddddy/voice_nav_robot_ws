@@ -21,6 +21,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace voice_nav_sim
 {
@@ -38,6 +39,12 @@ public:
 
   hardware_interface::CallbackReturn on_configure(
     const rclcpp_lifecycle::State & previous_state) override;
+
+  std::vector<hardware_interface::StateInterface> export_state_interfaces()
+    override;
+
+  std::vector<hardware_interface::CommandInterface>
+  export_command_interfaces() override;
 
   bool initSim(
     rclcpp::Node::SharedPtr & model_node,
