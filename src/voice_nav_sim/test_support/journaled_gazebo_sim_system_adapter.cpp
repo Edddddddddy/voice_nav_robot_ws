@@ -141,6 +141,9 @@ bool JournaledGazeboSimSystemAdapter::initSim(
   gz::sim::EntityComponentManager & entity_component_manager,
   unsigned int update_rate)
 {
+  entity_component_manager_ = nullptr;
+  left_wheel_entity_ = gz::sim::kNullEntity;
+  right_wheel_entity_ = gz::sim::kNullEntity;
   const bool initialized = upstream_->initSim(
     model_node,
     joints,
