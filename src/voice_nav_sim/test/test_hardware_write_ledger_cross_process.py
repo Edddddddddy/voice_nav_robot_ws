@@ -20,6 +20,7 @@ import os
 import selectors
 import subprocess
 import sys
+import threading
 
 from hardware_write_ledger_test_support import (
     ABI_VERSION,
@@ -1335,6 +1336,147 @@ def test_retained_banks_require_exact_ack_before_epoch_reuse(probe):
             close_owned_process_pipes(process)
 
 
+def test_concurrent_duplicate_ack_claims_snapshot_once(probe):
+    """Prove one in-flight ACK excludes a duplicate before evidence reuse."""
+    with HardwareWriteLedgerRegionOwner(
+        generation=95,
+        segment_capacity=1,
+        page_segment_limit=1,
+    ) as owner:
+        process = spawn_probe(probe, owner)
+        release_primary = threading.Event()
+        primary_thread = None
+        duplicate_thread = None
+        original_copy = owner._copy_validated_terminal_evidence
+        try:
+            require(
+                owner.wait_for_writer(process.pid) == process.pid,
+                'concurrent-ACK probe Writer PID mismatch',
+            )
+            require(
+                read_owned_line(process, 'READY') == 'READY',
+                'concurrent-ACK probe did not publish READY',
+            )
+            owner.unlink_name()
+            _arm, snapshot = seal_single_write_interval(
+                process,
+                owner,
+                interval_id=204,
+                sim_stamp_ns=100,
+                expected_write_seq=2,
+            )
+
+            primary_copied = threading.Event()
+            primary_results = []
+            duplicate_results = []
+            worker_errors = []
+
+            def controlled_copy(
+                interval_id,
+                bank_index,
+                bank_epoch,
+                seal_fence_write_seq,
+            ):
+                result = original_copy(
+                    interval_id,
+                    bank_index,
+                    bank_epoch,
+                    seal_fence_write_seq,
+                )
+                if threading.current_thread().name == 'primary-ledger-ack':
+                    primary_copied.set()
+                    if not release_primary.wait(timeout=3.0):
+                        raise TimeoutError('primary ACK release timed out')
+                return result
+
+            def run_ack(results):
+                try:
+                    results.append(owner.acknowledge(snapshot))
+                except BaseException as error:
+                    worker_errors.append(error)
+
+            owner._copy_validated_terminal_evidence = controlled_copy
+            primary_thread = threading.Thread(
+                target=run_ack,
+                args=(primary_results,),
+                name='primary-ledger-ack',
+            )
+            primary_thread.start()
+            require(
+                primary_copied.wait(timeout=3.0),
+                'primary ACK did not finish its evidence copy',
+            )
+            duplicate_thread = threading.Thread(
+                target=run_ack,
+                args=(duplicate_results,),
+                name='duplicate-ledger-ack',
+            )
+            duplicate_thread.start()
+            duplicate_thread.join(timeout=3.0)
+            require(
+                not duplicate_thread.is_alive(),
+                'duplicate ACK blocked behind the in-flight owner',
+            )
+            state_before_primary_release = owner.snapshot_bank(
+                snapshot.bank_index,
+            )[0]
+            release_primary.set()
+            primary_thread.join(timeout=3.0)
+            require(
+                not primary_thread.is_alive(),
+                'primary ACK did not complete after release',
+            )
+            owner._copy_validated_terminal_evidence = original_copy
+            require(
+                not worker_errors,
+                f'concurrent ACK worker failed: {worker_errors!r}',
+            )
+            require(
+                duplicate_results == [False] and
+                state_before_primary_release == BANK_STATE_SEALED_OK and
+                primary_results == [True],
+                f'duplicate ACK claimed the same snapshot: '
+                f'primary={primary_results!r}, '
+                f'duplicate={duplicate_results!r}, '
+                f'state={state_before_primary_release}',
+            )
+
+            _reused_arm, reused_snapshot = seal_single_write_interval(
+                process,
+                owner,
+                interval_id=205,
+                sim_stamp_ns=200,
+                expected_write_seq=4,
+            )
+            require(
+                not owner.acknowledge(snapshot) and
+                owner.snapshot_bank(reused_snapshot.bank_index)[0] ==
+                BANK_STATE_SEALED_OK,
+                'consumed concurrent snapshot released the reused epoch',
+            )
+            require(
+                owner.acknowledge(reused_snapshot),
+                'reused epoch exact snapshot was not acknowledged',
+            )
+
+            process.stdin.write('EXIT\n')
+            process.stdin.flush()
+            return_code = process.wait(timeout=3.0)
+            stderr = process.stderr.read()
+            require(
+                return_code == 0,
+                f'concurrent-ACK probe exited {return_code}: {stderr}',
+            )
+        finally:
+            release_primary.set()
+            owner._copy_validated_terminal_evidence = original_copy
+            for thread in (primary_thread, duplicate_thread):
+                if thread is not None:
+                    thread.join(timeout=3.0)
+            terminate_owned_process(process)
+            close_owned_process_pipes(process)
+
+
 def test_corrupt_segment_count_does_not_escape_mapping(probe):
     """Prove malformed bank geometry faults without CRC traversal."""
     with HardwareWriteLedgerRegionOwner(
@@ -2487,6 +2629,7 @@ def main():
     test_exact_seal_skip_includes_write_and_seals_fault(probe)
     test_parent_reads_immutable_pages_before_exact_ack(probe)
     test_retained_banks_require_exact_ack_before_epoch_reuse(probe)
+    test_concurrent_duplicate_ack_claims_snapshot_once(probe)
     test_corrupt_segment_count_does_not_escape_mapping(probe)
     test_clean_segment_coverage_gap_cannot_seal_ok(probe)
     test_invalid_active_seal_field_matrix_is_fail_closed(probe)
