@@ -87,48 +87,88 @@ if(BUILD_TESTING)
     COMMAND $<TARGET_FILE:hardware_write_ledger_c_abi_test>
   )
 
-  find_package(Threads REQUIRED)
-  add_executable(
-    hardware_write_ledger_writer_concurrency_test
-    test/hardware_write_ledger_writer_concurrency_test.cpp
-    test_support/hardware_write_ledger_writer.cpp
+  if(
+    CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+    CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"
   )
-  target_compile_features(
-    hardware_write_ledger_writer_concurrency_test
-    PRIVATE cxx_std_17
-  )
-  target_compile_options(
-    hardware_write_ledger_writer_concurrency_test
-    PRIVATE -fsanitize=thread -fno-omit-frame-pointer -fno-pie
-  )
-  target_link_options(
-    hardware_write_ledger_writer_concurrency_test
-    PRIVATE -fsanitize=thread -no-pie
-  )
-  target_include_directories(
-    hardware_write_ledger_writer_concurrency_test
-    PRIVATE test_support
-  )
-  target_link_libraries(
-    hardware_write_ledger_writer_concurrency_test
-    Threads::Threads
-  )
-  find_program(SETARCH_EXECUTABLE setarch REQUIRED)
-  add_test(
-    NAME hardware_write_ledger_writer_concurrency_test
-    COMMAND
-      "${SETARCH_EXECUTABLE}"
-      "${CMAKE_SYSTEM_PROCESSOR}"
-      -R
+    find_package(Threads REQUIRED)
+    add_executable(
+      hardware_write_ledger_writer_concurrency_test
+      test/hardware_write_ledger_writer_concurrency_test.cpp
+      test_support/hardware_write_ledger_writer.cpp
+    )
+    target_compile_features(
+      hardware_write_ledger_writer_concurrency_test
+      PRIVATE cxx_std_17
+    )
+    target_compile_options(
+      hardware_write_ledger_writer_concurrency_test
+      PRIVATE -fsanitize=thread -fno-omit-frame-pointer
+    )
+    target_link_options(
+      hardware_write_ledger_writer_concurrency_test
+      PRIVATE -fsanitize=thread
+    )
+    target_include_directories(
+      hardware_write_ledger_writer_concurrency_test
+      PRIVATE test_support
+    )
+    target_link_libraries(
+      hardware_write_ledger_writer_concurrency_test
+      Threads::Threads
+    )
+
+    set(
+      hardware_write_ledger_tsan_command
       $<TARGET_FILE:hardware_write_ledger_writer_concurrency_test>
-  )
-  set_tests_properties(
-    hardware_write_ledger_writer_concurrency_test
-    PROPERTIES
-      ENVIRONMENT "TSAN_OPTIONS=halt_on_error=1:exitcode=66"
-      LABELS concurrency
-      TIMEOUT 15
-  )
+    )
+    if(EXISTS "/proc/sys/kernel/osrelease")
+      file(
+        READ "/proc/sys/kernel/osrelease"
+        hardware_write_ledger_kernel_release
+        LIMIT 256
+      )
+      string(
+        TOLOWER
+        "${hardware_write_ledger_kernel_release}"
+        hardware_write_ledger_kernel_release
+      )
+    endif()
+    if(hardware_write_ledger_kernel_release MATCHES "microsoft")
+      find_program(SETARCH_EXECUTABLE NAMES setarch REQUIRED)
+      target_compile_options(
+        hardware_write_ledger_writer_concurrency_test
+        PRIVATE -fno-pie
+      )
+      target_link_options(
+        hardware_write_ledger_writer_concurrency_test
+        PRIVATE -no-pie
+      )
+      set(
+        hardware_write_ledger_tsan_command
+        "${SETARCH_EXECUTABLE}"
+        "${CMAKE_SYSTEM_PROCESSOR}"
+        -R
+        $<TARGET_FILE:hardware_write_ledger_writer_concurrency_test>
+      )
+    endif()
+    add_test(
+      NAME hardware_write_ledger_writer_concurrency_test
+      COMMAND ${hardware_write_ledger_tsan_command}
+    )
+    set_tests_properties(
+      hardware_write_ledger_writer_concurrency_test
+      PROPERTIES
+        ENVIRONMENT "TSAN_OPTIONS=halt_on_error=1:exitcode=66"
+        LABELS concurrency
+        TIMEOUT 15
+    )
+  else()
+    message(
+      STATUS
+      "Skipping hardware-write ledger TSAN test on this platform/compiler"
+    )
+  endif()
 
   add_executable(
     hardware_write_ledger_attach_probe
