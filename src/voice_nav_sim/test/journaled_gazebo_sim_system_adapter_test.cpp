@@ -46,6 +46,13 @@ public:
     return hardware_interface::CallbackReturn::ERROR;
   }
 
+  hardware_interface::CallbackReturn on_configure(
+    const rclcpp_lifecycle::State & previous_state) override
+  {
+    on_configure_previous_state = &previous_state;
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
   hardware_interface::return_type read(
     const rclcpp::Time &,
     const rclcpp::Duration &) override
@@ -61,6 +68,7 @@ public:
   }
 
   const hardware_interface::HardwareInfo * on_init_hardware_info{nullptr};
+  const rclcpp_lifecycle::State * on_configure_previous_state{nullptr};
 };
 
 TEST(
@@ -89,6 +97,18 @@ TEST(JournaledGazeboSimSystemAdapter, ForwardsOnInitArgumentAndResult)
   const auto result = adapter.on_init(hardware_info);
 
   EXPECT_EQ(upstream->on_init_hardware_info, &hardware_info);
+  EXPECT_EQ(result, hardware_interface::CallbackReturn::ERROR);
+}
+
+TEST(JournaledGazeboSimSystemAdapter, ForwardsOnConfigureArgumentAndResult)
+{
+  auto upstream = std::make_shared<RecordingGazeboSystem>();
+  voice_nav_sim::JournaledGazeboSimSystemAdapter adapter(upstream);
+  const rclcpp_lifecycle::State previous_state;
+
+  const auto result = adapter.on_configure(previous_state);
+
+  EXPECT_EQ(upstream->on_configure_previous_state, &previous_state);
   EXPECT_EQ(result, hardware_interface::CallbackReturn::ERROR);
 }
 
