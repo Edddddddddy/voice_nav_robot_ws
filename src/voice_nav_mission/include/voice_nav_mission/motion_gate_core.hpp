@@ -263,7 +263,6 @@ private:
     Operation expected,
     bool lease_required,
     ControlResult & rejection);
-  [[nodiscard]] bool advance_control_seq();
   void advance_state_seq();
   template<typename Mutation>
   void apply_transition(

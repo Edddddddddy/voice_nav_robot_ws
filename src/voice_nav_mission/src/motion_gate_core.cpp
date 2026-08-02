@@ -39,6 +39,7 @@ constexpr std::uint64_t kTransitionEventOpen = 2U;
 constexpr std::uint64_t kTransitionEventRenew = 3U;
 constexpr std::uint64_t kTransitionEventInhibit = 4U;
 constexpr std::uint64_t kTransitionEventAutomaticRetire = 5U;
+constexpr std::uint64_t kTransitionEventFault = 6U;
 static_assert(
   static_cast<std::uint64_t>(Operation::Prepare) == kTransitionEventPrepare);
 static_assert(
@@ -242,7 +243,9 @@ ControlResult MotionGateCore::prepare(
   }
 
   if (control_seq_ == std::numeric_limits<std::uint64_t>::max()) {
-    (void)advance_control_seq();
+    force_fault(
+      Reason::SequenceExhausted,
+      "control sequence exhausted while preparing");
     auto fault = result_from_snapshot(
       ResultCode::Faulted, Reason::SequenceExhausted,
       "control sequence exhausted while preparing");
@@ -376,7 +379,9 @@ ControlResult MotionGateCore::open(
       "candidate writer has an all-zero GID");
   }
   if (control_seq_ == std::numeric_limits<std::uint64_t>::max()) {
-    (void)advance_control_seq();
+    force_fault(
+      Reason::SequenceExhausted,
+      "control sequence exhausted while opening");
     auto fault = result_from_snapshot(
       ResultCode::Faulted, Reason::SequenceExhausted,
       "control sequence exhausted while opening");
@@ -462,7 +467,9 @@ ControlResult MotionGateCore::renew(
       "RENEW reached the authority deadline");
   }
   if (control_seq_ == std::numeric_limits<std::uint64_t>::max()) {
-    (void)advance_control_seq();
+    force_fault(
+      Reason::SequenceExhausted,
+      "control sequence exhausted while renewing");
     auto fault = result_from_snapshot(
       ResultCode::Faulted, Reason::SequenceExhausted,
       "control sequence exhausted while renewing");
@@ -648,27 +655,37 @@ void MotionGateCore::force_fault(Reason reason, std::string detail)
     return;
   }
 
-  if (control_seq_ == std::numeric_limits<std::uint64_t>::max()) {
-    reason = Reason::SequenceExhausted;
-    detail = "control sequence exhausted while entering fault";
-  } else {
-    ++control_seq_;
-  }
-
-  state_ = State::Faulted;
-  lease_id_.clear();
-  candidate_topic_.clear();
-  bound_writer_gid_.fill(0U);
-  writer_bound_ = false;
-  candidate_fresh_ = false;
-  selected_ = zero_command();
-  prepare_deadline_ = SteadyTimePoint{};
-  authority_deadline_ = SteadyTimePoint{};
-  candidate_deadline_ = SteadyTimePoint{};
-  reason_ = reason == Reason::None ? Reason::InternalFailure : reason;
-  detail_ = bounded_detail(
-    detail.empty() ? "MotionGate faulted" : std::move(detail));
-  advance_state_seq();
+  const bool sequence_exhausted =
+    control_seq_ == std::numeric_limits<std::uint64_t>::max();
+  const auto next_reason = sequence_exhausted ?
+    Reason::SequenceExhausted :
+    (reason == Reason::None ? Reason::InternalFailure : reason);
+  auto next_detail = bounded_detail(
+    sequence_exhausted ?
+    "control sequence exhausted while entering fault" :
+    (detail.empty() ? "MotionGate faulted" : std::move(detail)));
+  apply_transition(
+    kTransitionEventFault,
+    next_reason,
+    JournalFailurePolicy::ApplySafetyMutation,
+    [this, sequence_exhausted, next_reason, &next_detail]() noexcept {
+      if (!sequence_exhausted) {
+        ++control_seq_;
+      }
+      state_ = State::Faulted;
+      lease_id_.clear();
+      candidate_topic_.clear();
+      bound_writer_gid_.fill(0U);
+      writer_bound_ = false;
+      candidate_fresh_ = false;
+      selected_ = zero_command();
+      prepare_deadline_ = SteadyTimePoint{};
+      authority_deadline_ = SteadyTimePoint{};
+      candidate_deadline_ = SteadyTimePoint{};
+      reason_ = next_reason;
+      detail_.swap(next_detail);
+      advance_state_seq();
+    });
 }
 
 std::optional<ControlResult> MotionGateCore::replay_or_collision(
@@ -823,25 +840,6 @@ bool MotionGateCore::validate_common(
   return true;
 }
 
-bool MotionGateCore::advance_control_seq()
-{
-  if (control_seq_ == std::numeric_limits<std::uint64_t>::max()) {
-    state_ = State::Faulted;
-    lease_id_.clear();
-    candidate_topic_.clear();
-    bound_writer_gid_.fill(0U);
-    writer_bound_ = false;
-    candidate_fresh_ = false;
-    selected_ = zero_command();
-    reason_ = Reason::SequenceExhausted;
-    detail_ = "control sequence exhausted";
-    advance_state_seq();
-    return false;
-  }
-  ++control_seq_;
-  return true;
-}
-
 void MotionGateCore::advance_state_seq()
 {
   if (state_seq_ != std::numeric_limits<std::uint64_t>::max()) {
@@ -883,7 +881,9 @@ void MotionGateCore::retire_lease(
     return;
   }
   if (control_seq_ == std::numeric_limits<std::uint64_t>::max()) {
-    (void)advance_control_seq();
+    force_fault(
+      Reason::SequenceExhausted,
+      "control sequence exhausted while retiring a lease");
     return;
   }
 
