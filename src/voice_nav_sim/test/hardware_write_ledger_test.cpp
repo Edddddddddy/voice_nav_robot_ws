@@ -402,4 +402,34 @@ TEST(HardwareWriteLedger, LatchesANonFiniteWheelCommandFault)
   EXPECT_EQ(snapshot->page_checksum, independent_page_checksum(*snapshot));
 }
 
+TEST(HardwareWriteLedger, LatchesASimulationStampRegression)
+{
+  voice_nav_sim::HardwareWriteLedger ledger({48U, 14U, 0U, 2U, 2U});
+  const voice_nav_sim::HardwareWriteRecord first{
+    48U, 1U, 8'000'000, 0U, UINT64_C(9), UINT64_C(10)};
+  const voice_nav_sim::HardwareWriteRecord regressed{
+    48U, 2U, 7'999'999, 0U, UINT64_C(11), UINT64_C(12)};
+  ASSERT_TRUE(ledger.append(first));
+
+  EXPECT_FALSE(ledger.append(regressed));
+  EXPECT_EQ(
+    ledger.oracle_faults(),
+    voice_nav_sim::kHardwareWriteOracleFaultSimulationStamp);
+
+  auto nondecreasing = regressed;
+  nondecreasing.sim_stamp_ns = first.sim_stamp_ns;
+  ASSERT_TRUE(ledger.append(nondecreasing));
+  ASSERT_TRUE(ledger.seal());
+  const auto snapshot = ledger.snapshot_page(0U);
+  ASSERT_TRUE(snapshot.has_value());
+  EXPECT_EQ(
+    snapshot->oracle_faults,
+    voice_nav_sim::kHardwareWriteOracleFaultSimulationStamp);
+  ASSERT_EQ(snapshot->segments.size(), 2U);
+  EXPECT_EQ(
+    snapshot->segments[0U].sim_stamp_ns,
+    snapshot->segments[1U].sim_stamp_ns);
+  EXPECT_EQ(snapshot->page_checksum, independent_page_checksum(*snapshot));
+}
+
 }  // namespace
