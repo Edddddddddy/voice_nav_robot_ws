@@ -54,6 +54,7 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0044 | A non-copyable Core still shares one journal with another Core | Is ownership carried by a one-shot capability rather than an object trait? | Guarded |
 | PIT-0045 | Shared-memory identity is read before the producer publishes `READY` | Did the consumer acquire `READY` before reading any ordinary payload field? | Guarded |
 | PIT-0046 | A checksum covers a field, but every producer record still writes zero | Does a non-zero golden test prove the producer API accepts and serializes the semantic value? | Guarded |
+| PIT-0047 | A newly declared CMake target reports “No rule to make target” | Was the cached package explicitly reconfigured before interpreting a target-level RED? | Guarded |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -1172,3 +1173,21 @@ CRC64 golden value. Keep C ABI offsets and cross-process zero fixtures as
 separate compatibility checks. Commit `2a8f31b` preserved the compile-time RED;
 `5afbebc` completed the mapping without changing the 256-byte ABI. See
 [VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md).
+
+## PIT-0047: A cached target build can stop before the intended RED
+
+**Symptom.** After adding `motion_gate_process_runtime_test`, a targeted
+`colcon build --cmake-target motion_gate_process_runtime_test` failed with
+`No rule to make target`. It never compiled the test and therefore did not
+prove the expected missing-header RED.
+
+**Cause.** A target-only build can reuse an already-generated package build
+tree whose CMake target graph predates the edited `CMakeLists.txt`. The failure
+describes stale build metadata, not missing product behavior.
+
+**Guardrail.** The first targeted build after adding or renaming a CMake target
+must use `--cmake-force-configure`, or follow a successful package configure.
+Accept a TDD RED only after output proves the intended source or assertion was
+reached. Commit `5314866` was accepted only after the forced configure reached
+the precise missing `motion_gate_process_runtime.hpp` include; `639e1f1` then
+made that focused test green.
