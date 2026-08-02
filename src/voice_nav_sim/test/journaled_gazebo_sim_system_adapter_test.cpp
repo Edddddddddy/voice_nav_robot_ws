@@ -53,6 +53,24 @@ public:
     return hardware_interface::CallbackReturn::ERROR;
   }
 
+  std::vector<hardware_interface::StateInterface> export_state_interfaces()
+    override
+  {
+    ++export_state_interfaces_calls;
+    std::vector<hardware_interface::StateInterface> interfaces;
+    interfaces.emplace_back("recording_joint", "state", &state_value);
+    return interfaces;
+  }
+
+  std::vector<hardware_interface::CommandInterface>
+  export_command_interfaces() override
+  {
+    ++export_command_interfaces_calls;
+    std::vector<hardware_interface::CommandInterface> interfaces;
+    interfaces.emplace_back("recording_joint", "command", &command_value);
+    return interfaces;
+  }
+
   hardware_interface::return_type read(
     const rclcpp::Time &,
     const rclcpp::Duration &) override
@@ -69,6 +87,10 @@ public:
 
   const hardware_interface::HardwareInfo * on_init_hardware_info{nullptr};
   const rclcpp_lifecycle::State * on_configure_previous_state{nullptr};
+  std::size_t export_state_interfaces_calls{0U};
+  std::size_t export_command_interfaces_calls{0U};
+  double state_value{1.0};
+  double command_value{2.0};
 };
 
 TEST(
@@ -110,6 +132,22 @@ TEST(JournaledGazeboSimSystemAdapter, ForwardsOnConfigureArgumentAndResult)
 
   EXPECT_EQ(upstream->on_configure_previous_state, &previous_state);
   EXPECT_EQ(result, hardware_interface::CallbackReturn::ERROR);
+}
+
+TEST(JournaledGazeboSimSystemAdapter, ForwardsExportedInterfaceCollections)
+{
+  auto upstream = std::make_shared<RecordingGazeboSystem>();
+  voice_nav_sim::JournaledGazeboSimSystemAdapter adapter(upstream);
+
+  auto state_interfaces = adapter.export_state_interfaces();
+  auto command_interfaces = adapter.export_command_interfaces();
+
+  ASSERT_EQ(upstream->export_state_interfaces_calls, 1U);
+  ASSERT_EQ(state_interfaces.size(), 1U);
+  EXPECT_EQ(state_interfaces.front().get_name(), "recording_joint/state");
+  ASSERT_EQ(upstream->export_command_interfaces_calls, 1U);
+  ASSERT_EQ(command_interfaces.size(), 1U);
+  EXPECT_EQ(command_interfaces.front().get_name(), "recording_joint/command");
 }
 
 }  // namespace
