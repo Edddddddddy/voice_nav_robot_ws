@@ -18,7 +18,9 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
 
 #include "gate_event_journal.hpp"
@@ -33,6 +35,17 @@ static_assert(!std::is_copy_constructible_v<MotionGateCore>);
 static_assert(!std::is_copy_assignable_v<MotionGateCore>);
 static_assert(!std::is_move_constructible_v<MotionGateCore>);
 static_assert(!std::is_move_assignable_v<MotionGateCore>);
+static_assert(!std::is_copy_constructible_v<GateTransitionJournalBinding>);
+static_assert(!std::is_copy_assignable_v<GateTransitionJournalBinding>);
+static_assert(!std::is_move_constructible_v<GateTransitionJournalBinding>);
+static_assert(!std::is_move_assignable_v<GateTransitionJournalBinding>);
+static_assert(
+  !std::is_constructible_v<
+    MotionGateCore,
+    MotionGateConfig,
+    std::string,
+    std::uint64_t,
+    GateEventJournal *>);
 
 constexpr char kGateId[] = "0123456789abcdef0123456789abcdef";
 
@@ -84,6 +97,71 @@ GateEventJournalIdentity initialize_region(JournalRegion<Capacity> & region)
     region.header.nonce_lo};
 }
 
+TEST(MotionGateJournal, OneJournalGenerationCannotBindTwoCores)
+{
+  JournalRegion<1U> region;
+  const auto identity = initialize_region(region);
+  FakeClock clock;
+  GateEventJournal journal(
+    &region,
+    sizeof(region),
+    identity,
+    GateEventJournalClock{&FakeClock::read, &clock});
+
+  {
+    MotionGateCore first(
+      MotionGateConfig{}, kGateId, 0U,
+      journal.claim_transition_binding());
+    EXPECT_THROW(
+      (void)journal.claim_transition_binding(),
+      std::logic_error);
+  }
+
+  EXPECT_THROW(
+    (void)journal.claim_transition_binding(),
+    std::logic_error);
+}
+
+TEST(MotionGateJournal, BindingDetectsJournalLifetimeEndBeforeMutation)
+{
+  JournalRegion<1U> region;
+  const auto identity = initialize_region(region);
+  FakeClock clock;
+  std::unique_ptr<GateTransitionJournalBinding> binding;
+  {
+    GateEventJournal journal(
+      &region,
+      sizeof(region),
+      identity,
+      GateEventJournalClock{&FakeClock::read, &clock});
+    binding = journal.claim_transition_binding();
+  }
+  MotionGateCore gate(
+    MotionGateConfig{}, kGateId, 0U, std::move(binding));
+  const auto before = gate.snapshot();
+
+  EXPECT_THROW(
+    (void)gate.prepare(
+      ControlRequest{
+        Operation::Prepare,
+        "00000000000000000000000000000001",
+        kGateId,
+        0U,
+        ""},
+      MotionGateCore::SteadyTimePoint{}),
+    std::runtime_error);
+
+  const auto after = gate.snapshot();
+  EXPECT_EQ(after.state, before.state);
+  EXPECT_EQ(after.state_seq, before.state_seq);
+  EXPECT_EQ(after.control_seq, before.control_seq);
+  EXPECT_EQ(after.lease_id, before.lease_id);
+  EXPECT_EQ(after.reason, before.reason);
+  EXPECT_EQ(after.detail, before.detail);
+  EXPECT_TRUE(after.motion_inhibited);
+  EXPECT_TRUE(after.zero_selected);
+}
+
 TEST(MotionGateJournal, SuccessfulPrepareOwnsItsLinearizationFence)
 {
   JournalRegion<1U> region;
@@ -94,7 +172,9 @@ TEST(MotionGateJournal, SuccessfulPrepareOwnsItsLinearizationFence)
     sizeof(region),
     identity,
     GateEventJournalClock{&FakeClock::read, &clock});
-  MotionGateCore gate(MotionGateConfig{}, kGateId, 0U, &journal);
+  MotionGateCore gate(
+    MotionGateConfig{}, kGateId, 0U,
+    journal.claim_transition_binding());
 
   const auto result = gate.prepare(
     ControlRequest{
@@ -151,7 +231,9 @@ TEST(MotionGateJournal, SuccessfulOpenUsesTheSameCoreOwnedFence)
     sizeof(region),
     identity,
     GateEventJournalClock{&FakeClock::read, &clock});
-  MotionGateCore gate(MotionGateConfig{}, kGateId, 0U, &journal);
+  MotionGateCore gate(
+    MotionGateConfig{}, kGateId, 0U,
+    journal.claim_transition_binding());
   const auto now = MotionGateCore::SteadyTimePoint{};
   ASSERT_EQ(
     gate.prepare(
@@ -229,7 +311,9 @@ TEST(MotionGateJournal, ReservationFailureLeavesPrepareFailClosedAndUnchanged)
     GateOutputIntent{
         99U, 0U, 1U, 1U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U},
     []() noexcept {});
-  MotionGateCore gate(MotionGateConfig{}, kGateId, 0U, &journal);
+  MotionGateCore gate(
+    MotionGateConfig{}, kGateId, 0U,
+    journal.claim_transition_binding());
   const auto before = gate.snapshot();
 
   EXPECT_THROW(
@@ -273,7 +357,9 @@ TEST(MotionGateJournal, FullJournalCannotPreventExplicitInhibit)
     sizeof(region),
     identity,
     GateEventJournalClock{&FakeClock::read, &clock});
-  MotionGateCore gate(MotionGateConfig{}, kGateId, 0U, &journal);
+  MotionGateCore gate(
+    MotionGateConfig{}, kGateId, 0U,
+    journal.claim_transition_binding());
   const auto now = MotionGateCore::SteadyTimePoint{};
   ASSERT_EQ(
     gate.prepare(
@@ -341,7 +427,9 @@ TEST(MotionGateJournal, SuccessfulRenewUsesTheSameCoreOwnedFence)
     sizeof(region),
     identity,
     GateEventJournalClock{&FakeClock::read, &clock});
-  MotionGateCore gate(MotionGateConfig{}, kGateId, 0U, &journal);
+  MotionGateCore gate(
+    MotionGateConfig{}, kGateId, 0U,
+    journal.claim_transition_binding());
   const auto now = MotionGateCore::SteadyTimePoint{};
   ASSERT_EQ(
     gate.prepare(
@@ -426,7 +514,9 @@ TEST(MotionGateJournal, ExplicitInhibitCommitsLeaseRetirementAtOneFence)
     sizeof(region),
     identity,
     GateEventJournalClock{&FakeClock::read, &clock});
-  MotionGateCore gate(MotionGateConfig{}, kGateId, 0U, &journal);
+  MotionGateCore gate(
+    MotionGateConfig{}, kGateId, 0U,
+    journal.claim_transition_binding());
   const auto now = MotionGateCore::SteadyTimePoint{};
   ASSERT_EQ(
     gate.prepare(
@@ -514,7 +604,9 @@ TEST(MotionGateJournal, ForceFaultCommitsOneTerminalTransition)
     sizeof(region),
     identity,
     GateEventJournalClock{&FakeClock::read, &clock});
-  MotionGateCore gate(MotionGateConfig{}, kGateId, 0U, &journal);
+  MotionGateCore gate(
+    MotionGateConfig{}, kGateId, 0U,
+    journal.claim_transition_binding());
 
   gate.force_fault(Reason::PublishFailed, "publisher failed");
 
@@ -571,7 +663,9 @@ TEST(MotionGateJournal, CandidateExpiryCommitsAutomaticRetirement)
     sizeof(region),
     identity,
     GateEventJournalClock{&FakeClock::read, &clock});
-  MotionGateCore gate(MotionGateConfig{}, kGateId, 0U, &journal);
+  MotionGateCore gate(
+    MotionGateConfig{}, kGateId, 0U,
+    journal.claim_transition_binding());
   const auto now = MotionGateCore::SteadyTimePoint{};
   ASSERT_EQ(
     gate.prepare(
@@ -646,7 +740,8 @@ TEST(MotionGateJournal, SequenceExhaustionFaultIsJournaledWithoutWrap)
     identity,
     GateEventJournalClock{&FakeClock::read, &clock});
   MotionGateCore gate(
-    MotionGateConfig{}, kGateId, UINT64_MAX, &journal);
+    MotionGateConfig{}, kGateId, UINT64_MAX,
+    journal.claim_transition_binding());
 
   const auto result = gate.prepare(
     ControlRequest{
@@ -689,7 +784,8 @@ TEST(MotionGateJournal, InhibitAtMaximumSequenceReturnsTheFaultItCommitted)
     identity,
     GateEventJournalClock{&FakeClock::read, &clock});
   MotionGateCore gate(
-    MotionGateConfig{}, kGateId, UINT64_MAX - 2U, &journal);
+    MotionGateConfig{}, kGateId, UINT64_MAX - 2U,
+    journal.claim_transition_binding());
   const auto now = MotionGateCore::SteadyTimePoint{};
   ASSERT_EQ(
     gate.prepare(
@@ -776,7 +872,9 @@ TEST(MotionGateJournal, FullJournalCannotPreventForceFault)
     GateOutputIntent{
         99U, 0U, 1U, 1U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U},
     []() noexcept {});
-  MotionGateCore gate(MotionGateConfig{}, kGateId, 0U, &journal);
+  MotionGateCore gate(
+    MotionGateConfig{}, kGateId, 0U,
+    journal.claim_transition_binding());
 
   EXPECT_NO_THROW(
     gate.force_fault(Reason::PublishFailed, "publisher failed"));
