@@ -655,6 +655,8 @@ for the atomic sealed flag.
 ```text
 focused hardware_write_ledger GTest: 14/14 passed
 focused cppcheck + uncrustify: passed
+voice_nav_sim package CTest: 14/14 passed
+scoped xUnit: 93 tests, 0 errors, 0 failures, 10 skipped
 independent final review: P0=0, P1=0, P2=0
 protected Gazebo fingerprint:
   3631225|1|34712103|gz sim server (unchanged)

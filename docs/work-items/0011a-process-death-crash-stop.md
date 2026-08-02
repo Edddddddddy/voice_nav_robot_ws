@@ -20,7 +20,7 @@ surface and post-delegate `JointVelocityCmd` observation are behavior-tested;
 the focused Adapter target is 10/10 GREEN. The pure crash robot-description
 transformer now replaces only the unique canonical upstream plugin, injects
 only the validated journal name/nonce, and rejects structural or ownership
-ambiguity. `voice_nav_sim` is 13/13 CTest GREEN (69 scoped xUnit tests, 6
+ambiguity. `voice_nav_sim` is 14/14 CTest GREEN (93 scoped xUnit tests, 10
 skipped). The preallocated pure-C++ hardware-write ledger core now has
 contiguous non-wrapping sequence accounting, count-preserving segmentation,
 immutable CRC64 snapshot pages, and sticky generation/finite/stamp/capacity/
