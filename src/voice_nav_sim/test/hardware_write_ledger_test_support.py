@@ -479,6 +479,30 @@ class HardwareWriteLedgerRegionOwner:
         self.commit_prepared_request(request_ticket)
         return request_ticket
 
+    def post_seal_with_segment_budget(
+        self,
+        interval_id,
+        bank_index,
+        bank_epoch,
+        not_before_sim_stamp_ns,
+        segment_budget,
+    ):
+        """Publish one checksummed SEAL with an invalid unused budget."""
+        request_ticket = self._begin_request_preparation(
+            (
+                CONTROL_OP_SEAL,
+                CONTROL_FLAG_EXACT_SEAL_STAMP,
+                interval_id,
+                bank_index,
+                bank_epoch,
+                segment_budget,
+                0,
+                int(not_before_sim_stamp_ns) & UINT64_MASK,
+            ),
+        )
+        self.commit_prepared_request(request_ticket)
+        return request_ticket
+
     def replay_arm_with_interval(self, request_ticket, interval_id):
         """Release-republish one ticket with a different valid payload."""
         self._claim_request_mailbox()

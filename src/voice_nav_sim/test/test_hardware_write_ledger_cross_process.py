@@ -1006,6 +1006,159 @@ def test_clean_segment_coverage_gap_cannot_seal_ok(probe):
             close_owned_process_pipes(process)
 
 
+def test_invalid_seal_cannot_claim_or_mutate_terminal_bank(probe):
+    """Prove invalid SEAL receipts cannot name terminal evidence."""
+    with HardwareWriteLedgerRegionOwner(
+        generation=91,
+        segment_capacity=4,
+        page_segment_limit=2,
+    ) as owner:
+        process = spawn_probe(probe, owner)
+        try:
+            require(
+                owner.wait_for_writer(process.pid) == process.pid,
+                'terminal-mutation probe Writer PID mismatch',
+            )
+            require(
+                read_owned_line(process, 'READY') == 'READY',
+                'terminal-mutation probe did not publish READY',
+            )
+            owner.unlink_name()
+            arm_ticket = owner.post_arm(
+                interval_id=105,
+                segment_budget=4,
+                invocation_budget=4,
+                require_zero_commands=False,
+            )
+            process.stdin.write('BEGIN 100\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 1',
+                'terminal-mutation setup write did not begin',
+            )
+            arm_response = owner.wait_response(arm_ticket)
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 1',
+                'terminal-mutation setup write did not finish',
+            )
+
+            seal_ticket = owner.post_seal(
+                interval_id=105,
+                bank_index=arm_response[10],
+                bank_epoch=arm_response[11],
+                not_before_sim_stamp_ns=200,
+                require_exact_stamp=True,
+            )
+            process.stdin.write('BEGIN 200\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 2',
+                'terminal-mutation sealing write did not begin',
+            )
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 2',
+                'terminal-mutation sealing write did not finish',
+            )
+            seal_response = owner.wait_response(seal_ticket)
+            bank_index = seal_response[10]
+            terminal_bank = owner.snapshot_bank(bank_index)
+            terminal_segments = tuple(
+                owner.snapshot_segment(bank_index, index)
+                for index in range(owner.segment_capacity)
+            )
+            require(
+                terminal_bank[0] == BANK_STATE_SEALED_OK,
+                f'terminal-mutation setup bank faulted: {terminal_bank!r}',
+            )
+            require(
+                terminal_bank[15] == crc64_ecma_words(
+                    (
+                        *terminal_bank[1:15],
+                        *(
+                            word
+                            for segment in terminal_segments[
+                                :terminal_bank[9]
+                            ]
+                            for word in segment
+                        ),
+                    ),
+                ),
+                'terminal-mutation setup root checksum is invalid',
+            )
+
+            invalid_ticket = owner.post_seal_with_segment_budget(
+                interval_id=105,
+                bank_index=bank_index,
+                bank_epoch=seal_response[11],
+                not_before_sim_stamp_ns=300,
+                segment_budget=1,
+            )
+            process.stdin.write('BEGIN 300\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 3',
+                'invalid terminal SEAL did not reach Writer',
+            )
+            invalid_response = owner.wait_response(invalid_ticket)
+            require(
+                invalid_response[9:13] == (
+                    CONTROL_RESPONSE_INVALID,
+                    (1 << 64) - 1,
+                    0,
+                    2,
+                ),
+                f'invalid SEAL claimed a bank: {invalid_response!r}',
+            )
+            require(
+                owner.load_request_state() == CONTROL_REQUEST_IDLE,
+                'invalid SEAL retained the request envelope',
+            )
+            require(
+                owner.load_header_word(GLOBAL_ORACLE_FAULTS_WORD) ==
+                FAULT_PROTOCOL,
+                'invalid terminal SEAL did not latch exactly PROTOCOL',
+            )
+            require(
+                owner.snapshot_bank(bank_index) == terminal_bank and
+                tuple(
+                    owner.snapshot_segment(bank_index, index)
+                    for index in range(owner.segment_capacity)
+                ) == terminal_segments,
+                'invalid SEAL mutated terminal evidence before FINISH',
+            )
+
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 3',
+                'unarmed write after invalid SEAL did not finish',
+            )
+            require(
+                owner.snapshot_bank(bank_index) == terminal_bank and
+                tuple(
+                    owner.snapshot_segment(bank_index, index)
+                    for index in range(owner.segment_capacity)
+                ) == terminal_segments,
+                'unarmed FINISH mutated terminal evidence',
+            )
+
+            process.stdin.write('EXIT\n')
+            process.stdin.flush()
+            return_code = process.wait(timeout=3.0)
+            stderr = process.stderr.read()
+            require(
+                return_code == 0,
+                f'terminal-mutation probe exited {return_code}: {stderr}',
+            )
+        finally:
+            terminate_owned_process(process)
+            close_owned_process_pipes(process)
+
+
 def test_qualifying_fault_preserves_attempted_fence_count(probe):
     """Prove a budget fault retains its qualifying invocation metadata."""
     with HardwareWriteLedgerRegionOwner(
@@ -1587,6 +1740,7 @@ def main():
     test_exact_seal_skip_includes_write_and_seals_fault(probe)
     test_corrupt_segment_count_does_not_escape_mapping(probe)
     test_clean_segment_coverage_gap_cannot_seal_ok(probe)
+    test_invalid_seal_cannot_claim_or_mutate_terminal_bank(probe)
     test_qualifying_fault_preserves_attempted_fence_count(probe)
     test_fault_only_gap_preserves_later_valid_segment(probe)
     test_same_ticket_different_payload_replay_latches_fault(probe)
