@@ -149,16 +149,38 @@ bool HardwareWriteLedger::append(
       active.last_write_seq == std::numeric_limits<std::uint64_t>::max() ||
       impl_->total_invocation_count ==
       std::numeric_limits<std::uint64_t>::max() ||
-      record.write_seq != active.last_write_seq + 1U ||
-      record.sim_stamp_ns != active.sim_stamp_ns ||
-      record.delegated_result != active.delegated_result ||
-      record.left_command_bits != active.left_command_bits ||
-      record.right_command_bits != active.right_command_bits)
+      record.write_seq != active.last_write_seq + 1U)
     {
       return false;
     }
-    active.last_write_seq = record.write_seq;
-    ++active.invocation_count;
+
+    const bool same_tuple =
+      record.sim_stamp_ns == active.sim_stamp_ns &&
+      record.delegated_result == active.delegated_result &&
+      record.left_command_bits == active.left_command_bits &&
+      record.right_command_bits == active.right_command_bits;
+    if (same_tuple) {
+      active.last_write_seq = record.write_seq;
+      ++active.invocation_count;
+    } else {
+      if (
+        impl_->finalized_segment_count >=
+        impl_->config.segment_capacity - 1U)
+      {
+        return false;
+      }
+      impl_->finalized_segments[impl_->finalized_segment_count] = active;
+      ++impl_->finalized_segment_count;
+      active = HardwareWriteSegment{
+        record.generation,
+        record.write_seq,
+        record.write_seq,
+        1U,
+        record.sim_stamp_ns,
+        record.delegated_result,
+        record.left_command_bits,
+        record.right_command_bits};
+    }
     ++impl_->total_invocation_count;
     return true;
   }
