@@ -91,6 +91,26 @@ if(BUILD_TESTING)
     hardware_write_ledger_attach_probe
     test/hardware_write_ledger_attach_probe.cpp
   )
+  add_library(
+    voice_nav_sim_hardware_write_ledger_posix STATIC
+    test_support/attached_hardware_write_ledger.cpp
+  )
+  set_target_properties(
+    voice_nav_sim_hardware_write_ledger_posix
+    PROPERTIES POSITION_INDEPENDENT_CODE ON
+  )
+  target_compile_features(
+    voice_nav_sim_hardware_write_ledger_posix
+    PRIVATE cxx_std_17
+  )
+  target_include_directories(
+    voice_nav_sim_hardware_write_ledger_posix
+    PUBLIC test_support
+  )
+  target_link_libraries(
+    voice_nav_sim_hardware_write_ledger_posix
+    rt
+  )
   target_compile_features(
     hardware_write_ledger_attach_probe
     PRIVATE cxx_std_17
@@ -98,6 +118,10 @@ if(BUILD_TESTING)
   target_include_directories(
     hardware_write_ledger_attach_probe
     PRIVATE test_support
+  )
+  target_link_libraries(
+    hardware_write_ledger_attach_probe
+    voice_nav_sim_hardware_write_ledger_posix
   )
   add_test(
     NAME hardware_write_ledger_cross_process_test
