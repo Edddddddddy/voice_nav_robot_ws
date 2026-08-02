@@ -191,7 +191,7 @@ hardware_interface::return_type JournaledGazeboSimSystemAdapter::write(
     if (journal_enabled) {
       write_journal_->finish_write(
         ticket,
-        static_cast<std::uint64_t>(hardware_interface::return_type::ERROR),
+        kHardwareWriteDelegatedException,
         observe_wheel_commands());
     }
     throw;
@@ -208,33 +208,40 @@ hardware_interface::return_type JournaledGazeboSimSystemAdapter::write(
 HardwareWriteWheelObservation
 JournaledGazeboSimSystemAdapter::observe_wheel_commands() const noexcept
 {
-  if (
-    entity_component_manager_ == nullptr ||
-    left_wheel_entity_ == gz::sim::kNullEntity ||
-    right_wheel_entity_ == gz::sim::kNullEntity)
-  {
-    return HardwareWriteWheelObservation{
-      HardwareWriteObservationStatus::kMissingEntity, 0U, 0U};
-  }
-  const auto * left_command =
-    entity_component_manager_->Component<
-    gz::sim::components::JointVelocityCmd>(left_wheel_entity_);
-  const auto * right_command =
-    entity_component_manager_->Component<
-    gz::sim::components::JointVelocityCmd>(right_wheel_entity_);
-  if (left_command == nullptr || right_command == nullptr) {
-    return HardwareWriteWheelObservation{
-      HardwareWriteObservationStatus::kMissingComponent, 0U, 0U};
-  }
-  if (left_command->Data().empty() || right_command->Data().empty()) {
-    return HardwareWriteWheelObservation{
-      HardwareWriteObservationStatus::kEmptyComponent, 0U, 0U};
-  }
+  try {
+    if (
+      entity_component_manager_ == nullptr ||
+      left_wheel_entity_ == gz::sim::kNullEntity ||
+      right_wheel_entity_ == gz::sim::kNullEntity ||
+      !entity_component_manager_->HasEntity(left_wheel_entity_) ||
+      !entity_component_manager_->HasEntity(right_wheel_entity_))
+    {
+      return HardwareWriteWheelObservation{
+        HardwareWriteObservationStatus::kMissingEntity, 0U, 0U};
+    }
+    const auto * left_command =
+      entity_component_manager_->Component<
+      gz::sim::components::JointVelocityCmd>(left_wheel_entity_);
+    const auto * right_command =
+      entity_component_manager_->Component<
+      gz::sim::components::JointVelocityCmd>(right_wheel_entity_);
+    if (left_command == nullptr || right_command == nullptr) {
+      return HardwareWriteWheelObservation{
+        HardwareWriteObservationStatus::kMissingComponent, 0U, 0U};
+    }
+    if (left_command->Data().empty() || right_command->Data().empty()) {
+      return HardwareWriteWheelObservation{
+        HardwareWriteObservationStatus::kEmptyComponent, 0U, 0U};
+    }
 
-  return HardwareWriteWheelObservation{
-    HardwareWriteObservationStatus::kValid,
-    double_bits(left_command->Data()[0]),
-    double_bits(right_command->Data()[0])};
+    return HardwareWriteWheelObservation{
+      HardwareWriteObservationStatus::kValid,
+      double_bits(left_command->Data()[0]),
+      double_bits(right_command->Data()[0])};
+  } catch (...) {
+    return HardwareWriteWheelObservation{
+      HardwareWriteObservationStatus::kInspectionFailure, 0U, 0U};
+  }
 }
 
 }  // namespace voice_nav_sim

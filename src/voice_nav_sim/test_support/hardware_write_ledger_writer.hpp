@@ -22,6 +22,8 @@
 namespace voice_nav_sim
 {
 
+inline constexpr std::uint64_t kHardwareWriteDelegatedException{0x100U};
+
 struct HardwareWriteLedgerIdentity
 {
   std::uint64_t owner_uid;
@@ -42,6 +44,7 @@ enum class HardwareWriteObservationStatus : std::uint64_t
   kMissingEntity = 1U,
   kMissingComponent = 2U,
   kEmptyComponent = 3U,
+  kInspectionFailure = 4U,
 };
 
 struct HardwareWriteWheelObservation
