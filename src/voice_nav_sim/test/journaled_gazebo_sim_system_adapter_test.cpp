@@ -38,18 +38,38 @@ std::uint64_t double_bits(double value)
   return bits;
 }
 
-class RecordingHardwareWriteSink final
-  : public voice_nav_sim::HardwareWriteSink
+class RecordingHardwareWriteJournal final
+  : public voice_nav_sim::HardwareWriteJournal
 {
 public:
-  bool append(
-    const voice_nav_sim::HardwareWriteRecord & record) noexcept override
+  voice_nav_sim::HardwareWriteTicket begin_write(
+    std::int64_t sim_stamp_ns) noexcept override
   {
-    last_record = record;
-    return true;
+    ++begin_calls;
+    begun_sim_stamp_ns = sim_stamp_ns;
+    ticket.sim_stamp_ns = sim_stamp_ns;
+    return ticket;
   }
 
-  std::optional<voice_nav_sim::HardwareWriteRecord> last_record;
+  void finish_write(
+    voice_nav_sim::HardwareWriteTicket finished,
+    std::uint64_t delegated_result_value,
+    voice_nav_sim::HardwareWriteWheelObservation observation_value)
+  noexcept override
+  {
+    ++finish_calls;
+    finished_ticket = finished;
+    delegated_result = delegated_result_value;
+    observation = observation_value;
+  }
+
+  std::size_t begin_calls{0U};
+  std::size_t finish_calls{0U};
+  std::int64_t begun_sim_stamp_ns{0};
+  voice_nav_sim::HardwareWriteTicket ticket{37U, 0, 1U, 2U, true};
+  voice_nav_sim::HardwareWriteTicket finished_ticket{};
+  std::uint64_t delegated_result{0U};
+  voice_nav_sim::HardwareWriteWheelObservation observation{};
 };
 
 class RecordingGazeboSystem final : public GazeboSystemInterface
@@ -149,6 +169,11 @@ public:
   {
     write_time = &time;
     write_period = &period;
+    if (write_journal != nullptr) {
+      journal_began_before_upstream_write =
+        write_journal->begin_calls == 1U &&
+        write_journal->finish_calls == 0U;
+    }
     if (write_entity_component_manager != nullptr) {
       auto * left_command =
         write_entity_component_manager->Component<
@@ -194,6 +219,8 @@ public:
   const rclcpp::Duration * read_period{nullptr};
   const rclcpp::Time * write_time{nullptr};
   const rclcpp::Duration * write_period{nullptr};
+  RecordingHardwareWriteJournal * write_journal{nullptr};
+  bool journal_began_before_upstream_write{false};
   gz::sim::EntityComponentManager * write_entity_component_manager{nullptr};
   gz::sim::Entity write_left_entity{gz::sim::kNullEntity};
   gz::sim::Entity write_right_entity{gz::sim::kNullEntity};
@@ -357,10 +384,9 @@ TEST(
   ObservesActualWheelCommandsAfterDelegatedWrite)
 {
   auto upstream = std::make_shared<RecordingGazeboSystem>();
-  auto sink = std::make_shared<RecordingHardwareWriteSink>();
-  constexpr std::uint64_t generation = 41U;
+  auto journal = std::make_shared<RecordingHardwareWriteJournal>();
   voice_nav_sim::JournaledGazeboSimSystemAdapter adapter(
-    upstream, sink, generation);
+    upstream, journal);
   rclcpp::Node::SharedPtr model_node;
   gz::sim::EntityComponentManager entity_component_manager;
   const auto left_entity = entity_component_manager.CreateEntity();
@@ -377,6 +403,7 @@ TEST(
       entity_component_manager,
       50U));
   upstream->write_entity_component_manager = &entity_component_manager;
+  upstream->write_journal = journal.get();
   upstream->write_left_entity = left_entity;
   upstream->write_right_entity = right_entity;
   upstream->delegated_left_command = -1.25;
@@ -388,28 +415,33 @@ TEST(
   const auto result = adapter.write(time, period);
 
   EXPECT_EQ(result, hardware_interface::return_type::ERROR);
-  ASSERT_TRUE(sink->last_record.has_value());
-  EXPECT_EQ(sink->last_record->generation, generation);
-  EXPECT_EQ(sink->last_record->write_seq, 1U);
-  EXPECT_EQ(sink->last_record->sim_stamp_ns, time.nanoseconds());
+  EXPECT_TRUE(upstream->journal_began_before_upstream_write);
+  EXPECT_EQ(journal->begin_calls, 1U);
+  EXPECT_EQ(journal->finish_calls, 1U);
+  EXPECT_EQ(journal->begun_sim_stamp_ns, time.nanoseconds());
+  EXPECT_EQ(journal->finished_ticket.write_seq, 37U);
+  EXPECT_EQ(journal->finished_ticket.sim_stamp_ns, time.nanoseconds());
   EXPECT_EQ(
-    sink->last_record->delegated_result,
-    static_cast<std::uint8_t>(hardware_interface::return_type::ERROR));
+    journal->delegated_result,
+    static_cast<std::uint64_t>(hardware_interface::return_type::ERROR));
   EXPECT_EQ(
-    sink->last_record->left_command_bits,
+    journal->observation.status,
+    voice_nav_sim::HardwareWriteObservationStatus::kValid);
+  EXPECT_EQ(
+    journal->observation.left_command_bits,
     double_bits(upstream->delegated_left_command));
   EXPECT_EQ(
-    sink->last_record->right_command_bits,
+    journal->observation.right_command_bits,
     double_bits(upstream->delegated_right_command));
 }
 
 TEST(
   JournaledGazeboSimSystemAdapter,
-  DoesNotObserveFromBindingBeforeFailedReinitialization)
+  ReportsMissingEntityAfterFailedReinitialization)
 {
   auto upstream = std::make_shared<RecordingGazeboSystem>();
-  auto sink = std::make_shared<RecordingHardwareWriteSink>();
-  voice_nav_sim::JournaledGazeboSimSystemAdapter adapter(upstream, sink, 1U);
+  auto journal = std::make_shared<RecordingHardwareWriteJournal>();
+  voice_nav_sim::JournaledGazeboSimSystemAdapter adapter(upstream, journal);
   rclcpp::Node::SharedPtr model_node;
   const hardware_interface::HardwareInfo hardware_info{};
   gz::sim::EntityComponentManager first_entity_component_manager;
@@ -445,7 +477,13 @@ TEST(
     rclcpp::Time(2, 0, RCL_ROS_TIME), rclcpp::Duration(0, 20'000'000));
 
   EXPECT_EQ(result, hardware_interface::return_type::OK);
-  EXPECT_FALSE(sink->last_record.has_value());
+  EXPECT_EQ(journal->begin_calls, 1U);
+  EXPECT_EQ(journal->finish_calls, 1U);
+  EXPECT_EQ(
+    journal->observation.status,
+    voice_nav_sim::HardwareWriteObservationStatus::kMissingEntity);
+  EXPECT_EQ(journal->observation.left_command_bits, 0U);
+  EXPECT_EQ(journal->observation.right_command_bits, 0U);
 }
 
 }  // namespace
