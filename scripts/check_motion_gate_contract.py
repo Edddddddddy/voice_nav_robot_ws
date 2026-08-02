@@ -28,6 +28,12 @@ ARTIFACTS = {
         "motion_gate_core.hpp"
     ),
     "core_source": "src/voice_nav_mission/src/motion_gate_core.cpp",
+    "process_runtime_header": (
+        "src/voice_nav_mission/src/motion_gate_process_runtime.hpp"
+    ),
+    "process_runtime_source": (
+        "src/voice_nav_mission/src/motion_gate_process_runtime.cpp"
+    ),
     "node_source": "src/voice_nav_mission/src/motion_gate_node.cpp",
     "writer_observation_header": (
         "src/voice_nav_mission/src/writer_observation.hpp"
@@ -1191,6 +1197,140 @@ def parenthesized_call_bodies(
             )
 
 
+def top_level_cpp_arguments(source: str) -> list[str]:
+    """Split one already-unwrapped C++ call without trusting literals."""
+    comment_free, code_only = _cpp_lexical_views(source)
+    arguments: list[str] = []
+    start = 0
+    round_depth = 0
+    square_depth = 0
+    brace_depth = 0
+    for index, character in enumerate(code_only):
+        if character == "(":
+            round_depth += 1
+        elif character == ")":
+            round_depth -= 1
+        elif character == "[":
+            square_depth += 1
+        elif character == "]":
+            square_depth -= 1
+        elif character == "{":
+            brace_depth += 1
+        elif character == "}":
+            brace_depth -= 1
+        elif (
+            character == ","
+            and round_depth == 0
+            and square_depth == 0
+            and brace_depth == 0
+        ):
+            arguments.append(comment_free[start:index].strip())
+            start = index + 1
+    tail = comment_free[start:].strip()
+    if tail:
+        arguments.append(tail)
+    return arguments
+
+
+def first_parenthesized_call_end(source: str, call_token: str) -> int:
+    """Return the closing-parenthesis offset of one required C++ call."""
+    _, code_only = _cpp_lexical_views(source)
+    token_index = code_only.find(call_token)
+    if token_index < 0:
+        raise MotionGateContractError(
+            f"missing required call marker {call_token}"
+        )
+    opening = code_only.find("(", token_index + len(call_token))
+    if opening < 0:
+        raise MotionGateContractError(
+            f"unterminated call marker {call_token}"
+        )
+    depth = 0
+    for index in range(opening, len(code_only)):
+        character = code_only[index]
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+    raise MotionGateContractError(
+        f"unterminated call marker {call_token}"
+    )
+
+
+def validate_process_runtime(header_path: Path, source_path: Path) -> None:
+    header = read_text(header_path)
+    source = read_text(source_path)
+    require_source_tokens(
+        header,
+        (
+            "class MotionGateProcessRuntime",
+            "FinalOutputPublisher",
+            "publish_final_command(",
+            "FinalOutputState output_state() const",
+            "OutputJournalMode::Disabled",
+        ),
+        "MotionGateProcessRuntime header",
+    )
+    validate_order(
+        header,
+        (
+            "std::unique_ptr<AttachedGateEventJournal> attached_journal_;",
+            "std::unique_ptr<MotionGateCore> core_;",
+        ),
+        "MotionGateProcessRuntime Attached-Journal/Core lifetime",
+    )
+    validate_order(
+        source,
+        (
+            "attached_journal_ = std::make_unique<AttachedGateEventJournal>",
+            "core_ = std::make_unique<MotionGateCore>",
+            "attached_journal_->journal().claim_transition_binding()",
+            "output_journal_mode_ = OutputJournalMode::Usable",
+        ),
+        "MotionGateProcessRuntime journal-bound construction",
+    )
+
+    publication = method_body(
+        source,
+        "MotionGateProcessRuntime",
+        "publish_final_command",
+        "MotionGateProcessRuntime final output transaction",
+    )
+    usable_start = publication.find("++output_attempt_seq_;")
+    if usable_start < 0:
+        raise MotionGateContractError(
+            "MotionGateProcessRuntime usable journal lane must consume one "
+            "non-wrapping output attempt before publication"
+        )
+    usable_lane = publication[usable_start:]
+    publish_token = "attached_journal_->journal().publish_output"
+    if usable_lane.count(publish_token) != 1:
+        raise MotionGateContractError(
+            "MotionGateProcessRuntime usable journal lane must contain "
+            "exactly one publish_output transaction"
+        )
+    publish_end = first_parenthesized_call_end(usable_lane, publish_token)
+    success_index = usable_lane.find(
+        "record_success(selected, terminal_cause);"
+    )
+    if success_index < 0 or success_index <= publish_end:
+        raise MotionGateContractError(
+            "MotionGateProcessRuntime usable journal publish_output must "
+            "return (and therefore COMMIT) before record_success advances "
+            "Node output counters"
+        )
+    validate_order(
+        usable_lane,
+        (
+            "record_success(selected, terminal_cause);",
+            "result.journal_committed = true;",
+        ),
+        "MotionGateProcessRuntime committed-output result",
+    )
+
+
 def validate_writer_observation(
     header_path: Path,
     source_path: Path,
@@ -1589,13 +1729,13 @@ def validate_node(path: Path) -> None:
             "discover_unique_writer_gid_on_topic",
             "WriterObservationSession writer_observation_session_",
             "SingleThreadedExecutor",
+            "rclcpp::CallbackGroupType::MutuallyExclusive",
             "command.header.stamp",
             "get_clock()->now()",
             "add_on_set_parameters_callback",
             "MotionGate use_sim_time is immutable after startup",
             "use_sim_time runtime invariant was violated",
             "ros_time_is_active()",
-            "command.header.stamp.sec = 0",
             '"test_gate_event_journal_name"',
             '"test_gate_event_journal_descriptor"',
         ),
@@ -1626,6 +1766,24 @@ def validate_node(path: Path) -> None:
         ),
         "MotionGate process Runtime construction",
     )
+    if "MultiThreadedExecutor" in source:
+        raise MotionGateContractError(
+            "motion_gate_node must remain on its SingleThreadedExecutor"
+        )
+    runtime_initializers = parenthesized_call_bodies(source, "runtime_")
+    if not runtime_initializers or len(
+        top_level_cpp_arguments(runtime_initializers[0])
+    ) != 3:
+        raise MotionGateContractError(
+            "product motion_gate_node must construct the process Runtime "
+            "with exactly its Core config, Gate identity, and journal "
+            "parameters; it must not inject a FinalOutputFaultTestAdapter"
+        )
+    if "FinalOutputFaultTestAdapter" in source:
+        raise MotionGateContractError(
+            "product motion_gate_node must not inject the package-private "
+            "FinalOutputFaultTestAdapter"
+        )
     if re.search(r"\bget_gid\s*\(", source):
         raise MotionGateContractError(
             "OPEN must bind from Gate-local graph endpoint data, not a "
@@ -1829,15 +1987,59 @@ def validate_node(path: Path) -> None:
         "publish_serialized",
         "motion_gate_node",
     )
-    validate_order(
+    if source.count("runtime_.publish_final_command(") != 1:
+        raise MotionGateContractError(
+            "motion_gate_node final DDS publication must delegate through "
+            "exactly one runtime_.publish_final_command transaction"
+        )
+    runtime_publish_calls = parenthesized_call_bodies(
         publication,
+        "runtime_.publish_final_command",
+    )
+    if len(runtime_publish_calls) != 1:
+        raise MotionGateContractError(
+            "motion_gate_node publish_serialized must be a thin ROS Adapter "
+            "around runtime_.publish_final_command"
+        )
+    runtime_publish = runtime_publish_calls[0]
+    require_source_tokens(
+        runtime_publish,
         (
-            "std::scoped_lock",
-            "publication_mutex_",
+            "FinalOutputPublisher",
+            "FinalOutputFrame",
+            "command.header.stamp.sec = frame.stamp_sec",
             "final_command_publisher_->publish(",
         ),
-        "MotionGate serialized publication point",
+        "MotionGate Runtime-owned final DDS Publisher Adapter",
     )
+    if source.count("final_command_publisher_->publish(") != 1:
+        raise MotionGateContractError(
+            "motion_gate_node may call the final DDS publisher only once, "
+            "inside the Runtime-owned Publisher Adapter"
+        )
+    for forbidden_member in (
+        "publication_mutex_",
+        "output_publish_seq_",
+        "zero_publish_seq_",
+        "last_publication_was_zero_",
+    ):
+        if forbidden_member in source:
+            raise MotionGateContractError(
+                "motion_gate_node must not duplicate Runtime-owned final "
+                f"output state: {forbidden_member}"
+            )
+    for callback_name in ("on_candidate", "on_output_timer"):
+        callback = method_body(
+            source,
+            "MotionGateNode",
+            callback_name,
+            f"motion_gate_node {callback_name}",
+        )
+        if callback.count("publish_serialized(") != 1:
+            raise MotionGateContractError(
+                f"MotionGate {callback_name} must issue exactly one Runtime "
+                "output transaction with no outer DDS-zero retry"
+            )
 
     inhibit = method_body(
         source,
@@ -1865,12 +2067,22 @@ def validate_node(path: Path) -> None:
             "case Operation::Inhibit",
             "result = handle_inhibit(",
             "core_.tick(",
-            "publish_serialized(command)",
+            "publish_serialized()",
             "publish_state()",
             "fill_response(",
         ),
         "MotionGate INHIBIT zero-before-response linearization",
     )
+    if (
+        "if (!publish_serialized(" in source
+        or "&& publish_serialized(" in source
+        or "!command_published" in source
+        or "emergency_zero_published" in source
+    ):
+        raise MotionGateContractError(
+            "motion_gate_node must not repeat Runtime-owned DDS failure "
+            "fallback outside publish_final_command"
+        )
     fill_response = method_body(
         source,
         "MotionGateNode",
@@ -1881,11 +2093,26 @@ def validate_node(path: Path) -> None:
         fill_response,
         (
             "motion_inhibited",
-            "zero_published",
-            "output_publish_seq",
-            "zero_publish_seq",
+            "output.zero_published",
+            "output.state.output_publish_seq",
+            "output.state.zero_publish_seq",
         ),
         "MotionGate control response acknowledgement",
+    )
+    state_publication = method_body(
+        source,
+        "MotionGateNode",
+        "publish_state",
+        "motion_gate_node",
+    )
+    require_source_tokens(
+        state_publication,
+        (
+            "runtime_.output_state()",
+            "output_state.output_publish_seq",
+            "output_state.zero_publish_seq",
+        ),
+        "MotionGate Runtime-owned state counter Adapter",
     )
 
 
@@ -2818,6 +3045,10 @@ def validate_contract(root: Path) -> None:
         paths["controller_config"],
     )
     validate_core(paths["core_header"], paths["core_source"])
+    validate_process_runtime(
+        paths["process_runtime_header"],
+        paths["process_runtime_source"],
+    )
     validate_writer_observation(
         paths["writer_observation_header"],
         paths["writer_observation_source"],

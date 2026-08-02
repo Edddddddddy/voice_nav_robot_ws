@@ -300,6 +300,84 @@ Command MotionGateCore::tick(SteadyTimePoint now)
 }  // namespace voice_nav_mission
 """
 
+PROCESS_RUNTIME_HEADER = """\
+#pragma once
+
+#include <memory>
+
+namespace voice_nav_mission
+{
+class AttachedGateEventJournal;
+class MotionGateCore;
+struct FinalOutputFrame;
+struct FinalOutputPublisher;
+struct FinalOutputResult;
+struct FinalOutputState;
+
+class MotionGateProcessRuntime
+{
+public:
+  FinalOutputResult publish_final_command(
+    FinalOutputTime time,
+    FinalOutputPublisher publisher);
+  FinalOutputState output_state() const;
+
+private:
+  enum class OutputJournalMode {Disabled, Usable, Retired};
+  std::unique_ptr<AttachedGateEventJournal> attached_journal_;
+  std::unique_ptr<MotionGateCore> core_;
+  OutputJournalMode output_journal_mode_{OutputJournalMode::Disabled};
+};
+}  // namespace voice_nav_mission
+"""
+
+PROCESS_RUNTIME_SOURCE = """\
+#include "motion_gate_process_runtime.hpp"
+
+namespace voice_nav_mission
+{
+MotionGateProcessRuntime::MotionGateProcessRuntime(
+  MotionGateConfig config,
+  std::string gate_instance_id,
+  GateEventJournalTestParameters journal_parameters)
+{
+  const auto attachment_config =
+    parse_gate_event_journal_test_parameters(journal_parameters);
+  if (attachment_config.has_value()) {
+    attached_journal_ = std::make_unique<AttachedGateEventJournal>(
+      *attachment_config);
+    core_ = std::make_unique<MotionGateCore>(
+      config,
+      gate_instance_id,
+      0U,
+      attached_journal_->journal().claim_transition_binding());
+    output_journal_mode_ = OutputJournalMode::Usable;
+  }
+}
+
+FinalOutputResult MotionGateProcessRuntime::publish_final_command(
+  FinalOutputTime time,
+  FinalOutputPublisher publisher)
+{
+  (void)time;
+  ++output_attempt_seq_;
+  const auto selected = core_->selected_command();
+  const auto terminal_cause = pending_terminal_cause(selected);
+  const FinalOutputFrame frame{};
+  const GateOutputIntent intent{};
+  attached_journal_->journal().publish_output(
+    intent,
+    [&publisher, &frame]() {
+      publisher.publish(publisher.context, frame);
+    });
+  record_success(selected, terminal_cause);
+  FinalOutputResult result;
+  result.journal_committed = true;
+  return result;
+}
+}  // namespace voice_nav_mission
+"""
+
 WRITER_OBSERVATION_HEADER = """\
 #pragma once
 
@@ -672,8 +750,6 @@ TEST(
 
 NODE_SOURCE = """\
 #include <chrono>
-#include <mutex>
-
 #include "geometry_msgs/msg/twist_stamped.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rmw/types.h"
@@ -693,7 +769,8 @@ public:
       make_gate_instance_id(),
       node_config_.journal_parameters),
     core_(runtime_.core()),
-    callback_group_(create_callback_group()),
+    callback_group_(create_callback_group(
+      rclcpp::CallbackGroupType::MutuallyExclusive)),
     writer_observation_session_({
       "geometry_msgs/msg/TwistStamped",
       "/collision_monitor"})
@@ -729,10 +806,7 @@ public:
       "/motion_gate/internal/state", state_qos);
     output_timer_ = create_wall_timer(
       std::chrono::milliseconds(20),
-      [this]() {
-        const auto now = std::chrono::steady_clock::now();
-        publish_serialized(core_.tick(now));
-      });
+      [this]() {on_output_timer();});
   }
 
   OpenBinding
@@ -831,23 +905,52 @@ public:
     core_.accept_candidate(
       to_candidate(message, publisher_gid),
       std::chrono::steady_clock::now());
+    (void)core_.tick(std::chrono::steady_clock::now());
+    (void)publish_serialized();
   }
 
-  void publish_serialized(Command command)
+  void on_output_timer()
   {
-    std::scoped_lock lock(publication_mutex_);
-    if (!get_parameter("use_sim_time").as_bool() ||
-      !get_clock()->ros_time_is_active())
-    {
-      core_.force_fault(
-        Reason::ConfigurationInvalid,
-        "use_sim_time runtime invariant was violated");
-      command = Command{};
-      command.header.stamp.sec = 0;
+    (void)core_.tick(std::chrono::steady_clock::now());
+    (void)publish_serialized();
+  }
+
+  FinalOutputResult publish_serialized()
+  {
+    FinalOutputTime output_time;
+    output_time.simulation_time_active =
+      get_parameter("use_sim_time").as_bool() &&
+      get_clock()->ros_time_is_active();
+    if (output_time.simulation_time_active) {
+      const auto stamp = get_clock()->now();
+      output_time.stamp_sec = stamp.seconds();
+      output_time.stamp_nanosec = stamp.nanoseconds();
     } else {
-      command.header.stamp = get_clock()->now();
+      (void)"use_sim_time runtime invariant was violated";
     }
-    final_command_publisher_->publish(command);
+    return runtime_.publish_final_command(
+      output_time,
+      FinalOutputPublisher{
+        [](void * context, const FinalOutputFrame & frame) {
+          auto & node = *static_cast<MotionGateNode *>(context);
+          geometry_msgs::msg::TwistStamped command;
+          command.header.stamp.sec = frame.stamp_sec;
+          command.header.stamp.nanosec = frame.stamp_nanosec;
+          command.twist.linear.x = frame.command.linear_x;
+          command.twist.angular.z = frame.command.angular_z;
+          node.final_command_publisher_->publish(command);
+        },
+        this});
+  }
+
+  bool publish_state()
+  {
+    const auto output_state = runtime_.output_state();
+    StateMessage message;
+    message.output_publish_seq = output_state.output_publish_seq;
+    message.zero_publish_seq = output_state.zero_publish_seq;
+    state_publisher_->publish(message);
+    return true;
   }
 
   ControlResult handle_inhibit(
@@ -864,12 +967,12 @@ public:
   void fill_response(
     const ControlResult & result,
     ControlResponse & response,
-    bool zero_published)
+    const FinalOutputResult & output)
   {
     response.motion_inhibited = result.motion_inhibited;
-    response.zero_published = zero_published;
-    response.output_publish_seq = output_publish_seq_;
-    response.zero_publish_seq = zero_publish_seq_;
+    response.zero_published = output.zero_published;
+    response.output_publish_seq = output.state.output_publish_seq;
+    response.zero_publish_seq = output.state.zero_publish_seq;
   }
 
   void on_control(
@@ -883,11 +986,13 @@ public:
           request, std::chrono::steady_clock::now());
         break;
     }
-    const auto command =
-      core_.tick(std::chrono::steady_clock::now());
-    publish_serialized(command);
-    publish_state();
-    fill_response(result, response, command.is_zero());
+    (void)core_.tick(std::chrono::steady_clock::now());
+    auto output = publish_serialized();
+    if (!publish_state()) {
+      core_.force_fault(Reason::PublishFailed, "state publication failed");
+      output = publish_serialized();
+    }
+    fill_response(result, response, output);
   }
 
 private:
@@ -895,7 +1000,6 @@ private:
   MotionGateProcessRuntime runtime_;
   MotionGateCore & core_;
   rclcpp::CallbackGroup::SharedPtr callback_group_;
-  std::mutex publication_mutex_;
   WriterObservationSession writer_observation_session_;
   MotionGateCore::SteadyTimePoint writer_observation_started_at_{};
 };
@@ -1182,6 +1286,12 @@ FIXTURE_FILES = {
     ): CORE_HEADER,
     "src/voice_nav_mission/src/motion_gate_core.cpp": CORE_SOURCE,
     (
+        "src/voice_nav_mission/src/motion_gate_process_runtime.hpp"
+    ): PROCESS_RUNTIME_HEADER,
+    (
+        "src/voice_nav_mission/src/motion_gate_process_runtime.cpp"
+    ): PROCESS_RUNTIME_SOURCE,
+    (
         "src/voice_nav_mission/src/writer_observation.hpp"
     ): WRITER_OBSERVATION_HEADER,
     (
@@ -1295,6 +1405,154 @@ class MotionGateContractTest(unittest.TestCase):
 
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("Runtime member lifetime", completed.stderr)
+
+    def test_attached_journal_must_outlive_runtime_core(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_mission/src/motion_gate_process_runtime.hpp",
+                (
+                    "std::unique_ptr<AttachedGateEventJournal> "
+                    "attached_journal_;\n"
+                    "  std::unique_ptr<MotionGateCore> core_;"
+                ),
+                (
+                    "std::unique_ptr<MotionGateCore> core_;\n"
+                    "  std::unique_ptr<AttachedGateEventJournal> "
+                    "attached_journal_;"
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("Attached-Journal/Core lifetime", completed.stderr)
+
+    def test_journal_commit_must_precede_success_counter(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_mission/src/motion_gate_process_runtime.cpp",
+                (
+                    "  attached_journal_->journal().publish_output(\n"
+                    "    intent,"
+                ),
+                (
+                    "  record_success(selected, terminal_cause);\n"
+                    "  attached_journal_->journal().publish_output(\n"
+                    "    intent,"
+                ),
+            )
+            self.replace(
+                root,
+                "src/voice_nav_mission/src/motion_gate_process_runtime.cpp",
+                (
+                    "    });\n"
+                    "  record_success(selected, terminal_cause);\n"
+                    "  FinalOutputResult result;"
+                ),
+                (
+                    "    });\n"
+                    "  FinalOutputResult result;"
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("COMMIT", completed.stderr)
+
+    def test_product_node_cannot_inject_output_fault_adapter(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_mission/src/motion_gate_node.cpp",
+                "node_config_.journal_parameters),",
+                (
+                    "node_config_.journal_parameters,\n"
+                    "      FinalOutputFaultTestAdapter{}),"
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("must not inject", completed.stderr)
+
+    def test_node_cannot_own_runtime_output_counters(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_mission/src/motion_gate_node.cpp",
+                "rclcpp::CallbackGroup::SharedPtr callback_group_;",
+                (
+                    "rclcpp::CallbackGroup::SharedPtr callback_group_;\n"
+                    "  std::uint64_t output_publish_seq_{0U};"
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("Runtime-owned final output state", completed.stderr)
+
+    def test_output_callbacks_cannot_repeat_runtime_fallback(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_mission/src/motion_gate_node.cpp",
+                (
+                    "  void on_output_timer()\n"
+                    "  {\n"
+                    "    (void)core_.tick(std::chrono::steady_clock::now());\n"
+                    "    (void)publish_serialized();"
+                ),
+                (
+                    "  void on_output_timer()\n"
+                    "  {\n"
+                    "    (void)core_.tick(std::chrono::steady_clock::now());\n"
+                    "    if (!publish_serialized().published) {\n"
+                    "      (void)publish_serialized();\n"
+                    "    }"
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("no outer DDS-zero retry", completed.stderr)
+
+    def test_node_remains_single_threaded_and_mutually_exclusive(self) -> None:
+        mutations = (
+            (
+                "rclcpp::executors::SingleThreadedExecutor",
+                "rclcpp::executors::MultiThreadedExecutor",
+                "SingleThreadedExecutor",
+            ),
+            (
+                "rclcpp::CallbackGroupType::MutuallyExclusive",
+                "rclcpp::CallbackGroupType::Reentrant",
+                "MutuallyExclusive",
+            ),
+        )
+        for old, new, diagnostic in mutations:
+            with self.subTest(diagnostic=diagnostic):
+                def mutation(
+                    root: Path,
+                    old_value: str = old,
+                    new_value: str = new,
+                ) -> None:
+                    self.replace(
+                        root,
+                        "src/voice_nav_mission/src/motion_gate_node.cpp",
+                        old_value,
+                        new_value,
+                    )
+
+                completed = self.run_checker(mutation)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(diagnostic, completed.stderr)
 
     def test_node_cannot_bypass_process_runtime_link(self) -> None:
         def mutation(root: Path) -> None:
@@ -2176,9 +2434,9 @@ class MotionGateContractTest(unittest.TestCase):
                 "ros_time_is_active()",
             ),
             (
-                "command.header.stamp.sec = 0",
+                "command.header.stamp.sec = frame.stamp_sec",
                 "command.header.stamp.sec = 1",
-                "command.header.stamp.sec = 0",
+                "command.header.stamp.sec = frame.stamp_sec",
             ),
         )
         for old, new, diagnostic in mutations:
@@ -2693,14 +2951,14 @@ class MotionGateContractTest(unittest.TestCase):
             self.replace(
                 root,
                 "src/voice_nav_mission/src/motion_gate_node.cpp",
-                "std::scoped_lock lock(publication_mutex_);",
-                "final_command_publisher_->publish(command);",
+                "return runtime_.publish_final_command(",
+                "return bypass_runtime_and_publish(",
             )
 
         completed = self.run_checker(mutation)
 
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("serialized publication", completed.stderr)
+        self.assertIn("must delegate through", completed.stderr)
 
     def test_inhibit_must_publish_zero_before_acknowledgement(self) -> None:
         def mutation(root: Path) -> None:
@@ -2708,16 +2966,25 @@ class MotionGateContractTest(unittest.TestCase):
                 root,
                 "src/voice_nav_mission/src/motion_gate_node.cpp",
                 (
-                    "publish_serialized(command);\n"
-                    "    publish_state();\n"
-                    "    fill_response("
-                    "result, response, command.is_zero());"
+                    "(void)core_.tick(std::chrono::steady_clock::now());\n"
+                    "    auto output = publish_serialized();\n"
+                    "    if (!publish_state()) {\n"
+                    "      core_.force_fault(Reason::PublishFailed, "
+                    '"state publication failed");\n'
+                    "      output = publish_serialized();\n"
+                    "    }\n"
+                    "    fill_response(result, response, output);"
                 ),
                 (
-                    "fill_response("
-                    "result, response, command.is_zero());\n"
-                    "    publish_serialized(command);\n"
-                    "    publish_state();"
+                    "fill_response(result, response, FinalOutputResult{});\n"
+                    "    (void)core_.tick("
+                    "std::chrono::steady_clock::now());\n"
+                    "    auto output = publish_serialized();\n"
+                    "    if (!publish_state()) {\n"
+                    "      core_.force_fault(Reason::PublishFailed, "
+                    '"state publication failed");\n'
+                    "      output = publish_serialized();\n"
+                    "    }"
                 ),
             )
 
