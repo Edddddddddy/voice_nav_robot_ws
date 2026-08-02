@@ -390,7 +390,15 @@ struct HardwareWriteLedgerWriter::Impl
     if (
       request_ticket == 0U ||
       response_ticket == std::numeric_limits<std::uint64_t>::max() ||
-      request_ticket != response_ticket + 1U ||
+      request_ticket != response_ticket + 1U)
+    {
+      latch_global_fault(VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_PROTOCOL);
+      return;
+    }
+
+    last_consumed_request_ticket = request_ticket;
+    last_consumed_request_checksum = control->request_checksum;
+    if (
       control->request_checksum !=
       request_checksum(*header, *control, request_ticket))
     {
@@ -403,9 +411,6 @@ struct HardwareWriteLedgerWriter::Impl
         atomic_load_acquire(header->last_completed_write_seq));
       return;
     }
-
-    last_consumed_request_ticket = request_ticket;
-    last_consumed_request_checksum = control->request_checksum;
 
     const auto last_completed_write_seq =
       atomic_load_acquire(header->last_completed_write_seq);
