@@ -69,6 +69,23 @@ if(BUILD_TESTING)
     PUBLIC test_support
   )
 
+  add_executable(
+    hardware_write_ledger_c_abi_test
+    test/hardware_write_ledger_c_abi_test.c
+  )
+  target_compile_features(
+    hardware_write_ledger_c_abi_test
+    PRIVATE c_std_11
+  )
+  target_include_directories(
+    hardware_write_ledger_c_abi_test
+    PRIVATE test_support
+  )
+  add_test(
+    NAME hardware_write_ledger_c_abi_test
+    COMMAND $<TARGET_FILE:hardware_write_ledger_c_abi_test>
+  )
+
   install(
     TARGETS voice_nav_sim_journaled_gazebo_sim_system_adapter
     DESTINATION lib
