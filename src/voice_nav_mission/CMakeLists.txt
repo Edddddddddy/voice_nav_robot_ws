@@ -29,6 +29,22 @@ target_include_directories(
 )
 
 add_library(
+  attached_gate_event_journal STATIC
+  src/attached_gate_event_journal.cpp
+)
+target_compile_features(attached_gate_event_journal PUBLIC cxx_std_17)
+target_include_directories(
+  attached_gate_event_journal
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>"
+)
+target_link_libraries(
+  attached_gate_event_journal
+  PUBLIC gate_event_journal
+  PRIVATE rt
+)
+
+add_library(
   motion_gate_core STATIC
   src/motion_gate_core.cpp
 )
@@ -125,7 +141,7 @@ if(BUILD_TESTING)
   )
   target_link_libraries(
     attached_gate_event_journal_test
-    gate_event_journal
+    attached_gate_event_journal
     rt
   )
 
