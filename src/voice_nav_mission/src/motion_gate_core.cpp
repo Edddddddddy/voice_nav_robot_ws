@@ -34,8 +34,11 @@ constexpr char kCandidateTopicPrefix[] =
   "/voice_nav_internal/motion_gate/candidate/lease_";
 constexpr std::size_t kMaximumDetailLength = 160U;
 constexpr std::uint64_t kTransitionEventPrepare = 1U;
+constexpr std::uint64_t kTransitionEventOpen = 2U;
 static_assert(
   static_cast<std::uint64_t>(Operation::Prepare) == kTransitionEventPrepare);
+static_assert(
+  static_cast<std::uint64_t>(Operation::Open) == kTransitionEventOpen);
 
 struct IdentifierWords
 {
@@ -345,7 +348,8 @@ ControlResult MotionGateCore::open(
       request, Reason::WriterUnavailable,
       "candidate writer has an all-zero GID");
   }
-  if (!advance_control_seq()) {
+  if (control_seq_ == std::numeric_limits<std::uint64_t>::max()) {
+    (void)advance_control_seq();
     auto fault = result_from_snapshot(
       ResultCode::Faulted, Reason::SequenceExhausted,
       "control sequence exhausted while opening");
@@ -353,16 +357,23 @@ ControlResult MotionGateCore::open(
     return fault;
   }
 
-  bound_writer_gid_ = binding.writer_gid;
-  writer_bound_ = true;
-  state_ = State::Armed;
-  authority_deadline_ = now + config_.authority_lease;
-  candidate_deadline_ = now + config_.candidate_freshness;
-  candidate_fresh_ = false;
-  selected_ = zero_command();
-  reason_ = Reason::None;
-  detail_ = "lease armed; awaiting a fresh candidate";
-  advance_state_seq();
+  std::string next_detail{"lease armed; awaiting a fresh candidate"};
+  apply_transition(
+    kTransitionEventOpen,
+    Reason::None,
+    [this, now, &binding, &next_detail]() {
+      ++control_seq_;
+      bound_writer_gid_ = binding.writer_gid;
+      writer_bound_ = true;
+      state_ = State::Armed;
+      authority_deadline_ = now + config_.authority_lease;
+      candidate_deadline_ = now + config_.candidate_freshness;
+      candidate_fresh_ = false;
+      selected_ = zero_command();
+      reason_ = Reason::None;
+      detail_.swap(next_detail);
+      advance_state_seq();
+    });
 
   auto result = applied(request);
   remember(request, result);

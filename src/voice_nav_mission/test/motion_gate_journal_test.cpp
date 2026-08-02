@@ -149,11 +149,11 @@ TEST(MotionGateJournal, SuccessfulOpenUsesTheSameCoreOwnedFence)
   ASSERT_EQ(
     gate.prepare(
       ControlRequest{
-          Operation::Prepare,
-          "00000000000000000000000000000001",
-          kGateId,
-          0U,
-          ""},
+        Operation::Prepare,
+        "00000000000000000000000000000001",
+        kGateId,
+        0U,
+        ""},
       now).code,
     ResultCode::Applied);
   const auto prepared = gate.snapshot();
@@ -163,11 +163,11 @@ TEST(MotionGateJournal, SuccessfulOpenUsesTheSameCoreOwnedFence)
 
   const auto result = gate.open(
     ControlRequest{
-      Operation::Open,
-      "00000000000000000000000000000002",
-      kGateId,
-      prepared.control_seq,
-      prepared.lease_id},
+        Operation::Open,
+        "00000000000000000000000000000002",
+        kGateId,
+        prepared.control_seq,
+        prepared.lease_id},
     now,
     [writer]() {
       return OpenBinding{true, Reason::None, writer, "writer ready"};
