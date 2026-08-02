@@ -28,6 +28,7 @@ from launch_testing.asserts import assertExitCodes
 import launch_testing.markers
 import pytest
 import rclpy
+from rcl_interfaces.msg import ParameterType
 from rclpy.duration import Duration
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.parameter import Parameter
@@ -418,6 +419,47 @@ class MotionGateNodeTest(unittest.TestCase):
         self.executor.add_node(node)
         self.extra_nodes.append(node)
         return node
+
+    def test_journal_parameters_are_declared_read_only_and_default_off(self):
+        names = [
+            'test_gate_event_journal_name',
+            'test_gate_event_journal_descriptor',
+        ]
+        describe_future = self.parameter_client.describe_parameters(names)
+        self.wait_until(
+            describe_future.done,
+            2.0,
+            'Gate journal parameter descriptions',
+        )
+        self.assertIsNone(describe_future.exception())
+        descriptors = describe_future.result().descriptors
+        self.assertEqual([item.name for item in descriptors], names)
+        for descriptor in descriptors:
+            self.assertEqual(descriptor.type, ParameterType.PARAMETER_STRING)
+            self.assertTrue(descriptor.read_only)
+
+        get_future = self.parameter_client.get_parameters(names)
+        self.wait_until(
+            get_future.done,
+            2.0,
+            'default-off Gate journal parameter values',
+        )
+        self.assertIsNone(get_future.exception())
+        for value in get_future.result().values:
+            self.assertEqual(value.type, ParameterType.PARAMETER_STRING)
+            self.assertEqual(value.string_value, '')
+
+        set_future = self.parameter_client.set_parameters(
+            [Parameter(names[0], value='/voice_nav_gate_' + ('0' * 32))],
+        )
+        self.wait_until(
+            set_future.done,
+            2.0,
+            'read-only Gate journal parameter rejection',
+        )
+        self.assertIsNone(set_future.exception())
+        self.assertEqual(len(set_future.result().results), 1)
+        self.assertFalse(set_future.result().results[0].successful)
 
     def test_steady_fail_closed_protocol_without_clock(self):
         self.assertEqual(
