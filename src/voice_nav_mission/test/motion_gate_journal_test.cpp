@@ -504,5 +504,62 @@ TEST(MotionGateJournal, ExplicitInhibitCommitsLeaseRetirementAtOneFence)
   EXPECT_EQ(slot.commit_checksum, gate_event_journal_commit_checksum(slot));
 }
 
+TEST(MotionGateJournal, ForceFaultCommitsOneTerminalTransition)
+{
+  JournalRegion<1U> region;
+  const auto identity = initialize_region(region);
+  FakeClock clock;
+  GateEventJournal journal(
+    &region,
+    sizeof(region),
+    identity,
+    GateEventJournalClock{&FakeClock::read, &clock});
+  MotionGateCore gate(MotionGateConfig{}, kGateId, 0U, &journal);
+
+  gate.force_fault(Reason::PublishFailed, "publisher failed");
+
+  const auto state = gate.snapshot();
+  EXPECT_EQ(state.state, State::Faulted);
+  EXPECT_EQ(state.state_seq, 1U);
+  EXPECT_EQ(state.control_seq, 1U);
+  EXPECT_EQ(state.reason, Reason::PublishFailed);
+  EXPECT_TRUE(state.lease_id.empty());
+  EXPECT_TRUE(state.motion_inhibited);
+  EXPECT_TRUE(state.zero_selected);
+  EXPECT_EQ(clock.samples, 3U);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(region.header.claimed_slots),
+    1U);
+  const auto & slot = region.slots.front();
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(slot.phase),
+    VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_COMMITTED);
+  EXPECT_EQ(
+    slot.record_kind,
+    VOICE_NAV_GATE_EVENT_JOURNAL_KIND_CONTROL_TRANSITION);
+  EXPECT_EQ(slot.journal_seq, 1U);
+  EXPECT_EQ(slot.generation, identity.generation);
+  EXPECT_EQ(slot.intent_monotonic_ns, 100U);
+  EXPECT_EQ(slot.transition_linearization_ns, 200U);
+  EXPECT_EQ(slot.commit_monotonic_ns, 300U);
+  EXPECT_EQ(slot.event_code, 6U);  // FAULT
+  EXPECT_EQ(
+    slot.reason,
+    static_cast<std::uint64_t>(Reason::PublishFailed));
+  EXPECT_EQ(slot.before_state_seq, 0U);
+  EXPECT_EQ(slot.before_control_seq, 0U);
+  EXPECT_EQ(slot.after_state_seq, 1U);
+  EXPECT_EQ(slot.after_control_seq, 1U);
+  EXPECT_EQ(slot.before_lease_hi, 0U);
+  EXPECT_EQ(slot.before_lease_lo, 0U);
+  EXPECT_EQ(slot.after_lease_hi, 0U);
+  EXPECT_EQ(slot.after_lease_lo, 0U);
+  EXPECT_EQ(slot.gate_instance_hi, UINT64_C(0x0123456789abcdef));
+  EXPECT_EQ(slot.gate_instance_lo, UINT64_C(0x0123456789abcdef));
+  EXPECT_EQ(slot.flags, 0U);
+  EXPECT_EQ(slot.intent_checksum, gate_event_journal_intent_checksum(slot));
+  EXPECT_EQ(slot.commit_checksum, gate_event_journal_commit_checksum(slot));
+}
+
 }  // namespace
 }  // namespace voice_nav_mission
