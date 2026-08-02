@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -132,22 +133,31 @@ int execute_command(
 
 int main(int argc, char ** argv)
 {
-  if (argc != 8) {
+  if (argc != 3 && argc != 8) {
     return 64;
   }
 
   try {
-    voice_nav_sim::AttachedHardwareWriteLedger ledger(
-      voice_nav_sim::HardwareWriteLedgerAttachmentConfig{
-      argv[1],
-      voice_nav_sim::HardwareWriteLedgerIdentity{
-        parse_word(argv[2]),
-        parse_word(argv[3]),
-        parse_word(argv[4]),
-        parse_word(argv[5])},
-      voice_nav_sim::HardwareWriteLedgerLayout{
-        parse_word(argv[6]),
-        parse_word(argv[7])}});
+    std::unique_ptr<voice_nav_sim::AttachedHardwareWriteLedger> ledger;
+    if (argc == 3) {
+      ledger = std::make_unique<
+        voice_nav_sim::AttachedHardwareWriteLedger>(
+        voice_nav_sim::HardwareWriteLedgerDiscoveryConfig{
+          argv[1], argv[2]});
+    } else {
+      ledger = std::make_unique<
+        voice_nav_sim::AttachedHardwareWriteLedger>(
+        voice_nav_sim::HardwareWriteLedgerAttachmentConfig{
+          argv[1],
+          voice_nav_sim::HardwareWriteLedgerIdentity{
+            parse_word(argv[2]),
+            parse_word(argv[3]),
+            parse_word(argv[4]),
+            parse_word(argv[5])},
+          voice_nav_sim::HardwareWriteLedgerLayout{
+            parse_word(argv[6]),
+            parse_word(argv[7])}});
+    }
 
     std::cout << "READY" << std::endl;
     voice_nav_sim::HardwareWriteTicket pending_ticket{};
@@ -156,7 +166,7 @@ int main(int argc, char ** argv)
     while (std::getline(std::cin, command)) {
       bool keep_running{false};
       const auto result = execute_command(
-        ledger,
+        *ledger,
         command,
         pending_ticket,
         has_pending_ticket,

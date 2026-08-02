@@ -31,11 +31,19 @@ struct HardwareWriteLedgerAttachmentConfig
   HardwareWriteLedgerLayout expected_layout;
 };
 
-class AttachedHardwareWriteLedger
+struct HardwareWriteLedgerDiscoveryConfig
+{
+  std::string shared_memory_name;
+  std::string expected_nonce;
+};
+
+class AttachedHardwareWriteLedger final : public HardwareWriteJournal
 {
 public:
   explicit AttachedHardwareWriteLedger(
     HardwareWriteLedgerAttachmentConfig config);
+  explicit AttachedHardwareWriteLedger(
+    HardwareWriteLedgerDiscoveryConfig config);
   ~AttachedHardwareWriteLedger();
 
   AttachedHardwareWriteLedger(const AttachedHardwareWriteLedger &) = delete;
@@ -47,6 +55,13 @@ public:
 
   [[nodiscard]] std::uint64_t claimed_writer_pid() const noexcept;
   [[nodiscard]] HardwareWriteLedgerWriter & writer() noexcept;
+
+  [[nodiscard]] HardwareWriteTicket begin_write(
+    std::int64_t sim_stamp_ns) noexcept override;
+  void finish_write(
+    HardwareWriteTicket ticket,
+    std::uint64_t delegated_result,
+    HardwareWriteWheelObservation observation) noexcept override;
 
 private:
   struct Impl;
