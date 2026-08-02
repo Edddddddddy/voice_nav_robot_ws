@@ -151,11 +151,15 @@ public:
   explicit MotionGateNode(
     const rclcpp::NodeOptions & options = rclcpp::NodeOptions())
   : Node("motion_gate_node", options),
+    node_config_(load_node_config()),
+    runtime_(
+      node_config_.core,
+      make_gate_instance_id(),
+      node_config_.journal_parameters),
+    core_(runtime_.core()),
     callback_group_(
       create_callback_group(
         rclcpp::CallbackGroupType::MutuallyExclusive)),
-    node_config_(load_node_config()),
-    core_(node_config_.core, make_gate_instance_id()),
     writer_observation_session_({
       kCandidateType,
       node_config_.expected_candidate_writer_fqn})
@@ -1087,13 +1091,14 @@ private:
     fill_response(result, *response, zero_published);
   }
 
-  rclcpp::CallbackGroup::SharedPtr callback_group_;
-  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
-    use_sim_time_guard_;
   NodeConfig node_config_;
-  MotionGateCore core_;
+  MotionGateProcessRuntime runtime_;
+  MotionGateCore & core_;
+  rclcpp::CallbackGroup::SharedPtr callback_group_;
   WriterObservationSession writer_observation_session_;
   MotionGateCore::SteadyTimePoint writer_observation_started_at_{};
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
+    use_sim_time_guard_;
   rclcpp::Publisher<TwistStamped>::SharedPtr
     final_command_publisher_;
   rclcpp::Publisher<StateMessage>::SharedPtr state_publisher_;

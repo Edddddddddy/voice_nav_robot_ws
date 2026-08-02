@@ -98,7 +98,7 @@ rosidl_get_typesupport_target(
 )
 target_link_libraries(
   motion_gate_node
-  motion_gate_core
+  motion_gate_process_runtime
   "${motion_gate_typesupport}"
 )
 
