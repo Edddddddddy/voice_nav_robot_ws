@@ -460,7 +460,7 @@ class CrashStopContractTest(unittest.TestCase):
                 root,
                 (
                     "src/voice_nav_sim/test_support/"
-                    "hardware_write_sink.hpp"
+                    "journaled_gazebo_sim_system_adapter.hpp"
                 ),
                 (
                     "class JournaledGazeboSimSystemAdapter final : public\n"
@@ -520,7 +520,7 @@ class CrashStopContractTest(unittest.TestCase):
                 root,
                 (
                     "src/voice_nav_sim/test_support/"
-                    "journaled_gazebo_sim_system_adapter.hpp"
+                    "hardware_write_sink.hpp"
                 ),
                 "  std::uint64_t generation;\n",
                 "",

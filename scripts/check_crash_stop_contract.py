@@ -17,6 +17,9 @@ class CrashStopContractError(ValueError):
 
 
 ARTIFACTS = {
+    "write_sink": (
+        "src/voice_nav_sim/test_support/hardware_write_sink.hpp"
+    ),
     "adapter_header": (
         "src/voice_nav_sim/test_support/"
         "journaled_gazebo_sim_system_adapter.hpp"
@@ -119,9 +122,14 @@ def required_artifacts(root: Path) -> dict[str, Path]:
     return paths
 
 
-def validate_adapter(header_path: Path, source_path: Path) -> None:
+def validate_adapter(
+    header_path: Path,
+    source_path: Path,
+    write_sink_path: Path,
+) -> None:
     header = read_text(header_path)
     source = read_text(source_path)
+    write_sink = read_text(write_sink_path)
     combined = header + "\n" + source
 
     direct_concrete_base = re.search(
@@ -216,12 +224,12 @@ def validate_adapter(header_path: Path, source_path: Path) -> None:
 
     record_match = re.search(
         r"struct\s+HardwareWriteRecord\s*\{(?P<body>.*?)\};",
-        header,
+        write_sink,
         flags=re.DOTALL,
     )
     if record_match is None:
         raise CrashStopContractError(
-            "test hardware Adapter must define HardwareWriteRecord"
+            "hardware write sink must define HardwareWriteRecord"
         )
     record_body = record_match.group("body")
     if re.search(r"\biterations?\b", record_body, re.IGNORECASE):
@@ -742,7 +750,11 @@ def validate_sim_package(path: Path) -> None:
 
 def validate_contract(root: Path) -> None:
     paths = required_artifacts(root)
-    validate_adapter(paths["adapter_header"], paths["adapter_source"])
+    validate_adapter(
+        paths["adapter_header"],
+        paths["adapter_source"],
+        paths["write_sink"],
+    )
     validate_plugin_description(paths["adapter_plugin"])
     validate_adapter_behavior_test(paths["adapter_test"])
     validate_sim_cmake(paths["sim_cmake"])
