@@ -306,11 +306,11 @@ TEST(MotionGateJournal, SuccessfulRenewUsesTheSameCoreOwnedFence)
 
   const auto result = gate.renew(
     ControlRequest{
-      Operation::Renew,
-      "00000000000000000000000000000003",
-      kGateId,
-      armed.control_seq,
-      armed.lease_id},
+        Operation::Renew,
+        "00000000000000000000000000000003",
+        kGateId,
+        armed.control_seq,
+        armed.lease_id},
     now + std::chrono::milliseconds{10});
 
   ASSERT_EQ(result.code, ResultCode::Applied);

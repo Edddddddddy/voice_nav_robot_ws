@@ -36,10 +36,13 @@ constexpr char kCandidateTopicPrefix[] =
 constexpr std::size_t kMaximumDetailLength = 160U;
 constexpr std::uint64_t kTransitionEventPrepare = 1U;
 constexpr std::uint64_t kTransitionEventOpen = 2U;
+constexpr std::uint64_t kTransitionEventRenew = 3U;
 static_assert(
   static_cast<std::uint64_t>(Operation::Prepare) == kTransitionEventPrepare);
 static_assert(
   static_cast<std::uint64_t>(Operation::Open) == kTransitionEventOpen);
+static_assert(
+  static_cast<std::uint64_t>(Operation::Renew) == kTransitionEventRenew);
 
 struct IdentifierWords
 {
@@ -426,7 +429,8 @@ ControlResult MotionGateCore::renew(
       request, Reason::AuthorityExpired,
       "RENEW reached the authority deadline");
   }
-  if (!advance_control_seq()) {
+  if (control_seq_ == std::numeric_limits<std::uint64_t>::max()) {
+    (void)advance_control_seq();
     auto fault = result_from_snapshot(
       ResultCode::Faulted, Reason::SequenceExhausted,
       "control sequence exhausted while renewing");
@@ -434,11 +438,17 @@ ControlResult MotionGateCore::renew(
     return fault;
   }
 
-  const auto authority_lease = config_.authority_lease;
-  authority_deadline_ = now + authority_lease;
-  reason_ = Reason::None;
-  detail_ = "authority renewed";
-  advance_state_seq();
+  std::string next_detail{"authority renewed"};
+  apply_transition(
+    kTransitionEventRenew,
+    Reason::None,
+    [this, now, &next_detail]() noexcept {
+      ++control_seq_;
+      authority_deadline_ = now + config_.authority_lease;
+      reason_ = Reason::None;
+      detail_.swap(next_detail);
+      advance_state_seq();
+    });
 
   auto result = applied(request);
   remember(request, result);
