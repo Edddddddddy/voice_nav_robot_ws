@@ -124,6 +124,7 @@ std::uint64_t response_checksum(
     header.generation,
     header.nonce_hi,
     header.nonce_lo,
+    control.request_checksum,
     response_ticket,
     control.response_code,
     control.response_bank_index,
@@ -335,6 +336,18 @@ struct HardwareWriteLedgerWriter::Impl
     const auto request_ticket = atomic_load_acquire(control->request_ticket);
     const auto response_ticket = atomic_load_acquire(control->response_ticket);
     if (request_ticket == response_ticket) {
+      if (request_ticket == 0U) {
+        return;
+      }
+      const auto declared_checksum = control->request_checksum;
+      if (
+        request_ticket != last_consumed_request_ticket ||
+        declared_checksum != last_consumed_request_checksum ||
+        declared_checksum !=
+        request_checksum(*header, *control, request_ticket))
+      {
+        latch_global_fault(VOICE_NAV_HARDWARE_WRITE_LEDGER_FAULT_PROTOCOL);
+      }
       return;
     }
     if (
@@ -353,6 +366,9 @@ struct HardwareWriteLedgerWriter::Impl
         atomic_load_acquire(header->last_completed_write_seq));
       return;
     }
+
+    last_consumed_request_ticket = request_ticket;
+    last_consumed_request_checksum = control->request_checksum;
 
     const auto last_completed_write_seq =
       atomic_load_acquire(header->last_completed_write_seq);
@@ -584,6 +600,8 @@ struct HardwareWriteLedgerWriter::Impl
   std::uint64_t bank_stride{0U};
   std::uint64_t active_bank_index{kInvalidBankIndex};
   std::uint64_t active_bank_epoch{0U};
+  std::uint64_t last_consumed_request_ticket{0U};
+  std::uint64_t last_consumed_request_checksum{0U};
   bool has_outstanding_ticket{false};
   HardwareWriteTicket outstanding_ticket{
     0U, 0, kInvalidBankIndex, 0U, false};

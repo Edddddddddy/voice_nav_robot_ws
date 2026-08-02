@@ -95,6 +95,7 @@ def control_response_checksum(owner, control, response_ticket):
             owner.generation,
             owner.nonce_hi,
             owner.nonce_lo,
+            control[8],
             response_ticket,
             *control[9:13],
         ),
