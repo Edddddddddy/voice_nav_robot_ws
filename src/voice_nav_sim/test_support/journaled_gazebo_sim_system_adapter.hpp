@@ -24,7 +24,7 @@
 #include <string>
 #include <vector>
 
-#include "hardware_write_sink.hpp"
+#include "hardware_write_ledger_writer.hpp"
 
 namespace voice_nav_sim
 {
@@ -38,8 +38,7 @@ public:
     std::shared_ptr<gz_ros2_control::GazeboSimSystemInterface> upstream);
   JournaledGazeboSimSystemAdapter(
     std::shared_ptr<gz_ros2_control::GazeboSimSystemInterface> upstream,
-    std::shared_ptr<HardwareWriteSink> write_sink,
-    std::uint64_t generation);
+    std::shared_ptr<HardwareWriteJournal> write_journal);
 
   hardware_interface::CallbackReturn on_init(
     const hardware_interface::HardwareInfo & hardware_info) override;
@@ -83,20 +82,17 @@ public:
     const rclcpp::Duration & period) override;
 
 private:
-  void journal_after_delegated_write(
-    const rclcpp::Time & time,
-    hardware_interface::return_type delegated_result) noexcept;
+  [[nodiscard]] HardwareWriteWheelObservation observe_wheel_commands()
+  const noexcept;
 
   pluginlib::ClassLoader<
     gz_ros2_control::GazeboSimSystemInterface> upstream_loader_;
   std::shared_ptr<
     gz_ros2_control::GazeboSimSystemInterface> upstream_;
-  std::shared_ptr<HardwareWriteSink> write_sink_;
+  std::shared_ptr<HardwareWriteJournal> write_journal_;
   gz::sim::EntityComponentManager * entity_component_manager_{nullptr};
   gz::sim::Entity left_wheel_entity_{gz::sim::kNullEntity};
   gz::sim::Entity right_wheel_entity_{gz::sim::kNullEntity};
-  std::uint64_t generation_{0U};
-  std::uint64_t next_write_seq_{1U};
 };
 
 }  // namespace voice_nav_sim

@@ -52,20 +52,18 @@ JournaledGazeboSimSystemAdapter::JournaledGazeboSimSystemAdapter()
 JournaledGazeboSimSystemAdapter::JournaledGazeboSimSystemAdapter(
   std::shared_ptr<gz_ros2_control::GazeboSimSystemInterface> upstream)
 : JournaledGazeboSimSystemAdapter(
-    std::move(upstream), std::shared_ptr<HardwareWriteSink>{}, 0U)
+    std::move(upstream), std::shared_ptr<HardwareWriteJournal>{})
 {
 }
 
 JournaledGazeboSimSystemAdapter::JournaledGazeboSimSystemAdapter(
   std::shared_ptr<gz_ros2_control::GazeboSimSystemInterface> upstream,
-  std::shared_ptr<HardwareWriteSink> write_sink,
-  std::uint64_t generation)
+  std::shared_ptr<HardwareWriteJournal> write_journal)
 : upstream_loader_(
     "gz_ros2_control",
     "gz_ros2_control::GazeboSimSystemInterface"),
   upstream_(std::move(upstream)),
-  write_sink_(std::move(write_sink)),
-  generation_(generation)
+  write_journal_(std::move(write_journal))
 {
 }
 
@@ -158,7 +156,7 @@ bool JournaledGazeboSimSystemAdapter::initSim(
     hardware_info,
     entity_component_manager,
     update_rate);
-  if (initialized && write_sink_ != nullptr) {
+  if (initialized && write_journal_ != nullptr) {
     const auto left_joint = joints.find(kLeftWheelJoint);
     const auto right_joint = joints.find(kRightWheelJoint);
     if (left_joint != joints.end() && right_joint != joints.end()) {
@@ -181,21 +179,31 @@ hardware_interface::return_type JournaledGazeboSimSystemAdapter::write(
   const rclcpp::Time & time,
   const rclcpp::Duration & period)
 {
+  HardwareWriteTicket ticket{};
+  const bool journal_enabled = write_journal_ != nullptr;
+  if (journal_enabled) {
+    ticket = write_journal_->begin_write(time.nanoseconds());
+  }
   const auto delegated_result = upstream_->write(time, period);
-  journal_after_delegated_write(time, delegated_result);
+  if (journal_enabled) {
+    write_journal_->finish_write(
+      ticket,
+      static_cast<std::uint64_t>(delegated_result),
+      observe_wheel_commands());
+  }
   return delegated_result;
 }
 
-void JournaledGazeboSimSystemAdapter::journal_after_delegated_write(
-  const rclcpp::Time & time,
-  hardware_interface::return_type delegated_result) noexcept
+HardwareWriteWheelObservation
+JournaledGazeboSimSystemAdapter::observe_wheel_commands() const noexcept
 {
   if (
-    write_sink_ == nullptr || entity_component_manager_ == nullptr ||
+    entity_component_manager_ == nullptr ||
     left_wheel_entity_ == gz::sim::kNullEntity ||
     right_wheel_entity_ == gz::sim::kNullEntity)
   {
-    return;
+    return HardwareWriteWheelObservation{
+      HardwareWriteObservationStatus::kMissingEntity, 0U, 0U};
   }
   const auto * left_command =
     entity_component_manager_->Component<
@@ -203,21 +211,19 @@ void JournaledGazeboSimSystemAdapter::journal_after_delegated_write(
   const auto * right_command =
     entity_component_manager_->Component<
     gz::sim::components::JointVelocityCmd>(right_wheel_entity_);
-  if (
-    left_command == nullptr || left_command->Data().empty() ||
-    right_command == nullptr || right_command->Data().empty())
-  {
-    return;
+  if (left_command == nullptr || right_command == nullptr) {
+    return HardwareWriteWheelObservation{
+      HardwareWriteObservationStatus::kMissingComponent, 0U, 0U};
+  }
+  if (left_command->Data().empty() || right_command->Data().empty()) {
+    return HardwareWriteWheelObservation{
+      HardwareWriteObservationStatus::kEmptyComponent, 0U, 0U};
   }
 
-  const HardwareWriteRecord record{
-    generation_,
-    next_write_seq_++,
-    time.nanoseconds(),
-    static_cast<std::uint8_t>(delegated_result),
+  return HardwareWriteWheelObservation{
+    HardwareWriteObservationStatus::kValid,
     double_bits(left_command->Data()[0]),
     double_bits(right_command->Data()[0])};
-  (void)write_sink_->append(record);
 }
 
 }  // namespace voice_nav_sim

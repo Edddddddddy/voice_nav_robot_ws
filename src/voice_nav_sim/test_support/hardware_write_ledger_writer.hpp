@@ -60,7 +60,21 @@ struct HardwareWriteTicket
   bool included;
 };
 
-class HardwareWriteLedgerWriter
+class HardwareWriteJournal
+{
+public:
+  virtual ~HardwareWriteJournal() = default;
+
+  [[nodiscard]] virtual HardwareWriteTicket begin_write(
+    std::int64_t sim_stamp_ns) noexcept = 0;
+
+  virtual void finish_write(
+    HardwareWriteTicket ticket,
+    std::uint64_t delegated_result,
+    HardwareWriteWheelObservation observation) noexcept = 0;
+};
+
+class HardwareWriteLedgerWriter final : public HardwareWriteJournal
 {
 public:
   HardwareWriteLedgerWriter(void * region, std::size_t region_bytes);
@@ -74,12 +88,12 @@ public:
     HardwareWriteLedgerWriter &&) = delete;
 
   [[nodiscard]] HardwareWriteTicket begin_write(
-    std::int64_t sim_stamp_ns) noexcept;
+    std::int64_t sim_stamp_ns) noexcept override;
 
   void finish_write(
     HardwareWriteTicket ticket,
     std::uint64_t delegated_result,
-    HardwareWriteWheelObservation observation) noexcept;
+    HardwareWriteWheelObservation observation) noexcept override;
 
 private:
   struct Impl;
