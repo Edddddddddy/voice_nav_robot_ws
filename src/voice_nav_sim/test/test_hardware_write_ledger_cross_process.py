@@ -21,6 +21,7 @@ import subprocess
 import sys
 
 from hardware_write_ledger_test_support import (
+    ABI_VERSION,
     BANK_STATE_ACTIVE,
     BANK_STATE_FREE,
     BANK_STATE_SEALED_FAULT,
@@ -42,6 +43,9 @@ from hardware_write_ledger_test_support import (
     HardwareWriteLedgerRegionOwner,
     INVALID_BANK_INDEX,
     LAST_COMPLETED_WRITE_SEQ_WORD,
+    PAGE_BYTES,
+    PAGE_MAGIC,
+    SEGMENT_BYTES,
     WRITER_PID_WORD,
 )
 
@@ -50,6 +54,38 @@ def require(condition, message):
     """Raise explicitly even when Python assertions are optimized out."""
     if not condition:
         raise AssertionError(message)
+
+
+def independent_page_checksum(page):
+    """Recalculate one Parent page CRC without its implementation helper."""
+    header_words = (
+        page.page_magic,
+        page.abi_version,
+        page.page_bytes,
+        page.segment_bytes,
+        page.bank_index,
+        page.bank_epoch,
+        page.generation,
+        page.interval_id,
+        page.arm_fence_write_seq,
+        page.seal_fence_write_seq,
+        page.seal_not_before_sim_stamp_ns_bits,
+        page.predicate_flags,
+        page.page_index,
+        page.page_count,
+        page.total_segment_count,
+        page.total_invocation_count,
+        page.page_segment_count,
+        page.page_invocation_count,
+        page.page_first_write_seq,
+        page.page_last_write_seq,
+        page.previous_page_checksum,
+        page.oracle_faults,
+        page.bank_checksum,
+    )
+    return crc64_ecma_words(
+        (*header_words, *(word for segment in page.segments for word in segment)),
+    )
 
 
 def terminate_owned_process(process):
@@ -881,6 +917,190 @@ def test_exact_seal_skip_includes_write_and_seals_fault(probe):
             require(
                 return_code == 0,
                 f'exact-skip probe exited {return_code}: {stderr}',
+            )
+        finally:
+            terminate_owned_process(process)
+            close_owned_process_pipes(process)
+
+
+def test_parent_reads_immutable_pages_before_exact_ack(probe):
+    """Prove a complete two-page copy is required before exact ACK."""
+    with HardwareWriteLedgerRegionOwner(
+        generation=93,
+        segment_capacity=4,
+        page_segment_limit=2,
+    ) as owner:
+        process = spawn_probe(probe, owner)
+        try:
+            require(
+                owner.wait_for_writer(process.pid) == process.pid,
+                'page-reader probe Writer PID mismatch',
+            )
+            require(
+                read_owned_line(process, 'READY') == 'READY',
+                'page-reader probe did not publish READY',
+            )
+            owner.unlink_name()
+            arm_ticket = owner.post_arm(
+                interval_id=107,
+                segment_budget=4,
+                invocation_budget=4,
+                require_zero_commands=False,
+            )
+            process.stdin.write('BEGIN 100\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 1',
+                'page-reader first write did not begin',
+            )
+            arm_response = owner.wait_response(arm_ticket)
+            process.stdin.write('FINISH 0 0 0 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 1',
+                'page-reader first write did not finish',
+            )
+            process.stdin.write('BEGIN 200\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 2',
+                'page-reader second write did not begin',
+            )
+            process.stdin.write('FINISH 0 0 4607182418800017408 0\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 2',
+                'page-reader second write did not finish',
+            )
+            seal_ticket = owner.post_seal(
+                interval_id=107,
+                bank_index=arm_response[10],
+                bank_epoch=arm_response[11],
+                not_before_sim_stamp_ns=300,
+                require_exact_stamp=True,
+            )
+            process.stdin.write('BEGIN 300\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 3',
+                'page-reader sealing write did not begin',
+            )
+            process.stdin.write('FINISH 0 0 0 4607182418800017408\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'FINISHED') == 'FINISHED 3',
+                'page-reader sealing write did not finish',
+            )
+            seal_response = owner.wait_response(seal_ticket)
+
+            snapshot = owner.read_sealed_interval(
+                interval_id=107,
+                bank_index=seal_response[10],
+                bank_epoch=seal_response[11],
+                seal_fence_write_seq=3,
+            )
+            require(
+                snapshot.generation == 93 and
+                snapshot.interval_id == 107 and
+                snapshot.bank_index == seal_response[10] and
+                snapshot.bank_epoch == seal_response[11] and
+                snapshot.terminal_state == BANK_STATE_SEALED_OK and
+                snapshot.seal_fence_write_seq == 3 and
+                len(snapshot.pages) == 2,
+                f'page-reader snapshot identity changed: {snapshot!r}',
+            )
+            first_page, second_page = snapshot.pages
+            require(
+                (
+                    first_page.page_magic,
+                    first_page.abi_version,
+                    first_page.page_bytes,
+                    first_page.segment_bytes,
+                    first_page.page_index,
+                    first_page.page_count,
+                    first_page.total_segment_count,
+                    first_page.total_invocation_count,
+                    first_page.page_segment_count,
+                    first_page.page_invocation_count,
+                    first_page.page_first_write_seq,
+                    first_page.page_last_write_seq,
+                    first_page.previous_page_checksum,
+                ) == (
+                    PAGE_MAGIC,
+                    ABI_VERSION,
+                    PAGE_BYTES,
+                    SEGMENT_BYTES,
+                    0,
+                    2,
+                    3,
+                    3,
+                    2,
+                    2,
+                    1,
+                    2,
+                    0,
+                ),
+                f'first snapshot page changed: {first_page!r}',
+            )
+            require(
+                (
+                    second_page.page_index,
+                    second_page.page_count,
+                    second_page.page_segment_count,
+                    second_page.page_invocation_count,
+                    second_page.page_first_write_seq,
+                    second_page.page_last_write_seq,
+                    second_page.previous_page_checksum,
+                ) == (1, 2, 1, 1, 3, 3, first_page.page_checksum),
+                f'second snapshot page changed: {second_page!r}',
+            )
+            require(
+                tuple(segment[1:5] for page in snapshot.pages
+                      for segment in page.segments) == (
+                    (1, 1, 1, 100),
+                    (2, 2, 1, 200),
+                    (3, 3, 1, 300),
+                ),
+                f'page-reader segment partition changed: {snapshot.pages!r}',
+            )
+            require(
+                all(
+                    page.page_checksum == independent_page_checksum(page)
+                    for page in snapshot.pages
+                ),
+                'page-reader checksum chain is not independently valid',
+            )
+            require(
+                owner.snapshot_bank(snapshot.bank_index)[0] ==
+                BANK_STATE_SEALED_OK,
+                'reading pages released the retained bank',
+            )
+            require(
+                owner.acknowledge(snapshot),
+                'exact validated snapshot was not acknowledged',
+            )
+            require(
+                owner.snapshot_bank(snapshot.bank_index)[0] ==
+                BANK_STATE_FREE,
+                'exact ACK did not release the retained bank',
+            )
+            require(
+                not owner.acknowledge(snapshot),
+                'consumed snapshot acknowledged twice',
+            )
+            require(
+                first_page.page_checksum ==
+                independent_page_checksum(first_page),
+                'local immutable page changed after ACK',
+            )
+
+            process.stdin.write('EXIT\n')
+            process.stdin.flush()
+            return_code = process.wait(timeout=3.0)
+            stderr = process.stderr.read()
+            require(
+                return_code == 0,
+                f'page-reader probe exited {return_code}: {stderr}',
             )
         finally:
             terminate_owned_process(process)
@@ -2016,6 +2236,7 @@ def main():
     test_writing_request_is_invisible_until_ready(probe)
     test_seal_is_deferred_and_includes_qualifying_write(probe)
     test_exact_seal_skip_includes_write_and_seals_fault(probe)
+    test_parent_reads_immutable_pages_before_exact_ack(probe)
     test_corrupt_segment_count_does_not_escape_mapping(probe)
     test_clean_segment_coverage_gap_cannot_seal_ok(probe)
     test_invalid_active_seal_field_matrix_is_fail_closed(probe)
