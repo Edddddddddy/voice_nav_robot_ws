@@ -18,7 +18,7 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0008 | Local evidence was green, then the final change invalidated it | Were tests rerun on the exact final HEAD? | Guarded |
 | PIT-0009 | Code/tests support a case that the lesson still forbids | Do prose, tests, and implementation describe the same closed set? | Guarded |
 | PIT-0010 | A bounded RPC returns success after its total budget | Is the deadline checked again immediately after the RPC? | Guarded |
-| PIT-0011 | Every ament CTest fails to import `ament_cmake_test` | Were ROS and the workspace overlay sourced in that shell? | Guarded |
+| PIT-0011 | A CTest cannot import ament or the built workspace package | Were ROS and the workspace overlay sourced in that shell? | Guarded |
 | PIT-0012 | Product assertions pass, but Gazebo exits `-9` during CTest teardown | Did failure occur in the active test or the strict post-shutdown exit check? | Guarded |
 | PIT-0013 | A focused runner test passes, but canonical discovery cannot import the real test tree | Does the fixture match the repository's package markers and import path? | Guarded |
 | PIT-0014 | Concurrent launch tests collide despite a fixed `ROS_DOMAIN_ID` | Does generated CTest metadata invoke the official isolated runner without overriding its domain? | Guarded |
@@ -51,6 +51,8 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0041 | A checksum test stays green after its implementation omits a field | Does an independent constant and an include/exclude mutation matrix define the oracle? | Guarded |
 | PIT-0042 | An incremental WSL build warns that a dependency file is milliseconds in the future | Does the same target rebuild cleanly after comparing WSL time and file epoch? | Guarded |
 | PIT-0043 | A full evidence journal prevents MotionGate from inhibiting or faulting | Is evidence failure policy different for admission and safety-terminal mutations? | Guarded |
+| PIT-0044 | A non-copyable Core still shares one journal with another Core | Is ownership carried by a one-shot capability rather than an object trait? | Guarded |
+| PIT-0045 | Shared-memory identity is read before the producer publishes `READY` | Did the consumer acquire `READY` before reading any ordinary payload field? | Guarded |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -237,12 +239,15 @@ deadline inside `attempt()` and proves the late APPLIED result is rejected.
 **Symptom.** Every CTest target fails at `/opt/ros/.../run_test.py` with
 `ModuleNotFoundError: ament_cmake_test`, or a direct repository Python suite
 fails every ROS-aware support test with `ModuleNotFoundError: launch` while
-unrelated pure tests pass.
+unrelated pure tests pass. A package launch test can also fail with
+`ModuleNotFoundError: voice_nav_mission` when the base ROS installation was
+sourced but the newly built workspace overlay was not.
 
 **Cause.** CTest or `scripts/run_repository_tests.py` was invoked from a fresh
-WSL shell without sourcing ROS. Generated ament wrappers and support modules
-need ROS Python paths; compiled binaries and an existing build tree do not
-supply that environment.
+WSL shell without sourcing ROS, or only the base installation was sourced when
+the test imports the workspace's installed Python package. Generated ament
+wrappers and support modules need both applicable Python paths; compiled
+binaries and an existing build tree do not supply that environment.
 
 **Guardrail.** Source the base installation and current overlay in the same
 shell before CTest:
@@ -1051,4 +1056,53 @@ corruption so that the evidence generation is rejected. Unit tests fill the
 journal immediately before both PREPARE and INHIBIT and require opposite state
 outcomes. Evidence may fail closed as evidence, but it may never become a
 dependency for stopping motion. See
+[VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md).
+
+## PIT-0044: Object non-copyability is not resource exclusivity
+
+**Symptom.** `MotionGateCore` is non-copyable and non-movable, yet two
+independently constructed Cores can receive the same journal pointer and both
+commit a `before_control_seq=0 -> after_control_seq=1` transition. A
+"journal-bound" constructor can also accept null and silently run without the
+promised evidence path.
+
+**Cause.** Type traits constrain copies of one state-machine object; they say
+nothing about aliasing an external resource. A reusable raw pointer or public
+transition writer is still a second ownership path, and nullable dependency
+injection can turn a required mode into an optional one without an error.
+
+**Guardrail.** Each journal generation permanently issues at most one
+move-only transition capability. The Core consumes that capability, its
+transition method is private to the Core, a second claim fails even after the
+first Core is destroyed, and the journal-bound constructor rejects an empty
+capability. The separate three-argument constructor is the only explicit
+no-journal mode. The sequential lifetime contract detaches the capability if
+the Journal is destroyed first; production composition constructs the
+Attached Journal before the Core and destroys them in reverse. Do not claim
+concurrent destruction safety without a synchronized lifetime state and TSAN
+evidence. See
+[VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md).
+
+## PIT-0045: Acquire must precede every ordinary shared-memory read
+
+**Symptom.** A shared-memory attacher derives the expected generation or
+capacity from ordinary Header fields and only later constructs the validator
+that acquire-loads `init_state == READY`. Same-process tests pass, but a real
+consumer may read unpublished or stale payload while the parent is still
+initializing it.
+
+**Cause.** A release/acquire pair orders only operations that occur after the
+consumer's acquire. Reading ordinary payload first cannot be repaired by a
+later acquire, and deriving "expected" identity from the untrusted object also
+turns comparison into self-validation.
+
+**Guardrail.** The parent supplies the complete expected UID, generation,
+128-bit nonce, capacity, and therefore exact byte size out of band. The
+attacher validates only configuration and fd metadata before `mmap`, then
+passes the mapping and parent expectations directly to `GateEventJournal`.
+That constructor acquire-loads `READY` before reading any ordinary Header or
+slot field and claims `writer_pid` only after every validation succeeds.
+Wrong generation, nonce, capacity, mode, name, and size must fail before the
+claim. Same-process tests protect ordering in code review; a real parent/child
+probe remains mandatory evidence for cross-process publication semantics. See
 [VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md).

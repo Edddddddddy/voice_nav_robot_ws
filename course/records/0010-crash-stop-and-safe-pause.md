@@ -339,6 +339,76 @@ PowerShell-to-Bash boundary before entering the test gate. Separate literal
 CTest invocations succeeded, and the recurrence was appended to PIT-0001. It
 was not counted as a product RED.
 
+### Ownership, attachment, and terminal-cause corrections
+
+The complete-Core review then found two real P1 defects that object-level
+non-copyability had hidden. One journal could still be passed by raw pointer to
+two independently constructed Cores, and an active lease at
+`control_seq == UINT64_MAX` committed a FAULT but returned `Applied/None` on
+the first INHIBIT. Both counterexamples were preserved before repair:
+
+```text
+2e9b87d RED  -> 236812c GREEN  INHIBIT returns the committed sequence fault
+32e1049 RED  -> 41b44ba GREEN  one-shot transition capability and lifetime detach
+```
+
+The first review of `41b44ba` confirmed the sequence result and permanent
+second-claim rejection, then found two remaining capability bypasses: its
+transition method was public, and the journal-bound constructor accepted an
+empty capability. Commit `d4c2f95` locked both failures; `aa6612d` made the
+transition entry private to `MotionGateCore`, added a narrow low-level test
+peer, separated explicit no-journal construction, and rejected null in the
+journal-bound constructor. This recurrence is captured as
+[PIT-0044](../reference/engineering-pitfalls.md#pit-0044-object-non-copyability-is-not-resource-exclusivity).
+
+The review also showed that the Core discarded the terminal transition's
+`journal_seq`. Commit `856cf0c` required terminal-cause propagation and
+`4e6d0c1` exposed it in the snapshot, with zero for unjournaled fallback and
+non-terminal states. Commit `7a8216f` proves the first zero-output intent can
+bind that exact terminal sequence. Commit `7403899` locks both sequential
+lifetime orders and explicitly classifies constructor-time configuration fault
+as an unjournaled initial state. Concurrent Journal/Binding destruction is not
+claimed; the Node composition is thread-confined and must destroy Core before
+the Attached mapping.
+
+The POSIX attacher followed its own TDD pair:
+
+```text
+6a5d289 RED  -> cb94da4 GREEN  parent-supplied identity/capacity attachment
+```
+
+The first implementation had read `header.generation` before the validator's
+acquire of `READY` and had derived expectations from the object being checked.
+The corrected API receives complete UID/generation/nonce/capacity from the
+parent, validates exact fd metadata and size, then delegates the first mapped
+payload read to `GateEventJournal`'s READY-acquire boundary. Wrong identity,
+capacity, size, mode, and name fail before `writer_pid` claim. This is recorded
+as [PIT-0045](../reference/engineering-pitfalls.md#pit-0045-acquire-must-precede-every-ordinary-shared-memory-read).
+
+Independent Attached review reported P0=0, P1=0 and one P2 acceptance gap:
+the current seven tests use one process. A Python parent plus blocking C++
+child remains required to prove real child PID claim, cross-process
+release/acquire, parent-only unlink, and post-exit mapping evidence. Therefore
+POSIX attachment is not yet marked complete.
+
+```text
+Checkpoint 41b44ba package gate:
+15 CTest tests passed, including launch_test and every lint target
+
+Independent Attached temporary-build gate on cb94da4:
+7 tests, 0 errors, 0 failures, 0 skipped
+```
+
+One full CTest run sourced `/opt/ros/jazzy/setup.bash` but omitted
+`install/setup.bash`; only the launch test failed to import
+`voice_nav_mission`. The exact rerun with both overlays passed all 15 tests, so
+this was another [PIT-0011](../reference/engineering-pitfalls.md#pit-0011-ctest-needs-the-ros-environment-not-only-a-build-directory)
+occurrence, not a code RED. Review tooling also reproduced PIT-0001 by turning
+a quoted `|` filter into Bash pipelines. During the Attached loop, guessed
+ament test names produced `No tests found`; `ctest -N` followed by literal
+registered names corrected the evidence, reinforcing PIT-0016's rule that a
+zero exit is not proof the intended test ran.
+
 ## VN-0011A observed crash evidence
 
 | Case | Expected threshold | Observed result |

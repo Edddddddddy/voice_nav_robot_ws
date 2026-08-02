@@ -259,14 +259,46 @@ Control-transition `event_code` values are stable ABI facts:
 | `5` | automatic lease retirement; `reason` identifies expiry or candidate failure |
 | `6` | `FAULT`, including sequence exhaustion |
 
-The Core is a non-copyable and non-movable single owner of its optional
-single-writer journal. Every fenced mutation is compile-time constrained to a
-bounded `noexcept` callback. Journal reservation failure has two deliberately
-different policies: admission/extension transitions (`PREPARE`, `OPEN`, and
-`RENEW`) do not mutate, while safety-terminal transitions (`INHIBIT`, automatic
-retirement, and `FAULT`) still inhibit/fault and select zero. The latter
-invalidates the evidence generation through the latched journal fault, but
-evidence capture is never allowed to veto a safety mutation.
+The Core is non-copyable and non-movable, but that object trait is not the
+journal ownership proof. Each journal generation permanently issues at most
+one move-only transition capability; `MotionGateCore` consumes it, its
+transition entry point is private to the Core, and a second claim is rejected
+even after the first Core is destroyed. The explicit journal-bound Core
+constructor rejects an empty capability; only the separate three-argument
+constructor selects no-journal mode. Every fenced mutation is compile-time
+constrained to a bounded `noexcept` callback. Journal reservation failure has
+two deliberately different policies: admission/extension transitions
+(`PREPARE`, `OPEN`, and `RENEW`) do not mutate, while safety-terminal
+transitions (`INHIBIT`, automatic retirement, and `FAULT`) still inhibit/fault
+and select zero. The latter invalidates the evidence generation through the
+latched journal fault, but evidence capture is never allowed to veto a safety
+mutation.
+
+The lifetime contract is thread-confined: production constructs the Attached
+Journal before the Core and destroys the Core/capability before unmapping the
+Journal. Sequential reverse destruction is also fail-safe because destroying
+the Journal first detaches the capability; later admission fails before
+mutation, while a forced safety fault still selects zero. Concurrent Journal /
+Binding destruction is not claimed safe and is outside the single-threaded
+Node composition.
+
+The parent supplies the complete expected owner UID, non-zero generation,
+non-zero 128-bit nonce, capacity, and exact region size. The attacher validates
+its configuration, then opens an existing object only, checks the same fd is a
+regular object owned by the expected UID with exact mode `0600`, link count
+one, and exact size, and maps it. It reads no ordinary Header field before
+`GateEventJournal` acquire-loads `READY`; only after the complete ABI,
+identity, capacity, checksum, and empty-slot validation does it atomically
+claim `writer_pid`. It never creates, truncates, unlinks, or clears the parent
+object. Same-process tests are Layer 1 only; a real parent/child probe is the
+required Layer-2 publication and lifetime evidence.
+
+Each successful terminal transition exposes its committed `journal_seq` in
+the Core snapshot as `output_cause_transition_journal_seq`; Prepared/Armed
+states and unjournaled safety fallback expose zero. The first final zero-output
+intent binds that exact cause. A constructor-time `ConfigurationInvalid` state
+is explicitly an initial state rather than a transition, consumes no slot, and
+has cause zero.
 
 Gate journal ABI v1 is a little-endian C layout with a 128-byte header and
 256-byte fixed slots. All three checksums use CRC64-ECMA-182, polynomial
