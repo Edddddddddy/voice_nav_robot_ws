@@ -124,6 +124,36 @@ class CrashRobotDescriptionTest(unittest.TestCase):
                         '00112233445566778899aabbccddeeff',
                     )
 
+    def test_rejects_malformed_journal_identity(self):
+        valid_name = '/voice_nav_contract_fixture'
+        valid_nonce = '00112233445566778899aabbccddeeff'
+        invalid_identities = (
+            ('', valid_nonce, 'journal name'),
+            ('voice_nav_missing_slash', valid_nonce, 'journal name'),
+            ('/voice/nav', valid_nonce, 'journal name'),
+            ('/voice nav', valid_nonce, 'journal name'),
+            (valid_name, '', 'journal nonce'),
+            (valid_name, '00112233445566778899AABBCCDDEEFF', 'journal nonce'),
+            (valid_name, '00112233445566778899aabbccddeef', 'journal nonce'),
+            (valid_name, 'g0112233445566778899aabbccddeeff', 'journal nonce'),
+            (valid_name, '0' * 32, 'journal nonce'),
+        )
+
+        for journal_name, journal_nonce, diagnostic in invalid_identities:
+            with self.subTest(
+                journal_name=journal_name,
+                journal_nonce=journal_nonce,
+            ):
+                with self.assertRaisesRegex(
+                    crash_robot_description.CrashRobotDescriptionError,
+                    diagnostic,
+                ):
+                    crash_robot_description.transform_product_urdf(
+                        PRODUCT_URDF,
+                        journal_name,
+                        journal_nonce,
+                    )
+
 
 if __name__ == '__main__':
     unittest.main()
