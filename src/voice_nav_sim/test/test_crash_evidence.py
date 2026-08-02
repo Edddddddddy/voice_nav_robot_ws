@@ -117,6 +117,78 @@ class CrashLedgerTest(unittest.TestCase):
         ):
             duplicate_action.expect_sigkill(authority, 'authority_kill')
 
+    def test_signal_intent_is_not_exit_and_event_time_is_retained(self):
+        authority = EqualButDistinctAction('authority')
+        clean_process = EqualButDistinctAction('clean_process')
+        ledger = crash_evidence.CrashLedger()
+        ledger.expect_sigkill(authority, 'authority')
+        ledger.expect_clean(clean_process, 'clean_process')
+
+        ledger.arm_sigkill(authority, signal_intent_monotonic_ns=100)
+        with self.assertRaisesRegex(
+            crash_evidence.CrashEvidenceError,
+            'missing exits: authority, clean_process',
+        ):
+            ledger.assert_complete()
+
+        ledger.record_exit(
+            authority,
+            -signal.SIGKILL,
+            observed_monotonic_ns=125,
+        )
+        ledger.record_exit(
+            clean_process,
+            0,
+            observed_monotonic_ns=130,
+        )
+        self.assertEqual(
+            ledger.exit_observation(authority),
+            ('authority', -signal.SIGKILL, 125),
+        )
+
+        unarmed = crash_evidence.CrashLedger()
+        unarmed.expect_sigkill(authority, 'authority')
+        with self.assertRaisesRegex(
+            crash_evidence.CrashEvidenceError,
+            'SIGKILL action was not armed',
+        ):
+            unarmed.record_exit(
+                authority,
+                -signal.SIGKILL,
+                observed_monotonic_ns=125,
+            )
+
+        invalid_order = crash_evidence.CrashLedger()
+        invalid_order.expect_sigkill(authority, 'authority')
+        invalid_order.arm_sigkill(
+            authority,
+            signal_intent_monotonic_ns=126,
+        )
+        with self.assertRaisesRegex(
+            crash_evidence.CrashEvidenceError,
+            'exit observation precedes signal intent',
+        ):
+            invalid_order.record_exit(
+                authority,
+                -signal.SIGKILL,
+                observed_monotonic_ns=125,
+            )
+
+        with self.assertRaisesRegex(
+            crash_evidence.CrashEvidenceError,
+            'cannot arm clean action',
+        ):
+            ledger.arm_sigkill(
+                clean_process,
+                signal_intent_monotonic_ns=140,
+            )
+
+        with self.assertRaisesRegex(
+            crash_evidence.CrashEvidenceError,
+            'no declared actions',
+        ):
+            crash_evidence.CrashLedger().assert_complete()
+
 
 if __name__ == '__main__':
     unittest.main()

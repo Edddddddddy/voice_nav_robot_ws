@@ -92,6 +92,25 @@ crash_evidence_test: 1 passed
 The run used the repository's isolated ROS-domain and unique-partition launch
 contracts; it did not target the user's separately running Gazebo process.
 
+### Cycle A2: signal intent versus death observation
+
+```text
+Command:
+python3 -m pytest -q src/voice_nav_sim/test/test_crash_evidence.py
+
+Exit status: 1
+Executed tests: 2
+Result: 1 passed, 1 failed
+Expected failure:
+CrashLedgerTest.test_signal_intent_is_not_exit_and_event_time_is_retained
+-> AttributeError: CrashLedger has no arm_sigkill
+```
+
+The test body ran and isolates the next missing behavior: signal intent must be
+armed against one exact action but cannot satisfy completion; only a later
+same-host monotonic process-exit observation may do so. It also rejects an
+unarmed kill, inverted event time, arming a clean action, and an empty ledger.
+
 - [ ] Pure valid fixtures pass.
 - [ ] Negative/mutation fixtures fail for their expected reasons.
 - [ ] Repository assertion alone fails because crash-stop artifacts are absent.
