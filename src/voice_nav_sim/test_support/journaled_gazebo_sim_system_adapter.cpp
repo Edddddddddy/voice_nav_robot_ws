@@ -86,6 +86,24 @@ JournaledGazeboSimSystemAdapter::on_deactivate(
   return upstream_->on_deactivate(previous_state);
 }
 
+hardware_interface::return_type
+JournaledGazeboSimSystemAdapter::prepare_command_mode_switch(
+  const std::vector<std::string> & start_interfaces,
+  const std::vector<std::string> & stop_interfaces)
+{
+  return upstream_->prepare_command_mode_switch(
+    start_interfaces, stop_interfaces);
+}
+
+hardware_interface::return_type
+JournaledGazeboSimSystemAdapter::perform_command_mode_switch(
+  const std::vector<std::string> & start_interfaces,
+  const std::vector<std::string> & stop_interfaces)
+{
+  return upstream_->perform_command_mode_switch(
+    start_interfaces, stop_interfaces);
+}
+
 bool JournaledGazeboSimSystemAdapter::initSim(
   rclcpp::Node::SharedPtr & model_node,
   std::map<std::string, gz::sim::Entity> & joints,
