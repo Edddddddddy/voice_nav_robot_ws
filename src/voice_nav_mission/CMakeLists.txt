@@ -146,6 +146,22 @@ if(BUILD_TESTING)
     rt
   )
 
+  ament_add_gtest(
+    motion_gate_process_runtime_test
+    test/motion_gate_process_runtime_test.cpp
+  )
+  target_compile_features(
+    motion_gate_process_runtime_test PUBLIC cxx_std_17
+  )
+  target_include_directories(
+    motion_gate_process_runtime_test
+    PRIVATE src
+  )
+  target_link_libraries(
+    motion_gate_process_runtime_test
+    attached_gate_event_journal
+  )
+
   add_executable(
     gate_event_journal_c_abi_test
     test/gate_event_journal_c_abi_test.c
