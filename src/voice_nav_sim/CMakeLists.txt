@@ -13,6 +13,7 @@ find_package(ament_cmake REQUIRED)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(ament_cmake_pytest REQUIRED)
   find_package(ament_cmake_ros REQUIRED)
   find_package(ament_lint_auto REQUIRED)
   find_package(launch_testing_ament_cmake REQUIRED)
@@ -49,6 +50,12 @@ if(BUILD_TESTING)
   ament_add_gtest(
     tf_ownership_evaluator_test
     test/tf_ownership_evaluator_test.cpp
+  )
+
+  ament_add_pytest_test(
+    crash_evidence_test
+    test/test_crash_evidence.py
+    TIMEOUT 10
   )
   target_include_directories(
     tf_ownership_evaluator_test

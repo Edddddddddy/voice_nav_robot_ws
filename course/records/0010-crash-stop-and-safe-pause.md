@@ -37,6 +37,29 @@ require its own future identity.
 
 ## VN-0011A tests-first RED
 
+### Cycle A1: exact-action CrashLedger
+
+The first executable tracer bullet isolates launch-process exit accounting.
+It deliberately supplies a loadable support module whose constructor raises a
+named `NotImplementedError`, so collection/import succeeds and exactly one
+test body reaches the missing behavior.
+
+```text
+Command:
+python3 -m pytest -q src/voice_nav_sim/test/test_crash_evidence.py
+
+Exit status: 1
+Executed tests: 1
+Expected failure:
+CrashLedgerTest.test_exact_action_exit_accounting_is_closed_and_exhaustive
+-> NotImplementedError: VN-0011A tests-first RED
+```
+
+This is a valid RED rather than a syntax, import, discovery, skip, or wrong-
+environment failure. It requires exact action identity even for distinct
+objects that compare equal, a closed `-SIGKILL`/zero exit set, rejection of
+unknown/duplicate/wrong exits, and exhaustive completion.
+
 - [ ] Pure valid fixtures pass.
 - [ ] Negative/mutation fixtures fail for their expected reasons.
 - [ ] Repository assertion alone fails because crash-stop artifacts are absent.
