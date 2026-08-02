@@ -586,8 +586,9 @@ TEST(
     0xddddeeeeffff0000U,
     0x5aU};
   std::uint64_t transition_calls = 0U;
+  auto transition_binding = journal.claim_transition_binding();
 
-  const auto outcome = journal.apply_transition(
+  const auto outcome = transition_binding->apply_transition(
     intent,
     [&region, &transition_calls]() {
       ++transition_calls;
@@ -661,9 +662,10 @@ TEST(GateEventJournal, TransitionFailureLeavesLinearizedIntent)
     0xddddeeeeffff0000U,
     0xa5U};
   std::uint64_t transition_calls = 0U;
+  auto transition_binding = journal.claim_transition_binding();
 
   EXPECT_THROW(
-    journal.apply_transition(
+    transition_binding->apply_transition(
       intent,
       [&region, &transition_calls]() -> GateTransitionAfter {
         ++transition_calls;

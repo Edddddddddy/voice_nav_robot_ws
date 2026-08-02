@@ -254,6 +254,41 @@ GateEventJournal::GateEventJournal(
   }
 }
 
+GateEventJournal::~GateEventJournal()
+{
+  if (live_transition_binding_ != nullptr) {
+    live_transition_binding_->journal_ = nullptr;
+    live_transition_binding_ = nullptr;
+  }
+}
+
+std::unique_ptr<GateTransitionJournalBinding>
+GateEventJournal::claim_transition_binding()
+{
+  auto binding = std::unique_ptr<GateTransitionJournalBinding>(
+    new GateTransitionJournalBinding());
+  bool unclaimed = false;
+  if (!transition_binding_claimed_.compare_exchange_strong(
+      unclaimed, true, std::memory_order_acq_rel, std::memory_order_acquire))
+  {
+    throw std::logic_error(
+            "Gate event journal transition binding already claimed");
+  }
+  binding->journal_ = this;
+  live_transition_binding_ = binding.get();
+  return binding;
+}
+
+GateTransitionJournalBinding::~GateTransitionJournalBinding()
+{
+  if (journal_ != nullptr) {
+    if (journal_->live_transition_binding_ == this) {
+      journal_->live_transition_binding_ = nullptr;
+    }
+    journal_ = nullptr;
+  }
+}
+
 GateEventJournal::Reservation GateEventJournal::reserve_slot()
 {
   std::uint64_t slot_index = gate_event_journal_load_acquire(

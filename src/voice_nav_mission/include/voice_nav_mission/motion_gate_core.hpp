@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -28,7 +29,7 @@
 namespace voice_nav_mission
 {
 
-class GateEventJournal;
+class GateTransitionJournalBinding;
 
 inline constexpr std::size_t kWriterGidSize = 16U;
 using WriterGid = std::array<std::uint8_t, kWriterGidSize>;
@@ -193,8 +194,15 @@ public:
   MotionGateCore(
     MotionGateConfig config,
     std::string gate_instance_id,
-    std::uint64_t initial_control_seq = 0U,
-    GateEventJournal * event_journal = nullptr);
+    std::uint64_t initial_control_seq = 0U);
+
+  MotionGateCore(
+    MotionGateConfig config,
+    std::string gate_instance_id,
+    std::uint64_t initial_control_seq,
+    std::unique_ptr<GateTransitionJournalBinding> transition_journal);
+
+  ~MotionGateCore();
 
   MotionGateCore(const MotionGateCore &) = delete;
   MotionGateCore & operator=(const MotionGateCore &) = delete;
@@ -289,8 +297,7 @@ private:
 
   MotionGateConfig config_;
   std::string gate_instance_id_;
-  // Non-owning. When configured, the journal must outlive this Core.
-  GateEventJournal * event_journal_{nullptr};
+  std::unique_ptr<GateTransitionJournalBinding> transition_journal_;
   State state_{State::Inhibited};
   std::uint64_t state_seq_{0U};
   std::uint64_t control_seq_{0U};

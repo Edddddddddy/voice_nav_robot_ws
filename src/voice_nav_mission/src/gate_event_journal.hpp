@@ -15,8 +15,11 @@
 #ifndef GATE_EVENT_JOURNAL_HPP_
 #define GATE_EVENT_JOURNAL_HPP_
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <stdexcept>
 #include <utility>
 
 #include "gate_event_journal_abi.h"  // NOLINT(build/include_subdir)
@@ -27,6 +30,8 @@
 
 namespace voice_nav_mission
 {
+
+class GateTransitionJournalBinding;
 
 using GateEventJournalHeader = voice_nav_gate_event_journal_header_v1;
 using GateEventJournalSlot = voice_nav_gate_event_journal_slot_v1;
@@ -127,11 +132,15 @@ public:
     std::size_t region_bytes,
     GateEventJournalIdentity expected_identity,
     GateEventJournalClock clock);
+  ~GateEventJournal();
 
   GateEventJournal(const GateEventJournal &) = delete;
   GateEventJournal & operator=(const GateEventJournal &) = delete;
   GateEventJournal(GateEventJournal &&) = delete;
   GateEventJournal & operator=(GateEventJournal &&) = delete;
+
+  [[nodiscard]] std::unique_ptr<GateTransitionJournalBinding>
+  claim_transition_binding();
 
   template<typename Publisher>
   GateOutputOutcome publish_output(
@@ -143,6 +152,19 @@ public:
     return commit_output(reservation);
   }
 
+private:
+  friend class GateTransitionJournalBinding;
+
+  struct Reservation
+  {
+    GateEventJournalSlot * slot;
+    std::uint64_t journal_seq;
+    std::uint64_t slot_index;
+  };
+
+  Reservation reserve_slot();
+  Reservation begin_output(const GateOutputIntent & intent);
+  GateOutputOutcome commit_output(const Reservation & reservation);
   template<typename Transition>
   GateTransitionOutcome apply_transition(
     const GateTransitionIntent & intent,
@@ -154,18 +176,6 @@ public:
       std::forward<Transition>(transition)();
     return commit_transition(reservation, after);
   }
-
-private:
-  struct Reservation
-  {
-    GateEventJournalSlot * slot;
-    std::uint64_t journal_seq;
-    std::uint64_t slot_index;
-  };
-
-  Reservation reserve_slot();
-  Reservation begin_output(const GateOutputIntent & intent);
-  GateOutputOutcome commit_output(const Reservation & reservation);
   Reservation begin_transition(const GateTransitionIntent & intent);
   void mark_transition_linearization(
     const Reservation & reservation) noexcept;
@@ -178,6 +188,42 @@ private:
   std::size_t region_bytes_;
   GateEventJournalIdentity expected_identity_;
   GateEventJournalClock clock_;
+  std::atomic_bool transition_binding_claimed_{false};
+  GateTransitionJournalBinding * live_transition_binding_{nullptr};
+};
+
+class GateTransitionJournalBinding
+{
+public:
+  ~GateTransitionJournalBinding();
+
+  GateTransitionJournalBinding(
+    const GateTransitionJournalBinding &) = delete;
+  GateTransitionJournalBinding & operator=(
+    const GateTransitionJournalBinding &) = delete;
+  GateTransitionJournalBinding(GateTransitionJournalBinding &&) = delete;
+  GateTransitionJournalBinding & operator=(
+    GateTransitionJournalBinding &&) = delete;
+
+  template<typename Transition>
+  GateTransitionOutcome apply_transition(
+    const GateTransitionIntent & intent,
+    Transition && transition)
+  {
+    if (journal_ == nullptr) {
+      throw std::runtime_error(
+              "Gate transition journal binding outlived its journal");
+    }
+    return journal_->apply_transition(
+      intent, std::forward<Transition>(transition));
+  }
+
+private:
+  friend class GateEventJournal;
+
+  GateTransitionJournalBinding() noexcept = default;
+
+  GateEventJournal * journal_{nullptr};
 };
 
 }  // namespace voice_nav_mission

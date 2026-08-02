@@ -94,11 +94,23 @@ bool Command::is_zero() const noexcept
 MotionGateCore::MotionGateCore(
   MotionGateConfig config,
   std::string gate_instance_id,
+  std::uint64_t initial_control_seq)
+: MotionGateCore(
+    std::move(config),
+    std::move(gate_instance_id),
+    initial_control_seq,
+    std::unique_ptr<GateTransitionJournalBinding>{})
+{
+}
+
+MotionGateCore::MotionGateCore(
+  MotionGateConfig config,
+  std::string gate_instance_id,
   std::uint64_t initial_control_seq,
-  GateEventJournal * event_journal)
+  std::unique_ptr<GateTransitionJournalBinding> transition_journal)
 : config_(std::move(config)),
   gate_instance_id_(std::move(gate_instance_id)),
-  event_journal_(event_journal),
+  transition_journal_(std::move(transition_journal)),
   control_seq_(initial_control_seq)
 {
   selected_ = zero_command();
@@ -112,6 +124,8 @@ MotionGateCore::MotionGateCore(
   }
 }
 
+MotionGateCore::~MotionGateCore() = default;
+
 template<typename Mutation>
 void MotionGateCore::apply_transition(
   std::uint64_t event_code,
@@ -123,7 +137,7 @@ void MotionGateCore::apply_transition(
     std::is_nothrow_invocable_v<Mutation &>,
     "a journaled Core mutation must be bounded and noexcept");
 
-  if (event_journal_ == nullptr) {
+  if (transition_journal_ == nullptr) {
     std::forward<Mutation>(mutation)();
     return;
   }
@@ -142,7 +156,7 @@ void MotionGateCore::apply_transition(
     0U};
 
   try {
-    (void)event_journal_->apply_transition(
+    (void)transition_journal_->apply_transition(
       intent,
       [this, &mutation]() noexcept {
         std::forward<Mutation>(mutation)();
