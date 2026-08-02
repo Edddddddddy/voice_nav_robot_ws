@@ -10,7 +10,7 @@ The Hardware-Write Ledger is one deep Module. Its shared-memory ABI is the seam
 between the test Parent and the Gazebo Writer process. POSIX creation/attach
 and the Gazebo hardware wrapper are Adapters; neither owns ledger policy.
 
-The Writer Interface is deliberately small:
+The Writer Interface is deliberately small and both operations are `noexcept`:
 
 ```text
 begin_write(sim_stamp) -> write ticket
@@ -23,6 +23,24 @@ returns an opaque ticket. `finish_write` consumes that exact ticket once. A
 wheel observation is `VALID`, `MISSING_ENTITY`, `MISSING_COMPONENT`, or
 `EMPTY_COMPONENT`; only `VALID` carries left/right IEEE-754 bits. The Adapter
 must report every outcome and preserve the upstream return value.
+
+One Writer permits exactly one outstanding ticket because the pinned hardware
+Interface is synchronous. A nested or concurrent `begin_write`, sequence
+exhaustion, a zero/wrapped sequence, or a duplicate, stale, foreign, or
+mismatched `finish_write` latches a global protocol/sequence fault and returns
+or consumes an invalid ticket without throwing. It never reuses or fabricates
+a sequence. A successful `begin_write` that is not followed by its matching
+finish leaves `last_completed_write_seq` unchanged; a later begin detects the
+outstanding ticket, and Writer death leaves any ACTIVE interval invalid. A
+valid finish records or faults the observation before release-publishing its
+sequence as completed.
+
+These methods perform no allocation, filesystem I/O, logging, ROS call, wait,
+or transport publication. Attachment is outside the write seam: its constructor
+may throw `std::invalid_argument`, `std::system_error`, or allocation failure
+before returning a usable Writer. The POSIX Attached Adapter owns mapping RAII
+and delegates ledger policy to the Writer implementation. Its claimed-PID
+inspection is a test diagnostic, not part of the Gazebo Writer Interface.
 
 The Parent Interface posts ARM/SEAL, polls the matching receipt, reads a sealed
 page, and ACKs an exact sealed identity. Only one request may be outstanding.
