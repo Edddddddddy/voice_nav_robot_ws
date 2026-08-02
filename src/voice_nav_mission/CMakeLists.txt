@@ -164,12 +164,29 @@ if(BUILD_TESTING)
     PROPERTIES LABELS "c_abi"
   )
 
+  add_executable(
+    gate_event_journal_attach_probe
+    test/gate_event_journal_attach_probe.cpp
+  )
+  target_compile_features(
+    gate_event_journal_attach_probe PUBLIC cxx_std_17
+  )
+  target_include_directories(
+    gate_event_journal_attach_probe
+    PRIVATE src
+  )
+  target_link_libraries(
+    gate_event_journal_attach_probe
+    attached_gate_event_journal
+    rt
+  )
+
   add_test(
     NAME gate_event_journal_cross_process_test
     COMMAND
       "${Python3_EXECUTABLE}"
       "${CMAKE_CURRENT_SOURCE_DIR}/test/test_gate_event_journal_cross_process.py"
-      "${CMAKE_CURRENT_BINARY_DIR}/gate_event_journal_attach_probe"
+      "$<TARGET_FILE:gate_event_journal_attach_probe>"
   )
   set_tests_properties(
     gate_event_journal_cross_process_test
