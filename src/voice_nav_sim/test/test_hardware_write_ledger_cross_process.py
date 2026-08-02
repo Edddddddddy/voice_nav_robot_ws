@@ -623,7 +623,7 @@ def test_seal_is_deferred_and_includes_qualifying_write(probe):
                 3,
                 4,
                 4,
-                0,
+                CONTROL_FLAG_EXACT_SEAL_STAMP,
                 200,
                 3,
                 3,
