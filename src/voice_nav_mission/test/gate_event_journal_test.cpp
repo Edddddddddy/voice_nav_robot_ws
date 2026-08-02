@@ -21,6 +21,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <stdexcept>
 
 namespace voice_nav_mission
@@ -289,6 +290,54 @@ TEST(GateEventJournal, PublisherFailureLeavesTrailingIntent)
   EXPECT_EQ(
     region.slot.intent_checksum,
     gate_event_journal_intent_checksum(region.slot));
+}
+
+TEST(
+  GateEventJournal,
+  CapacityExhaustionLatchesOverflowWithoutPublishingOrOverwrite)
+{
+  OneSlotRegion region;
+  const auto identity = initialize_region(region);
+  FakeClock clock;
+  GateEventJournal journal(
+    &region,
+    sizeof(region),
+    identity,
+    GateEventJournalClock{&FakeClock::read, &clock});
+  const auto intent = make_output_intent();
+  std::uint64_t first_publisher_calls = 0U;
+  std::uint64_t rejected_publisher_calls = 0U;
+
+  journal.publish_output(
+    intent,
+    [&first_publisher_calls]() {
+      ++first_publisher_calls;
+    });
+  const auto committed_slot = region.slot;
+
+  EXPECT_THROW(
+    journal.publish_output(
+      intent,
+      [&rejected_publisher_calls]() {
+        ++rejected_publisher_calls;
+      }),
+    std::overflow_error);
+
+  EXPECT_EQ(first_publisher_calls, 1U);
+  EXPECT_EQ(rejected_publisher_calls, 0U);
+  EXPECT_EQ(clock.next, 2U);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(region.header.claimed_slots),
+    1U);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(region.header.overflow_latched),
+    1U);
+  EXPECT_EQ(
+    std::memcmp(
+      &region.slot,
+      &committed_slot,
+      sizeof(GateEventJournalSlot)),
+    0);
 }
 
 TEST(GateEventJournal, ChecksumCoverageMatchesAbiV1)
