@@ -503,6 +503,55 @@ make the root crash-stop contract green: the Gazebo hardware Adapter, crash
 policy/composition, three real SIGKILL cases, wheel ledger, physical-stop
 evidence, repetitions, PR, and CI remain open.
 
+### Gazebo hardware Adapter plugin-load checkpoint
+
+The first real Adapter tracer used the installed Jazzy plugin registry rather
+than a static token fixture:
+
+```text
+c9223d3  RED: exported Adapter lookup throws LibraryLoadException
+f93b233  GREEN: outer Adapter and pinned standard upstream both construct
+```
+
+The RED target compiled and executed. Its only test failed because pluginlib
+listed `gz_ros2_control/GazeboSimSystem` and the legacy alias, but not
+`voice_nav_sim/JournaledGazeboSimSystemAdapter`. The GREEN adds a test-only
+shared library and plugin XML, derives from the public
+`GazeboSimSystemInterface`, and creates the fixed upstream
+`gz_ros2_control/GazeboSimSystem` through a managed loader. The loader member
+precedes the shared instance so reverse destruction unloads safely. Canonical
+product Xacro still selects the standard upstream plugin directly.
+
+This tracer deliberately implements only the pure `initSim`, `read`, and
+`write` delegation needed for a loadable Interface instance. It does not yet
+claim lifecycle/interface-export/mode-switch parity, post-delegate
+`JointVelocityCmd` observation, or journaling; each remains a later behavior
+RED rather than untested breadth.
+
+```text
+voice_nav_sim forced-configure build: passed
+plugin-load CTest: 1/1 passed
+cppcheck/lint_cmake/uncrustify/xmllint: 4/4 passed
+warning-free incremental build: passed
+voice_nav_sim package CTest: 12/12 passed
+scoped xUnit: 54 tests, 0 errors, 0 failures, 6 skipped
+user Gazebo PID 3631225: identical and live before/after package gate
+root crash-stop checker: expected RED, now advances to missing crash_stop_policy.py
+```
+
+The first configure also proved
+[PIT-0054](../reference/engineering-pitfalls.md#pit-0054-ament-cmake-fixes-the-link-signature-style-per-target):
+ament had already selected the plain `target_link_libraries` signature, so a
+later `PRIVATE` form was invalid. A grouped cross-shell CTest regex then
+reproduced PIT-0001; separate literal test names produced the valid lint gate.
+Neither wrapper/configuration failure was counted as the behavior RED.
+
+Independent review reported P0=0, P1=0 and one explicit P2: selecting this
+temporary Adapter in a test URDF before the next microcycle would bypass
+upstream lifecycle, interface-export, and mode-switch behavior. Product and
+test transformers therefore remain forbidden from selecting it until complete
+parameter/return parity is behavior-tested.
+
 ## VN-0011A observed crash evidence
 
 | Case | Expected threshold | Observed result |

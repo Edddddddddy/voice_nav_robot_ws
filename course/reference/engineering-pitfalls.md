@@ -61,6 +61,7 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0051 | One launch test intentionally starts both valid and invalid processes | Are exit codes asserted per exact launch action instead of globally? | Guarded |
 | PIT-0052 | An evidence/DDS failure prevents the direct safety-zero fallback | Can fault recording itself throw before the zero publisher is called? | Guarded |
 | PIT-0053 | Jazzy rejects `rclcpp::Time::to_msg()` while wiring a message stamp | Was an API from another ROS distribution assumed instead of compiling the target? | Guarded |
+| PIT-0054 | CMake rejects a target after `ament_*` wiring with a plain/keyword signature conflict | Did a later `target_link_libraries(... PRIVATE ...)` mix styles with an ament macro's plain call? | Guarded |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -120,6 +121,12 @@ errors before any product test ran. The valid RED used the explicit path
 Bash as syntax near `(`; separate literal test names remained the repair. In
 both cases `git status` confirmed that the wrapper failure had not mutated the
 repository, and neither event was counted as product RED.
+
+The Adapter GREEN lint attempt reproduced the grouped-regex failure a third
+time: a cross-shell `ctest -R "a|b|c"` lost its quote boundary, ran one test,
+then treated the remaining names as shell pipelines. Four separate literal
+CTest invocations replaced it; all passed. This was wrapper evidence only and
+did not alter the focused Adapter result.
 
 ## PIT-0002: WSL transport warnings are not the command result
 
@@ -1352,3 +1359,28 @@ a ROS Adapter. On Jazzy, explicitly convert with
 its integer `sec` and `nanosec` fields; do not reconstruct the stamp through
 floating-point seconds. The corrected package build, Node launch tests, and
 format/static-analysis gate must all pass before the Adapter is committed.
+
+## PIT-0054: Ament CMake fixes the link-signature style per target
+
+**Symptom.** CMake configuration fails with `The plain signature for
+target_link_libraries has already been used` after a new direct Gazebo library
+is linked with `PRIVATE`.
+
+**Cause.** On Jazzy, both `ament_target_dependencies()` and
+`ament_add_gtest()` internally call the plain `target_link_libraries` form.
+CMake forbids mixing that form with the keyword form (`PRIVATE`, `PUBLIC`, or
+`INTERFACE`) for the same target.
+
+**Guardrail.** Once an ament macro has wired a target, add direct imported
+targets with the plain form too:
+
+```cmake
+ament_target_dependencies(target dependency)
+target_link_libraries(target gz-sim8::gz-sim8)
+```
+
+Force package reconfiguration and require the real target to compile. Do not
+drop direct dependencies or hide them transitively merely to avoid the style
+conflict. VN-0011A first exposed this while linking both the test-only Gazebo
+hardware Adapter and its GTest; using one plain form per target produced the
+focused plugin-load GREEN.

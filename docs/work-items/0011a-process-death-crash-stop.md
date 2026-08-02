@@ -12,11 +12,12 @@
 
 **Capability state:** In progress. The exact-action/exact-exit CrashLedger, Gate
 output transaction, Core-owned transition matrix, one-shot transition
-capability, same-process POSIX attachment checks, and real parent/child
-shared-memory publication/lifetime guard are complete. The current
-`voice_nav_mission` package gate is 16/16 GREEN. Node composition and final
-publisher integration, evidence analysis, the Gazebo Adapter, repository
-GREEN, product crash runs, the final local gate, PR, and CI remain open.
+capability, POSIX attachment/lifetime proof, and Runtime-owned final publisher
+composition are complete. The current `voice_nav_mission` package gate is
+18/18 GREEN. Real pluginlib discovery now constructs the public-Interface test
+Adapter and its pinned upstream plugin. Full forwarding/observation behavior,
+the hardware-write ledger, evidence policy and composition, repository GREEN,
+product crash runs, the final local gate, PR, and CI remain open.
 
 ## Immutable base
 
