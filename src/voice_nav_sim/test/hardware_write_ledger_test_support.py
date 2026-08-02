@@ -48,9 +48,12 @@ CONTROL_OFFSET = HEADER_BYTES
 CONTROL_RESPONSE_TICKET_WORD = 14
 CONTROL_REQUEST_TICKET_WORD = 15
 BANK_STATE_ACTIVE = 1
+BANK_STATE_FREE = 0
 CONTROL_OP_ARM = 1
 CONTROL_FLAG_ZERO_REQUIRED = 1
 CONTROL_RESPONSE_OK = 1
+CONTROL_RESPONSE_INVALID = 2
+FAULT_SEQUENCE = 1 << 0
 FAULT_SIM_STAMP = 1 << 3
 FAULT_PROTOCOL = 1 << 7
 
@@ -265,6 +268,14 @@ class HardwareWriteLedgerRegionOwner:
         header = list(struct.unpack_from(HEADER_FORMAT, self.region, 0))
         header[23] ^= 1
         struct.pack_into(HEADER_FORMAT, self.region, 0, *header)
+
+    def force_last_completed_write_seq(self, write_seq):
+        """Release-store a sequence boundary for exhaustion fault injection."""
+        self.atomic.store_release(
+            self.region,
+            LAST_COMPLETED_WRITE_SEQ_WORD * 8,
+            write_seq,
+        )
 
     def wait_for_writer(self, expected_pid, timeout=3.0):
         """Wait until the exact child PID owns the Writer claim."""

@@ -22,10 +22,13 @@ import sys
 
 from hardware_write_ledger_test_support import (
     BANK_STATE_ACTIVE,
+    BANK_STATE_FREE,
     CONTROL_FLAG_ZERO_REQUIRED,
     CONTROL_OP_ARM,
+    CONTROL_RESPONSE_INVALID,
     CONTROL_RESPONSE_OK,
     FAULT_PROTOCOL,
+    FAULT_SEQUENCE,
     FAULT_SIM_STAMP,
     GLOBAL_ORACLE_FAULTS_WORD,
     HardwareWriteLedgerRegionOwner,
@@ -587,6 +590,65 @@ def test_decreasing_sim_stamp_latches_fault_without_overwrite(probe):
             close_owned_process_pipes(process)
 
 
+def test_sequence_exhaustion_rejects_arm_before_bank_activation(probe):
+    """Prove sequence exhaustion cannot leave an impossible ACTIVE bank."""
+    with HardwareWriteLedgerRegionOwner(
+        generation=82,
+        segment_capacity=4,
+        page_segment_limit=2,
+    ) as owner:
+        process = spawn_probe(probe, owner)
+        try:
+            require(
+                owner.wait_for_writer(process.pid) == process.pid,
+                'exhaustion probe Writer PID mismatch',
+            )
+            require(
+                read_owned_line(process, 'READY') == 'READY',
+                'exhaustion probe did not publish READY',
+            )
+            owner.unlink_name()
+            owner.force_last_completed_write_seq((1 << 64) - 1)
+            request_ticket = owner.post_arm(
+                interval_id=96,
+                segment_budget=2,
+                invocation_budget=2,
+                require_zero_commands=True,
+            )
+            process.stdin.write('BEGIN 100\n')
+            process.stdin.flush()
+            require(
+                read_owned_line(process, 'BEGAN') == 'BEGAN 0',
+                'sequence exhaustion fabricated a write ticket',
+            )
+            response = owner.wait_response(request_ticket)
+            require(
+                response[9] == CONTROL_RESPONSE_INVALID,
+                f'exhausted ARM response was {response[9]}',
+            )
+            require(
+                owner.snapshot_bank(0)[0] == BANK_STATE_FREE and
+                owner.snapshot_bank(1)[0] == BANK_STATE_FREE,
+                'sequence exhaustion left an impossible ACTIVE bank',
+            )
+            require(
+                owner.load_header_word(GLOBAL_ORACLE_FAULTS_WORD) &
+                FAULT_SEQUENCE,
+                'sequence exhaustion did not latch its global fault',
+            )
+            process.stdin.write('EXIT\n')
+            process.stdin.flush()
+            return_code = process.wait(timeout=3.0)
+            stderr = process.stderr.read()
+            require(
+                return_code == 0,
+                f'exhaustion probe exited {return_code}: {stderr}',
+            )
+        finally:
+            terminate_owned_process(process)
+            close_owned_process_pipes(process)
+
+
 def main():
     """Run the bounded cross-process ledger behavior slices."""
     if len(sys.argv) != 2:
@@ -598,6 +660,7 @@ def main():
     test_arm_excludes_prior_write_and_preserves_multiple_records(probe)
     test_same_ticket_different_payload_replay_latches_fault(probe)
     test_decreasing_sim_stamp_latches_fault_without_overwrite(probe)
+    test_sequence_exhaustion_rejects_arm_before_bank_activation(probe)
 
 
 if __name__ == '__main__':

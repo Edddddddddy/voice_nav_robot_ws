@@ -65,7 +65,7 @@ int execute_command(
       return 69;
     }
     pending_ticket = ledger.writer().begin_write(sim_stamp_ns);
-    has_pending_ticket = true;
+    has_pending_ticket = pending_ticket.write_seq != 0U;
     keep_running = true;
     std::cout << "BEGAN " << pending_ticket.write_seq << std::endl;
     return 0;
