@@ -16,8 +16,14 @@ if(BUILD_TESTING)
   find_package(ament_cmake_pytest REQUIRED)
   find_package(ament_cmake_ros REQUIRED)
   find_package(ament_lint_auto REQUIRED)
+  find_package(gz_sim_vendor REQUIRED)
+  find_package(gz-sim8 REQUIRED)
+  find_package(gz_ros2_control REQUIRED)
+  find_package(hardware_interface REQUIRED)
   find_package(launch_testing_ament_cmake REQUIRED)
+  find_package(pluginlib REQUIRED)
   find_package(rclcpp REQUIRED)
+  find_package(rclcpp_lifecycle REQUIRED)
   find_package(rmw REQUIRED)
   find_package(tf2_msgs REQUIRED)
 
@@ -50,6 +56,27 @@ if(BUILD_TESTING)
   ament_add_gtest(
     tf_ownership_evaluator_test
     test/tf_ownership_evaluator_test.cpp
+  )
+
+  ament_add_gtest(
+    journaled_gazebo_sim_system_adapter_test
+    test/journaled_gazebo_sim_system_adapter_test.cpp
+  )
+  target_compile_features(
+    journaled_gazebo_sim_system_adapter_test
+    PRIVATE cxx_std_17
+  )
+  ament_target_dependencies(
+    journaled_gazebo_sim_system_adapter_test
+    gz_ros2_control
+    hardware_interface
+    pluginlib
+    rclcpp
+    rclcpp_lifecycle
+  )
+  target_link_libraries(
+    journaled_gazebo_sim_system_adapter_test
+    gz-sim8::gz-sim8
   )
 
   ament_add_pytest_test(
