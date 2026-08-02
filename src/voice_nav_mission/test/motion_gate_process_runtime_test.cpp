@@ -50,6 +50,41 @@ std::string descriptor_for(const OwnedJournalRegion & owner)
   return descriptor.str();
 }
 
+struct RecordingFinalPublisher
+{
+  explicit RecordingFinalPublisher(OwnedJournalRegion * journal_owner)
+  : owner(journal_owner)
+  {
+  }
+
+  OwnedJournalRegion * owner{nullptr};
+  std::vector<FinalOutputFrame> frames;
+  std::vector<std::uint64_t> phases_during_publish;
+
+  static void publish(void * context, const FinalOutputFrame & frame)
+  {
+    auto & self = *static_cast<RecordingFinalPublisher *>(context);
+    self.frames.push_back(frame);
+    if (self.owner == nullptr) {
+      return;
+    }
+    const auto claimed = gate_event_journal_load_acquire(
+      self.owner->header().claimed_slots);
+    if (claimed == 0U) {
+      self.phases_during_publish.push_back(0U);
+      return;
+    }
+    self.phases_during_publish.push_back(
+      gate_event_journal_load_acquire(
+        self.owner->slot(claimed - 1U).phase));
+  }
+
+  [[nodiscard]] FinalOutputPublisher adapter() noexcept
+  {
+    return FinalOutputPublisher{&RecordingFinalPublisher::publish, this};
+  }
+};
+
 TEST(MotionGateProcessRuntimeTest, BothEmptyParametersDisableAttachment)
 {
   const auto config = parse_gate_event_journal_test_parameters(
@@ -204,6 +239,126 @@ TEST(MotionGateProcessRuntimeTest, AttachedRuntimeOwnsCoreBeforeMapping)
   EXPECT_NE(slot.intent_monotonic_ns, 0U);
   EXPECT_GE(slot.transition_linearization_ns, slot.intent_monotonic_ns);
   EXPECT_GE(slot.commit_monotonic_ns, slot.transition_linearization_ns);
+}
+
+TEST(MotionGateProcessRuntimeTest, JournaledSuccessCommitsBeforeCountersAdvance)
+{
+  const std::string gate_instance_id =
+    "0123456789abcdef0123456789abcdef";
+  OwnedJournalRegion owner(4U);
+  MotionGateProcessRuntime runtime(
+    MotionGateConfig{},
+    gate_instance_id,
+    GateEventJournalTestParameters{
+      owner.name(), descriptor_for(owner)});
+  RecordingFinalPublisher publisher{&owner};
+
+  const auto result = runtime.publish_final_command(
+    FinalOutputTime{true, 7, 9U}, publisher.adapter());
+
+  ASSERT_EQ(publisher.frames.size(), 1U);
+  EXPECT_TRUE(publisher.frames[0].command.is_zero());
+  EXPECT_EQ(publisher.frames[0].stamp_sec, 7);
+  EXPECT_EQ(publisher.frames[0].stamp_nanosec, 9U);
+  ASSERT_EQ(publisher.phases_during_publish.size(), 1U);
+  EXPECT_EQ(
+    publisher.phases_during_publish[0],
+    VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_INTENT);
+  EXPECT_TRUE(result.published);
+  EXPECT_TRUE(result.zero_published);
+  EXPECT_TRUE(result.journal_committed);
+  EXPECT_FALSE(result.fallback_attempted);
+  EXPECT_EQ(result.failure, FinalOutputFailure::None);
+  EXPECT_EQ(result.state.output_publish_seq, 1U);
+  EXPECT_EQ(result.state.zero_publish_seq, 1U);
+  EXPECT_TRUE(result.state.last_publication_was_zero);
+  EXPECT_EQ(result.locally_consumed_terminal_cause_seq, 0U);
+
+  ASSERT_EQ(
+    gate_event_journal_load_acquire(owner.header().claimed_slots),
+    1U);
+  const auto & slot = owner.slot(0U);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(slot.phase),
+    VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_COMMITTED);
+  EXPECT_EQ(
+    slot.record_kind,
+    VOICE_NAV_GATE_EVENT_JOURNAL_KIND_OUTPUT_ATTEMPT);
+  EXPECT_EQ(slot.event_code, 1U);
+  EXPECT_EQ(slot.reason, static_cast<std::uint64_t>(Reason::None));
+  EXPECT_EQ(slot.output_attempt_seq, 1U);
+  EXPECT_EQ(slot.intended_output_seq, 1U);
+  EXPECT_EQ(slot.ros_stamp_sec_bits, 7U);
+  EXPECT_EQ(slot.ros_stamp_nanosec, 9U);
+  EXPECT_EQ(slot.linear_x_bits, 0U);
+  EXPECT_EQ(slot.angular_z_bits, 0U);
+  EXPECT_EQ(slot.gate_instance_hi, UINT64_C(0x0123456789abcdef));
+  EXPECT_EQ(slot.gate_instance_lo, UINT64_C(0x0123456789abcdef));
+  EXPECT_EQ(slot.cause_transition_journal_seq, 0U);
+  EXPECT_EQ(slot.flags, 0U);
+  EXPECT_EQ(slot.intent_checksum, gate_event_journal_intent_checksum(slot));
+  EXPECT_EQ(slot.commit_checksum, gate_event_journal_commit_checksum(slot));
+}
+
+TEST(MotionGateProcessRuntimeTest, TerminalZeroBindsCauseExactlyOnce)
+{
+  const std::string gate_instance_id =
+    "0123456789abcdef0123456789abcdef";
+  OwnedJournalRegion owner(8U);
+  MotionGateProcessRuntime runtime(
+    MotionGateConfig{},
+    gate_instance_id,
+    GateEventJournalTestParameters{
+      owner.name(), descriptor_for(owner)});
+  const auto now = MotionGateCore::SteadyTimePoint{} +
+    std::chrono::milliseconds{10};
+  const auto prepared = runtime.core().prepare(
+    ControlRequest{
+      Operation::Prepare,
+      "00000000000000000000000000000001",
+      gate_instance_id,
+      0U,
+      ""},
+    now);
+  ASSERT_EQ(prepared.code, ResultCode::Applied);
+  const auto inhibited = runtime.core().inhibit(
+    ControlRequest{
+      Operation::Inhibit,
+      "00000000000000000000000000000002",
+      gate_instance_id,
+      prepared.control_seq,
+      prepared.lease_id},
+    now);
+  ASSERT_EQ(inhibited.code, ResultCode::Applied);
+  ASSERT_EQ(
+    runtime.core().snapshot().output_cause_transition_journal_seq,
+    2U);
+  RecordingFinalPublisher publisher{&owner};
+
+  const auto first = runtime.publish_final_command(
+    FinalOutputTime{true, 11, 12U}, publisher.adapter());
+  const auto second = runtime.publish_final_command(
+    FinalOutputTime{true, 13, 14U}, publisher.adapter());
+
+  ASSERT_EQ(publisher.frames.size(), 2U);
+  EXPECT_TRUE(publisher.frames[0].command.is_zero());
+  EXPECT_TRUE(publisher.frames[1].command.is_zero());
+  EXPECT_TRUE(first.journal_committed);
+  EXPECT_TRUE(second.journal_committed);
+  EXPECT_EQ(first.locally_consumed_terminal_cause_seq, 2U);
+  EXPECT_EQ(second.locally_consumed_terminal_cause_seq, 0U);
+  EXPECT_EQ(first.state.output_publish_seq, 1U);
+  EXPECT_EQ(first.state.zero_publish_seq, 1U);
+  EXPECT_EQ(second.state.output_publish_seq, 2U);
+  EXPECT_EQ(second.state.zero_publish_seq, 2U);
+  EXPECT_EQ(owner.slot(2U).cause_transition_journal_seq, 2U);
+  EXPECT_EQ(owner.slot(3U).cause_transition_journal_seq, 0U);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(owner.slot(2U).phase),
+    VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_COMMITTED);
+  EXPECT_EQ(
+    gate_event_journal_load_acquire(owner.slot(3U).phase),
+    VOICE_NAV_GATE_EVENT_JOURNAL_PHASE_COMMITTED);
 }
 
 }  // namespace
