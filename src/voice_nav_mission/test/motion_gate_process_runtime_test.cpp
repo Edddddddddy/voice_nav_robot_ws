@@ -250,7 +250,7 @@ TEST(MotionGateProcessRuntimeTest, JournaledSuccessCommitsBeforeCountersAdvance)
     MotionGateConfig{},
     gate_instance_id,
     GateEventJournalTestParameters{
-      owner.name(), descriptor_for(owner)});
+        owner.name(), descriptor_for(owner)});
   RecordingFinalPublisher publisher{&owner};
 
   const auto result = runtime.publish_final_command(
@@ -309,25 +309,25 @@ TEST(MotionGateProcessRuntimeTest, TerminalZeroBindsCauseExactlyOnce)
     MotionGateConfig{},
     gate_instance_id,
     GateEventJournalTestParameters{
-      owner.name(), descriptor_for(owner)});
+        owner.name(), descriptor_for(owner)});
   const auto now = MotionGateCore::SteadyTimePoint{} +
     std::chrono::milliseconds{10};
   const auto prepared = runtime.core().prepare(
     ControlRequest{
-      Operation::Prepare,
-      "00000000000000000000000000000001",
-      gate_instance_id,
-      0U,
-      ""},
+        Operation::Prepare,
+        "00000000000000000000000000000001",
+        gate_instance_id,
+        0U,
+        ""},
     now);
   ASSERT_EQ(prepared.code, ResultCode::Applied);
   const auto inhibited = runtime.core().inhibit(
     ControlRequest{
-      Operation::Inhibit,
-      "00000000000000000000000000000002",
-      gate_instance_id,
-      prepared.control_seq,
-      prepared.lease_id},
+        Operation::Inhibit,
+        "00000000000000000000000000000002",
+        gate_instance_id,
+        prepared.control_seq,
+        prepared.lease_id},
     now);
   ASSERT_EQ(inhibited.code, ResultCode::Applied);
   ASSERT_EQ(

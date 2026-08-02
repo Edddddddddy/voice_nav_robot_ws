@@ -30,6 +30,7 @@ namespace voice_nav_mission
 {
 
 class GateTransitionJournalBinding;
+class MotionGateProcessRuntime;
 
 inline constexpr std::size_t kWriterGidSize = 16U;
 using WriterGid = std::array<std::uint8_t, kWriterGidSize>;
@@ -239,6 +240,8 @@ public:
   void force_fault(Reason reason, std::string detail);
 
 private:
+  friend class MotionGateProcessRuntime;
+
   enum class JournalFailurePolicy : std::uint8_t
   {
     RejectMutation = 0,
