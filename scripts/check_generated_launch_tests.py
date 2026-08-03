@@ -23,6 +23,10 @@ EXPECTED_TESTS = {
         },
     },
     "voice_nav_sim": {
+        "test_test_fault_producer_pair.py": {
+            "source": "test_fault_producer_pair.py",
+            "timeout": 30.0,
+        },
         "test_test_journaled_gazebo_hardware_write.py": {
             "source": "test_journaled_gazebo_hardware_write.py",
             "timeout": 180.0,

@@ -45,11 +45,14 @@
   <test_depend>python3-pytest</test_depend>
   <test_depend>rclcpp</test_depend>
   <test_depend>rclcpp_lifecycle</test_depend>
+  <test_depend>rcl_interfaces</test_depend>
   <test_depend>rclpy</test_depend>
   <test_depend>rmw</test_depend>
   <test_depend>sensor_msgs</test_depend>
+  <test_depend>std_msgs</test_depend>
   <test_depend>tf2_ros</test_depend>
   <test_depend>tf2_msgs</test_depend>
+  <test_depend>voice_nav_mission</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>

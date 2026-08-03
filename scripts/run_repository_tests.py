@@ -34,6 +34,66 @@ REQUIRED_TEST_IDS: frozenset[str] = frozenset(
             "test_repository_crash_stop_contract_passes"
         ),
         (
+            "test_fault_producer_contract.FaultProducerContractTest."
+            "test_repository_contract_passes"
+        ),
+        (
+            "test_fault_producer_contract.FaultProducerContractTest."
+            "test_candidate_fqn_is_not_configurable"
+        ),
+        (
+            "test_fault_producer_contract.FaultProducerContractTest."
+            "test_actions_cannot_respawn"
+        ),
+        (
+            "test_fault_producer_contract.FaultProducerContractTest."
+            "test_actions_cannot_hide_identity_in_a_namespace"
+        ),
+        (
+            "test_fault_producer_contract.FaultProducerContractTest."
+            "test_candidate_cannot_own_control_client"
+        ),
+        (
+            "test_fault_producer_contract.FaultProducerContractTest."
+            "test_control_client_cannot_move_into_candidate_else"
+        ),
+        (
+            "test_fault_producer_contract.FaultProducerContractTest."
+            "test_authority_must_renew"
+        ),
+        (
+            "test_fault_producer_contract.FaultProducerContractTest."
+            "test_candidate_must_acknowledge_state_before_prepare"
+        ),
+        (
+            "test_fault_producer_contract.FaultProducerContractTest."
+            "test_final_controller_must_exist_before_prepare"
+        ),
+        (
+            "test_fault_producer_contract.FaultProducerContractTest."
+            "test_parent_cannot_import_control_protocol"
+        ),
+        (
+            "test_fault_producer_contract.FaultProducerContractTest."
+            "test_launch_test_must_outlive_both_leases"
+        ),
+        (
+            "test_fault_producer_contract.FaultProducerContractTest."
+            "test_launch_test_cannot_return_before_sustain_window"
+        ),
+        (
+            "test_fault_producer_contract.FaultProducerContractTest."
+            "test_protocol_evidence_cannot_be_decorated_as_skipped"
+        ),
+        (
+            "test_fault_producer_contract.FaultProducerContractTest."
+            "test_cmake_timeout_is_pinned"
+        ),
+        (
+            "test_fault_producer_contract.FaultProducerContractTest."
+            "test_readiness_dependency_is_direct"
+        ),
+        (
             "test_motion_gate_contract.MotionGateContractTest."
             "test_repository_motion_gate_contract_passes"
         ),

@@ -48,6 +48,60 @@ MOTION_GATE_NODE_JOURNAL_CRITICAL_CASES = (
         "test_exit_codes_match_configuration_contract",
     ),
 )
+FAULT_PRODUCER_PAIR_CRITICAL_CASES = (
+    (
+        "voice_nav_sim.FaultProducerPairTest",
+        "test_independent_helpers_arm_gate_without_parent_control",
+    ),
+    (
+        "voice_nav_sim.FaultProducerPairShutdownTest",
+        "test_all_fixture_processes_exit_cleanly",
+    ),
+)
+SIMULATION_CONTROL_CRITICAL_CASES = (
+    (
+        "voice_nav_sim.LaunchStartupPolicyTest",
+        "test_startup_handler_stops_after_failed_stage",
+    ),
+    (
+        "voice_nav_sim.SimulationControlTest",
+        "test_stamped_drive_odometry_tf_and_consumer_timeout",
+    ),
+    (
+        "voice_nav_sim.SimulationControlShutdownTest",
+        "test_all_launch_managed_processes_exit_cleanly",
+    ),
+)
+SIMULATION_INTERFACES_CRITICAL_CASES = (
+    (
+        "voice_nav_sim.SimulationInterfacesTest",
+        "test_perception_odom_tf_and_ownership_contract",
+    ),
+    (
+        "voice_nav_sim.SimulationInterfacesShutdownTest",
+        "test_all_launch_managed_processes_exit_cleanly",
+    ),
+)
+TF_OWNERSHIP_CONFLICT_CRITICAL_CASES = (
+    (
+        "voice_nav_sim.TfOwnershipConflictTest",
+        "test_normal_audit_rejects_and_sentinel_proves_the_conflict",
+    ),
+)
+SIM_CRITICAL_FILES = {
+    "test_test_fault_producer_pair.py.xunit.xml": (
+        FAULT_PRODUCER_PAIR_CRITICAL_CASES
+    ),
+    "test_test_simulation_control.py.xunit.xml": (
+        SIMULATION_CONTROL_CRITICAL_CASES
+    ),
+    "test_test_simulation_interfaces.py.xunit.xml": (
+        SIMULATION_INTERFACES_CRITICAL_CASES
+    ),
+    "test_test_tf_ownership_conflict.py.xunit.xml": (
+        TF_OWNERSHIP_CONFLICT_CRITICAL_CASES
+    ),
+}
 
 
 def write_xunit(path: Path, *, tests: int, skipped: int = 0) -> None:
@@ -88,6 +142,25 @@ def write_launch_xunit(
         ),
         encoding="utf-8",
     )
+
+
+def write_sim_critical_inventory(
+    results: Path,
+    *,
+    omit: frozenset[str] = frozenset(),
+    skipped: tuple[str, tuple[str, str]] | None = None,
+) -> None:
+    for filename, cases in SIM_CRITICAL_FILES.items():
+        if filename in omit:
+            continue
+        skipped_case = None
+        if skipped is not None and skipped[0] == filename:
+            skipped_case = skipped[1]
+        write_launch_xunit(
+            results / filename,
+            cases,
+            skipped_case=skipped_case,
+        )
 
 
 def write_mission_launch_evidence(results: Path) -> None:
@@ -407,34 +480,10 @@ class ScopedTestResultsTest(unittest.TestCase):
                 / "test_results"
                 / "voice_nav_sim"
             )
-            write_launch_xunit(
-                results / "test_test_simulation_control.py.xunit.xml",
-                (
-                    (
-                        "voice_nav_sim.LaunchStartupPolicyTest",
-                        "test_startup_handler_stops_after_failed_stage",
-                    ),
-                    (
-                        "voice_nav_sim.SimulationControlTest",
-                        "test_stamped_drive_odometry_tf_and_consumer_timeout",
-                    ),
-                    (
-                        "voice_nav_sim.SimulationControlShutdownTest",
-                        "test_all_launch_managed_processes_exit_cleanly",
-                    ),
-                ),
-            )
-            write_launch_xunit(
-                results / "test_test_simulation_interfaces.py.xunit.xml",
-                (
-                    (
-                        "voice_nav_sim.SimulationInterfacesTest",
-                        "test_perception_odom_tf_and_ownership_contract",
-                    ),
-                    (
-                        "voice_nav_sim.SimulationInterfacesShutdownTest",
-                        "test_all_launch_managed_processes_exit_cleanly",
-                    ),
+            write_sim_critical_inventory(
+                results,
+                omit=frozenset(
+                    {"test_test_tf_ownership_conflict.py.xunit.xml"}
                 ),
             )
 
@@ -454,6 +503,7 @@ class ScopedTestResultsTest(unittest.TestCase):
                 / "test_results"
                 / "voice_nav_sim"
             )
+            write_sim_critical_inventory(results)
             write_launch_xunit(
                 results / "test_test_simulation_control.py.xunit.xml",
                 (
@@ -467,36 +517,54 @@ class ScopedTestResultsTest(unittest.TestCase):
                     ),
                 ),
             )
-            write_launch_xunit(
-                results / "test_test_simulation_interfaces.py.xunit.xml",
-                (
-                    (
-                        "voice_nav_sim.SimulationInterfacesTest",
-                        "test_perception_odom_tf_and_ownership_contract",
-                    ),
-                    (
-                        "voice_nav_sim.SimulationInterfacesShutdownTest",
-                        "test_all_launch_managed_processes_exit_cleanly",
-                    ),
-                ),
+
+            completed = self.run_reporter(build_base, "voice_nav_sim")
+
+            self.assertEqual(completed.returncode, 2, completed.stdout)
+            self.assertIn("inventory is incomplete", completed.stderr)
+
+    def test_report_requires_fault_producer_pair_launch_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            results = (
+                build_base
+                / "voice_nav_sim"
+                / "test_results"
+                / "voice_nav_sim"
             )
-            write_launch_xunit(
-                results / "test_test_tf_ownership_conflict.py.xunit.xml",
-                (
-                    (
-                        "voice_nav_sim.TfOwnershipConflictTest",
-                        (
-                            "test_normal_audit_rejects_and_sentinel_"
-                            "proves_the_conflict"
-                        ),
-                    ),
+            write_sim_critical_inventory(
+                results,
+                omit=frozenset(
+                    {"test_test_fault_producer_pair.py.xunit.xml"}
                 ),
             )
 
             completed = self.run_reporter(build_base, "voice_nav_sim")
 
             self.assertEqual(completed.returncode, 2, completed.stdout)
-            self.assertIn("inventory is incomplete", completed.stderr)
+            self.assertIn("critical launch evidence", completed.stderr)
+
+    def test_report_rejects_skipped_fault_producer_pair_case(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            results = (
+                build_base
+                / "voice_nav_sim"
+                / "test_results"
+                / "voice_nav_sim"
+            )
+            write_sim_critical_inventory(
+                results,
+                skipped=(
+                    "test_test_fault_producer_pair.py.xunit.xml",
+                    FAULT_PRODUCER_PAIR_CRITICAL_CASES[0],
+                ),
+            )
+
+            completed = self.run_reporter(build_base, "voice_nav_sim")
+
+            self.assertEqual(completed.returncode, 2, completed.stdout)
+            self.assertIn("critical launch evidence", completed.stderr)
 
     def test_report_rejects_inconsistent_critical_launch_inventory(
         self,

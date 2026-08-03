@@ -99,6 +99,24 @@ CRITICAL_LAUNCH_CASES: dict[
     "voice_nav_sim": {
         Path(
             "test_results/voice_nav_sim/"
+            "test_test_fault_producer_pair.py.xunit.xml"
+        ): frozenset(
+            {
+                (
+                    "voice_nav_sim.FaultProducerPairTest",
+                    (
+                        "test_independent_helpers_arm_gate_without_"
+                        "parent_control"
+                    ),
+                ),
+                (
+                    "voice_nav_sim.FaultProducerPairShutdownTest",
+                    "test_all_fixture_processes_exit_cleanly",
+                ),
+            }
+        ),
+        Path(
+            "test_results/voice_nav_sim/"
             "test_test_simulation_control.py.xunit.xml"
         ): frozenset(
             {

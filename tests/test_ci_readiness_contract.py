@@ -43,6 +43,7 @@ GENERATED_CHECKER = (
 GENERATED_MISSION_WORKING_DIRECTORY = (
     "/workspace/build/voice_nav_mission"
 )
+GENERATED_SIM_WORKING_DIRECTORY = "/workspace/build/voice_nav_sim"
 
 
 def load_generated_checker():
@@ -57,7 +58,12 @@ def load_generated_checker():
     return module
 
 
-def generated_launch_test(name: str, source: str, timeout: float) -> dict:
+def generated_launch_test(
+    package: str,
+    name: str,
+    source: str,
+    timeout: float,
+) -> dict:
     return {
         "name": name,
         "command": [
@@ -69,7 +75,7 @@ def generated_launch_test(name: str, source: str, timeout: float) -> dict:
             ),
             "/tmp/result.xunit.xml",
             "--command",
-            f"/workspace/src/voice_nav_mission/test/{source}",
+            f"/workspace/src/{package}/test/{source}",
         ],
         "properties": [
             {
@@ -91,7 +97,7 @@ def generated_launch_test(name: str, source: str, timeout: float) -> dict:
             {"name": "TIMEOUT", "value": timeout},
             {
                 "name": "WORKING_DIRECTORY",
-                "value": GENERATED_MISSION_WORKING_DIRECTORY,
+                "value": f"/workspace/build/{package}",
             },
         ],
     }
@@ -102,13 +108,53 @@ def generated_mission_payload():
         "kind": "ctestInfo",
         "tests": [
             generated_launch_test(
+                "voice_nav_mission",
                 "test_test_motion_gate_node.py",
                 "test_motion_gate_node.py",
                 60.0,
             ),
             generated_launch_test(
+                "voice_nav_mission",
                 "test_test_motion_gate_node_journal.py",
                 "test_motion_gate_node_journal.py",
+                30.0,
+            ),
+        ],
+    }
+
+
+def generated_sim_payload():
+    return {
+        "kind": "ctestInfo",
+        "tests": [
+            generated_launch_test(
+                "voice_nav_sim",
+                "test_test_fault_producer_pair.py",
+                "test_fault_producer_pair.py",
+                30.0,
+            ),
+            generated_launch_test(
+                "voice_nav_sim",
+                "test_test_journaled_gazebo_hardware_write.py",
+                "test_journaled_gazebo_hardware_write.py",
+                180.0,
+            ),
+            generated_launch_test(
+                "voice_nav_sim",
+                "test_test_simulation_control.py",
+                "test_simulation_control.py",
+                120.0,
+            ),
+            generated_launch_test(
+                "voice_nav_sim",
+                "test_test_simulation_interfaces.py",
+                "test_simulation_interfaces.py",
+                120.0,
+            ),
+            generated_launch_test(
+                "voice_nav_sim",
+                "test_test_tf_ownership_conflict.py",
+                "test_tf_ownership_conflict.py",
                 30.0,
             ),
         ],
@@ -242,6 +288,7 @@ class CiReadinessContractTest(unittest.TestCase):
         )
 
         self.assertEqual(sim_targets, {
+            "test_test_fault_producer_pair.py",
             "test_test_journaled_gazebo_hardware_write.py",
             "test_test_simulation_control.py",
             "test_test_simulation_interfaces.py",
@@ -281,7 +328,7 @@ class CiReadinessContractTest(unittest.TestCase):
 
     def test_launch_tests_use_official_process_scoped_domain_leases(self):
         expected_launch_test_counts = {
-            SIMULATION_CMAKE: 4,
+            SIMULATION_CMAKE: 5,
             MISSION_CMAKE: 2,
             BRINGUP_CMAKE: 1,
         }
@@ -347,6 +394,11 @@ class CiReadinessContractTest(unittest.TestCase):
                 GENERATED_MISSION_WORKING_DIRECTORY
             ),
         )
+        checker.validate_package_payload(
+            "voice_nav_sim",
+            generated_sim_payload(),
+            expected_working_directory=GENERATED_SIM_WORKING_DIRECTORY,
+        )
 
     def test_generated_metadata_requires_node_journal_inventory(self):
         checker = load_generated_checker()
@@ -362,6 +414,20 @@ class CiReadinessContractTest(unittest.TestCase):
                 expected_working_directory=(
                     GENERATED_MISSION_WORKING_DIRECTORY
                 ),
+            )
+
+    def test_generated_metadata_requires_fault_producer_pair_inventory(self):
+        checker = load_generated_checker()
+        payload = generated_sim_payload()
+        payload["tests"].pop(0)
+
+        with self.assertRaises(
+            checker.GeneratedLaunchTestContractError,
+        ):
+            checker.validate_package_payload(
+                "voice_nav_sim",
+                payload,
+                expected_working_directory=GENERATED_SIM_WORKING_DIRECTORY,
             )
 
     def test_generated_metadata_rejects_isolation_override(self):

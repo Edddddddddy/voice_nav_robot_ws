@@ -27,6 +27,7 @@ if(BUILD_TESTING)
   find_package(rclcpp_lifecycle REQUIRED)
   find_package(rmw REQUIRED)
   find_package(tf2_msgs REQUIRED)
+  find_package(voice_nav_mission REQUIRED)
 
   add_library(
     voice_nav_sim_journaled_gazebo_sim_system_adapter SHARED
@@ -231,6 +232,11 @@ if(BUILD_TESTING)
     TARGETS voice_nav_sim_journaled_gazebo_sim_system_adapter
     DESTINATION lib
   )
+  install(
+    PROGRAMS test/fault_producer.py
+    DESTINATION lib/${PROJECT_NAME}
+    RENAME fault_producer_helper
+  )
 
   add_executable(
     tf_ownership_auditor
@@ -317,6 +323,11 @@ if(BUILD_TESTING)
     TIMEOUT 10
   )
   ament_add_pytest_test(
+    fault_producer_protocol_test
+    test/test_fault_producer_protocol.py
+    TIMEOUT 10
+  )
+  ament_add_pytest_test(
     crash_robot_description_test
     test/test_crash_robot_description.py
     TIMEOUT 10
@@ -326,6 +337,11 @@ if(BUILD_TESTING)
     PRIVATE test
   )
 
+  add_launch_test(
+    test/test_fault_producer_pair.py
+    TIMEOUT 30
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
+  )
   add_launch_test(
     test/test_simulation_control.py
     TIMEOUT 120
@@ -348,6 +364,7 @@ if(BUILD_TESTING)
   )
 
   set_tests_properties(
+    test_test_fault_producer_pair.py
     test_test_simulation_control.py
     test_test_journaled_gazebo_hardware_write.py
     test_test_simulation_interfaces.py
@@ -358,6 +375,7 @@ if(BUILD_TESTING)
       RUN_SERIAL TRUE
   )
   set_tests_properties(
+    test_test_fault_producer_pair.py
     test_test_simulation_control.py
     test_test_journaled_gazebo_hardware_write.py
     test_test_simulation_interfaces.py

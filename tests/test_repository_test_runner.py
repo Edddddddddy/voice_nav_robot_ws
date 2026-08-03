@@ -164,6 +164,14 @@ class RepositoryTestRunnerTest(unittest.TestCase):
                 "GazeboTeardownMutationTest.test_repository_contract_passes"
             ),
             (
+                "test_fault_producer_contract.FaultProducerContractTest."
+                "test_repository_contract_passes"
+            ),
+            (
+                "test_fault_producer_contract.FaultProducerContractTest."
+                "test_candidate_cannot_own_control_client"
+            ),
+            (
                 "test_repository_test_runner.RepositoryTestRunnerTest."
                 "test_empty_contract_suite_fails_the_run"
             ),
