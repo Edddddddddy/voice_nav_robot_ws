@@ -928,18 +928,78 @@ sustain the real Gate. It does not claim SIGKILL, terminal reason, latency,
 journal causality, wheel-zero, or physical-stationarity evidence; all observed
 crash rows below therefore remain `Not yet captured`.
 
+### Authority process-death Layer-2 checkpoint
+
+`7ed0941` registers and executes the first exact producer death. The durable
+tests-first inventory RED is
+`/tmp/vn_authority_death_inventory_red.log`: the expected authority-death
+target was absent, the launch target set lacked
+`test_test_authority_process_death.py`, and the isolated-runner count was
+`5 != 6`. After CMake and every generated/scoped evidence inventory were
+updated, the launch tracer used the real MotionGate plus two independent helper
+PIDs and killed only the exact authority action through the previously reviewed
+Adapter.
+
+The observer owns no Gate client and no publisher. It records callback receipt
+time before taking its lock, binds exactly one compatible `/collision_monitor`
+writer and its armed GID, obtains a fresh <=40 ms barrier with state/output ages
+<=20 ms, and starts latency only at exact `ProcessExited(-9)`. It then requires
+`AUTHORITY_EXPIRED`, empty lease/topic/GID, a new zero publish sequence, and at
+least 100 ms of zero output while the same candidate GID continues finite
+non-zero traffic. Shutdown accounting is exhaustive: MotionGate 0, authority
+-9, candidate 0.
+
+```text
+fresh authority repetitions: 5/5 passed
+exit->state ms: 248.924, 231.238, 232.850, 243.979, 242.579
+exit->zero ms:  249.086, 231.418, 232.965, 244.078, 242.670
+control_seq delta: 1 in every run
+fault-producer contract: 50/50 passed
+repository tests: 420/420 passed
+voice_nav_sim package: 22/22 CTests
+voice_nav_sim scoped xUnit: 152 total, 0 errors, 0 failures, 18 skipped
+independent terminal review: two reviewers, P0=0, P1=0
+protected Gazebo: 3631225|34712103|gz sim server (unchanged)
+```
+
+Independent review repeatedly mutated the test rather than trusting assertion
+text. It exposed callback-under-lock timestamp inversion, deadline scan order,
+fabricated Adapter time, unregistered starred actions, publisher aliases and
+reflection, assertion rebinding, ambiguous endpoint sets, and collection
+truncation/deletion. Semantic AST checks plus a review-locked full-tracer AST
+SHA-256 now fail closed; [PIT-0033](../reference/engineering-pitfalls.md#pit-0033-dds-receipt-order-is-not-cross-process-event-order)
+and [PIT-0072](../reference/engineering-pitfalls.md#pit-0072-dynamic-python-can-preserve-assertion-text-while-removing-proof)
+capture the reusable rules.
+
+This is only Layer-2 DDS receipt evidence. It does not prove that Gate terminal
+transition-linearization or bound-zero pre-publish fences occur after process
+exit, and it has no Gazebo/controller/wheel/odom evidence. The complete
+Authority acceptance row therefore remains open for the next Gate-journal and
+headless-Gazebo slice.
+
 ## VN-0011A observed crash evidence
 
 | Case | Expected threshold | Observed result |
 | --- | --- | --- |
-| Authority SIGKILL | <=40 ms steady valid/recent-nonzero-Gate-commit barrier; Gate receipt <=20 ms; advancing non-zero simulation surfaces <=30 ms simulation age; exact `-SIGKILL`; Gate-journal terminal transition-linearization and bound-zero pre-publish fences are not earlier than ProcessExited, while later commits prove completion; state has empty lease, journaled predecessor-plus-one `control_seq`, new/equal zero-output seq, `AUTHORITY_EXPIRED`; <=300 ms steady | Not yet captured |
+| Authority SIGKILL | <=40 ms steady valid/recent-nonzero-Gate-commit barrier; Gate receipt <=20 ms; advancing non-zero simulation surfaces <=30 ms simulation age; exact `-SIGKILL`; Gate-journal terminal transition-linearization and bound-zero pre-publish fences are not earlier than ProcessExited, while later commits prove completion; state has empty lease, journaled predecessor-plus-one `control_seq`, new/equal zero-output seq, `AUTHORITY_EXPIRED`; <=300 ms steady | **Layer-2 partial:** exact -9 and receipt barrier/state/zero/candidate evidence passed 5/5; state 231.238-248.924 ms, zero 231.418-249.086 ms. Gate-journal causality and all Gazebo surfaces remain `Not yet captured`, so the row is open. |
 | Candidate SIGKILL | same bounded arming/Gate-journal rules; exact `-SIGKILL`; authority RENEWs remain live and are journaled; terminal sequence follows the last committed predecessor; `CANDIDATE_EXPIRED`; event-to-state <=200 ms steady | Not yet captured |
 | MotionGate SIGKILL | exact `-SIGKILL`; Gazebo/controller live; no injected zero; a marker new to the generation is COMMITTED exactly once, ACKed by non-zero controller output before the next 20 ms repeat, and remains the final Gate output record after death; any repeat retries the generation; first controller zero satisfies `0.35 s < delta_sim <= 0.36 s + epsilon`; graph quiet is cleanup only | Not yet captured |
 | Wheel command/state | compatible BEST_EFFORT introspection remains mandatory corroboration; delegated hardware ledger accounts for each invocation through contiguous `write_seq` range/count segments, nondecreasing simulation stamp, and no overflow/gap/nonzero violation; World Statistics separately owns iteration; together they prove first both-wheel zero plus no regression | Not yet captured |
 | Physical stationarity | after the later controller/lossless both-wheel-zero linearization, shared wheel-state/odom window begins <=1.2 s and holds >=0.20 s simulation time | Not yet captured |
-| Exit ledger | killed actions `-SIGKILL`; all other launch-managed actions 0 | Not yet captured |
+| Exit ledger | killed actions `-SIGKILL`; all other launch-managed actions 0 | **Layer-2 authority partial:** exact `(motion_gate=0, authority=-9, candidate=0)` passed. Full headless launch ledger remains `Not yet captured`. |
 
 ## VN-0011A mutation and repository gates
+
+Layer-2 authority subset completed in `7ed0941`:
+
+- [x] Exact authority action/signal/exit and exhaustive three-process ledger.
+- [x] Parent cannot control Gate or publish/inject final zero.
+- [x] Fresh arming, callback-entry receipt fences, scan-first deadline, unique
+  candidate writer/GID, new zero sequence, and >=100 ms counter-evidence.
+- [x] False-green mutations and review-locked AST backstop pass 50/50.
+- [x] Five focused repetitions and two independent terminal reviews pass.
+
+The following boxes remain whole-VN-0011A gates and are intentionally open:
 
 - [ ] Wrong process/signal is rejected.
 - [ ] Collapsed helper process is rejected.

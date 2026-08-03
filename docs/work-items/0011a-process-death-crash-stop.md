@@ -631,6 +631,12 @@ pre-existing user-owned Gazebo process.
   autonomously PREPARE/OPEN/RENEW and publish a bounded non-zero candidate;
   the parent only provides the exact final-controller subscriber and proves a
   sustained ARMED state before any process-death test is added.
+- No-Gazebo authority-death tracer: exact launch action `SIGKILL`, exact
+  `ProcessExited(-9)` latency origin, fresh arming receipts, continued traffic
+  from the one compatible candidate writer with the armed GID, terminal
+  `AUTHORITY_EXPIRED`, a new zero sequence, and an exhaustive three-process
+  exit ledger. This is explicitly Layer-2 receipt evidence, not Gate-journal
+  causal evidence.
 - Contract: product launch topology, helper separation, clocks, controller
   parameters, evidence surfaces, generated test inventory, and mutation
   resistance.
@@ -756,11 +762,32 @@ pre-existing user-owned Gazebo process.
   passed 2/2; repository tests passed 382; `voice_nav_sim` reported 148 tests,
   zero errors/failures, 18 deliberate skips, and all five launch tests. The
   protected Gazebo process retained starttime `34712103`.
+- `7ed0941` adds the first real producer process-death execution. The launch
+  parent registers every expected exit before starting the real MotionGate and
+  two helper PIDs, sends `SIGKILL` only to the exact authority action, and uses
+  the Adapter's exact `ProcessExited(-9)` callback-entry timestamp as the
+  latency origin. A fresh <=40 ms arming barrier includes <=20 ms state and
+  non-zero-output receipts. The observer then requires
+  `AUTHORITY_EXPIRED`, empty lease/topic/GID, a new zero-output sequence, and
+  continued finite non-zero traffic from exactly one compatible candidate
+  endpoint whose GID equals the armed GID. Five fresh executions observed
+  state/zero latency ranges of 231.238-248.924 ms and
+  231.418-249.086 ms; every run advanced `control_seq` by one and retained at
+  least 100 ms of zero/candidate receipts. The exact exit ledger was
+  MotionGate 0, authority -9, candidate 0. Independent reviews found and
+  closed receipt-fence, deadline, identity, hidden-action, reflection,
+  rebinding, and mutation-checker gaps; both final reviews report P0=0/P1=0.
+  The review-locked tracer AST fails closed on any otherwise-unclassified
+  executable change. Final evidence is 50/50 fault-producer contract tests,
+  420/420 repository tests, 22/22 `voice_nav_sim` CTests, and 152 scoped xUnit
+  cases with zero errors/failures and 18 deliberate skips. The protected
+  Gazebo process retained starttime `34712103`.
 
-These are component, Layer-2, and Adapter-runtime composition facts, not
-observed product crash evidence. The repository topology contract is GREEN;
-the independent helpers now autonomously ARM the real Gate, but the exact
-authority, candidate, and MotionGate process-death executions and their latency
-evidence remain unimplemented. The pre-commit local gate is GREEN; exact pushed
-HEAD, PR, CI, rebase/public tree, and Issue closure identities remain pending
-under the delivery identity policy.
+These are component, Layer-2, Adapter-runtime, and authority receipt facts,
+not complete observed product crash evidence. The exact authority helper is
+now killed and Gate receipt latency is bounded, but same-host Gate-journal
+causal fences, Gazebo/controller/wheel/odom evidence, candidate death, and
+MotionGate death remain unimplemented. Therefore the full Authority row below
+stays open. The pre-commit local gate is GREEN; exact pushed HEAD, PR, CI,
+rebase/public tree, and Issue closure identities remain pending under the
+delivery identity policy.

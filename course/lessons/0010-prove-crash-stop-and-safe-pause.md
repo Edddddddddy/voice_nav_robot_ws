@@ -256,11 +256,27 @@ controller endpoint 后才开始 PREPARE；动态 candidate writer 在 PREPARE �
 且窗口内观察到 non-zero candidate traffic，超过 250/150 ms 两条 lease，但它仍
 不是任一 process-death 验收行。
 
+`7ed0941` 随后完成第一条真实 process-death tracer：parent 只对 exact authority
+launch action 发出 `SIGKILL`，延迟起点来自 exact `ProcessExited(-9)` callback-entry
+steady timestamp。测试在 kill 前重新取得 <=40 ms arming barrier，并要求状态和最终
+非零输出都不老于 20 ms；kill 后只接受 300 ms receipt window 内的
+`AUTHORITY_EXPIRED` 与新 zero sequence。candidate 不能只是“同名 endpoint”：必须
+是 compatible endpoint 总数恰好为 1，且其 GID 等于 armed GID，并在 authority
+退出后继续发送至少 100 ms 的有限非零流量。五次 fresh launch 的 state/zero
+延迟分别落在 231.238-248.924 ms 与 231.418-249.086 ms。
+
+这条证据只属于 Layer-2 receipt tracer。callback 在 observer lock 前取 receipt
+fence，等待循环先扫描已收样本、再检查当前 wall deadline，可排除锁等待和线程晚调度
+造成的假红/假绿；但 DDS receipt 仍不能证明 Gate 内部 transition 或 pre-publish
+发生在 `ProcessExited` 之后。完整 Authority 行仍需 parent-owned Gate journal 和
+Gazebo/controller/wheel/odom 证据，不能提前勾选完成。
+
 后续继续按 tests-first 补齐：
 
-- 复用 exact action 与 CrashLedger 的无 Gazebo authority SIGKILL tracer；
+- 把 Gate event journal 接入同一 authority SIGKILL tracer，补 causal fences；
+- 可独立 kill candidate 的 `CANDIDATE_EXPIRED` tracer；
 - 可参数化的 Gate-expiry 与 simulation-window evidence Module；
-- isolated headless product launch test；
+- isolated headless product launch 与 MotionGate SIGKILL test；
 - 对集成测试本身的 static/mutation contract；
 - generated CTest/xUnit inventory and strict teardown checks。
 

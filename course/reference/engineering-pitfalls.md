@@ -73,6 +73,13 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0063 | An INVALID receipt appears to select an existing terminal bank | Does rejection use the canonical invalid identity without touching bank evidence? | Guarded |
 | PIT-0064 | A valid faulted interval cannot be read because attempts exceed its armed budget | Does CAPACITY explain the attempted count instead of making the bank structurally unreadable? | Guarded |
 | PIT-0065 | Two Parent ACK callers can release a later bank epoch | Is the registered snapshot claimed before validation and excluded until its single CAS completes? | Guarded |
+| PIT-0066 | A delegated exception leaves a hardware-write sequence open | Does every successful begin have exactly one finish, including rethrow paths? | Guarded |
+| PIT-0067 | Shared-memory identity validators disagree across layers | Do Parent, transformer, and Adapter enforce one exact name/nonce grammar? | Guarded |
+| PIT-0068 | Hardware evidence overflows despite a 100 Hz controller | Was capacity sized from Gazebo's hardware-write cadence rather than controller updates? | Guarded |
+| PIT-0069 | Evidence keywords remain after the proof is bypassed | Does the checker bind executable AST/data flow and generated CTest semantics? | Guarded |
+| PIT-0070 | A launch test passes but another evidence inventory is stale | Were CMake, CI, generated CTest, scoped xUnit, and critical names updated atomically? | Guarded |
+| PIT-0071 | Generic Flake8 contradicts the ROS package lint result | Was the registered `ament_flake8` / `ament_pep257` policy used? | Guarded |
+| PIT-0072 | A static evidence checker stays green after executable Python is weakened | Is the reviewed AST closed against rebinding, reflection, aliases, and hidden launch actions? | Guarded |
 
 ## PIT-0001: Windows-to-WSL quoting is a two-shell contract
 
@@ -956,6 +963,17 @@ Pre-death transition/output intent with post-death receipt and receipt-only
 mutations must fail. See
 [VN-0011A](../../docs/work-items/0011a-process-death-crash-stop.md).
 
+**Recurrence evidence.** The first authority-process tracer recorded DDS
+receipt time only after acquiring its observer lock. A callback that had
+already entered before `ProcessExited` could therefore wait behind a snapshot
+and receive a false post-exit timestamp. The repaired callback takes its
+steady receipt fence before the lock. Its terminal wait always scans collected
+samples before consulting current wall time and accepts only receipts in the
+closed `[exit, deadline]` window, so a late-scheduled test thread neither
+credits late evidence nor discards evidence received on time. This remains
+Layer-2 receipt evidence; it deliberately does not replace the same-host Gate
+journal required for causal transition and pre-publish fences.
+
 ## PIT-0034: Dynamic `exec_module` may not satisfy decorator assumptions
 
 **Symptom.** A support file parses and is found, but pytest fails during
@@ -1740,3 +1758,29 @@ package environment. A generic Flake8 run may be useful diagnostic input, but
 do not rewrite otherwise valid code solely to alternate between two ambient
 plugin policies. Preserve its raw output in `/tmp` and record which command is
 the release gate.
+
+## PIT-0072: Dynamic Python can preserve assertion text while removing proof
+
+**Symptom.** A static contract still reports GREEN after a launch test gains
+an unregistered action, fabricates `ProcessExited` time, aliases a publisher
+factory, reflects `publish`, truncates the endpoint set, or replaces
+`self.assertEqual` with a no-op. The expected calls and assertion text remain
+in the file, so presence-based checks see no change.
+
+**Cause.** Python's executable object model is larger than a token denylist.
+Attribute rebinding, aliases, `getattr`, `operator.methodcaller`, slice writes
+and deletes, subclass overrides, and starred properties can redirect a
+syntactically correct evidence path. Checking only a helper body also misses
+the construction and launch-context seams that choose the helper at runtime.
+
+**Guardrail.** Keep behavior evidence primary, then protect its closed test
+fixture with mutation-developed AST contracts. The authority tracer requires
+the exact Adapter construction and launch-context mapping, an exact two-action
+producer property, one immutable compatible-endpoint collection per phase,
+the unique armed writer GID, callback-entry receipt fences, scan-first receipt
+deadlines, unmodified assertion/predicate callables, and no publisher or
+dynamic-reflection surface in the observer. A reviewed SHA-256 of the complete
+AST is the final fail-closed backstop: any otherwise-unclassified executable
+change requires an explicit fingerprint update and independent review. The
+50-test mutation suite and real launch test must both pass; the fingerprint is
+tamper evidence, never a substitute for runtime execution.
