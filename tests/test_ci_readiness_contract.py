@@ -242,6 +242,7 @@ class CiReadinessContractTest(unittest.TestCase):
         )
 
         self.assertEqual(sim_targets, {
+            "test_test_journaled_gazebo_hardware_write.py",
             "test_test_simulation_control.py",
             "test_test_simulation_interfaces.py",
             "test_test_tf_ownership_conflict.py",
@@ -280,7 +281,7 @@ class CiReadinessContractTest(unittest.TestCase):
 
     def test_launch_tests_use_official_process_scoped_domain_leases(self):
         expected_launch_test_counts = {
-            SIMULATION_CMAKE: 3,
+            SIMULATION_CMAKE: 4,
             MISSION_CMAKE: 2,
             BRINGUP_CMAKE: 1,
         }

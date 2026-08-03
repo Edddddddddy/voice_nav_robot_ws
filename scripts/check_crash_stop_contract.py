@@ -36,6 +36,10 @@ ARTIFACTS = {
         "src/voice_nav_sim/test/"
         "journaled_gazebo_sim_system_adapter_test.cpp"
     ),
+    "runtime_adapter_test": (
+        "src/voice_nav_sim/test/"
+        "test_journaled_gazebo_hardware_write.py"
+    ),
     "evidence_policy": (
         "src/voice_nav_sim/test_support/crash_stop_policy.py"
     ),
@@ -74,6 +78,12 @@ ADAPTER_TARGET = (
 )
 ADAPTER_TEST_TARGET = (
     "journaled_gazebo_sim_system_adapter_test"
+)
+RUNTIME_ADAPTER_TEST_FILE = (
+    "test/test_journaled_gazebo_hardware_write.py"
+)
+RUNTIME_ADAPTER_CTEST = (
+    "test_test_journaled_gazebo_hardware_write.py"
 )
 
 POLICY_VALUES: dict[str, object] = {
@@ -718,6 +728,18 @@ def validate_adapter_behavior_test(path: Path) -> None:
 
 def validate_sim_cmake(path: Path) -> None:
     source = read_text(path)
+
+    def cmake_tokens(block: str) -> list[str]:
+        raw_tokens = re.findall(
+            r'"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[^\s]+',
+            block,
+        )
+        return [
+            token[1:-1]
+            if len(token) >= 2 and token[0] == token[-1] and token[0] in "\"'"
+            else token
+            for token in raw_tokens
+        ]
     required_find_packages = (
         "gz_sim_vendor",
         "gz-sim8",
@@ -850,6 +872,1341 @@ def validate_sim_cmake(path: Path) -> None:
             "voice_nav_sim Adapter target must link the POSIX hardware ledger"
         )
 
+    cmake_without_comments = "\n".join(
+        line.split("#", 1)[0] for line in source.splitlines()
+    )
+    command_shadow = re.search(
+        r"\b(?:macro|function)\s*\(\s*"
+        r"(?:add_launch_test|set_tests_properties|set_property)\b",
+        cmake_without_comments,
+        flags=re.IGNORECASE,
+    )
+    build_testing_rebind = re.search(
+        r"\b(?:set|unset|option)\s*\(\s*BUILD_TESTING\b"
+        r"|\bset_property\s*\(\s*CACHE\s+BUILD_TESTING\b",
+        cmake_without_comments,
+        flags=re.IGNORECASE,
+    )
+
+    def condition_stack_at(position: int) -> list[tuple[str, ...]]:
+        stack: list[tuple[str, ...]] = []
+        control_commands = re.finditer(
+            r"\b(?P<command>if|elseif|else|endif)\s*"
+            r"\((?P<body>.*?)\)",
+            cmake_without_comments,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        for match in control_commands:
+            if match.start() >= position:
+                break
+            command = match.group("command").lower()
+            if command == "if":
+                stack.append(tuple(cmake_tokens(match.group("body"))))
+            elif command == "elseif" and stack:
+                stack[-1] = (
+                    "__ELSEIF__",
+                    *cmake_tokens(match.group("body")),
+                )
+            elif command == "else" and stack:
+                stack[-1] = ("__ELSE__",)
+            elif command == "endif" and stack:
+                stack.pop()
+        return stack
+
+    testing_condition = [("BUILD_TESTING",)]
+    runtime_registrations = list(re.finditer(
+        r"add_launch_test\s*\(\s*['\"]?"
+        + re.escape(RUNTIME_ADAPTER_TEST_FILE)
+        + r"['\"]?(?=\s)(?P<body>.*?)\)",
+        cmake_without_comments,
+        flags=re.DOTALL,
+    ))
+
+    def parse_launch_arguments(
+        tokens: list[str],
+    ) -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
+        """Mirror cmake_parse_arguments for add_launch_test's keywords."""
+        one_value_keywords = {"TARGET", "TIMEOUT", "PYTHON_EXECUTABLE"}
+        multi_value_keywords = {"ARGS", "LABELS"}
+        recognized = one_value_keywords | multi_value_keywords
+        one_values = {keyword: [] for keyword in one_value_keywords}
+        multi_values = {keyword: [] for keyword in multi_value_keywords}
+        unparsed: list[str] = []
+        active_multi: str | None = None
+        index = 0
+        while index < len(tokens):
+            token = tokens[index]
+            if token in one_value_keywords:
+                active_multi = None
+                if index + 1 >= len(tokens) or tokens[index + 1] in recognized:
+                    one_values[token].append("")
+                    index += 1
+                    continue
+                one_values[token].append(tokens[index + 1])
+                index += 2
+                continue
+            if token in multi_value_keywords:
+                active_multi = token
+                index += 1
+                continue
+            if active_multi is not None:
+                multi_values[active_multi].append(token)
+            else:
+                unparsed.append(token)
+            index += 1
+        return one_values, multi_values, unparsed
+
+    runtime_is_isolated = False
+    if (
+        len(runtime_registrations) == 1
+        and command_shadow is None
+        and build_testing_rebind is None
+    ):
+        registration_tokens = cmake_tokens(
+            runtime_registrations[0].group("body")
+        )
+        one_values, multi_values, unparsed = parse_launch_arguments(
+            registration_tokens
+        )
+        targets = one_values["TARGET"]
+        target_is_owned = (
+            not targets
+            or (len(targets) == 1 and targets[0] == RUNTIME_ADAPTER_CTEST)
+        )
+        runner_is_exact = unparsed == [
+            "RUNNER",
+            "${ament_cmake_ros_DIR}/run_test_isolated.py",
+        ]
+        registration_options_are_owned = (
+            one_values["TIMEOUT"] == ["180"]
+            and not one_values["PYTHON_EXECUTABLE"]
+            and not multi_values["ARGS"]
+            and not multi_values["LABELS"]
+        )
+        runtime_is_isolated = (
+            target_is_owned
+            and runner_is_exact
+            and registration_options_are_owned
+            and condition_stack_at(runtime_registrations[0].start())
+            == testing_condition
+        )
+
+    if not runtime_is_isolated:
+        raise CrashStopContractError(
+            "voice_nav_sim CMake must register the isolated runtime Adapter "
+            "test with its owned CTest target"
+        )
+
+    serial_assignments: list[tuple[str, int]] = []
+    property_blocks = re.finditer(
+        r"\b(?P<command>set_tests_properties|set_property)\s*"
+        r"\((?P<body>.*?)\)",
+        cmake_without_comments,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    for match in property_blocks:
+        command = match.group("command").lower()
+        tokens = cmake_tokens(match.group("body"))
+        if command == "set_tests_properties":
+            if "PROPERTIES" not in tokens:
+                continue
+            properties_index = tokens.index("PROPERTIES")
+            targets = tokens[:properties_index]
+            property_tokens = tokens[properties_index + 1:]
+            dynamic_property_name = any(
+                "${" in property_tokens[index]
+                or "$<" in property_tokens[index]
+                for index in range(0, len(property_tokens), 2)
+            )
+            run_serial_values = [
+                property_tokens[index + 1]
+                for index in range(0, len(property_tokens) - 1, 2)
+                if property_tokens[index] == "RUN_SERIAL"
+            ]
+            ambiguous_target = any(
+                "${" in target or "$<" in target
+                for target in targets
+            )
+            if (
+                dynamic_property_name
+                and (
+                    RUNTIME_ADAPTER_CTEST in targets
+                    or ambiguous_target
+                )
+            ):
+                serial_assignments.append(("", match.start()))
+                continue
+            if run_serial_values and ambiguous_target:
+                serial_assignments.append(("", match.start()))
+                continue
+            if RUNTIME_ADAPTER_CTEST not in targets:
+                continue
+            serial_assignments.extend(
+                (value, match.start())
+                for value in run_serial_values
+            )
+            continue
+
+        if not tokens or tokens[0] != "TEST" or "PROPERTY" not in tokens:
+            continue
+        property_index = tokens.index("PROPERTY")
+        targets_and_options = tokens[1:property_index]
+        targets = [
+            token
+            for token in targets_and_options
+            if token not in {"APPEND", "APPEND_STRING"}
+        ]
+        if property_index + 1 >= len(tokens):
+            continue
+        property_name = tokens[property_index + 1]
+        ambiguous_target = any(
+            "${" in target or "$<" in target
+            for target in targets
+        )
+        if (
+            ("${" in property_name or "$<" in property_name)
+            and (
+                RUNTIME_ADAPTER_CTEST in targets
+                or ambiguous_target
+            )
+        ):
+            serial_assignments.append(("", match.start()))
+            continue
+        if property_name != "RUN_SERIAL":
+            continue
+        if ambiguous_target:
+            serial_assignments.append(("", match.start()))
+            continue
+        if RUNTIME_ADAPTER_CTEST not in targets:
+            continue
+        values = tokens[property_index + 2:]
+        if (
+            len(values) != 1
+            or any(
+                option in targets_and_options
+                for option in ("APPEND", "APPEND_STRING")
+            )
+        ):
+            serial_assignments.append(("", match.start()))
+        else:
+            serial_assignments.append((values[0], match.start()))
+
+    cmake_truthy = {"1", "ON", "YES", "TRUE", "Y"}
+    runtime_is_serial = (
+        len(serial_assignments) == 1
+        and serial_assignments[0][0].upper() in cmake_truthy
+        and condition_stack_at(serial_assignments[0][1])
+        == testing_condition
+    )
+    if not runtime_is_serial:
+        raise CrashStopContractError(
+            "voice_nav_sim CMake must serialize its Gazebo process with one "
+            "unambiguous RUN_SERIAL assignment"
+        )
+
+
+def validate_runtime_adapter_test(path: Path) -> None:
+    source = read_text(path)
+    try:
+        tree = ast.parse(source, filename=str(path))
+    except SyntaxError as error:
+        raise CrashStopContractError(
+            f"cannot parse runtime Adapter test {path}: {error}"
+        ) from error
+
+    def final_call_name(node: ast.AST) -> str | None:
+        if not isinstance(node, ast.Call):
+            return None
+        if isinstance(node.func, ast.Name):
+            return node.func.id
+        if isinstance(node.func, ast.Attribute):
+            return node.func.attr
+        return None
+
+    def receiver_call(
+        node: ast.AST,
+        receiver: str,
+        method: str,
+    ) -> bool:
+        return (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == method
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == receiver
+        )
+
+    def ast_equal(left: ast.AST | None, right: ast.AST | None) -> bool:
+        if left is None or right is None:
+            return False
+        return ast.dump(left, include_attributes=False) == ast.dump(
+            right,
+            include_attributes=False,
+        )
+
+    def expression(source_text: str) -> ast.expr:
+        return ast.parse(source_text, mode="eval").body
+
+    def keyword_value(call: ast.AST | None, name: str) -> ast.expr | None:
+        if not isinstance(call, ast.Call):
+            return None
+        matches = [
+            keyword.value
+            for keyword in call.keywords
+            if keyword.arg == name
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def call_uses_name(
+        call: ast.AST | None,
+        position: int,
+        name: str,
+    ) -> bool:
+        return (
+            isinstance(call, ast.Call)
+            and len(call.args) > position
+            and isinstance(call.args[position], ast.Name)
+            and call.args[position].id == name
+        )
+
+    def dotted_name(node: ast.AST) -> str:
+        parts: list[str] = []
+        current = node
+        if isinstance(current, ast.Call):
+            current = current.func
+        while isinstance(current, ast.Attribute):
+            parts.append(current.attr)
+            current = current.value
+        if isinstance(current, ast.Name):
+            parts.append(current.id)
+        return ".".join(reversed(parts))
+
+    functions = {
+        node.name: node
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    runtime_method_name = (
+        "test_real_gazebo_writer_records_nonzero_wheel_commands"
+    )
+    runtime_test = functions.get(runtime_method_name)
+    if runtime_test is None:
+        raise CrashStopContractError(
+            "runtime Adapter test must expose the owned real-Gazebo behavior"
+        )
+
+    runtime_class = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ClassDef) and runtime_test in node.body
+        ),
+        None,
+    )
+    unittest_is_imported = any(
+        isinstance(statement, ast.Import)
+        and any(
+            alias.name == "unittest" and alias.asname is None
+            for alias in statement.names
+        )
+        for statement in tree.body
+    )
+    runtime_is_collected = (
+        runtime_class is not None
+        and runtime_class in tree.body
+        and runtime_class.name == "JournaledGazeboHardwareWriteTest"
+        and runtime_test in runtime_class.body
+        and len(
+            [
+                statement
+                for statement in runtime_class.body
+                if isinstance(
+                    statement,
+                    (ast.FunctionDef, ast.AsyncFunctionDef),
+                )
+                and statement.name == runtime_method_name
+            ]
+        )
+        == 1
+        and len(runtime_class.bases) == 1
+        and ast_equal(
+            runtime_class.bases[0],
+            expression("unittest.TestCase"),
+        )
+        and unittest_is_imported
+        and [argument.arg for argument in runtime_test.args.args]
+        == ["self", "proc_info", "gazebo_action", "ledger_owner"]
+        and not runtime_test.args.posonlyargs
+        and not runtime_test.args.kwonlyargs
+        and runtime_test.args.vararg is None
+        and runtime_test.args.kwarg is None
+        and not runtime_test.args.defaults
+        and not runtime_test.args.kw_defaults
+    )
+    if not runtime_is_collected:
+        raise CrashStopContractError(
+            "runtime Adapter evidence test must remain executable as a "
+            "top-level unittest.TestCase method"
+        )
+
+    protected_assertion_methods = {
+        "assertEqual",
+        "assertGreater",
+        "assertTrue",
+    }
+
+    def assignment_targets(node: ast.AST) -> list[ast.AST]:
+        if isinstance(node, ast.Assign):
+            return list(node.targets)
+        if isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+            return [node.target]
+        if isinstance(node, ast.Delete):
+            return list(node.targets)
+        return []
+
+    def target_root_name(node: ast.AST) -> str | None:
+        current = node
+        while isinstance(current, (ast.Attribute, ast.Subscript)):
+            current = current.value
+        return current.id if isinstance(current, ast.Name) else None
+
+    proof_primitives = {
+        "abs",
+        "all",
+        "any",
+        "math",
+        "struct",
+        "tuple",
+        "zip",
+    }
+    proof_primitive_is_rebound = any(
+        target_root_name(target) in proof_primitives | {"double_from_bits"}
+        for node in ast.walk(tree)
+        for target in assignment_targets(node)
+    )
+    proof_primitive_is_redefined = any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and node.name in proof_primitives
+        for node in ast.walk(tree)
+    )
+    bound_import_names = [
+        alias.asname or alias.name.split(".")[-1]
+        for statement in tree.body
+        if isinstance(statement, (ast.Import, ast.ImportFrom))
+        for alias in statement.names
+    ]
+    imports_are_owned = (
+        bound_import_names.count("math") == 1
+        and bound_import_names.count("struct") == 1
+        and not any(
+            name in {"abs", "all", "any", "tuple", "zip"}
+            for name in bound_import_names
+        )
+    )
+    decoder_functions = [
+        statement
+        for statement in tree.body
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and statement.name == "double_from_bits"
+    ]
+    decoder_returns = [] if len(decoder_functions) != 1 else [
+        statement
+        for statement in decoder_functions[0].body
+        if isinstance(statement, ast.Return)
+    ]
+    decoder_is_exact = (
+        len(decoder_functions) == 1
+        and isinstance(decoder_functions[0], ast.FunctionDef)
+        and [
+            argument.arg
+            for argument in decoder_functions[0].args.args
+        ]
+        == ["bits"]
+        and not decoder_functions[0].args.posonlyargs
+        and not decoder_functions[0].args.kwonlyargs
+        and decoder_functions[0].args.vararg is None
+        and decoder_functions[0].args.kwarg is None
+        and len(decoder_returns) == 1
+        and ast_equal(
+            decoder_returns[0].value,
+            expression(
+                "struct.unpack('<d', struct.pack('<Q', bits))[0]"
+            ),
+        )
+    )
+    if (
+        proof_primitive_is_rebound
+        or proof_primitive_is_redefined
+        or not imports_are_owned
+        or not decoder_is_exact
+    ):
+        raise CrashStopContractError(
+            "runtime Adapter evidence must preserve its proof primitives and "
+            "exact wheel-bit decoder"
+        )
+
+    fixture_binding_is_rebound = any(
+        target_root_name(target)
+        in {"self", "proc_info", "gazebo_action", "ledger_owner"}
+        and not any(
+            isinstance(child, ast.Attribute)
+            and child.attr in protected_assertion_methods
+            for child in ast.walk(target)
+        )
+        for node in ast.walk(runtime_test)
+        for target in assignment_targets(node)
+    )
+    if fixture_binding_is_rebound:
+        raise CrashStopContractError(
+            "runtime Adapter evidence test must remain executable with its "
+            "injected fixture bindings"
+        )
+
+    runtime_binding_is_rebound = any(
+        target_root_name(target) == "JournaledGazeboHardwareWriteTest"
+        for node in ast.walk(tree)
+        for target in assignment_targets(node)
+    )
+    runtime_binding_is_dynamically_rebound = any(
+        isinstance(node, ast.Call)
+        and final_call_name(node) in {"setattr", "delattr", "object"}
+        and any(
+            isinstance(child, ast.Name)
+            and child.id == "JournaledGazeboHardwareWriteTest"
+            for child in ast.walk(node)
+        )
+        and any(
+            isinstance(child, ast.Constant)
+            and child.value == runtime_method_name
+            for child in ast.walk(node)
+        )
+        for node in ast.walk(tree)
+    )
+    if runtime_binding_is_rebound or runtime_binding_is_dynamically_rebound:
+        raise CrashStopContractError(
+            "runtime Adapter evidence test must remain executable without "
+            "post-definition replacement"
+        )
+
+    assertion_method_is_rebound = any(
+        any(
+            isinstance(child, ast.Attribute)
+            and child.attr in protected_assertion_methods
+            for child in ast.walk(target)
+        )
+        for node in ast.walk(tree)
+        for target in assignment_targets(node)
+    )
+    unittest_binding_is_rebound = any(
+        any(
+            (
+                isinstance(child, ast.Name)
+                and child.id == "unittest"
+            )
+            or (
+                isinstance(child, ast.Attribute)
+                and dotted_name(child).startswith("unittest.")
+            )
+            for child in ast.walk(target)
+        )
+        for node in ast.walk(tree)
+        for target in assignment_targets(node)
+    )
+    class_overrides_assertion = any(
+        isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and statement.name in protected_assertion_methods
+        for statement in runtime_class.body
+    )
+    dynamic_assertion_replacement = any(
+        isinstance(node, ast.Call)
+        and final_call_name(node) in {"setattr", "delattr", "patch", "object"}
+        and any(
+            isinstance(child, ast.Constant)
+            and child.value in protected_assertion_methods
+            for child in ast.walk(node)
+        )
+        for node in ast.walk(tree)
+    )
+    if (
+        assertion_method_is_rebound
+        or unittest_binding_is_rebound
+        or class_overrides_assertion
+        or dynamic_assertion_replacement
+    ):
+        raise CrashStopContractError(
+            "runtime Adapter evidence must use unmodified unittest assertions"
+        )
+
+    forbidden_markers = {
+        "expectedfailure",
+        "importorskip",
+        "skip",
+        "skipif",
+        "skiptest",
+        "skipunless",
+        "xfail",
+    }
+    decorators = list(runtime_test.decorator_list)
+    if runtime_class is not None:
+        decorators.extend(runtime_class.decorator_list)
+    decorator_disables_test = any(
+        any(
+            part.lower() in forbidden_markers
+            for part in dotted_name(decorator).split(".")
+        )
+        for decorator in decorators
+    )
+    call_disables_test = any(
+        final_call_name(node).lower() in forbidden_markers
+        for node in ast.walk(runtime_test)
+        if isinstance(node, ast.Call) and final_call_name(node) is not None
+    )
+    module_disables_test = any(
+        isinstance(node, (ast.Assign, ast.AnnAssign))
+        and any(
+            (
+                isinstance(target, ast.Name)
+                and target.id
+                in {"pytestmark", "__test__", "__unittest_skip__"}
+            )
+            or (
+                isinstance(target, ast.Attribute)
+                and target.attr in {"__test__", "__unittest_skip__"}
+            )
+            for target in (
+                node.targets
+                if isinstance(node, ast.Assign)
+                else [node.target]
+            )
+        )
+        for node in ast.walk(tree)
+    )
+    early_termination = any(
+        isinstance(node, (ast.Return, ast.Raise))
+        for node in ast.walk(runtime_test)
+    )
+    if (
+        decorator_disables_test
+        or call_disables_test
+        or module_disables_test
+        or early_termination
+    ):
+        raise CrashStopContractError(
+            "runtime Adapter evidence test must remain executable and cannot "
+            "return, raise, skip, xfail, or use expected-failure markers"
+        )
+
+    assignments_by_name: dict[str, list[tuple[int, ast.expr]]] = {}
+    assertion_calls: list[tuple[int, ast.Call]] = []
+    foreign_assertion_receiver = any(
+        isinstance(statement, ast.Expr)
+        and isinstance(statement.value, ast.Call)
+        and isinstance(statement.value.func, ast.Attribute)
+        and statement.value.func.attr in protected_assertion_methods
+        and not (
+            isinstance(statement.value.func.value, ast.Name)
+            and statement.value.func.value.id == "self"
+        )
+        for statement in runtime_test.body
+    )
+    if foreign_assertion_receiver:
+        raise CrashStopContractError(
+            "runtime Adapter evidence must use unmodified unittest assertions "
+            "through the collected self receiver"
+        )
+    for index, statement in enumerate(runtime_test.body):
+        if (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+        ):
+            assignments_by_name.setdefault(
+                statement.targets[0].id,
+                [],
+            ).append((index, statement.value))
+        if (
+            isinstance(statement, ast.Expr)
+            and isinstance(statement.value, ast.Call)
+            and isinstance(statement.value.func, ast.Attribute)
+            and statement.value.func.attr in protected_assertion_methods
+            and isinstance(statement.value.func.value, ast.Name)
+            and statement.value.func.value.id == "self"
+        ):
+            assertion_calls.append((index, statement.value))
+
+    def unique_assignment(name: str) -> tuple[int, ast.expr] | None:
+        assignments = assignments_by_name.get(name, [])
+        return assignments[0] if len(assignments) == 1 else None
+
+    def has_binary_assert(
+        method: str,
+        left: ast.AST,
+        right: ast.AST,
+        *,
+        commutative: bool = False,
+    ) -> bool:
+        for _, call in assertion_calls:
+            if final_call_name(call) != method or len(call.args) < 2:
+                continue
+            direct = ast_equal(call.args[0], left) and ast_equal(
+                call.args[1],
+                right,
+            )
+            reverse = commutative and ast_equal(
+                call.args[0],
+                right,
+            ) and ast_equal(call.args[1], left)
+            if direct or reverse:
+                return True
+        return False
+
+    def true_assertion(
+        predicate,
+    ) -> tuple[int, ast.Call] | None:
+        return next(
+            (
+                (index, call)
+                for index, call in assertion_calls
+                if final_call_name(call) == "assertTrue"
+                and call.args
+                and predicate(call.args[0])
+            ),
+            None,
+        )
+
+    launched_assignment = unique_assignment("launched_pid")
+    launched_pid = (
+        None if launched_assignment is None else launched_assignment[1]
+    )
+    pid_capture = (
+        isinstance(launched_pid, ast.Subscript)
+        and isinstance(launched_pid.value, ast.Attribute)
+        and launched_pid.value.attr == "process_details"
+        and isinstance(launched_pid.value.value, ast.Name)
+        and launched_pid.value.value.id == "gazebo_action"
+        and isinstance(launched_pid.slice, ast.Constant)
+        and launched_pid.slice.value == "pid"
+    )
+
+    def asserts_exact_writer(call: ast.Call) -> bool:
+        if final_call_name(call) != "assertEqual" or len(call.args) < 2:
+            return False
+        for candidate, expected in (
+            (call.args[0], call.args[1]),
+            (call.args[1], call.args[0]),
+        ):
+            if (
+                receiver_call(candidate, "ledger_owner", "wait_for_writer")
+                and len(candidate.args) == 1
+                and call_uses_name(candidate, 0, "launched_pid")
+                and ast_equal(expected, expression("launched_pid"))
+            ):
+                return True
+        return False
+
+    writer_assertion = next(
+        (
+            (index, call)
+            for index, call in assertion_calls
+            if asserts_exact_writer(call)
+        ),
+        None,
+    )
+    if not pid_capture or writer_assertion is None:
+        raise CrashStopContractError(
+            "runtime Adapter test must bind the ledger to the exact Gazebo "
+            "Writer PID"
+        )
+
+    required_assignment_names = (
+        "arm_ticket",
+        "arm_response",
+        "seal_ticket",
+        "seal_response",
+        "snapshot",
+        "segments",
+        "wheel_commands",
+    )
+    required_assignments = {
+        name: unique_assignment(name)
+        for name in required_assignment_names
+    }
+    if any(
+        assignment is None
+        for assignment in required_assignments.values()
+    ):
+        raise CrashStopContractError(
+            "runtime Adapter test must prove ARM, SEAL, immutable snapshot, "
+            "and ACK through the Parent ledger"
+        )
+
+    arm_index, arm_call = required_assignments["arm_ticket"]
+    arm_response_index, arm_response_call = required_assignments[
+        "arm_response"
+    ]
+    seal_index, seal_call = required_assignments["seal_ticket"]
+    seal_response_index, seal_response_call = required_assignments[
+        "seal_response"
+    ]
+    snapshot_index, snapshot_call = required_assignments["snapshot"]
+    arm_interval = keyword_value(arm_call, "interval_id")
+    seal_interval = keyword_value(seal_call, "interval_id")
+    snapshot_interval = keyword_value(snapshot_call, "interval_id")
+
+    ack_assertion = true_assertion(
+        lambda node: (
+            receiver_call(node, "ledger_owner", "acknowledge")
+            and len(node.args) == 1
+            and call_uses_name(node, 0, "snapshot")
+        )
+    )
+    ordered_operations = (
+        launched_assignment is not None
+        and ack_assertion is not None
+        and (
+            launched_assignment[0]
+            < writer_assertion[0]
+            < arm_index
+            < arm_response_index
+            < seal_index
+            < seal_response_index
+            < snapshot_index
+            < ack_assertion[0]
+        )
+    )
+    interval_is_complete = (
+        receiver_call(arm_call, "ledger_owner", "post_arm")
+        and isinstance(arm_call, ast.Call)
+        and not arm_call.args
+        and arm_interval is not None
+        and keyword_value(arm_call, "segment_budget") is not None
+        and keyword_value(arm_call, "invocation_budget") is not None
+        and ast_equal(
+            keyword_value(arm_call, "require_zero_commands"),
+            expression("False"),
+        )
+        and receiver_call(
+            arm_response_call,
+            "ledger_owner",
+            "wait_response",
+        )
+        and isinstance(arm_response_call, ast.Call)
+        and len(arm_response_call.args) == 1
+        and call_uses_name(arm_response_call, 0, "arm_ticket")
+        and receiver_call(seal_call, "ledger_owner", "post_seal")
+        and isinstance(seal_call, ast.Call)
+        and not seal_call.args
+        and ast_equal(seal_interval, arm_interval)
+        and ast_equal(
+            keyword_value(seal_call, "bank_index"),
+            expression("arm_response[10]"),
+        )
+        and ast_equal(
+            keyword_value(seal_call, "bank_epoch"),
+            expression("arm_response[11]"),
+        )
+        and ast_equal(
+            keyword_value(seal_call, "not_before_sim_stamp_ns"),
+            expression("0"),
+        )
+        and ast_equal(
+            keyword_value(seal_call, "require_exact_stamp"),
+            expression("False"),
+        )
+        and receiver_call(
+            seal_response_call,
+            "ledger_owner",
+            "wait_response",
+        )
+        and isinstance(seal_response_call, ast.Call)
+        and len(seal_response_call.args) == 1
+        and call_uses_name(seal_response_call, 0, "seal_ticket")
+        and receiver_call(
+            snapshot_call,
+            "ledger_owner",
+            "read_sealed_interval",
+        )
+        and isinstance(snapshot_call, ast.Call)
+        and not snapshot_call.args
+        and ast_equal(snapshot_interval, arm_interval)
+        and ast_equal(
+            keyword_value(snapshot_call, "bank_index"),
+            expression("seal_response[10]"),
+        )
+        and ast_equal(
+            keyword_value(snapshot_call, "bank_epoch"),
+            expression("seal_response[11]"),
+        )
+        and ast_equal(
+            keyword_value(snapshot_call, "seal_fence_write_seq"),
+            expression("seal_response[12]"),
+        )
+        and has_binary_assert(
+            "assertEqual",
+            expression("arm_response[9]"),
+            expression("CONTROL_RESPONSE_OK"),
+            commutative=True,
+        )
+        and has_binary_assert(
+            "assertEqual",
+            expression("seal_response[9]"),
+            expression("CONTROL_RESPONSE_OK"),
+            commutative=True,
+        )
+        and has_binary_assert(
+            "assertEqual",
+            expression("seal_response[10]"),
+            expression("arm_response[10]"),
+            commutative=True,
+        )
+        and has_binary_assert(
+            "assertEqual",
+            expression("seal_response[11]"),
+            expression("arm_response[11]"),
+            commutative=True,
+        )
+        and has_binary_assert(
+            "assertGreater",
+            expression("seal_response[12]"),
+            expression("arm_response[12]"),
+        )
+        and ordered_operations
+    )
+    if not interval_is_complete:
+        raise CrashStopContractError(
+            "runtime Adapter test must prove ARM, SEAL, immutable snapshot, "
+            "and ACK through the Parent ledger"
+        )
+
+    _, segments_call = required_assignments["segments"]
+    _, wheel_commands_call = required_assignments["wheel_commands"]
+
+    def exact_generator_quantifier(
+        node: ast.AST,
+        quantifier: str,
+        element: ast.AST,
+        iterable_name: str | None = None,
+    ) -> bool:
+        if (
+            not isinstance(node, ast.Call)
+            or final_call_name(node) != quantifier
+            or len(node.args) != 1
+            or not isinstance(node.args[0], ast.GeneratorExp)
+        ):
+            return False
+        generator = node.args[0]
+        if len(generator.generators) != 1:
+            return False
+        if iterable_name is not None and not ast_equal(
+            generator.generators[0].iter,
+            expression(iterable_name),
+        ):
+            return False
+        return ast_equal(generator.elt, element)
+
+    def positive_abs_comparison(node: ast.AST, variable: str) -> bool:
+        if (
+            not isinstance(node, ast.Compare)
+            or len(node.ops) != 1
+            or not isinstance(node.ops[0], ast.Gt)
+            or len(node.comparators) != 1
+            or not isinstance(node.left, ast.Call)
+            or final_call_name(node.left) != "abs"
+            or len(node.left.args) != 1
+            or not ast_equal(node.left.args[0], expression(variable))
+            or not isinstance(node.comparators[0], ast.Constant)
+            or isinstance(node.comparators[0].value, bool)
+            or not isinstance(node.comparators[0].value, (int, float))
+        ):
+            return False
+        return node.comparators[0].value > 0
+
+    def positive_wheel_pair(node: ast.AST) -> bool:
+        if not isinstance(node, ast.BoolOp) or not isinstance(node.op, ast.And):
+            return False
+        return (
+            len(node.values) == 2
+            and any(
+                positive_abs_comparison(value, "left")
+                for value in node.values
+            )
+            and any(
+                positive_abs_comparison(value, "right")
+                for value in node.values
+            )
+        )
+
+    segments_generator = (
+        segments_call.args[0]
+        if isinstance(segments_call, ast.Call)
+        and final_call_name(segments_call) == "tuple"
+        and len(segments_call.args) == 1
+        and not segments_call.keywords
+        and isinstance(segments_call.args[0], ast.GeneratorExp)
+        else None
+    )
+    segments_from_snapshot = (
+        isinstance(segments_generator, ast.GeneratorExp)
+        and ast_equal(segments_generator.elt, expression("segment"))
+        and len(segments_generator.generators) == 2
+        and isinstance(segments_generator.generators[0].target, ast.Name)
+        and segments_generator.generators[0].target.id == "page"
+        and ast_equal(
+            segments_generator.generators[0].iter,
+            expression("snapshot.pages"),
+        )
+        and not segments_generator.generators[0].ifs
+        and not segments_generator.generators[0].is_async
+        and isinstance(segments_generator.generators[1].target, ast.Name)
+        and segments_generator.generators[1].target.id == "segment"
+        and ast_equal(
+            segments_generator.generators[1].iter,
+            expression("page.segments"),
+        )
+        and not segments_generator.generators[1].ifs
+        and not segments_generator.generators[1].is_async
+    )
+    wheel_commands_generator = (
+        wheel_commands_call.args[0]
+        if isinstance(wheel_commands_call, ast.Call)
+        and final_call_name(wheel_commands_call) == "tuple"
+        and len(wheel_commands_call.args) == 1
+        and not wheel_commands_call.keywords
+        and isinstance(wheel_commands_call.args[0], ast.GeneratorExp)
+        else None
+    )
+    wheel_commands_from_segments = (
+        isinstance(wheel_commands_generator, ast.GeneratorExp)
+        and ast_equal(
+            wheel_commands_generator.elt,
+            expression(
+                "(double_from_bits(segment[6]), "
+                "double_from_bits(segment[7]))"
+            ),
+        )
+        and len(wheel_commands_generator.generators) == 1
+        and isinstance(
+            wheel_commands_generator.generators[0].target,
+            ast.Name,
+        )
+        and wheel_commands_generator.generators[0].target.id == "segment"
+        and ast_equal(
+            wheel_commands_generator.generators[0].iter,
+            expression("segments"),
+        )
+        and not wheel_commands_generator.generators[0].ifs
+        and not wheel_commands_generator.generators[0].is_async
+    )
+    command_indexes = set()
+    for call in ast.walk(wheel_commands_call):
+        if final_call_name(call) != "double_from_bits" or len(call.args) != 1:
+            continue
+        argument = call.args[0]
+        if (
+            isinstance(argument, ast.Subscript)
+            and isinstance(argument.value, ast.Name)
+            and argument.value.id == "segment"
+            and isinstance(argument.slice, ast.Constant)
+            and isinstance(argument.slice.value, int)
+        ):
+            command_indexes.add(argument.slice.value)
+
+    contiguous_assertion = true_assertion(
+        lambda node: exact_generator_quantifier(
+            node,
+            "all",
+            expression("following[1] == previous[2] + 1"),
+        )
+        and isinstance(node.args[0].generators[0].iter, ast.Call)
+        and final_call_name(node.args[0].generators[0].iter) == "zip"
+        and len(node.args[0].generators[0].iter.args) == 2
+        and ast_equal(
+            node.args[0].generators[0].iter.args[0],
+            expression("segments"),
+        )
+        and ast_equal(
+            node.args[0].generators[0].iter.args[1],
+            expression("segments[1:]"),
+        )
+    )
+    upstream_ok_assertion = true_assertion(
+        lambda node: exact_generator_quantifier(
+            node,
+            "all",
+            expression("segment[5] == 0"),
+            "segments",
+        )
+    )
+    finite_assertion = true_assertion(
+        lambda node: exact_generator_quantifier(
+            node,
+            "all",
+            expression(
+                "math.isfinite(left) and math.isfinite(right)"
+            ),
+            "wheel_commands",
+        )
+    )
+    nonzero_assertion = true_assertion(
+        lambda node: (
+            isinstance(node, ast.Call)
+            and final_call_name(node) == "any"
+            and len(node.args) == 1
+            and isinstance(node.args[0], ast.GeneratorExp)
+            and len(node.args[0].generators) == 1
+            and ast_equal(
+                node.args[0].generators[0].iter,
+                expression("wheel_commands"),
+            )
+            and positive_wheel_pair(node.args[0].elt)
+        )
+    )
+    clean_evidence = (
+        has_binary_assert(
+            "assertEqual",
+            expression("snapshot.terminal_state"),
+            expression("BANK_STATE_SEALED_OK"),
+            commutative=True,
+        )
+        and has_binary_assert(
+            "assertEqual",
+            expression("snapshot.oracle_faults"),
+            expression("0"),
+            commutative=True,
+        )
+        and has_binary_assert(
+            "assertEqual",
+            expression(
+                "ledger_owner.load_header_word(GLOBAL_ORACLE_FAULTS_WORD)"
+            ),
+            expression("0"),
+            commutative=True,
+        )
+        and true_assertion(
+            lambda node: ast_equal(node, expression("segments"))
+        )
+        is not None
+        and has_binary_assert(
+            "assertEqual",
+            expression("segments[0][1]"),
+            expression("arm_response[12] + 1"),
+            commutative=True,
+        )
+        and has_binary_assert(
+            "assertEqual",
+            expression("segments[-1][2]"),
+            expression("seal_response[12]"),
+            commutative=True,
+        )
+        and contiguous_assertion is not None
+        and upstream_ok_assertion is not None
+        and finite_assertion is not None
+        and nonzero_assertion is not None
+        and segments_from_snapshot
+        and wheel_commands_from_segments
+        and {6, 7} <= command_indexes
+    )
+    if not clean_evidence:
+        raise CrashStopContractError(
+            "runtime Adapter test must require a fault-free terminal ledger "
+            "with VALID upstream-OK non-zero wheel evidence"
+        )
+
+    expansion = functions.get("expanded_journaled_robot_description")
+    generate = functions.get("generate_test_description")
+    expansion_assignments = [] if expansion is None else [
+        statement
+        for statement in expansion.body
+        if isinstance(statement, ast.Assign)
+        and len(statement.targets) == 1
+        and isinstance(statement.targets[0], ast.Name)
+        and statement.targets[0].id == "product_urdf"
+    ]
+    expansion_returns = [] if expansion is None else [
+        statement
+        for statement in expansion.body
+        if isinstance(statement, ast.Return)
+    ]
+    product_urdf_value = (
+        expansion_assignments[0].value
+        if len(expansion_assignments) == 1
+        else None
+    )
+    transform_return = (
+        expansion_returns[0].value
+        if len(expansion_returns) == 1
+        else None
+    )
+    product_calls = [] if product_urdf_value is None else [
+        node
+        for node in ast.walk(product_urdf_value)
+        if isinstance(node, ast.Call)
+    ]
+    transformer_owns_identity = (
+        isinstance(transform_return, ast.Call)
+        and final_call_name(transform_return) == "transform_product_urdf"
+        and len(transform_return.args) == 3
+        and ast_equal(transform_return.args[0], expression("product_urdf"))
+        and ast_equal(
+            transform_return.args[1],
+            expression("LEDGER_OWNER.name"),
+        )
+        and ast_equal(
+            transform_return.args[2],
+            expression("LEDGER_OWNER.nonce"),
+        )
+    )
+
+    generate_assignments: dict[str, list[ast.expr]] = {}
+    generate_returns: list[ast.Return] = []
+    if generate is not None:
+        for statement in generate.body:
+            if (
+                isinstance(statement, ast.Assign)
+                and len(statement.targets) == 1
+                and isinstance(statement.targets[0], ast.Name)
+            ):
+                generate_assignments.setdefault(
+                    statement.targets[0].id,
+                    [],
+                ).append(statement.value)
+            if isinstance(statement, ast.Return):
+                generate_returns.append(statement)
+
+    description_assignments = generate_assignments.get(
+        "robot_description",
+        [],
+    )
+    publisher_assignments = generate_assignments.get(
+        "robot_state_publisher",
+        [],
+    )
+    robot_description_value = (
+        description_assignments[0]
+        if len(description_assignments) == 1
+        else None
+    )
+    robot_state_publisher_value = (
+        publisher_assignments[0]
+        if len(publisher_assignments) == 1
+        else None
+    )
+    publisher_parameters = keyword_value(
+        robot_state_publisher_value,
+        "parameters",
+    )
+    description_parameter_values: list[ast.AST] = []
+    if publisher_parameters is not None:
+        for mapping in ast.walk(publisher_parameters):
+            if not isinstance(mapping, ast.Dict):
+                continue
+            for key, value in zip(mapping.keys, mapping.values):
+                if (
+                    isinstance(key, ast.Constant)
+                    and key.value == "robot_description"
+                ):
+                    description_parameter_values.append(value)
+
+    publisher_reaches_launch = any(
+        final_call_name(call) == "LaunchDescription"
+        and call.args
+        and isinstance(call.args[0], (ast.List, ast.Tuple))
+        and any(
+            ast_equal(element, expression("robot_state_publisher"))
+            for element in call.args[0].elts
+        )
+        for return_statement in generate_returns
+        for call in ast.walk(return_statement)
+        if isinstance(call, ast.Call)
+    )
+    generation_reaches_expansion = (
+        isinstance(robot_description_value, ast.Call)
+        and final_call_name(robot_description_value)
+        == "expanded_journaled_robot_description"
+        and isinstance(robot_state_publisher_value, ast.Call)
+        and final_call_name(robot_state_publisher_value) == "Node"
+        and ast_equal(
+            keyword_value(robot_state_publisher_value, "package"),
+            expression("'robot_state_publisher'"),
+        )
+        and ast_equal(
+            keyword_value(robot_state_publisher_value, "executable"),
+            expression("'robot_state_publisher'"),
+        )
+        and len(description_parameter_values) == 1
+        and ast_equal(
+            description_parameter_values[0],
+            expression("robot_description"),
+        )
+        and publisher_reaches_launch
+    )
+
+    canonical_transform_is_owned = (
+        any(
+            isinstance(call.func, ast.Attribute)
+            and call.func.attr == "process_file"
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "xacro"
+            for call in product_calls
+        )
+        and expansion is not None
+        and any(
+            isinstance(node, ast.Constant)
+            and node.value == "voice_nav_robot.urdf.xacro"
+            for node in ast.walk(expansion)
+        )
+        and transformer_owns_identity
+        and generation_reaches_expansion
+    )
+    if not canonical_transform_is_owned:
+        raise CrashStopContractError(
+            "runtime Adapter test must expand the canonical product Xacro "
+            "and inject only its owned name-and-nonce hardware transform"
+        )
+
+    partition_is_unique = any(
+        isinstance(statement, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "TEST_PARTITION"
+            for target in statement.targets
+        )
+        and isinstance(statement.value, ast.Call)
+        and final_call_name(statement.value) == "claim_unique_test_partition"
+        for statement in tree.body
+    )
+    setup = functions.get("setUp")
+    cleanup_calls = [] if setup is None else [
+        call
+        for call in ast.walk(setup)
+        if isinstance(call, ast.Call) and final_call_name(call) == "addCleanup"
+    ]
+    cleanup_is_scoped = any(
+        call.args
+        and isinstance(call.args[0], ast.Attribute)
+        and call.args[0].attr == "structured_stop_gazebo"
+        and any(
+            keyword.arg == "expected_partition"
+            and isinstance(keyword.value, ast.Name)
+            and keyword.value.id == "TEST_PARTITION"
+            for keyword in call.keywords
+        )
+        for call in cleanup_calls
+    )
+    broad_process_sweep = any(
+        isinstance(call.func, ast.Attribute)
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "os"
+        and call.func.attr == "kill"
+        or final_call_name(call) in {"pkill", "killall", "pgrep"}
+        for call in ast.walk(tree)
+        if isinstance(call, ast.Call)
+    )
+    if not partition_is_unique or not cleanup_is_scoped or broad_process_sweep:
+        raise CrashStopContractError(
+            "runtime Adapter test must use a partition-scoped structured "
+            "Gazebo stop without broad process discovery or signals"
+        )
+
 
 def validate_sim_package(path: Path) -> None:
     try:
@@ -889,6 +2246,7 @@ def validate_contract(root: Path) -> None:
     )
     validate_plugin_description(paths["adapter_plugin"])
     validate_adapter_behavior_test(paths["adapter_test"])
+    validate_runtime_adapter_test(paths["runtime_adapter_test"])
     validate_sim_cmake(paths["sim_cmake"])
     validate_sim_package(paths["sim_package"])
     validate_evidence_policy(paths["evidence_policy"])

@@ -39,8 +39,8 @@ MOTION_GATE_NODE_JOURNAL_CRITICAL_CASES = (
     (
         "voice_nav_mission.MotionGateNodeJournalTest",
         (
-            "test_full_configuration_claims_exact_pid_and_"
-            "mapping_survives_exit"
+            "test_full_configuration_journals_zero_output_"
+            "and_survives_exit"
         ),
     ),
     (

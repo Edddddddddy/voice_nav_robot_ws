@@ -23,6 +23,10 @@ EXPECTED_TESTS = {
         },
     },
     "voice_nav_sim": {
+        "test_test_journaled_gazebo_hardware_write.py": {
+            "source": "test_journaled_gazebo_hardware_write.py",
+            "timeout": 180.0,
+        },
         "test_test_simulation_control.py": {
             "source": "test_simulation_control.py",
             "timeout": 120.0,

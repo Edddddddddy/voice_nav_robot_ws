@@ -244,6 +244,124 @@ TEST(
 """
 
 
+RUNTIME_ADAPTER_TEST = """\
+import math
+import pytest
+import struct
+import unittest
+
+
+def double_from_bits(bits):
+    return struct.unpack('<d', struct.pack('<Q', bits))[0]
+
+
+def expanded_journaled_robot_description():
+    product_urdf = xacro.process_file('voice_nav_robot.urdf.xacro').toxml()
+    return transform_product_urdf(
+        product_urdf,
+        LEDGER_OWNER.name,
+        LEDGER_OWNER.nonce,
+    )
+
+
+TEST_PARTITION = claim_unique_test_partition('l0010_hw_write')
+
+
+@pytest.mark.launch_test
+def generate_test_description():
+    robot_description = expanded_journaled_robot_description()
+    robot_state_publisher = Node(
+        package='robot_state_publisher',
+        executable='robot_state_publisher',
+        parameters=[{'robot_description': robot_description}],
+    )
+    return LaunchDescription([robot_state_publisher])
+
+
+class JournaledGazeboHardwareWriteTest(unittest.TestCase):
+    def setUp(self, proc_info):
+        self.addCleanup(
+            gazebo_shutdown.structured_stop_gazebo,
+            proc_info,
+            expected_partition=TEST_PARTITION,
+        )
+
+    def test_real_gazebo_writer_records_nonzero_wheel_commands(
+        self,
+        proc_info,
+        gazebo_action,
+        ledger_owner,
+    ):
+        launched_pid = gazebo_action.process_details['pid']
+        self.assertEqual(
+            ledger_owner.wait_for_writer(launched_pid),
+            launched_pid,
+        )
+        arm_ticket = ledger_owner.post_arm(
+            interval_id=1,
+            segment_budget=64,
+            invocation_budget=64,
+            require_zero_commands=False,
+        )
+        arm_response = ledger_owner.wait_response(arm_ticket)
+        self.assertEqual(arm_response[9], CONTROL_RESPONSE_OK)
+        seal_ticket = ledger_owner.post_seal(
+            interval_id=1,
+            bank_index=arm_response[10],
+            bank_epoch=arm_response[11],
+            not_before_sim_stamp_ns=0,
+            require_exact_stamp=False,
+        )
+        seal_response = ledger_owner.wait_response(seal_ticket)
+        self.assertEqual(seal_response[9], CONTROL_RESPONSE_OK)
+        self.assertEqual(seal_response[10], arm_response[10])
+        self.assertEqual(seal_response[11], arm_response[11])
+        self.assertGreater(seal_response[12], arm_response[12])
+        snapshot = ledger_owner.read_sealed_interval(
+            interval_id=1,
+            bank_index=seal_response[10],
+            bank_epoch=seal_response[11],
+            seal_fence_write_seq=seal_response[12],
+        )
+        self.assertEqual(snapshot.terminal_state, BANK_STATE_SEALED_OK)
+        self.assertEqual(snapshot.oracle_faults, 0)
+        self.assertEqual(
+            ledger_owner.load_header_word(GLOBAL_ORACLE_FAULTS_WORD),
+            0,
+        )
+        segments = tuple(
+            segment for page in snapshot.pages for segment in page.segments
+        )
+        self.assertTrue(segments)
+        self.assertEqual(segments[0][1], arm_response[12] + 1)
+        self.assertEqual(segments[-1][2], seal_response[12])
+        self.assertTrue(
+            all(
+                following[1] == previous[2] + 1
+                for previous, following in zip(segments, segments[1:])
+            )
+        )
+        self.assertTrue(all(segment[5] == 0 for segment in segments))
+        wheel_commands = tuple(
+            (double_from_bits(segment[6]), double_from_bits(segment[7]))
+            for segment in segments
+        )
+        self.assertTrue(
+            all(
+                math.isfinite(left) and math.isfinite(right)
+                for left, right in wheel_commands
+            )
+        )
+        self.assertTrue(
+            any(
+                abs(left) > 1e-3 and abs(right) > 1e-3
+                for left, right in wheel_commands
+            )
+        )
+        self.assertTrue(ledger_owner.acknowledge(snapshot))
+"""
+
+
 SIM_CMAKE = """\
 cmake_minimum_required(VERSION 3.22)
 project(voice_nav_sim)
@@ -298,6 +416,15 @@ if(BUILD_TESTING)
   target_link_libraries(
     journaled_gazebo_sim_system_adapter_test PRIVATE
     voice_nav_sim_journaled_gazebo_sim_system_adapter
+  )
+  add_launch_test(
+    test/test_journaled_gazebo_hardware_write.py
+    TIMEOUT 180
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
+  )
+  set_tests_properties(
+    test_test_journaled_gazebo_hardware_write.py
+    PROPERTIES RUN_SERIAL TRUE
   )
 endif()
 
@@ -446,6 +573,10 @@ FIXTURE_FILES = {
         "journaled_gazebo_sim_system_adapter_test.cpp"
     ): ADAPTER_BEHAVIOR_TEST,
     (
+        "src/voice_nav_sim/test/"
+        "test_journaled_gazebo_hardware_write.py"
+    ): RUNTIME_ADAPTER_TEST,
+    (
         "src/voice_nav_sim/test_support/crash_stop_policy.py"
     ): EVIDENCE_POLICY,
     (
@@ -484,6 +615,33 @@ class CrashStopContractTest(unittest.TestCase):
             self.create_fixture(root)
             if mutation is not None:
                 mutation(root)
+            return subprocess.run(
+                [
+                    sys.executable,
+                    str(CHECKER),
+                    "--root",
+                    str(root),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+    def run_repository_snapshot_checker(
+        self,
+        mutation,
+    ) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            for relative_path in FIXTURE_FILES:
+                source_path = REPOSITORY_ROOT / relative_path
+                destination = root / relative_path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_text(
+                    source_path.read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
+            mutation(root)
             return subprocess.run(
                 [
                     sys.executable,
@@ -694,6 +852,796 @@ class CrashStopContractTest(unittest.TestCase):
 
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("default Adapter must construct", completed.stderr)
+
+    def test_runtime_evidence_requires_exact_gazebo_writer_pid(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                (
+                    "src/voice_nav_sim/test/"
+                    "test_journaled_gazebo_hardware_write.py"
+                ),
+                "ledger_owner.wait_for_writer(launched_pid)",
+                "ledger_owner.disabled_wait_for_writer(launched_pid)",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("exact Gazebo Writer PID", completed.stderr)
+
+    def test_runtime_evidence_rejects_derived_writer_pid(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                (
+                    "src/voice_nav_sim/test/"
+                    "test_journaled_gazebo_hardware_write.py"
+                ),
+                "gazebo_action.process_details['pid']",
+                "gazebo_action.process_details['pid'] + 1",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("exact Gazebo Writer PID", completed.stderr)
+
+    def test_runtime_evidence_requires_complete_ledger_interval(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                (
+                    "src/voice_nav_sim/test/"
+                    "test_journaled_gazebo_hardware_write.py"
+                ),
+                "ledger_owner.post_seal(",
+                "ledger_owner.disabled_post_seal(",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "ARM, SEAL, immutable snapshot, and ACK",
+            completed.stderr,
+        )
+
+    def test_runtime_evidence_requires_clean_nonzero_wheel_writes(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                (
+                    "src/voice_nav_sim/test/"
+                    "test_journaled_gazebo_hardware_write.py"
+                ),
+                "segment[5] == 0",
+                "segment[5] >= 0",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "VALID upstream-OK non-zero wheel evidence",
+            completed.stderr,
+        )
+
+    def test_runtime_segments_must_come_from_snapshot_pages(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                (
+                    "src/voice_nav_sim/test/"
+                    "test_journaled_gazebo_hardware_write.py"
+                ),
+                (
+                    "segment for page in snapshot.pages "
+                    "for segment in page.segments"
+                ),
+                (
+                    "(0, arm_response[12] + 1, seal_response[12], "
+                    "0, 0, 0, 0x3FF0000000000000, "
+                    "0x3FF0000000000000) for _ in (snapshot,)"
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "VALID upstream-OK non-zero wheel evidence",
+            completed.stderr,
+        )
+
+    def test_real_runtime_terminal_tokens_outside_assertion_fail(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                (
+                    "src/voice_nav_sim/test/"
+                    "test_journaled_gazebo_hardware_write.py"
+                ),
+                (
+                    "        self.assertEqual(\n"
+                    "            snapshot.terminal_state,\n"
+                    "            BANK_STATE_SEALED_OK,\n"
+                ),
+                (
+                    "        retained_terminal_tokens = (\n"
+                    "            snapshot.terminal_state,\n"
+                    "            BANK_STATE_SEALED_OK,\n"
+                ),
+            )
+
+        completed = self.run_repository_snapshot_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "fault-free terminal ledger",
+            completed.stderr,
+        )
+
+    def test_runtime_terminal_assertion_cannot_reverse_polarity(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                (
+                    "src/voice_nav_sim/test/"
+                    "test_journaled_gazebo_hardware_write.py"
+                ),
+                (
+                    "self.assertEqual("
+                    "snapshot.terminal_state, BANK_STATE_SEALED_OK)"
+                ),
+                (
+                    "self.assertNotEqual("
+                    "snapshot.terminal_state, BANK_STATE_SEALED_OK)"
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("fault-free terminal ledger", completed.stderr)
+
+    def test_runtime_seal_cannot_swap_arm_bank_and_epoch(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                (
+                    "src/voice_nav_sim/test/"
+                    "test_journaled_gazebo_hardware_write.py"
+                ),
+                "bank_index=arm_response[10]",
+                "bank_index=arm_response[11]",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "ARM, SEAL, immutable snapshot, and ACK",
+            completed.stderr,
+        )
+
+    def test_runtime_evidence_cannot_return_before_proof(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                (
+                    "src/voice_nav_sim/test/"
+                    "test_journaled_gazebo_hardware_write.py"
+                ),
+                "        launched_pid = gazebo_action.process_details['pid']",
+                (
+                    "        return\n"
+                    "        launched_pid = gazebo_action.process_details['pid']"
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("must remain executable", completed.stderr)
+
+    def test_runtime_evidence_cannot_skip_before_proof(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                (
+                    "src/voice_nav_sim/test/"
+                    "test_journaled_gazebo_hardware_write.py"
+                ),
+                "        launched_pid = gazebo_action.process_details['pid']",
+                (
+                    "        self.skipTest('disabled')\n"
+                    "        launched_pid = gazebo_action.process_details['pid']"
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("must remain executable", completed.stderr)
+
+    def test_runtime_evidence_cannot_be_decorated_as_skipped(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                (
+                    "src/voice_nav_sim/test/"
+                    "test_journaled_gazebo_hardware_write.py"
+                ),
+                (
+                    "    def test_real_gazebo_writer_records_nonzero_"
+                    "wheel_commands("
+                ),
+                (
+                    "    @unittest.skip('disabled')\n"
+                    "    def test_real_gazebo_writer_records_nonzero_"
+                    "wheel_commands("
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("must remain executable", completed.stderr)
+
+    def test_runtime_evidence_class_must_be_collected(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                (
+                    "src/voice_nav_sim/test/"
+                    "test_journaled_gazebo_hardware_write.py"
+                ),
+                (
+                    "class JournaledGazeboHardwareWriteTest("
+                    "unittest.TestCase):"
+                ),
+                "class JournaledGazeboHardwareWriteTest:",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("must remain executable", completed.stderr)
+
+    def test_runtime_assertion_methods_cannot_be_replaced(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                (
+                    "src/voice_nav_sim/test/"
+                    "test_journaled_gazebo_hardware_write.py"
+                ),
+                "        launched_pid = gazebo_action.process_details['pid']",
+                (
+                    "        self.assertEqual = lambda *args, **kwargs: None\n"
+                    "        self.assertGreater = lambda *args, **kwargs: None\n"
+                    "        self.assertTrue = lambda *args, **kwargs: None\n"
+                    "        launched_pid = gazebo_action.process_details['pid']"
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("unmodified unittest assertions", completed.stderr)
+
+    def test_runtime_evidence_requires_canonical_test_transform(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                (
+                    "src/voice_nav_sim/test/"
+                    "test_journaled_gazebo_hardware_write.py"
+                ),
+                "transform_product_urdf(",
+                "disabled_transform_product_urdf(",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("canonical product Xacro", completed.stderr)
+
+    def test_runtime_transform_result_must_reach_the_launch_graph(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                (
+                    "src/voice_nav_sim/test/"
+                    "test_journaled_gazebo_hardware_write.py"
+                ),
+                (
+                    "    return transform_product_urdf(\n"
+                    "        product_urdf,\n"
+                    "        LEDGER_OWNER.name,\n"
+                    "        LEDGER_OWNER.nonce,\n"
+                    "    )"
+                ),
+                (
+                    "    transform_product_urdf(\n"
+                    "        product_urdf,\n"
+                    "        LEDGER_OWNER.name,\n"
+                    "        LEDGER_OWNER.nonce,\n"
+                    "    )\n"
+                    "    return product_urdf"
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("canonical product Xacro", completed.stderr)
+
+    def test_runtime_expansion_result_cannot_be_discarded(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                (
+                    "src/voice_nav_sim/test/"
+                    "test_journaled_gazebo_hardware_write.py"
+                ),
+                (
+                    "    robot_description = "
+                    "expanded_journaled_robot_description()"
+                ),
+                (
+                    "    expanded_journaled_robot_description()\n"
+                    "    robot_description = 'untransformed'"
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("canonical product Xacro", completed.stderr)
+
+    def test_runtime_transform_must_feed_robot_state_publisher(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                (
+                    "src/voice_nav_sim/test/"
+                    "test_journaled_gazebo_hardware_write.py"
+                ),
+                "'robot_description': robot_description,",
+                (
+                    "'robot_description': '<robot name=\"not_canonical\"/>',\n"
+                    "                'proof_only_robot_description': "
+                    "robot_description,"
+                ),
+            )
+
+        completed = self.run_repository_snapshot_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("canonical product Xacro", completed.stderr)
+
+    def test_runtime_evidence_requires_partition_scoped_cleanup(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                (
+                    "src/voice_nav_sim/test/"
+                    "test_journaled_gazebo_hardware_write.py"
+                ),
+                "gazebo_shutdown.structured_stop_gazebo,",
+                "gazebo_shutdown.disabled_structured_stop_gazebo,",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "partition-scoped structured Gazebo stop",
+            completed.stderr,
+        )
+
+    def test_runtime_evidence_must_be_registered_as_isolated(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_sim/CMakeLists.txt",
+                "    test/test_journaled_gazebo_hardware_write.py\n",
+                "    test/disabled_journaled_gazebo_hardware_write.py\n",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "register the isolated runtime Adapter test",
+            completed.stderr,
+        )
+
+    def test_runtime_evidence_must_be_serialized(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_sim/CMakeLists.txt",
+                "    PROPERTIES RUN_SERIAL TRUE\n",
+                "    PROPERTIES RUN_SERIAL FALSE\n",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("serialize its Gazebo process", completed.stderr)
+
+    def test_runtime_evidence_requires_runner_keyword(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_sim/CMakeLists.txt",
+                "    RUNNER \"${ament_cmake_ros_DIR}/run_test_isolated.py\"\n",
+                "    ARGS \"${ament_cmake_ros_DIR}/run_test_isolated.py\"\n",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("register the isolated runtime Adapter test", completed.stderr)
+
+    def test_runtime_runner_text_inside_labels_is_not_a_runner(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_sim/CMakeLists.txt",
+                (
+                    "    TIMEOUT 180\n"
+                    "    RUNNER \"${ament_cmake_ros_DIR}/run_test_isolated.py\"\n"
+                ),
+                (
+                    "    TIMEOUT 180\n"
+                    "    LABELS launch_test RUNNER "
+                    "\"${ament_cmake_ros_DIR}/run_test_isolated.py\"\n"
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("register the isolated runtime Adapter test", completed.stderr)
+
+    def test_runtime_target_cannot_redirect_the_serial_property(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_sim/CMakeLists.txt",
+                "    TIMEOUT 180\n",
+                "    TARGET unowned_runtime_target\n    TIMEOUT 180\n",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("register the isolated runtime Adapter test", completed.stderr)
+
+    def test_runtime_registration_must_be_reachable_when_testing(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_sim/CMakeLists.txt",
+                "if(BUILD_TESTING)",
+                "if(BUILD_TESTING AND FALSE)",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("register the isolated runtime Adapter test", completed.stderr)
+
+    def test_runtime_registration_command_cannot_be_shadowed(self) -> None:
+        def mutation(root: Path) -> None:
+            path = root / "src/voice_nav_sim/CMakeLists.txt"
+            source = path.read_text(encoding="utf-8")
+            path.write_text(
+                (
+                    "macro(add_launch_test test_path)\n"
+                    "  get_filename_component(test_name \"${test_path}\" NAME)\n"
+                    "  add_test(\n"
+                    "    NAME \"test_${test_name}\"\n"
+                    "    COMMAND \"${CMAKE_COMMAND}\" -E true\n"
+                    "  )\n"
+                    "endmacro()\n"
+                )
+                + source,
+                encoding="utf-8",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("register the isolated runtime Adapter test", completed.stderr)
+
+    def test_runtime_serial_text_inside_label_is_not_a_property(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_sim/CMakeLists.txt",
+                "    PROPERTIES RUN_SERIAL TRUE\n",
+                '    PROPERTIES LABELS "RUN_SERIAL TRUE"\n',
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("serialize its Gazebo process", completed.stderr)
+
+    def test_runtime_serial_property_must_target_the_runtime_test(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_sim/CMakeLists.txt",
+                (
+                    "    test_test_journaled_gazebo_hardware_write.py\n"
+                    "    PROPERTIES RUN_SERIAL TRUE\n"
+                ),
+                (
+                    "    journaled_gazebo_sim_system_adapter_test\n"
+                    "    PROPERTIES LABELS "
+                    "test_test_journaled_gazebo_hardware_write.py "
+                    "RUN_SERIAL TRUE\n"
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("serialize its Gazebo process", completed.stderr)
+
+    def test_later_runtime_serial_assignment_cannot_disable_it(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_sim/CMakeLists.txt",
+                "endif()\n\nament_package()",
+                (
+                    "  set_tests_properties(\n"
+                    "    test_test_journaled_gazebo_hardware_write.py\n"
+                    "    PROPERTIES RUN_SERIAL FALSE\n"
+                    "  )\n"
+                    "endif()\n\nament_package()"
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("serialize its Gazebo process", completed.stderr)
+
+    def test_variable_target_cannot_override_runtime_serialization(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_sim/CMakeLists.txt",
+                "endif()\n\nament_package()",
+                (
+                    "  set(\n"
+                    "    runtime_test_name\n"
+                    "    test_test_journaled_gazebo_hardware_write.py\n"
+                    "  )\n"
+                    "  set_tests_properties(\n"
+                    "    ${runtime_test_name}\n"
+                    "    PROPERTIES RUN_SERIAL FALSE\n"
+                    "  )\n"
+                    "endif()\n\nament_package()"
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("serialize its Gazebo process", completed.stderr)
+
+    def test_explicit_cmake_truthy_serial_values_are_supported(self) -> None:
+        for truthy in ("TRUE", "true", "ON", "YES", "Y", "1"):
+            with self.subTest(truthy=truthy):
+                def mutation(root: Path) -> None:
+                    self.replace(
+                        root,
+                        "src/voice_nav_sim/CMakeLists.txt",
+                        "    PROPERTIES RUN_SERIAL TRUE\n",
+                        f"    PROPERTIES RUN_SERIAL {truthy}\n",
+                    )
+
+                completed = self.run_checker(mutation)
+
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_runtime_method_cannot_be_replaced_after_definition(self) -> None:
+        def mutation(root: Path) -> None:
+            path = (
+                root
+                / "src/voice_nav_sim/test/"
+                "test_journaled_gazebo_hardware_write.py"
+            )
+            source = path.read_text(encoding="utf-8")
+            path.write_text(
+                source
+                + (
+                    "\nJournaledGazeboHardwareWriteTest."
+                    "test_real_gazebo_writer_records_nonzero_wheel_commands = (\n"
+                    "    lambda self, proc_info, gazebo_action, ledger_owner: "
+                    "None\n"
+                    ")\n"
+                ),
+                encoding="utf-8",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("must remain executable", completed.stderr)
+
+    def test_runtime_assertions_must_use_self_receiver(self) -> None:
+        def mutation(root: Path) -> None:
+            path = (
+                root
+                / "src/voice_nav_sim/test/"
+                "test_journaled_gazebo_hardware_write.py"
+            )
+            source = path.read_text(encoding="utf-8")
+            source = source.replace(
+                "import unittest\n",
+                "import unittest\nfrom unittest.mock import Mock\n",
+                1,
+            )
+            source = source.replace(
+                "TEST_PARTITION = ",
+                "NOOP_ASSERTIONS = Mock()\n\nTEST_PARTITION = ",
+                1,
+            )
+            for method in ("assertEqual", "assertGreater", "assertTrue"):
+                source = source.replace(
+                    f"self.{method}(",
+                    f"NOOP_ASSERTIONS.{method}(",
+                )
+            path.write_text(source, encoding="utf-8")
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("unmodified unittest assertions", completed.stderr)
+
+    def test_runtime_proof_builtins_cannot_be_rebound(self) -> None:
+        def mutation(root: Path) -> None:
+            path = (
+                root
+                / "src/voice_nav_sim/test/"
+                "test_journaled_gazebo_hardware_write.py"
+            )
+            source = path.read_text(encoding="utf-8")
+            path.write_text(
+                "any = lambda *_args, **_kwargs: True\n" + source,
+                encoding="utf-8",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("proof primitives", completed.stderr)
+
+    def test_runtime_publisher_must_be_direct_launch_action(self) -> None:
+        def mutation(root: Path) -> None:
+            path = (
+                root
+                / "src/voice_nav_sim/test/"
+                "test_journaled_gazebo_hardware_write.py"
+            )
+            source = path.read_text(encoding="utf-8")
+            source = source.replace(
+                "from launch.actions import ",
+                "from launch.actions import OpaqueFunction, ",
+                1,
+            )
+            source = source.replace(
+                "                robot_state_publisher,\n",
+                (
+                    "                OpaqueFunction(\n"
+                    "                    function=lambda _context: (\n"
+                    "                        [] if robot_state_publisher else []\n"
+                    "                    ),\n"
+                    "                ),\n"
+                ),
+                1,
+            )
+            path.write_text(source, encoding="utf-8")
+
+        completed = self.run_repository_snapshot_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("canonical product Xacro", completed.stderr)
+
+    def test_runtime_registration_rejects_build_testing_rebind(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_sim/CMakeLists.txt",
+                "if(BUILD_TESTING)",
+                "set(BUILD_TESTING FALSE)\nif(BUILD_TESTING)",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("register the isolated runtime Adapter test", completed.stderr)
+
+    def test_runtime_registration_rejects_python_override(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_sim/CMakeLists.txt",
+                "    TIMEOUT 180\n",
+                "    TIMEOUT 180\n    PYTHON_EXECUTABLE /bin/true\n",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("register the isolated runtime Adapter test", completed.stderr)
+
+    def test_runtime_registration_rejects_skip_test(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_sim/CMakeLists.txt",
+                "    RUNNER \"${ament_cmake_ros_DIR}/run_test_isolated.py\"\n",
+                (
+                    "    RUNNER "
+                    "\"${ament_cmake_ros_DIR}/run_test_isolated.py\"\n"
+                    "    SKIP_TEST\n"
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("register the isolated runtime Adapter test", completed.stderr)
+
+    def test_dynamic_property_name_cannot_disable_serialization(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_sim/CMakeLists.txt",
+                "endif()\n\nament_package()",
+                (
+                    "  set(serial_property RUN_SERIAL)\n"
+                    "  set_tests_properties(\n"
+                    "    test_test_journaled_gazebo_hardware_write.py\n"
+                    "    PROPERTIES ${serial_property} FALSE\n"
+                    "  )\n"
+                    "endif()\n\nament_package()"
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("serialize its Gazebo process", completed.stderr)
+
+    def test_runtime_evidence_cannot_sweep_processes(self) -> None:
+        def mutation(root: Path) -> None:
+            path = (
+                root
+                / "src/voice_nav_sim/test/"
+                "test_journaled_gazebo_hardware_write.py"
+            )
+            source = path.read_text(encoding="utf-8")
+            path.write_text(source + "\nos.kill(1, 9)\n", encoding="utf-8")
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "without broad process discovery or signals",
+            completed.stderr,
+        )
 
     def test_adapter_target_requires_posix_ledger_link(self) -> None:
         def mutation(root: Path) -> None:
