@@ -812,6 +812,61 @@ protected Gazebo: not signaled, stopped, or reused
 package/full-repository/Gazebo runtime gates: pending the crash-stop policy
 ```
 
+### Real Gazebo Adapter runtime checkpoint
+
+The previous checkpoints proved the ledger and Adapter separately. Commit
+`9f4df62` adds the first vertical runtime proof through the default constructor:
+the launch test expands the canonical product Xacro, transforms only the
+hardware plugin, supplies the Parent-owned name/nonce, and starts a fresh
+headless Gazebo partition. The ledger accepts only the exact launch-managed
+Gazebo PID. After both controllers become ACTIVE, Parent ARMs, publishes a
+bounded non-zero stamped drive command, posts inclusive SEAL, reads the full
+immutable page chain, and ACKs it. GREEN requires a clean terminal bank and
+global fault word, Writer-contiguous fences, `VALID + upstream OK`, finite
+left/right command bits with at least one non-zero pair, and exact ACK.
+
+The first runner RED was only a fixture import failure: launch-testing does not
+place the source `test/` directory on `sys.path`. Loading the sibling module by
+its file path reached the real behavior RED, `SEALED_FAULT/CAPACITY (0x10)`.
+The assumption that evidence ran at the 100 Hz controller rate was wrong;
+Gazebo called hardware `write()` at each 1 ms simulation step. The fixture now
+uses a hard 8192-segment bound and only a 120 ms command window. PIT-0068 keeps
+that distinction visible.
+
+Commit `09bba8b` records the hardened contract. Independent reviews found that
+keyword search could pass after assertions were deleted, reversed, skipped,
+rebound, or made unreachable;
+response fields and snapshot provenance could be forged; transformed XML
+could miss the launched RobotStatePublisher; and CMake labels, variables,
+Python overrides, skip flags, or later property writes could masquerade as the
+effective runner/serialization configuration. The repaired checker binds the
+top-level collected TestCase, unmodified `self` assertions, exact ordered
+Parent flow, snapshot-page generator, wheel-bit decoder, and direct RSP launch
+action. Its CMake parser mirrors keyword consumption and requires an unchanged
+`BUILD_TESTING`, exact isolated runner, no bypass arguments, and one explicit
+final serial property. PIT-0069 records why keyword presence is not executable
+evidence.
+
+```text
+runtime test RED 1: sibling test-support module absent from runner sys.path
+runtime test RED 2: SEALED_FAULT, bank/global fault 0x10 (CAPACITY)
+runtime test GREEN: 3/3 fresh launches, 43.43 s total
+focused Adapter/Writer/POSIX/transform/runtime CTests: 5/5 passed
+static crash-stop contract: 65/65 passed
+voice_nav_sim package gate: 19/19 CTests; 134 xUnit, 18 skipped
+generated CTest: exact isolated runner; RUN_SERIAL=True; TIMEOUT=180
+full scripts/verify.sh: passed
+repository tests: 364 passed
+all-package scoped xUnit: 398 total, 0 errors, 0 failures, 39 skipped
+clean MotionGate install audit: passed
+post-run /dev/shm/voice_nav_hardware_* inventory: empty
+protected Gazebo: 3631225|1|34712103|gz sim server (unchanged)
+```
+
+This checkpoint proves real Adapter composition and lossless hardware-write
+evidence. It does not satisfy any authority, candidate, or MotionGate SIGKILL
+row below; those remain the next VN-0011A slice.
+
 ## VN-0011A observed crash evidence
 
 | Case | Expected threshold | Observed result |

@@ -1611,3 +1611,97 @@ CAS; every return and exception clears the in-flight marker. Writer cannot
 reuse the bank before that CAS changes it to FREE. A deterministic two-thread
 test pauses the claimant after its complete copy and proves the duplicate
 cannot release the state or consume the newer epoch.
+
+## PIT-0066: A delegated exception still owns a hardware-write sequence
+
+**Symptom.** Adapter tests pass for ordinary `OK` and `ERROR` returns, but an
+exception from the delegated Gazebo write leaves Writer permanently
+OUTSTANDING, or is recorded as though upstream returned `ERROR` normally.
+
+**Cause.** The Adapter began a Writer-owned cycle before delegation but closed
+it only on the return path. Fabricating `ERROR` in the catch path hid the
+difference between a returned result and an absent result.
+
+**Guardrail.** Every successful `begin_write()` has exactly one
+`finish_write()`, including exception paths. Use a named out-of-range delegated
+exception sentinel so Writer latches `PROTOCOL`, preserve any independent
+wheel-observation fault, and rethrow the original exception. Unit tests must
+prove ordering and exactly-once completion without letting the Adapter own or
+invent sequence numbers.
+
+## PIT-0067: Shared-memory identity validators can drift across layers
+
+**Symptom.** The pure robot-description transformer accepts an identity that
+the C++ Attached Adapter rejects at runtime, or the Adapter opens a stale
+same-name object because one layer applies a weaker nonce rule.
+
+**Cause.** Parent creation, XML transformation, and C++ discovery each grew
+their own approximation of a POSIX name or nonce grammar. Component tests used
+different examples, so every layer was locally GREEN while composition could
+not attach safely.
+
+**Guardrail.** Lock one strict external identity contract everywhere:
+`/voice_nav_hardware_<16-lower-hex>` plus exactly 32 lowercase, non-zero nonce
+hex digits. Mutation tests compare Python and C++ rejection boundaries;
+cross-process discovery proves a wrong nonce cannot claim `writer_pid`; the
+real Gazebo test proves the exact launch-managed PID claims the transformed
+positive identity.
+
+## PIT-0068: Gazebo hardware-write cadence is not controller update cadence
+
+**Symptom.** A short real-Gazebo ARM-to-SEAL interval unexpectedly terminates
+with `FAULT_CAPACITY` even though its budget comfortably covers the expected
+100 Hz controller updates.
+
+**Cause.** `gz_ros2_control` can invoke the hardware `write()` path on each
+1 ms simulation step while the controller manager updates commands every
+10 ms. Hardware evidence assigns a sequence to the former, so a budget sized
+from the latter undercounts by roughly an order of magnitude and can undercount
+further when simulation runs faster than wall time.
+
+**Guardrail.** Size and time evidence intervals from the observed hardware
+write cadence, keep the capture window minimal, and retain a hard protocol
+capacity. The isolated runtime regression uses an 8192-segment bounded region,
+a 120 ms continuously published command window, immediate inclusive SEAL, and
+requires a fault-free terminal snapshot plus no `/dev/shm` residue after three
+fresh launches.
+
+## PIT-0069: Evidence keywords do not prove that evidence executed
+
+**Symptom.** A static contract and CTest both report GREEN after the runtime
+test is changed to return or skip before its proof, an assertion is reversed,
+the transformed URDF is discarded, or `RUNNER` / `RUN_SERIAL` text is moved
+into an unrelated CMake label.
+
+**Cause.** Text-presence checks confuse vocabulary with semantics. Python
+tokens can remain in unreachable or negative assertions, while CMake
+multi-value keywords consume later tokens and a later property assignment can
+override an earlier one.
+
+**Guardrail.** Develop evidence checkers with false-green mutation tests. Parse
+the runtime test AST, reject skip/xfail/expected-failure and early termination,
+bind the ordered PID, ARM, SEAL, snapshot, and ACK data flow to positive
+assertions, and trace the owned transform into the returned launch graph.
+Parse `add_launch_test` using its actual one-value/multi-value keyword rules;
+require the exact isolated runner, owned CTest target, and one unambiguous
+truthy `RUN_SERIAL` assignment. Keep the real headless-Gazebo test in the
+package gate because a static checker is a guardrail, not runtime evidence.
+
+## PIT-0070: A launch-test change has several evidence inventories
+
+**Symptom.** The new launch test itself passes, but the repository contract,
+generated-CTest audit, or final scoped xUnit report rejects the workspace. A
+renamed critical test can likewise leave CTest GREEN while the final evidence
+gate reports a missing case.
+
+**Cause.** CMake registration is only one layer. The repository also owns an
+allowed target/count contract, an expected generated CTest inventory, and a
+critical `(classname, testcase)` xUnit inventory. Adding or renaming a test
+without updating each semantic consumer creates drift.
+
+**Guardrail.** Treat launch-test registration as one atomic change across
+CMake, CI-readiness expectations, generated metadata validation, scoped result
+reporting, and their mutation/unit tests. Run the complete `scripts/verify.sh`,
+not only `colcon test`: the final gate must prove target inventory, isolated
+runner, timeout, serialization, required testcase identities, and clean-install
+boundaries in one pass.

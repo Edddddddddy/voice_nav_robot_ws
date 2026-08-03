@@ -20,9 +20,17 @@ finish_write(ticket, delegated result, wheel observation)
 
 `begin_write` consumes eligible control, assigns the next global sequence, and
 returns an opaque ticket. `finish_write` consumes that exact ticket once. A
-wheel observation is `VALID`, `MISSING_ENTITY`, `MISSING_COMPONENT`, or
-`EMPTY_COMPONENT`; only `VALID` carries left/right IEEE-754 bits. The Adapter
-must report every outcome and preserve the upstream return value.
+wheel observation is `VALID`, `MISSING_ENTITY`, `MISSING_COMPONENT`,
+`EMPTY_COMPONENT`, or Adapter-local `INSPECTION_FAILURE`; only `VALID` carries
+left/right IEEE-754 bits. `INSPECTION_FAILURE` is deliberately outside the
+recordable ABI range and therefore latches `OBSERVATION`. The Adapter must
+report every outcome and preserve the upstream return value.
+
+If the delegated upstream write throws, the Adapter still finishes the exact
+outstanding ticket once with the named out-of-range
+`kHardwareWriteDelegatedException` sentinel and then rethrows the original
+exception. Writer latches `PROTOCOL` (and any independent observation fault),
+consumes the sequence, and never fabricates a normal upstream `ERROR` return.
 
 One Writer permits exactly one outstanding ticket because the pinned hardware
 Interface is synchronous. A nested or concurrent `begin_write`, sequence
@@ -52,6 +60,10 @@ Attachment and mapping are outside the write seam: its constructor may throw
 returning a usable Writer. The POSIX Attached Adapter owns mapping RAII and
 delegates ledger policy to the Writer implementation. Its claimed-PID
 inspection is a test diagnostic, not part of the Gazebo Writer Interface.
+The default Gazebo Adapter reads an exact `journal_name` / `journal_nonce` pair
+from `HardwareInfo` during `initSim`, attaches once before the first journaled
+write, and fails initialization for a partial, invalid, unclaimable, or changed
+identity. Product Xacro and launch files contain no such test seam.
 
 The Parent Interface posts ARM/SEAL, polls the matching receipt, copies every
 bounded page of one sealed interval, and ACKs an exact sealed identity. Only
@@ -140,6 +152,11 @@ bank may contain no segments or strictly ordered, non-overlapping segment
 ranges with gaps; a successful bank must have exact segment coverage whose
 summed counts equal `invocation_count`. Identical tuples on opposite sides of
 a gap never fold together.
+
+Budgets are derived from the actual hardware `write()` cadence. In Gazebo that
+cadence can be the 1 ms simulation step even when controller updates run at
+100 Hz; sizing from the controller rate alone can create a false `CAPACITY`
+terminal fault before SEAL.
 
 A simulation-stamp regression is relational: its otherwise recordable tuple
 has already been captured when comparison with the prior stored tuple detects
@@ -237,19 +254,25 @@ claim of portable ISO C++ interprocess atomics.
 
 ## Ownership and failure rules
 
-The Parent creates one exact `0600` POSIX object with `O_EXCL`, sizes and clears
-it, writes static identity/layout, then release-publishes READY. Writer opens
-but never creates or unlinks it, validates exact UID/mode/link-count/size,
-identity, reserved zeros, checksum, and two FREE banks, then uniquely claims
+The Parent creates one strict `/voice_nav_hardware_<16-lower-hex>` `0600` POSIX
+object with `O_EXCL`, sizes and clears it, writes a non-zero 32-lower-hex nonce
+plus static identity/layout, then release-publishes READY. Writer validates the
+out-of-band name and nonce first, opens with `O_RDWR | O_CLOEXEC` but never
+creates or unlinks, independently derives bounded capacity from the file size,
+and checks exact UID/mode/link-count/inode/size before and after mapping. Only
+after acquire-observing READY does it validate ABI geometry, identity, nonce,
+reserved zeros, checksum, and two pristine FREE banks, then uniquely claims
 its PID. Parent unlinks the name only after observing that claim; existing
-mappings remain valid.
+mappings remain valid. READY freezes the region size and immutable header for
+the mapping lifetime.
 
 Writer death with ACTIVE or pending control makes that interval unusable.
 Only a fully checksummed release-published sealed state is readable. Parent
 death does not clear or ACK evidence. Tests terminate only their directly
 owned child process and never scan or signal unrelated ROS/Gazebo processes.
 
-The heap-backed `HardwareWriteLedger` currently proves folding, validation,
-pagination, and checksum behavior. It is transitional test evidence, not an
-object to place in or copy around the mapping. Shared banks are fixed-width
-storage owned directly by the final Module.
+The heap-backed `HardwareWriteLedger` remains a pure reference implementation
+for focused folding, validation, pagination, and checksum tests. Runtime crash
+evidence instead uses `AttachedHardwareWriteLedger` and
+`HardwareWriteLedgerWriter` directly over the fixed-width shared mapping; no
+heap-backed ledger object is placed in or copied around that mapping.

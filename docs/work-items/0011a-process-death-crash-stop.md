@@ -14,20 +14,25 @@
 output transaction, Core-owned transition matrix, one-shot transition
 capability, POSIX attachment/lifetime proof, and Runtime-owned final publisher
 composition are complete. The current `voice_nav_mission` package gate is
-18/18 GREEN. Real pluginlib discovery now constructs the public-Interface test
-Adapter and its pinned upstream plugin. Its complete Jazzy 1.2.19 forwarding
-surface and post-delegate `JointVelocityCmd` observation are behavior-tested;
-the focused Adapter target is 10/10 GREEN. The pure crash robot-description
-transformer now replaces only the unique canonical upstream plugin, injects
-only the validated journal name/nonce, and rejects structural or ownership
-ambiguity. `voice_nav_sim` is 14/14 CTest GREEN (93 scoped xUnit tests, 10
-skipped). The preallocated pure-C++ hardware-write ledger core now has
-contiguous non-wrapping sequence accounting, count-preserving segmentation,
-immutable CRC64 snapshot pages, and sticky generation/finite/stamp/capacity/
-zero-window faults; its focused behavior suite is 14/14 GREEN. Shared-memory
-ARM/SEAL control, retained dual banks and ACK, Adapter fail-closed integration,
-evidence policy and composition, repository GREEN, product crash runs, the
-final local gate, PR, and CI remain open.
+18/18 GREEN. Real pluginlib discovery constructs the public-Interface test
+Adapter and its pinned upstream plugin. Writer now owns every begin/finish
+sequence; missing entities/components, inspection failures, and delegated
+exceptions all finish fail closed. The default Adapter discovers the strict
+POSIX identity from `HardwareInfo`, verifies the nonce, and owns the Attached
+mapping for its lifetime.
+
+The test-only launch now expands the canonical product Xacro, replaces only
+the hardware plugin, and starts a fresh partitioned headless Gazebo. Three
+consecutive runs proved that the exact launch-managed Gazebo PID claimed the
+ledger, ARM/SEAL produced a fault-free immutable snapshot with contiguous
+upstream-OK writes and real non-zero wheel-command bits, exact ACK succeeded,
+structured teardown exited cleanly, and `/dev/shm` retained no object. The
+65-test root contract locks this executable topology and rejects uncollected,
+disabled, rebound, negative, forged-provenance, discarded-flow, and CMake
+lookalike evidence. This closes Adapter runtime composition, not the
+authority/candidate/MotionGate crash cases. Shared fault injection, product
+crash repetitions, PR, CI, and release identity remain open; the complete
+pre-commit local gate is GREEN.
 
 ## Immutable base
 
@@ -673,9 +678,44 @@ pre-existing user-owned Gazebo process.
   five static/format checks passed. The sourced 319-test repository run has
   exactly the deliberate missing-`crash_stop_policy.py` RED; the static
   repository contract passes.
+- `9f4df62` adds the first real Gazebo Adapter runtime proof. The initial test
+  import failed because launch-testing does not add the source `test/`
+  directory to `sys.path`; after loading that sibling explicitly, the first
+  behavior RED sealed `FAULT_CAPACITY` (`0x10`). Gazebo invokes hardware
+  `write()` at the 1 ms simulation step rather than only at the 100 Hz
+  controller update, so the bounded fixture was corrected to 8192 segments
+  and a 120 ms command window. The exact test then passed three fresh launches
+  in 43.43 s, with no `/dev/shm/voice_nav_hardware_*` residue and protected
+  process identity `3631225|1|34712103|gz sim server` unchanged. The focused
+  Adapter/Writer/POSIX/transform/runtime set passed 5/5.
+- `09bba8b` locks the follow-up static contract developed through mutation
+  tracers and corrected through independent P1 reviews. It AST-validates the
+  real test method's exact PID, ARM-response-SEAL-response-snapshot-ACK data
+  flow, and positive fault/sequence/non-zero assertions. The collected
+  TestCase method, its `self` assertions, proof primitives, exact
+  snapshot-page generator, and direct RobotStatePublisher launch action cannot
+  be rebound or bypassed; its
+  synthetic fixture uses the real Parent API shape. CMake parsing mirrors
+  `add_launch_test` keyword consumption and requires the owned 180-second test,
+  exact isolated runner, default Python, no extra arguments or skip flag, an
+  unchanged `BUILD_TESTING`, and one unambiguous effective `RUN_SERIAL`.
+  All 65 contract tests pass, including mutations of the real repository test
+  and generated-CMake semantics.
+- The sourced `voice_nav_sim` package gate passes 19/19 CTests and 134 scoped
+  xUnit cases with 18 deliberate skips. Generated CTest JSON names the exact
+  `run_test_isolated.py`, `RUN_SERIAL=True`, and `TIMEOUT=180`; the protected
+  Gazebo starttime remains `34712103`, and shared-memory residue is empty.
+- The complete `scripts/verify.sh` gate passes in one run: 364 repository
+  tests, all six package builds, generated launch-test metadata, all six
+  sequential package test suites, 398 scoped xUnit cases with zero errors or
+  failures and 39 deliberate skips, and the clean MotionGate install audit.
+  Adding the runtime launch test exposed and closed three stale evidence
+  inventories: CI target/count, generated CTest expectations, and the renamed
+  critical journal testcase. PIT-0070 records this synchronization rule.
 
-These are component and Layer-2 contract facts, not observed product crash
-evidence. The repository topology contract remains deliberately RED until Node
-composition and the Gazebo Adapter exist. Exact final local/pushed HEAD, PR,
-CI, rebase/public tree, and Issue closure identities remain pending under the
+These are component, Layer-2, and Adapter-runtime composition facts, not
+observed product crash evidence. The repository topology contract is GREEN;
+the exact authority, candidate, and MotionGate process-death executions remain
+unimplemented. The pre-commit local gate is GREEN; exact pushed HEAD, PR, CI,
+rebase/public tree, and Issue closure identities remain pending under the
 delivery identity policy.
