@@ -94,6 +94,26 @@ REQUIRED_TEST_IDS: frozenset[str] = frozenset(
             "test_readiness_dependency_is_direct"
         ),
         (
+            "test_fault_producer_contract.FaultProducerContractTest."
+            "test_authority_kill_must_target_exact_action"
+        ),
+        (
+            "test_fault_producer_contract.FaultProducerContractTest."
+            "test_authority_latency_must_start_at_process_exit"
+        ),
+        (
+            "test_fault_producer_contract.FaultProducerContractTest."
+            "test_authority_barrier_requires_a_new_renew"
+        ),
+        (
+            "test_fault_producer_contract.FaultProducerContractTest."
+            "test_authority_observer_cannot_inject_final_output"
+        ),
+        (
+            "test_fault_producer_contract.FaultProducerContractTest."
+            "test_authority_exit_code_cannot_use_broad_allowlist"
+        ),
+        (
             "test_motion_gate_contract.MotionGateContractTest."
             "test_repository_motion_gate_contract_passes"
         ),

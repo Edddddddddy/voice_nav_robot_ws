@@ -129,6 +129,12 @@ def generated_sim_payload():
         "tests": [
             generated_launch_test(
                 "voice_nav_sim",
+                "test_test_authority_process_death.py",
+                "test_authority_process_death.py",
+                30.0,
+            ),
+            generated_launch_test(
+                "voice_nav_sim",
                 "test_test_fault_producer_pair.py",
                 "test_fault_producer_pair.py",
                 30.0,
@@ -288,6 +294,7 @@ class CiReadinessContractTest(unittest.TestCase):
         )
 
         self.assertEqual(sim_targets, {
+            "test_test_authority_process_death.py",
             "test_test_fault_producer_pair.py",
             "test_test_journaled_gazebo_hardware_write.py",
             "test_test_simulation_control.py",
@@ -328,7 +335,7 @@ class CiReadinessContractTest(unittest.TestCase):
 
     def test_launch_tests_use_official_process_scoped_domain_leases(self):
         expected_launch_test_counts = {
-            SIMULATION_CMAKE: 5,
+            SIMULATION_CMAKE: 6,
             MISSION_CMAKE: 2,
             BRINGUP_CMAKE: 1,
         }
@@ -417,6 +424,20 @@ class CiReadinessContractTest(unittest.TestCase):
             )
 
     def test_generated_metadata_requires_fault_producer_pair_inventory(self):
+        checker = load_generated_checker()
+        payload = generated_sim_payload()
+        payload["tests"].pop(0)
+
+        with self.assertRaises(
+            checker.GeneratedLaunchTestContractError,
+        ):
+            checker.validate_package_payload(
+                "voice_nav_sim",
+                payload,
+                expected_working_directory=GENERATED_SIM_WORKING_DIRECTORY,
+            )
+
+    def test_generated_metadata_requires_authority_death_inventory(self):
         checker = load_generated_checker()
         payload = generated_sim_payload()
         payload["tests"].pop(0)

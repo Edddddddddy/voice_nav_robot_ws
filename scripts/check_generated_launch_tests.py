@@ -23,6 +23,10 @@ EXPECTED_TESTS = {
         },
     },
     "voice_nav_sim": {
+        "test_test_authority_process_death.py": {
+            "source": "test_authority_process_death.py",
+            "timeout": 30.0,
+        },
         "test_test_fault_producer_pair.py": {
             "source": "test_fault_producer_pair.py",
             "timeout": 30.0,

@@ -48,6 +48,16 @@ MOTION_GATE_NODE_JOURNAL_CRITICAL_CASES = (
         "test_exit_codes_match_configuration_contract",
     ),
 )
+AUTHORITY_PROCESS_DEATH_CRITICAL_CASES = (
+    (
+        "voice_nav_sim.AuthorityProcessDeathTest",
+        "test_exact_authority_sigkill_expires_gate_to_zero",
+    ),
+    (
+        "voice_nav_sim.AuthorityProcessDeathShutdownTest",
+        "test_exact_exit_ledger_is_complete",
+    ),
+)
 FAULT_PRODUCER_PAIR_CRITICAL_CASES = (
     (
         "voice_nav_sim.FaultProducerPairTest",
@@ -89,6 +99,9 @@ TF_OWNERSHIP_CONFLICT_CRITICAL_CASES = (
     ),
 )
 SIM_CRITICAL_FILES = {
+    "test_test_authority_process_death.py.xunit.xml": (
+        AUTHORITY_PROCESS_DEATH_CRITICAL_CASES
+    ),
     "test_test_fault_producer_pair.py.xunit.xml": (
         FAULT_PRODUCER_PAIR_CRITICAL_CASES
     ),
@@ -536,6 +549,49 @@ class ScopedTestResultsTest(unittest.TestCase):
                 results,
                 omit=frozenset(
                     {"test_test_fault_producer_pair.py.xunit.xml"}
+                ),
+            )
+
+            completed = self.run_reporter(build_base, "voice_nav_sim")
+
+            self.assertEqual(completed.returncode, 2, completed.stdout)
+            self.assertIn("critical launch evidence", completed.stderr)
+
+    def test_report_requires_authority_process_death_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            results = (
+                build_base
+                / "voice_nav_sim"
+                / "test_results"
+                / "voice_nav_sim"
+            )
+            write_sim_critical_inventory(
+                results,
+                omit=frozenset(
+                    {"test_test_authority_process_death.py.xunit.xml"}
+                ),
+            )
+
+            completed = self.run_reporter(build_base, "voice_nav_sim")
+
+            self.assertEqual(completed.returncode, 2, completed.stdout)
+            self.assertIn("critical launch evidence", completed.stderr)
+
+    def test_report_rejects_skipped_authority_process_death_case(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            results = (
+                build_base
+                / "voice_nav_sim"
+                / "test_results"
+                / "voice_nav_sim"
+            )
+            write_sim_critical_inventory(
+                results,
+                skipped=(
+                    "test_test_authority_process_death.py.xunit.xml",
+                    AUTHORITY_PROCESS_DEATH_CRITICAL_CASES[0],
                 ),
             )
 

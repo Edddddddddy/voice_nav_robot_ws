@@ -338,6 +338,11 @@ if(BUILD_TESTING)
   )
 
   add_launch_test(
+    test/test_authority_process_death.py
+    TIMEOUT 30
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
+  )
+  add_launch_test(
     test/test_fault_producer_pair.py
     TIMEOUT 30
     RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
@@ -364,6 +369,7 @@ if(BUILD_TESTING)
   )
 
   set_tests_properties(
+    test_test_authority_process_death.py
     test_test_fault_producer_pair.py
     test_test_simulation_control.py
     test_test_journaled_gazebo_hardware_write.py
@@ -375,6 +381,7 @@ if(BUILD_TESTING)
       RUN_SERIAL TRUE
   )
   set_tests_properties(
+    test_test_authority_process_death.py
     test_test_fault_producer_pair.py
     test_test_simulation_control.py
     test_test_journaled_gazebo_hardware_write.py

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import re
 import sys
 import xml.etree.ElementTree as element_tree
@@ -24,9 +25,16 @@ ARTIFACTS = {
     "protocol_test": (
         "src/voice_nav_sim/test/test_fault_producer_protocol.py"
     ),
+    "authority_death_test": (
+        "src/voice_nav_sim/test/test_authority_process_death.py"
+    ),
     "cmake": "src/voice_nav_sim/CMakeLists.txt",
     "package": "src/voice_nav_sim/package.xml",
 }
+
+AUTHORITY_TRACER_AST_SHA256 = (
+    "797084a05b25800e576b478c94b28190aeda6ddc73164c1dd17ad2743baa595a"
+)
 
 
 def read_text(path: Path) -> str:
@@ -113,6 +121,28 @@ def parameter_role(call: ast.Call) -> str | None:
 def validate_actions(path: Path) -> None:
     source, tree = parse_python(path)
     factory = function_named(tree, "make_fault_producers")
+    actions_property = function_named(tree, "actions")
+    action_statements = actions_property.body
+    if (
+        action_statements
+        and isinstance(action_statements[0], ast.Expr)
+        and isinstance(action_statements[0].value, ast.Constant)
+        and isinstance(action_statements[0].value.value, str)
+    ):
+        action_statements = action_statements[1:]
+    if (
+        [ast.unparse(item) for item in actions_property.decorator_list]
+        != ["property"]
+        or [argument.arg for argument in actions_property.args.args]
+        != ["self"]
+        or len(action_statements) != 1
+        or not isinstance(action_statements[0], ast.Return)
+        or ast.unparse(action_statements[0].value)
+        != "(self.authority, self.candidate)"
+    ):
+        raise FaultProducerContractError(
+            "fault-producer actions property must remain the exact pair"
+        )
     assignments = {
         target.id: statement.value
         for statement in factory.body
@@ -497,8 +527,843 @@ def validate_protocol_test(path: Path) -> None:
             )
 
 
+def validate_authority_death_test(path: Path) -> None:
+    """Require SIGKILL to target the one exact authority launch action."""
+    source, tree = parse_python(path)
+    forbidden = (
+        "InternalMotionGateControl",
+        "create_client(",
+        "create_publisher(",
+        "os.kill(",
+        "subprocess",
+        "SignalProcess",
+        "matches_action",
+        ".emit_event(",
+    )
+    if any(marker in source for marker in forbidden):
+        raise FaultProducerContractError(
+            "observer-only authority tracer must not control or inject output"
+        )
+    publisher_factories = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr in {"create_publisher", "create_generic_publisher"}
+    ]
+    publish_calls = calls_named(tree, "publish")
+    if publisher_factories or publish_calls:
+        raise FaultProducerContractError(
+            "observer-only authority tracer must not control or inject output"
+        )
+    reflection_names = {
+        "getattr",
+        "getattr_static",
+        "setattr",
+        "delattr",
+        "vars",
+        "globals",
+        "locals",
+        "eval",
+        "exec",
+        "compile",
+        "__import__",
+        "import_module",
+        "attrgetter",
+        "methodcaller",
+        "__getattribute__",
+        "__setattr__",
+    }
+    reflection_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and final_call_name(node) in reflection_names
+    ]
+    reflection_attributes = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr
+        in {"__dict__", "__getattribute__", "__setattr__"}
+    ]
+    if reflection_calls or reflection_attributes:
+        raise FaultProducerContractError(
+            "authority observer must not use dynamic reflection"
+        )
+    called_names = {
+        final_call_name(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and final_call_name(node)
+    } - {"exit_observation", "request_sigkill", "wait_for_exact_exit"}
+    callable_identity_writes = [
+        node
+        for node in ast.walk(tree)
+        if (
+            isinstance(node, ast.Name)
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            and node.id in called_names
+        )
+        or (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.ctx, (ast.Store, ast.Del))
+            and node.attr in called_names
+        )
+    ]
+    if callable_identity_writes:
+        raise FaultProducerContractError(
+            "authority tracer must preserve assertion and predicate callable "
+            "identity"
+        )
+    constants = {
+        target.id: statement.value.value
+        for statement in tree.body
+        if isinstance(statement, ast.Assign)
+        and isinstance(statement.value, ast.Constant)
+        and isinstance(statement.value.value, (int, float))
+        for target in statement.targets
+        if isinstance(target, ast.Name)
+    }
+    required_constants = {
+        "ARMING_MAX_AGE_NS": 20_000_000,
+        "ARMING_WINDOW_NS": 40_000_000,
+        "AUTHORITY_STOP_DEADLINE_NS": 300_000_000,
+        "ZERO_HOLD_SECONDS": 0.12,
+        "ZERO_HOLD_MIN_SPAN_NS": 100_000_000,
+        "MINIMUM_ZERO_HOLD_SAMPLES": 5,
+    }
+    if any(
+        constants.get(name) != value
+        for name, value in required_constants.items()
+    ):
+        raise FaultProducerContractError(
+            "authority timing constants must remain pinned"
+        )
+    for callback_name, collection_name in (
+        ("on_state", "states"),
+        ("on_output", "outputs"),
+        ("on_candidate", "candidate_messages"),
+    ):
+        callback = function_named(tree, callback_name)
+        receipt_assignments = [
+            statement
+            for statement in callback.body
+            if isinstance(statement, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "receipt_ns"
+                for target in statement.targets
+            )
+            and ast.unparse(statement.value) == "time.monotonic_ns()"
+        ]
+        locked_sections = [
+            statement
+            for statement in callback.body
+            if isinstance(statement, ast.With)
+            and len(statement.items) == 1
+            and ast.unparse(statement.items[0].context_expr) == "self.lock"
+        ]
+        append_calls = (
+            calls_named(locked_sections[0], "append")
+            if len(locked_sections) == 1
+            else []
+        )
+        if (
+            len(receipt_assignments) != 1
+            or len(locked_sections) != 1
+            or receipt_assignments[0].lineno >= locked_sections[0].lineno
+            or len(calls_named(locked_sections[0], "monotonic_ns")) != 0
+            or len(append_calls) != 1
+            or ast.unparse(append_calls[0].func)
+            != f"self.{collection_name}.append"
+            or [ast.unparse(argument) for argument in append_calls[0].args]
+            != ["(receipt_ns, message)"]
+        ):
+            raise FaultProducerContractError(
+                "authority observer must preserve callback-entry receipt "
+                "fences before its lock"
+            )
+    generate = function_named(tree, "generate_test_description")
+    class_inventory = {
+        node.name: [ast.unparse(base) for base in node.bases]
+        for node in tree.body
+        if isinstance(node, ast.ClassDef)
+    }
+    adapter_module_bindings = [
+        statement
+        for statement in tree.body
+        if isinstance(statement, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id == "launch_crash_adapter"
+            for target in statement.targets
+        )
+    ]
+    adapter_constructors = [
+        statement
+        for statement in generate.body
+        if isinstance(statement, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "crash_adapter"
+            for target in statement.targets
+        )
+    ]
+    ledger_constructors = [
+        statement
+        for statement in generate.body
+        if isinstance(statement, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "ledger"
+            for target in statement.targets
+        )
+    ]
+    adapter_type_writes = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.ctx, ast.Store)
+        and node.attr == "LaunchCrashAdapter"
+    ]
+    if (
+        class_inventory
+        != {
+            "AuthorityProcessDeathTest": ["unittest.TestCase"],
+            "AuthorityProcessDeathShutdownTest": ["unittest.TestCase"],
+        }
+        or len(adapter_module_bindings) != 1
+        or ast.unparse(adapter_module_bindings[0].value)
+        != (
+            "load_test_support('launch_crash_adapter.py', "
+            "'voice_nav_authority_launch_crash_adapter')"
+        )
+        or len(adapter_constructors) != 1
+        or ast.unparse(adapter_constructors[0].value)
+        != "launch_crash_adapter.LaunchCrashAdapter(ledger)"
+        or len(ledger_constructors) != 1
+        or ast.unparse(ledger_constructors[0].value)
+        != "crash_evidence.CrashLedger()"
+        or adapter_type_writes
+    ):
+        raise FaultProducerContractError(
+            "authority tracer must preserve exact LaunchCrashAdapter "
+            "construction"
+        )
+    expected_clean = {
+        tuple(ast.unparse(argument) for argument in call.args)
+        for call in calls_named(generate, "expect_clean")
+    }
+    expected_kill = [
+        tuple(ast.unparse(argument) for argument in call.args)
+        for call in calls_named(generate, "expect_sigkill")
+    ]
+    launch_descriptions = calls_named(generate, "LaunchDescription")
+    launch_elements = []
+    if (
+        len(launch_descriptions) == 1
+        and launch_descriptions[0].args
+        and isinstance(launch_descriptions[0].args[0], ast.List)
+    ):
+        launch_elements = [
+            ast.unparse(element)
+            for element in launch_descriptions[0].args[0].elts
+        ]
+    generate_returns = [
+        statement
+        for statement in generate.body
+        if isinstance(statement, ast.Return)
+    ]
+    context_mapping = {}
+    if (
+        len(generate_returns) == 1
+        and isinstance(generate_returns[0].value, ast.Tuple)
+        and len(generate_returns[0].value.elts) == 2
+        and isinstance(generate_returns[0].value.elts[1], ast.Dict)
+    ):
+        context = generate_returns[0].value.elts[1]
+        context_mapping = {
+            literal_string(key): ast.unparse(value)
+            for key, value in zip(context.keys, context.values)
+        }
+    if context_mapping != {
+        "crash_adapter": "crash_adapter",
+        "motion_gate": "motion_gate",
+        "authority": "producers.authority",
+        "candidate": "producers.candidate",
+    }:
+        raise FaultProducerContractError(
+            "authority tracer must preserve its exact launch context"
+        )
+    registration_assignments = [
+        statement
+        for statement in generate.body
+        if isinstance(statement, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id == "exit_registrations"
+            for target in statement.targets
+        )
+    ]
+    registration_elements = []
+    if (
+        len(registration_assignments) == 1
+        and isinstance(registration_assignments[0].value, ast.Tuple)
+    ):
+        registration_elements = [
+            ast.unparse(element)
+            for element in registration_assignments[0].value.elts
+        ]
+    if (
+        expected_clean != {
+            ("motion_gate", "'motion_gate'"),
+            ("producers.candidate", "'candidate'"),
+        }
+        or expected_kill
+        != [("producers.authority", "'authority'")]
+        or registration_elements
+        != [
+            "crash_adapter.expect_clean(motion_gate, 'motion_gate')",
+            (
+                "crash_adapter.expect_sigkill(producers.authority, "
+                "'authority')"
+            ),
+            (
+                "crash_adapter.expect_clean(producers.candidate, "
+                "'candidate')"
+            ),
+        ]
+        or launch_elements
+        != [
+            "*exit_registrations",
+            "motion_gate",
+            "*producers.actions",
+            "launch_testing.actions.ReadyToTest()",
+        ]
+        or "make_fault_producers('authority_death')"
+        not in ast.unparse(generate)
+    ):
+        raise FaultProducerContractError(
+            "authority tracer must preserve exact launch exit registrations"
+        )
+    test_method = function_named(
+        tree,
+        "test_exact_authority_sigkill_expires_gate_to_zero",
+    )
+    skipped = any(
+        final_call_name(call) in {"skip", "skipTest"}
+        for call in ast.walk(test_method)
+        if isinstance(call, ast.Call)
+    )
+    if (
+        test_method.decorator_list
+        or any(isinstance(node, ast.Return) for node in ast.walk(test_method))
+        or skipped
+    ):
+        raise FaultProducerContractError(
+            "authority tracer must execute without skip or early return"
+        )
+    exact_exit = function_named(tree, "wait_for_exact_exit")
+    exit_observations = [
+        call
+        for call in calls_named(exact_exit, "exit_observation")
+        if ast.unparse(call.func) == "crash_adapter.exit_observation"
+    ]
+    exit_returns = [
+        node for node in ast.walk(exact_exit) if isinstance(node, ast.Return)
+    ]
+    exit_handlers = [
+        node
+        for node in ast.walk(exact_exit)
+        if isinstance(node, ast.ExceptHandler)
+    ]
+    if (
+        len(exit_observations) != 1
+        or [ast.unparse(argument) for argument in exit_observations[0].args]
+        != ["authority"]
+        or len(exit_returns) != 1
+        or ast.unparse(exit_returns[0].value)
+        != "crash_adapter.exit_observation(authority)"
+        or len(exit_handlers) != 1
+        or ast.unparse(exit_handlers[0].type)
+        != "crash_evidence.CrashEvidenceError"
+    ):
+        raise FaultProducerContractError(
+            "authority tracer must use the exact ProcessExited observation "
+            "source"
+        )
+    protected_adapter_names = {
+        "crash_adapter",
+        "exit_observation",
+        "request_sigkill",
+        "wait_for_exact_exit",
+    }
+    allowed_adapter_calls = {
+        "crash_adapter.request_sigkill",
+        "self.wait_for_exact_exit",
+    }
+    adapter_rebound = False
+    for method in (test_method, exact_exit):
+        for node in ast.walk(method):
+            targets = []
+            value = None
+            if isinstance(node, ast.Assign):
+                targets = node.targets
+                value = node.value
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+                targets = [node.target]
+                value = node.value
+            elif isinstance(node, ast.NamedExpr):
+                targets = [node.target]
+                value = node.value
+            if targets and any(
+                (
+                    isinstance(item, ast.Name)
+                    and item.id in protected_adapter_names
+                )
+                or (
+                    isinstance(item, ast.Attribute)
+                    and item.attr in protected_adapter_names
+                )
+                or isinstance(item, ast.Name)
+                and item.id == "crash_adapter"
+                for target in targets
+                for item in ast.walk(target)
+            ):
+                adapter_rebound = True
+            if value is not None and any(
+                isinstance(item, ast.Name) and item.id == "crash_adapter"
+                for item in ast.walk(value)
+            ):
+                direct_call = (
+                    isinstance(value, ast.Call)
+                    and ast.unparse(value.func) in allowed_adapter_calls
+                )
+                if not direct_call:
+                    adapter_rebound = True
+            if isinstance(node, ast.Call) and final_call_name(node) in {
+                "setattr",
+                "__setattr__",
+            }:
+                adapter_rebound = True
+    if adapter_rebound:
+        raise FaultProducerContractError(
+            "authority tracer must reject adapter rebinding and aliases"
+        )
+    kill_calls = calls_named(test_method, "request_sigkill")
+    if (
+        len(kill_calls) != 1
+        or [ast.unparse(argument) for argument in kill_calls[0].args]
+        != ["launch_service", "authority"]
+    ):
+        raise FaultProducerContractError(
+            "authority tracer must request exact authority SIGKILL"
+        )
+    deadline_assertions = [
+        call
+        for call in calls_named(test_method, "assertLessEqual")
+        if len(call.args) == 2
+        and ast.unparse(call.args[1]) == "AUTHORITY_STOP_DEADLINE_NS"
+    ]
+    measured_latencies = {
+        ast.unparse(call.args[0])
+        for call in deadline_assertions
+    }
+    if measured_latencies != {
+        "terminal_receipt - exit_ns",
+        "zero_receipt - exit_ns",
+    }:
+        raise FaultProducerContractError(
+            "authority tracer must measure exact ProcessExited latency"
+        )
+    arming_assertions = [
+        call
+        for call in calls_named(test_method, "assertLessEqual")
+        if len(call.args) == 2
+        and ast.unparse(call.args[1])
+        in {"ARMING_WINDOW_NS", "ARMING_MAX_AGE_NS"}
+    ]
+    arming_pairs = [
+        tuple(ast.unparse(argument) for argument in call.args)
+        for call in arming_assertions
+    ]
+    if len(arming_pairs) != 3 or set(arming_pairs) != {
+        ("signal_intent_ns - barrier_started", "ARMING_WINDOW_NS"),
+        ("signal_intent_ns - state_receipt", "ARMING_MAX_AGE_NS"),
+        ("signal_intent_ns - output_receipt", "ARMING_MAX_AGE_NS"),
+    }:
+        raise FaultProducerContractError(
+            "authority tracer must preserve exact fresh arming barrier "
+            "assertions"
+        )
+    ordered_names = (
+        "wait_for_fresh_arming_barrier",
+        "request_sigkill",
+        "wait_for_exact_exit",
+        "assert_no_preexit_retirement",
+        "wait_for_terminal_evidence",
+        "assert_terminal_state",
+        "assert_zero_hold_and_candidate_counter_evidence",
+    )
+    ordered_calls = [
+        calls_named(test_method, name)
+        for name in ordered_names
+    ]
+    if (
+        any(len(matches) != 1 for matches in ordered_calls)
+        or [matches[0].lineno for matches in ordered_calls]
+        != sorted(matches[0].lineno for matches in ordered_calls)
+    ):
+        raise FaultProducerContractError(
+            "authority tracer must preserve its fresh arming barrier order"
+        )
+    fresh_barrier = function_named(tree, "wait_for_fresh_arming_barrier")
+    fresh_source = ast.unparse(fresh_barrier)
+    if not all(
+        marker in fresh_source
+        for marker in (
+            "sample[1].control_seq > baseline_state.control_seq",
+            "sample[1].gate_instance_id == baseline_state.gate_instance_id",
+            "sample[1].lease_id == baseline_state.lease_id",
+            "now_ns - renewed[0] <= ARMING_MAX_AGE_NS",
+            "now_ns - nonzero[0] <= ARMING_MAX_AGE_NS",
+            "self.is_finite_nonzero(sample[1])",
+        )
+    ):
+        raise FaultProducerContractError(
+            "authority tracer must require fresh RENEW arming evidence"
+        )
+    preexit = function_named(tree, "assert_no_preexit_retirement")
+    preexit_source = ast.unparse(preexit)
+    if (
+        preexit_source.count(
+            "barrier_started_ns <= receipt < exit_ns"
+        ) != 2
+        or not all(
+            marker in preexit_source
+            for marker in (
+                "self.is_live_armed(state)",
+                "state.gate_instance_id == armed_state.gate_instance_id",
+                "state.lease_id == armed_state.lease_id",
+                "all((self.is_finite_nonzero(output)",
+            )
+        )
+    ):
+        raise FaultProducerContractError(
+            "authority tracer must preserve pre-exit live counter-evidence"
+        )
+
+    terminal_wait = function_named(tree, "wait_for_terminal_evidence")
+    terminal_assertion = function_named(tree, "assert_terminal_state")
+    terminal_source = ast.unparse(terminal_wait)
+    assertion_source = ast.unparse(terminal_assertion)
+    new_zero_assertions = [
+        call
+        for call in calls_named(terminal_assertion, "assertGreater")
+        if [ast.unparse(argument) for argument in call.args]
+        == ["terminal.zero_publish_seq", "armed.zero_publish_seq"]
+    ]
+    if len(new_zero_assertions) != 1:
+        raise FaultProducerContractError(
+            "authority terminal evidence must require a new zero publish "
+            "sequence"
+        )
+    terminal_loops = [
+        node for node in ast.walk(terminal_wait) if isinstance(node, ast.While)
+    ]
+    terminal_snapshots = calls_named(terminal_wait, "snapshot")
+    deadline_clocks = [
+        call
+        for call in calls_named(terminal_wait, "monotonic_ns")
+        if ast.unparse(call.func) == "time.monotonic_ns"
+    ]
+    if (
+        terminal_source.count("sample[0] >= exit_ns") != 2
+        or terminal_source.count("sample[0] <= deadline_ns") != 2
+        or len(terminal_loops) != 1
+        or not isinstance(terminal_loops[0].test, ast.Constant)
+        or terminal_loops[0].test.value is not True
+        or len(terminal_snapshots) != 1
+        or len(deadline_clocks) != 1
+        or terminal_snapshots[0].lineno >= deadline_clocks[0].lineno
+        or "if time.monotonic_ns() > deadline_ns:" not in terminal_source
+    ):
+        raise FaultProducerContractError(
+            "authority terminal evidence must use a scan-first receipt "
+            "deadline"
+        )
+    if (
+        "InternalMotionGateState.CANDIDATE_EXPIRED" in source
+        or not all(
+            marker in terminal_source
+            for marker in (
+                "deadline_ns = exit_ns + AUTHORITY_STOP_DEADLINE_NS",
+                "sample[0] >= exit_ns",
+                "InternalMotionGateState.AUTHORITY_EXPIRED",
+                "self.is_zero(sample[1])",
+            )
+        )
+        or not all(
+            marker in assertion_source
+            for marker in (
+                "InternalMotionGateState.AUTHORITY_EXPIRED",
+                "'authority lease expired'",
+                "terminal.lease_id, ''",
+                "terminal.candidate_topic, ''",
+                "terminal.motion_inhibited",
+                "terminal.zero_selected",
+            )
+        )
+    ):
+        raise FaultProducerContractError(
+            "authority tracer must require AUTHORITY_EXPIRED terminal evidence"
+        )
+    counter_evidence = function_named(
+        tree,
+        "assert_zero_hold_and_candidate_counter_evidence",
+    )
+    candidate_binding = function_named(tree, "bind_candidate_observer")
+    binding_source = ast.unparse(candidate_binding)
+    endpoint_filter = (
+        "endpoint.node_name == 'collision_monitor' and "
+        "endpoint.node_namespace == '/' and "
+        "(endpoint.topic_type == 'geometry_msgs/msg/TwistStamped')"
+    )
+    compatible_assignments = {
+        target.id: statement.value
+        for function in (candidate_binding, counter_evidence)
+        for statement in ast.walk(function)
+        if isinstance(statement, ast.Assign)
+        and isinstance(statement.value, ast.ListComp)
+        for target in statement.targets
+        if isinstance(target, ast.Name)
+        and target.id in {"compatible", "compatible_writers"}
+    }
+    endpoint_collection_names = {"compatible", "compatible_writers"}
+    endpoint_collection_nodes = tuple(
+        node
+        for function in (candidate_binding, counter_evidence)
+        for node in ast.walk(function)
+    )
+    endpoint_store_counts = {
+        name: sum(
+            1
+            for node in endpoint_collection_nodes
+            if isinstance(node, ast.Name)
+            and isinstance(node.ctx, ast.Store)
+            and node.id == name
+        )
+        for name in endpoint_collection_names
+    }
+    endpoint_aliases = []
+    endpoint_indirect_writes = []
+    for node in endpoint_collection_nodes:
+        targets = []
+        value = None
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+            value = node.value
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            targets = [node.target]
+            value = node.value
+        elif isinstance(node, ast.NamedExpr):
+            targets = [node.target]
+            value = node.value
+        elif isinstance(node, ast.Delete):
+            targets = node.targets
+        if value is not None and any(
+            isinstance(item, ast.Name)
+            and item.id in endpoint_collection_names
+            for item in ast.walk(value)
+        ):
+            endpoint_aliases.append(node)
+        for target in targets:
+            referenced = {
+                item.id
+                for item in ast.walk(target)
+                if isinstance(item, ast.Name)
+                and item.id in endpoint_collection_names
+            }
+            if referenced and not (
+                isinstance(target, ast.Name)
+                and target.id in endpoint_collection_names
+            ):
+                endpoint_indirect_writes.append(node)
+    endpoint_mutation_calls = [
+        node
+        for node in endpoint_collection_nodes
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and any(
+            isinstance(item, ast.Name)
+            and item.id in endpoint_collection_names
+            for item in ast.walk(node.func.value)
+        )
+    ]
+    endpoint_deletes = [
+        node
+        for node in endpoint_collection_nodes
+        if isinstance(node, ast.Name)
+        and isinstance(node.ctx, ast.Del)
+        and node.id in endpoint_collection_names
+    ]
+    if (
+        endpoint_store_counts
+        != {"compatible": 1, "compatible_writers": 1}
+        or endpoint_aliases
+        or endpoint_indirect_writes
+        or endpoint_mutation_calls
+        or endpoint_deletes
+    ):
+        raise FaultProducerContractError(
+            "authority tracer must preserve immutable endpoint evidence "
+            "collections"
+        )
+    compatible_shapes = {}
+    for name, comprehension in compatible_assignments.items():
+        if (
+            len(comprehension.generators) == 1
+            and len(comprehension.generators[0].ifs) == 1
+        ):
+            compatible_shapes[name] = ast.unparse(
+                comprehension.generators[0].ifs[0]
+            )
+    if not all(
+        marker in binding_source
+        for marker in (
+            "self.node.create_subscription(TwistStamped, topic, "
+            "self.on_candidate, candidate_qos())",
+            "expected_gid = bytes(writer_gid)",
+            "endpoint.node_name == 'collision_monitor'",
+            "endpoint.node_namespace == '/'",
+            "endpoint.topic_type == 'geometry_msgs/msg/TwistStamped'",
+            "len(compatible) == 1",
+            "bytes(compatible[0].endpoint_gid) == expected_gid",
+            "self.candidate_snapshot()",
+        )
+    ) or compatible_shapes != {
+        "compatible": endpoint_filter,
+        "compatible_writers": endpoint_filter,
+    }:
+        raise FaultProducerContractError(
+            "authority tracer must preserve surviving candidate "
+            "counter-evidence and exact writer binding"
+        )
+    counter_source = ast.unparse(counter_evidence)
+    receipt_span_assertions = [
+        call
+        for call in calls_named(counter_evidence, "assertGreaterEqual")
+        if len(call.args) == 2
+        and ast.unparse(call.args[1]) == "ZERO_HOLD_MIN_SPAN_NS"
+    ]
+    receipt_span_pairs = [
+        tuple(ast.unparse(argument) for argument in call.args)
+        for call in receipt_span_assertions
+    ]
+    if len(receipt_span_pairs) != 2 or set(receipt_span_pairs) != {
+        ("held[-1][0] - held[0][0]", "ZERO_HOLD_MIN_SPAN_NS"),
+        (
+            "candidate_after_exit[-1][0] - candidate_after_exit[0][0]",
+            "ZERO_HOLD_MIN_SPAN_NS",
+        ),
+    }:
+        raise FaultProducerContractError(
+            "authority tracer must preserve exact receipt-span assertions"
+        )
+    counter_equal_pairs = [
+        tuple(ast.unparse(argument) for argument in call.args[:2])
+        for call in calls_named(counter_evidence, "assertEqual")
+        if len(call.args) >= 2
+    ]
+    if (
+        counter_equal_pairs.count(("len(compatible_writers)", "1")) != 1
+        or counter_equal_pairs.count(
+            (
+                "bytes(compatible_writers[0].endpoint_gid)",
+                "expected_gid",
+            )
+        )
+        != 1
+    ):
+        raise FaultProducerContractError(
+            "authority tracer must require one compatible writer with the "
+            "armed GID"
+        )
+    if not all(
+        marker in counter_source
+        for marker in (
+            "all((self.is_zero(output) for _receipt, output in held))",
+            "held[-1][0] - held[0][0]",
+            "ZERO_HOLD_MIN_SPAN_NS",
+            "get_publishers_info_by_topic(candidate_topic)",
+            "endpoint.node_name == 'collision_monitor'",
+            "endpoint.node_namespace == '/'",
+            "geometry_msgs/msg/TwistStamped",
+            "self.assertEqual(len(compatible_writers), 1",
+            "bytes(compatible_writers[0].endpoint_gid)",
+            "self.candidate_snapshot()",
+            "receipt >= exit_ns",
+            "candidate_after_exit[-1][0] - candidate_after_exit[0][0]",
+            "self.is_finite_nonzero(message)",
+        )
+    ):
+        raise FaultProducerContractError(
+            "authority tracer must preserve surviving candidate counter-evidence"
+        )
+
+    shutdown_method = function_named(
+        tree,
+        "test_exact_exit_ledger_is_complete",
+    )
+    exit_calls = calls_named(shutdown_method, "assertExitCodes")
+    exact_allowlists = {}
+    for call in exit_calls:
+        process_value = keyword(call, "process")
+        allowlist_value = keyword(call, "allowable_exit_codes")
+        if isinstance(process_value, ast.Name):
+            exact_allowlists[process_value.id] = ast.unparse(allowlist_value)
+    shutdown_source = ast.unparse(shutdown_method)
+    if (
+        len(exit_calls) != 3
+        or exact_allowlists != {
+            "motion_gate": "[0]",
+            "authority": "[-signal.SIGKILL]",
+            "candidate": "[0]",
+        }
+        or shutdown_source.count("crash_adapter.assert_complete()") != 1
+        or not all(
+            marker in shutdown_source
+            for marker in (
+                "('motion_gate', 0)",
+                "('authority', -signal.SIGKILL)",
+                "('candidate', 0)",
+            )
+        )
+    ):
+        raise FaultProducerContractError(
+            "authority tracer must preserve the exact exhaustive exit ledger"
+        )
+    authority_ast_digest = hashlib.sha256(
+        ast.dump(tree, include_attributes=False).encode("utf-8")
+    ).hexdigest()
+    if authority_ast_digest != AUTHORITY_TRACER_AST_SHA256:
+        raise FaultProducerContractError(
+            "review-locked authority tracer AST fingerprint changed"
+        )
+
+
 def validate_cmake(path: Path) -> None:
     source = read_text(path)
+    authority_registration = re.search(
+        r"add_launch_test\s*\(\s*test/test_authority_process_death\.py\s+"
+        r"TIMEOUT\s+30\s+RUNNER\s+"
+        r'"\$\{ament_cmake_ros_DIR\}/run_test_isolated\.py"\s*\)',
+        source,
+        flags=re.MULTILINE,
+    )
+    if (
+        not authority_registration
+        or source.count("test_test_authority_process_death.py") != 2
+    ):
+        raise FaultProducerContractError(
+            "CMake must register the isolated authority process-death launch test"
+        )
     launch_registration = re.search(
         r"add_launch_test\s*\(\s*test/test_fault_producer_pair\.py\s+"
         r"TIMEOUT\s+30\s+RUNNER\s+"
@@ -555,6 +1420,7 @@ def validate_contract(root: Path) -> None:
     validate_helper(paths["helper"])
     validate_launch_test(paths["launch_test"])
     validate_protocol_test(paths["protocol_test"])
+    validate_authority_death_test(paths["authority_death_test"])
     validate_cmake(paths["cmake"])
     validate_package(paths["package"])
 
