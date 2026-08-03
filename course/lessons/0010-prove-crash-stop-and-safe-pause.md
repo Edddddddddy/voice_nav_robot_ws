@@ -242,13 +242,23 @@ pure valid fixture passes
 ```
 
 Slice A 的文档 contract、CrashLedger、Gate/hardware journal 和第一条真实 Gazebo
-Adapter runtime 证据均已落盘。`0cf7866` 又增加了 exact launch crash Adapter：
-它先 ARM ledger，再通过 `SignalProcess(SIGKILL, matches_action(exact_action))`
-发信号，并在 exact `OnProcessExit` 回调入口取 monotonic 时间。同步极速退出和延迟
-取时 mutation 都会失败。它仍只是故障注入 seam，不是任一 process-death 验收行。
+Adapter runtime 证据均已落盘。`0cf7866` 增加 exact launch crash Adapter；
+`b45d118` 又增加两个可独立管理的 helper OS process：authority 自主执行
+PREPARE/OPEN/RENEW，固定 FQN `/collision_monitor` 的 candidate 持续发布有界非零
+候选速度，测试 parent 只观察状态与最终输出。
+
+这里发现了一个容易制造假绿的边界：DDS/ROS graph 中 endpoint 可见，不等于目标
+进程的 executor 已运行 callback、也不等于它已消费 transient Gate snapshot。短暂的
+PREPARED generation 不能靠固定 sleep 碰运气。candidate 必须先消费初始 Gate state，
+再发布 transient-local readiness ACK；authority 同时确认 exact candidate 和最终
+controller endpoint 后才开始 PREPARE；动态 candidate writer 在 PREPARE 给出 topic
+后才创建，并在 OPEN 前再次验证。最终 fixture 连续保持 ARMED/live/fresh 0.55 s，
+且窗口内观察到 non-zero candidate traffic，超过 250/150 ms 两条 lease，但它仍
+不是任一 process-death 验收行。
+
 后续继续按 tests-first 补齐：
 
-- authority/candidate 两个独立 helper OS process；
+- 复用 exact action 与 CrashLedger 的无 Gazebo authority SIGKILL tracer；
 - 可参数化的 Gate-expiry 与 simulation-window evidence Module；
 - isolated headless product launch test；
 - 对集成测试本身的 static/mutation contract；

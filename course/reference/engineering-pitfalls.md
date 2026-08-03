@@ -14,7 +14,7 @@ is [Problem learning and recurrence control](../../docs/process/problem-learning
 | PIT-0004 | `rosidl_generate_interfaces` rejects an interface package | Is `rosidl_interface_packages` membership in `package.xml`? | Guarded |
 | PIT-0005 | Gazebo rejects `base_footprint` inertia | Does the logical planar frame carry physical inertia? | Guarded |
 | PIT-0006 | xacro reports `unknown macro name: xacro:material` | Was a `material` macro actually defined or included? | Guarded |
-| PIT-0007 | DDS is matched but MotionGate reports writer identity mismatch | Is graph identity temporarily unresolved for the same non-zero GID? | Guarded |
+| PIT-0007 | DDS is matched but MotionGate identity/readiness still fails | Is graph metadata unresolved, or has the target callback not acknowledged readiness? | Guarded |
 | PIT-0008 | Local evidence was green, then the final change invalidated it | Were tests rerun on the exact final HEAD? | Guarded |
 | PIT-0009 | Code/tests support a case that the lesson still forbids | Do prose, tests, and implementation describe the same closed set? | Guarded |
 | PIT-0010 | A bounded RPC returns success after its total budget | Is the deadline checked again immediately after the RPC? | Guarded |
@@ -139,6 +139,11 @@ then treated the remaining names as shell pipelines. Four separate literal
 CTest invocations replaced it; all passed. This was wrapper evidence only and
 did not alter the focused Adapter result.
 
+During the producer-pair documentation checkpoint, PowerShell expanded the
+Awk field token `$22` before WSL received the `/proc` identity probe. The probe
+was rerun as direct `cat`/`xargs` argument calls with no embedded shell variable;
+Git status stayed clean and the protected process identity was unchanged.
+
 ## PIT-0002: WSL transport warnings are not the command result
 
 **Symptom.** WSL emits a localhost/NAT warning, sometimes with garbled Windows
@@ -207,15 +212,18 @@ macro explicitly. Run xacro to a temporary URDF before launching
 `robot_state_publisher`. See
 [Lesson 0003](../lessons/0003-build-static-robot-model.md).
 
-## PIT-0007: DDS matching and ROS graph identity are non-atomic
+## PIT-0007: DDS matching, ROS graph identity, and callback readiness are non-atomic
 
 **Symptom.** The candidate writer and reader are DDS-matched, but a Gate-local
 `get_publishers_info_by_topic()` snapshot temporarily reports unresolved node
-identity and OPEN fails intermittently.
+identity and OPEN fails intermittently. In a short-lived test generation, the
+endpoint can also be graph-visible before the candidate executor has consumed
+the initial Gate snapshot, so the first state update is missed.
 
-**Supported cause.** Transport matching and graph metadata convergence are
-different observations, not one atomic transaction. The exact middleware field
-arrival order is not assumed.
+**Supported cause.** Transport matching, graph metadata convergence, and
+application callback progress are different observations, not one atomic
+transaction. The exact middleware field arrival order is not assumed, and
+endpoint visibility is not a readiness acknowledgement from the target process.
 
 **Guardrail.** Only the exact typed `WRITER_METADATA_PENDING` state is retryable:
 there must be one publisher, correct type/kind/QoS, a non-zero GID pinned to the
@@ -225,7 +233,15 @@ node name or Jazzy's exact `_NODE_NAME_UNKNOWN_` and
 identity, replacement, disappearance after pinning, zero GID, or barrier change
 remains terminal. See
 [VN-0010-C1](../../docs/work-items/0010-corrective-writer-identity-convergence.md)
-and [Lesson 0009](../lessons/0009-build-independent-motion-gate.md).
+and [Lesson 0009](../lessons/0009-build-independent-motion-gate.md). For a
+bounded test fixture, combine those graph checks with an explicit
+transient-local readiness ACK emitted only after the candidate consumes an
+initial Gate state; wait for the exact final-controller endpoint before
+PREPARE. The helper's compatibility convergence has exactly one additional
+closed retry branch: `WRITER_UNAVAILABLE` only when detail is exactly
+`candidate topic has no writer`. Every retry uses a fresh request ID, preserves
+the same PREPARED snapshot/generation, and shares one absolute deadline. Do not
+replace any of these proofs with a fixed sleep.
 
 ## PIT-0008: Acceptance evidence belongs to an exact commit
 

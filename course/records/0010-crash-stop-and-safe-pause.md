@@ -882,9 +882,51 @@ the intended single-test RED. Final evidence is 4/4 direct tests, the exact
 registered CTest 1/1, `ament_flake8`, `ament_pep257`, repository/crash-stop
 contracts, and `git diff --check`, all GREEN.
 
-This checkpoint does not yet create the authority/candidate helper processes,
-kill a real launch-managed producer, or satisfy the latency/journal/physical
-rows below.
+At this checkpoint the authority/candidate helper processes did not yet exist,
+and no real launch-managed producer was killed. The next checkpoint closes only
+the independent arming fixture; the latency/journal/physical rows remain open.
+
+### Independent fault-producer pair checkpoint
+
+`b45d118` launches the authority and candidate as distinct, test-only OS
+processes beside the real MotionGate. The parent owns no Gate control client;
+it only supplies the exact final-controller subscriber and observes the
+package-private Gate state plus final output. The authority autonomously
+PREPAREs, OPENs, and RENEWs every
+75 ms. The exact `/collision_monitor` candidate publishes a fixed bounded
+non-zero `TwistStamped` every 10 ms.
+
+The diagnostic behavior RED used base HEAD `dbe120d` plus the uncommitted
+tracer and ran
+`ctest --test-dir build/voice_nav_sim -R '^test_test_fault_producer_pair.py$' --output-on-failure`.
+`/tmp/vn_fault_pair_behavior_red2.log` records the runner return code 1 and
+CTest result 0%/1 failed after all three processes launched and autonomous ARM
+timed out; every process exited cleanly. The outer CTest numeric exit code was
+not durably captured, so this is not promoted to final release evidence. The
+first implementation then exposed two ordering defects rather
+than hiding them with sleep: the final-controller endpoint was absent at OPEN,
+and graph-visible candidate metadata preceded application callback readiness.
+The final protocol waits for the exact controller endpoint and for an explicit
+candidate acknowledgement emitted only after it consumes the initial Gate
+snapshot.
+
+```text
+focused protocol + launch tracer: 2/2 passed
+producer pair: three distinct launch-managed PIDs
+continuous ARMED/live/fresh interval: 0.55 s; non-zero traffic observed
+authority renew period: 75 ms; control_seq advanced by at least 3
+fresh repetitions after readiness fix: 3/3 passed
+independent review: P0=0, P1=5 found, P1=5 closed
+repository tests: 382 passed
+voice_nav_sim scoped xUnit: 148 total, 0 errors, 0 failures, 18 skipped
+voice_nav_sim launch tests: 5/5 passed
+protected Gazebo starttime: 34712103 (unchanged)
+```
+
+This checkpoint proves only that independently killable producers can arm and
+sustain the real Gate. It does not claim SIGKILL, terminal reason, latency,
+journal causality, wheel-zero, or physical-stationarity evidence; all observed
+crash rows below therefore remain `Not yet captured`.
 
 ## VN-0011A observed crash evidence
 

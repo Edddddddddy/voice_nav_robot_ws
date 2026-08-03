@@ -65,6 +65,18 @@ the real package-private Gate protocol but are not product nodes.
 - Package-private MotionGate IDL and Core semantics: unchanged.
 - Product resident processes: unchanged; no respawn or Gate-exit shutdown is
   added.
+- The no-Gazebo arming fixture launches the authority renewer and candidate
+  publisher as two independent test-only OS processes. The candidate FQN is
+  fixed to `/collision_monitor`; its command topic is generation-scoped. The
+  authority owns PREPARE/OPEN/RENEW, while the launch-test parent owns no Gate
+  control client and only observes state and final output.
+- Graph endpoint discovery is not treated as application readiness. Before the
+  short PREPARED generation starts, the candidate must consume an initial Gate
+  state and publish an explicit transient-local readiness acknowledgement; the
+  authority also waits for the candidate state reader/readiness publisher and
+  the exact final-controller endpoint. Only after PREPARE exposes the dynamic
+  command topic does the candidate create its writer; authority then waits for
+  that exact writer before OPEN.
 - Controller limits, 100 Hz update rate, stamped command mode, and
   `cmd_vel_timeout=0.35`: unchanged.
 - New code is test support, fault-injection orchestration, pure evidence
@@ -615,6 +627,10 @@ pre-existing user-owned Gazebo process.
   exact child PID claim, parent-only unlink, post-unlink child commit,
   post-exit parent validation through the existing mapping, independent CRC64,
   and idempotent cleanup with no `/dev/shm` residue.
+- No-Gazebo Layer-2 tracer: two independently launch-managed helper PIDs
+  autonomously PREPARE/OPEN/RENEW and publish a bounded non-zero candidate;
+  the parent only provides the exact final-controller subscriber and proves a
+  sustained ARMED state before any process-death test is added.
 - Contract: product launch topology, helper separation, clocks, controller
   parameters, evidence surfaces, generated test inventory, and mutation
   resistance.
@@ -724,10 +740,27 @@ pre-existing user-owned Gazebo process.
   and pep257, repository/crash-stop contracts, and diff check, all GREEN.
   PIT-0071 records why ambient generic Flake8 output is not substituted for
   the registered ROS lint policy.
+- `b45d118` adds the first no-Gazebo independent producer-pair runtime. The
+  behavior RED in `/tmp/vn_fault_pair_behavior_red2.log` launched MotionGate
+  plus two distinct helper PIDs and timed out waiting for autonomous ARM; all
+  launch-managed processes still exited cleanly. The first GREEN probes exposed
+  two real ordering requirements: OPEN must wait for the exact final-controller
+  consumer, and graph-visible candidate endpoints do not prove that the
+  candidate callback has consumed Gate state. An explicit candidate snapshot
+  acknowledgement now precedes PREPARE. The final tracer proves typed OPEN
+  convergence, autonomous 75 ms renewals, and 0.55 s of continuously
+  ARMED/live/fresh state with non-zero candidate traffic, longer than both
+  250/150 ms leases. Independent review reported five
+  P1 false-green gaps; exact endpoint, role ownership, reachable sustain, and
+  collected protocol-evidence contracts close all five. Final focused evidence
+  passed 2/2; repository tests passed 382; `voice_nav_sim` reported 148 tests,
+  zero errors/failures, 18 deliberate skips, and all five launch tests. The
+  protected Gazebo process retained starttime `34712103`.
 
 These are component, Layer-2, and Adapter-runtime composition facts, not
 observed product crash evidence. The repository topology contract is GREEN;
-the exact authority, candidate, and MotionGate process-death executions remain
-unimplemented. The pre-commit local gate is GREEN; exact pushed HEAD, PR, CI,
-rebase/public tree, and Issue closure identities remain pending under the
-delivery identity policy.
+the independent helpers now autonomously ARM the real Gate, but the exact
+authority, candidate, and MotionGate process-death executions and their latency
+evidence remain unimplemented. The pre-commit local gate is GREEN; exact pushed
+HEAD, PR, CI, rebase/public tree, and Issue closure identities remain pending
+under the delivery identity policy.
