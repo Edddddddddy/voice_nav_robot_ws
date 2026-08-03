@@ -867,6 +867,25 @@ This checkpoint proves real Adapter composition and lossless hardware-write
 evidence. It does not satisfy any authority, candidate, or MotionGate SIGKILL
 row below; those remain the next VN-0011A slice.
 
+### Exact launch crash Adapter checkpoint
+
+`0cf7866` closes the first fault-injection seam without launching Gazebo. The
+Adapter owns exact `OnProcessExit(target_action=...)` registrations, arms the
+closed `CrashLedger` before emitting
+`SignalProcess(SIGKILL, matches_action(exact_action))`, and records monotonic
+time as the first effective exit-callback operation. Two behavior RED/GREEN
+cycles cover killed and clean actions. Independent review found two P1
+false-green windows; a synchronous fastest-exit fake and observable
+`clock -> arm -> emit -> callback clock -> record` order close them. Reversing
+ARM/emission or moving the callback clock after ledger recording each produces
+the intended single-test RED. Final evidence is 4/4 direct tests, the exact
+registered CTest 1/1, `ament_flake8`, `ament_pep257`, repository/crash-stop
+contracts, and `git diff --check`, all GREEN.
+
+This checkpoint does not yet create the authority/candidate helper processes,
+kill a real launch-managed producer, or satisfy the latency/journal/physical
+rows below.
+
 ## VN-0011A observed crash evidence
 
 | Case | Expected threshold | Observed result |

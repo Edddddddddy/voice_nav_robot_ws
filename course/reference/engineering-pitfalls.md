@@ -1705,3 +1705,22 @@ reporting, and their mutation/unit tests. Run the complete `scripts/verify.sh`,
 not only `colcon test`: the final gate must prove target inventory, isolated
 runner, timeout, serialization, required testcase identities, and clean-install
 boundaries in one pass.
+
+## PIT-0071: Ambient Flake8 plugins are not the ROS package lint contract
+
+**Symptom.** A focused `python3 -m flake8` invocation reports import-order and
+docstring failures that the package's registered ROS lint target never
+reported; changing imports to satisfy that invocation can then make
+`ament_flake8` reject the opposite order.
+
+**Cause.** The generic executable loads whatever Flake8 plugins and defaults
+are installed in the current Python environment. ROS 2 package gates use the
+versioned `ament_flake8` and `ament_pep257` policies separately, so their rule
+set and import-order interpretation are the authoritative repository contract.
+
+**Guardrail.** Use `ament_flake8` for style/import checks and `ament_pep257`
+for docstrings, then execute the registered CTest to prove discovery and the
+package environment. A generic Flake8 run may be useful diagnostic input, but
+do not rewrite otherwise valid code solely to alternate between two ambient
+plugin policies. Preserve its raw output in `/tmp` and record which command is
+the release gate.

@@ -241,15 +241,17 @@ pure valid fixture passes
   -> refactor behind the same Interface
 ```
 
-Slice A 的文档 contract 已落盘，CrashLedger 的 exact identity/closed exit 与
-signal-intent/ProcessExited 两个纯逻辑 RED/GREEN 微循环也已落盘并通过 ament/CTest
-注册。simulation-window analyzer、repository-only RED、Gate/hardware journal 和
-isolated launch 仍必须继续按 tests-first 补齐：
+Slice A 的文档 contract、CrashLedger、Gate/hardware journal 和第一条真实 Gazebo
+Adapter runtime 证据均已落盘。`0cf7866` 又增加了 exact launch crash Adapter：
+它先 ARM ledger，再通过 `SignalProcess(SIGKILL, matches_action(exact_action))`
+发信号，并在 exact `OnProcessExit` 回调入口取 monotonic 时间。同步极速退出和延迟
+取时 mutation 都会失败。它仍只是故障注入 seam，不是任一 process-death 验收行。
+后续继续按 tests-first 补齐：
 
-- 扩展 pure crash-ledger tests；
-- pure simulation-window evidence tests；
-- static/mutation repository contract；
+- authority/candidate 两个独立 helper OS process；
+- 可参数化的 Gate-expiry 与 simulation-window evidence Module；
 - isolated headless product launch test；
+- 对集成测试本身的 static/mutation contract；
 - generated CTest/xUnit inventory and strict teardown checks。
 
 在任何新测试存在之前，可以执行当前基线检查：

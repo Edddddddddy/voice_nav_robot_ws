@@ -712,6 +712,18 @@ pre-existing user-owned Gazebo process.
   Adding the runtime launch test exposed and closed three stale evidence
   inventories: CI target/count, generated CTest expectations, and the renamed
   critical journal testcase. PIT-0070 records this synchronization rule.
+- `0cf7866` adds the launch-process seam needed by the next authority tracer.
+  The initial SIGKILL behavior RED failed only at the unimplemented Adapter;
+  its GREEN binds exact `OnProcessExit`, arms before emitting
+  `SignalProcess(SIGKILL, matches_action(exact_action))`, and records the
+  observer monotonic timestamp at callback entry. A second RED/GREEN covers
+  clean actions for the exhaustive ledger. Independent review found two P1
+  false-green gaps; synchronous fastest-exit and explicit collaborator-order
+  fixtures now reject emit-before-ARM and late-clock mutations. Final focused
+  evidence is 4/4 direct tests, exact registered CTest 1/1, ROS ament Flake8
+  and pep257, repository/crash-stop contracts, and diff check, all GREEN.
+  PIT-0071 records why ambient generic Flake8 output is not substituted for
+  the registered ROS lint policy.
 
 These are component, Layer-2, and Adapter-runtime composition facts, not
 observed product crash evidence. The repository topology contract is GREEN;
