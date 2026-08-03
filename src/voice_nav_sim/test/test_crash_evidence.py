@@ -17,6 +17,11 @@ from pathlib import Path
 import signal
 import unittest
 
+from launch import LaunchContext
+from launch.actions import ExecuteProcess
+from launch.events.process import ProcessExited
+from launch.events.process import SignalProcess
+
 
 def load_crash_evidence_support():
     support_path = (
@@ -38,6 +43,26 @@ def load_crash_evidence_support():
 crash_evidence = load_crash_evidence_support()
 
 
+def load_launch_crash_adapter_support():
+    support_path = (
+        Path(__file__).resolve().parents[1]
+        / 'test_support'
+        / 'launch_crash_adapter.py'
+    )
+    specification = importlib.util.spec_from_file_location(
+        'voice_nav_launch_crash_adapter_test_support',
+        support_path,
+    )
+    if specification is None or specification.loader is None:
+        raise RuntimeError('could not load launch crash adapter support')
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
+launch_crash_adapter = load_launch_crash_adapter_support()
+
+
 class EqualButDistinctAction:
     """Expose accidental equality-keyed process accounting."""
 
@@ -51,7 +76,153 @@ class EqualButDistinctAction:
         return 1
 
 
+class OrderingCrashLedger(crash_evidence.CrashLedger):
+    """Expose collaborator ordering without weakening ledger semantics."""
+
+    def __init__(self, operations):
+        super().__init__()
+        self.operations = operations
+
+    def arm_sigkill(self, action, *, signal_intent_monotonic_ns):
+        self.operations.append('arm')
+        return super().arm_sigkill(
+            action,
+            signal_intent_monotonic_ns=signal_intent_monotonic_ns,
+        )
+
+    def record_exit(
+        self,
+        action,
+        returncode,
+        *,
+        observed_monotonic_ns=None,
+    ):
+        self.operations.append('record')
+        return super().record_exit(
+            action,
+            returncode,
+            observed_monotonic_ns=observed_monotonic_ns,
+        )
+
+
+class RecordingLaunchService:
+    """Synchronously expose the fastest possible process-exit race."""
+
+    def __init__(self, handler, exit_event, operations):
+        self.emitted_events = []
+        self.handler = handler
+        self.exit_event = exit_event
+        self.operations = operations
+
+    def emit_event(self, event):
+        self.operations.append('emit')
+        self.emitted_events.append(event)
+        if event.process_matcher(self.exit_event.action):
+            self.handler.handle(self.exit_event, LaunchContext())
+
+
+def process_exit_event(action, returncode):
+    return ProcessExited(
+        action=action,
+        name='fixture',
+        cmd=['fixture'],
+        cwd=None,
+        env={},
+        pid=12345,
+        returncode=returncode,
+    )
+
+
 class CrashLedgerTest(unittest.TestCase):
+    def test_launch_adapter_records_clean_process_exit(self):
+        candidate = ExecuteProcess(cmd=['/bin/true'])
+        ledger = crash_evidence.CrashLedger()
+        adapter = launch_crash_adapter.LaunchCrashAdapter(ledger)
+        registration = adapter.expect_clean(candidate, 'candidate')
+
+        registration.event_handler.handle(
+            process_exit_event(candidate, 0),
+            LaunchContext(),
+        )
+
+        label, returncode, observed_ns = adapter.exit_observation(candidate)
+        self.assertEqual(label, 'candidate')
+        self.assertEqual(returncode, 0)
+        self.assertGreater(observed_ns, 0)
+        self.assertEqual(
+            adapter.assert_complete(),
+            (('candidate', 0),),
+        )
+
+    def test_launch_adapter_uses_exact_sigkill_and_process_exit_time(self):
+        authority = ExecuteProcess(cmd=['/bin/true'])
+        equal_role_but_distinct = ExecuteProcess(cmd=['/bin/true'])
+        operations = []
+        clock_values = iter((100, 125))
+
+        def ordered_monotonic_ns():
+            operations.append('clock')
+            return next(clock_values)
+
+        original_monotonic_ns = (
+            launch_crash_adapter.time.monotonic_ns
+        )
+        self.addCleanup(
+            setattr,
+            launch_crash_adapter.time,
+            'monotonic_ns',
+            original_monotonic_ns,
+        )
+        launch_crash_adapter.time.monotonic_ns = ordered_monotonic_ns
+
+        ledger = OrderingCrashLedger(operations)
+        adapter = launch_crash_adapter.LaunchCrashAdapter(ledger)
+        registration = adapter.expect_sigkill(authority, 'authority')
+        handler = registration.event_handler
+
+        authority_exit = process_exit_event(authority, -signal.SIGKILL)
+        other_exit = process_exit_event(
+            equal_role_but_distinct,
+            -signal.SIGKILL,
+        )
+        self.assertTrue(handler.matches(authority_exit))
+        self.assertFalse(handler.matches(other_exit))
+
+        launch_service = RecordingLaunchService(
+            handler,
+            authority_exit,
+            operations,
+        )
+        signal_intent_ns = adapter.request_sigkill(
+            launch_service,
+            authority,
+        )
+        self.assertEqual(signal_intent_ns, 100)
+        self.assertEqual(
+            operations,
+            ['clock', 'arm', 'emit', 'clock', 'record'],
+        )
+        self.assertEqual(len(launch_service.emitted_events), 1)
+        signal_event = launch_service.emitted_events[0]
+        self.assertIsInstance(signal_event, SignalProcess)
+        self.assertEqual(signal_event.signal, signal.SIGKILL)
+        self.assertTrue(signal_event.process_matcher(authority))
+        self.assertFalse(
+            signal_event.process_matcher(equal_role_but_distinct),
+        )
+
+        label, returncode, observed_ns = adapter.exit_observation(
+            authority,
+        )
+        self.assertEqual(label, 'authority')
+        self.assertEqual(returncode, -signal.SIGKILL)
+        self.assertEqual(observed_ns, 125)
+        self.assertGreaterEqual(observed_ns, signal_intent_ns)
+        self.assertEqual(
+            adapter.assert_complete(),
+            (('authority', -signal.SIGKILL),),
+        )
+
     def test_exact_action_exit_accounting_is_closed_and_exhaustive(self):
         authority = EqualButDistinctAction('authority')
         candidate = EqualButDistinctAction('candidate')
