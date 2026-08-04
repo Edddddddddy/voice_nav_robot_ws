@@ -11,7 +11,7 @@ The `v0.1` repository foundation already exists. The approved capability
 sequence is fixed as:
 `v0.2` → `v0.3` → `v0.4` → `v0.5` → `v0.6` → `v0.7` → `v1.0`.
 These are capability milestones in one vertically runnable walking skeleton,
-not teaching checkpoints or Lesson numbers.
+and each milestone extends the same runnable product path.
 
 | Milestone | Capability boundary |
 | --- | --- |
