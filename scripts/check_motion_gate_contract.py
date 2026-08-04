@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the Lesson 0009 MotionGate product contract without starting ROS."""
+"""Validate the MotionGate product contract without starting ROS."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 class MotionGateContractError(ValueError):
-    """A checked artifact violates the Lesson 0009 MotionGate contract."""
+    """A checked artifact violates the MotionGate contract."""
 
 
 ARTIFACTS = {
@@ -215,7 +215,7 @@ def required_artifacts(root: Path) -> dict[str, Path]:
         if not path.is_file():
             relative = path.relative_to(root).as_posix()
             raise MotionGateContractError(
-                f"missing Lesson 0009 MotionGate artifact: {relative}"
+                f"missing MotionGate artifact: {relative}"
             )
     return resolved
 
@@ -2620,7 +2620,7 @@ def validate_product_launch(path: Path) -> None:
     if keyword_value(gate, "on_exit") is not None:
         raise MotionGateContractError(
             "motion_gate_node exit must leave simulation and the controller "
-            "running so Lesson 0010 can verify the consumer deadman"
+            "running so process-death tests can verify the consumer deadman"
         )
     if keyword_value(gate, "respawn") is not None:
         raise MotionGateContractError(

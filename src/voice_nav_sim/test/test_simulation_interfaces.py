@@ -144,7 +144,7 @@ def generate_test_description():
     tf_ownership_auditor = Node(
         package='voice_nav_sim',
         executable='tf_ownership_auditor',
-        name='lesson_0008_tf_ownership_auditor',
+        name='tf_ownership_auditor',
         output='screen',
         arguments=audit_arguments,
     )
