@@ -4,6 +4,14 @@ set -eo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 workspace_root="$(cd -- "${script_dir}/.." && pwd)"
+
+# A WSL process cannot consume the Windows absolute gitdir: pointer that a
+# Codex managed worktree may contain.  Establish the repository context before
+# the first Git subprocess and export it to every helper and child process.
+# shellcheck disable=SC1091
+source "${script_dir}/prepare_git_context.sh"
+voice_nav_prepare_git_context "${workspace_root}"
+
 ros_distro="jazzy"
 if [[ -n "${ROS_DISTRO:-}" && "${ROS_DISTRO}" != "${ros_distro}" ]]; then
   echo "VoiceNav Robot requires ROS_DISTRO=jazzy; found ${ROS_DISTRO}" >&2
