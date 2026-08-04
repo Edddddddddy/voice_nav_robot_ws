@@ -65,6 +65,46 @@ class RepositoryContractTest(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
+    def test_issue_and_pull_request_templates_are_decision_complete(self) -> None:
+        issue_template_paths = (
+            REPOSITORY_ROOT / ".github" / "ISSUE_TEMPLATE" / "prd.yml",
+            REPOSITORY_ROOT / ".github" / "ISSUE_TEMPLATE" / "task.yml",
+        )
+        required_issue_fields = (
+            "issue_linkage",
+            "acceptance",
+            "rollback",
+            "interface_impact",
+            "risks",
+            "dependencies",
+            "verification",
+        )
+        for template_path in issue_template_paths:
+            template = template_path.read_text(encoding="utf-8")
+            for field in required_issue_fields:
+                with self.subTest(template=template_path.name, field=field):
+                    self.assertIn(f"id: {field}", template)
+            self.assertNotRegex(template.lower(), r"lesson|learning[- ]record|work[- ]item")
+
+        pull_request_template = (
+            REPOSITORY_ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md"
+        ).read_text(encoding="utf-8")
+        for heading in (
+            "## Issue linkage",
+            "## Acceptance",
+            "## Rollback",
+            "## Interface impact",
+            "## Risks",
+            "## Dependencies",
+            "## Verification",
+        ):
+            with self.subTest(heading=heading):
+                self.assertIn(heading, pull_request_template)
+        self.assertIn("Closes #", pull_request_template)
+        self.assertNotRegex(
+            pull_request_template.lower(), r"lesson|learning[- ]record|work[- ]item"
+        )
+
     def test_valid_course_catalog_passes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

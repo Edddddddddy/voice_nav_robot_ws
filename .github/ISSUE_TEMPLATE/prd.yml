@@ -1,0 +1,133 @@
+name: Product requirements document
+description: Record a decision-complete product requirement and its delivery boundaries.
+title: "[PRD] "
+labels:
+  - type:prd
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Keep the PRD focused on user value, explicit decisions, and independently
+        verifiable outcomes. GitHub Issues are the canonical requirements record.
+
+  - type: textarea
+    id: issue_linkage
+    attributes:
+      label: Issue linkage
+      description: Link a parent PRD, related Issues, or child Tasks. State why each link matters.
+      placeholder: |
+        Parent: N/A
+        Related Issues:
+        Child Tasks:
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What user or product problem needs a decision now?
+    validations:
+      required: true
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: State the measurable product outcome in one short paragraph.
+    validations:
+      required: true
+
+  - type: textarea
+    id: user_value
+    attributes:
+      label: User value
+      description: Who benefits, and what becomes possible or safer?
+    validations:
+      required: true
+
+  - type: textarea
+    id: requirements
+    attributes:
+      label: Requirements
+      description: List the product rules and observable behavior that must hold.
+      placeholder: |
+        - REQ-001 ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: decisions
+    attributes:
+      label: Decisions
+      description: Record selected approaches, important thresholds, and rejected alternatives.
+    validations:
+      required: true
+
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: Out of scope
+      description: State the boundaries that related Tasks must not cross.
+      placeholder: |
+        - ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Use independently verifiable, observable outcomes.
+      placeholder: |
+        - [ ] AC-001 ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: rollback
+    attributes:
+      label: Rollback
+      description: Explain how the change can be reversed and what evidence must be preserved.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: interface_impact
+    attributes:
+      label: Stable Interface impact
+      description: Identify changes to user-visible, ROS, configuration, safety, timing, or error contracts.
+      options:
+        - No Stable Interface change
+        - Backward-compatible Stable Interface change
+        - Breaking Stable Interface change
+        - Not yet known
+    validations:
+      required: true
+
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks and mitigations
+      description: Cover safety, compatibility, data, privacy, dependency, and operational risks.
+    validations:
+      required: true
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Link prerequisite Issues, external constraints, approvals, or say None.
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification plan
+      description: Name exact automated commands and bounded manual evidence.
+      placeholder: |
+        - `python3 ...`
+        - `bash scripts/verify.sh`
+    validations:
+      required: true
