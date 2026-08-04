@@ -1,65 +1,55 @@
-# 工程变更生命周期
+# Change lifecycle
 
-VoiceNav Robot reference
+GitHub Issues are the canonical source for requirements, decisions,
+acceptance, dependencies, and status. A change is delivered through one
+isolated branch and one pull request linked to its Issue.
 
-```
-Work Item
-   ↓
-短生命周期 Branch
-   ↓
-实现 + 自动测试 + 文档
-   ↓
-本地统一质量门禁
-   ↓
-Diff 自审 / PR / CI
-   ↓
-合并 main
-   ↓
-达到里程碑时才 Release
+```text
+GitHub Issue
+   -> isolated short-lived branch
+   -> implementation + focused tests + documentation
+   -> local verification
+   -> complete diff review / Draft PR / CI
+   -> rebase merge to main
+   -> release milestone when the capability is ready
 ```
 
-## 每层留下什么证据
+## Evidence at each stage
 
-| 阶段 | 最小产物 |
+| Stage | Minimum durable evidence |
 | --- | --- |
-| Work Item | 目标、非目标、验收条件、风险、测试计划 |
-| 设计 | Interface 文档；真正重大取舍才写 ADR |
-| 实现 | 源码、配置和最靠近稳定 Interface 的测试 |
-| 验证 | 统一命令、退出状态、测试摘要、必要的人工证据 |
-| 评审 | 完整 staged diff、Definition of Done |
-| 发布 | 版本、CHANGELOG、不可变 tag、发布验收 |
+| Issue | Goal, non-goals, acceptance, risk, interface impact, dependencies, rollback, verification |
+| Design | Stable Interface documentation; ADR for a consequential trade-off |
+| Implementation | Source, configuration, and tests at the deepest stable Interface |
+| Verification | Exact command, exit status, test summary, and required manual evidence |
+| Review | Complete staged diff, acceptance mapping, and resolved review findings |
+| Release | Version, changelog, immutable tag, and linked acceptance evidence |
 
-## 三个不要混淆的粒度
+## Three distinct granularities
 
-- **Work Item**：一个可验收变化，例如接入 ROS bridge。
-- **Commit**：一个连贯的修改理由，可作为评审单位。
-- **Release**：一组可交付能力的不可变版本，不等于一课。
+- **Issue**: one independently reversible change with observable acceptance.
+- **Commit**: one coherent modification reason and review unit.
+- **Release**: an immutable set of deliverable capabilities, not a single
+  commit or branch.
 
-## 什么时候写 ADR
+## Git safety boundaries
 
-以下三项必须同时成立：
+- `.gitignore` affects only untracked files; it does not remove tracked data.
+- `git rm --cached` removes an index entry but, without `--cached`, also removes
+  the working-tree file.
+- Use explicit pathspecs in a mixed Windows/WSL workspace. Do not use
+  destructive reset or clean commands to resolve uncertainty.
+- Published tags and release history are never rewritten.
 
-1. 更换选择的成本明显；
-1. 没有上下文时，未来维护者会疑惑；
-1. 确实比较过有意义的替代方案。
+## Minimum pre-PR checks
 
-普通参数、文件位置和易于替换的库选择不需要 ADR。它们应留在代码、配置、测试或 Interface 文档中。
-
-## Git 安全边界
-
-- `.gitignore` 只影响未跟踪文件，不会自动遗忘已跟踪文件。
-- `git rm --cached` 只从索引移除；省略 `--cached` 会同时删除工作区文件。
-- 混合工作区使用明确 pathspec 暂存，不盲目执行 `git add .`。
-- 禁止使用 `reset --hard` 或 `clean -fdx` 处理不清楚的工作区。
-- 发布后的 tag 与历史不重写。
-
-## 提交前最小检查
-
-```
+```bash
 git status --short
 git diff
 bash scripts/verify.sh
 git diff --cached
 ```
 
-依据：[REP-2004](https://reps.openrobotics.org/rep-2004/)、[Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) 与 [Semantic Versioning](https://semver.org/spec/v2.0.0.html)。
+See [REP-2004](https://reps.openrobotics.org/rep-2004/),
+[Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/), and
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html).

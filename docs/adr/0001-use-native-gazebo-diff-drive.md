@@ -10,10 +10,10 @@ base and will translate its model-scoped Gazebo Transport topics through a
 the Nav2 Gazebo odometry path while preventing Gazebo names from leaking into
 Mission, Agent, or audio Interfaces.
 
-This decision describes the completed early learning baseline. It was
+This decision describes the completed early simulation baseline. It was
 superseded for the product target by
-[ADR-0002](0002-migrate-to-gz-ros2-control.md); historical lessons and evidence
-remain valid.
+[ADR-0002](0002-migrate-to-gz-ros2-control.md); the historical decision and its
+evidence remain valid.
 
 ## Considered options
 

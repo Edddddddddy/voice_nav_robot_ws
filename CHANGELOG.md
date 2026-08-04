@@ -15,8 +15,8 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   product test layers, plus a fresh-prefix install audit proving that the
   internal Core header/library are not exported. Exact-head local verification,
   independent code/safety/documentation review, required hosted CI, rebase
-  merge, and the immutable `course/0009-solution` checkpoint are complete.
-  Process-death and Gazebo pause/resume acceptance remain Lesson 0010 scope.
+  merge are complete. The configured controller timeout is not by itself
+  evidence of process-death recovery or physical stationarity.
 - Added a packaged, self-contained Gazebo world with an analytic obstacle and
   a 360-degree single-layer GPU LiDAR on `laser_link`.
 - Added a headless perception integration gate that verifies `/scan` type,
@@ -25,10 +25,8 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Added a per-edge TF ownership auditor that correlates message publisher GIDs
   with fully qualified graph endpoint owners over a complete observation
   window, plus duplicate-writer and disjoint-writer fault fixtures.
-- Added the Lesson 0008 Work Item, course contract, and evidence record for
-  the packaged LiDAR world and product graph.
-- Added the tests-first Lesson 0007 contract, Work Item, and pending evidence
-  record for migrating the simulation drive path to `gz_ros2_control` and
+- Added the repository contract for the packaged LiDAR world and product graph.
+- Added the tests-first simulation-drive contract for `gz_ros2_control` and
   Jazzy's native `TwistStamped` `diff_drive_controller` input.
 - Added a headless Gazebo integration gate that proves controller activation,
   wheel Interface claims, forward/positive-yaw odometry, TF output, publisher
@@ -36,7 +34,7 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- Locked the Lesson 0009 private Gate seam to
+- Locked the private Gate seam to
   `InternalMotionGateControl`/`InternalMotionGateState`, the operations
   `PREPARE`/`OPEN`/`RENEW`/`INHIBIT`, Gate-generated lease topics, global
   compare-and-swap sequencing, exact 32-character lowercase hexadecimal
@@ -52,7 +50,8 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   RMW at startup, and both runtime packages declare the Fast DDS dependency.
   The final controller publisher follows
   `rclcpp::SystemDefaultsQoS()` and must prove actual endpoint compatibility;
-  crash-stop and pause/resume acceptance remain Lesson 0010 scope.
+  process-death crash-stop and pause/resume acceptance remain separate target
+  evidence.
 - Replaced the product model's native Gazebo DiffDrive plugin with
   `gz_ros2_control`, a Jazzy `diff_drive_controller`, and an event-ordered
   launch owned directly by ROS 2 launch.
@@ -113,21 +112,19 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Hand-written differential-drive Xacro model and internal TF tree.
 - Gazebo collision, inertia, stable spawning, native DiffDrive, velocity
   limits, and odometry.
-- Versioned Markdown course catalog, Lessons 0001–0006, engineering references,
-  and evidence-backed learning records.
-- Repository contract tests for course ordering, path confinement, local links,
-  documentation layout, and synchronized ROS package versions.
+- Repository contract tests for path confinement, local links, documentation
+  layout, and synchronized ROS package versions.
 - GitHub Issue and PR templates, pinned Ubuntu 24.04 / ROS 2 Jazzy CI, and
   monthly GitHub Actions dependency updates.
 - Product, architecture, Mission, motion, TF/mode, quality, testing, release,
-  security, ADR, and Work Item documentation for the accepted v1.0 plan.
+  security, and ADR documentation for the accepted v1.0 plan.
 
 ### Changed
 
 - Reorganized documentation into `docs/product`, `docs/architecture`,
-  `docs/process`, `docs/adr`, `docs/work-items`, and `course`.
+  `docs/process`, `docs/adr`, and `docs/agents`.
 - Synchronized all ROS package metadata with the repository `0.1.0` version.
-- Defined native Gazebo DiffDrive as a historical teaching checkpoint; the
+- Defined native Gazebo DiffDrive as a historical simulation baseline; the
   product path now migrates to `gz_ros2_control`, `diff_drive_controller`, an
   independent MotionGate, and consumer-side command timeout.
 - Extended the canonical verification command to run repository contracts and
@@ -135,11 +132,10 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- Preserved the original Lesson 0003 box-robot assignment and added a separate
-  erratum for the accepted cylinder implementation, wheel links, dimensions,
-  and measured LiDAR transform.
-- Closed the Lesson 0006 evidence gap using the learner's recorded commits and
-  verification output.
+- Recorded the accepted cylinder implementation, wheel links, dimensions, and
+  measured LiDAR transform in the current model and architecture contracts.
+- Preserved the original repository baseline and its verification boundaries in
+  the immutable recovery archive.
 
 ### Security
 
@@ -148,3 +144,9 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The quality gate rejects tracked `build/`, `install/`, and `log/` paths.
 - Operational stop terminology no longer implies a certified emergency-stop
   or physical-stop guarantee.
+
+### Archive note
+
+- Retired Course and repository Work Item material is recoverable from
+  `archive/vn-0011a-pre-workflow-reset-20260804` at commit `075c0f4` and the
+  external verified all-refs bundle.

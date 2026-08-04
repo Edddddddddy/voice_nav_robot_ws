@@ -254,7 +254,7 @@ generic workflow DSL, or a Mission-level Behavior Tree.
 
 At v0.1 the source IDL is intentionally provisional: it still has session/turn
 fields, unbounded strings/steps, no Runtime fencing, no STOP Service, and no
-state snapshot. The v0.4 Work Item updates IDL, all producers/consumers,
+state snapshot. The v0.4 Issue updates IDL, all producers/consumers,
 contract tests, documentation, and changelog together. After v1.0, a breaking
 DDS change creates V2 types/endpoints plus a temporary V1 Adapter; an
 `api_version` field cannot make incompatible DDS types compatible.

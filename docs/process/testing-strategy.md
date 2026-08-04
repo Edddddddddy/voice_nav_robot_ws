@@ -68,7 +68,7 @@ The result reporter deliberately snapshots inode, size, mtime, and ctime and
 fails closed if a writer overlaps evidence collection. On that diagnostic,
 identify the writer and establish quiescence before a full retry; do not clear
 the named file or relax the identity check. See
-[PIT-0022](../../course/reference/engineering-pitfalls.md#pit-0022-test-result-evidence-requires-one-shared-tree-writer).
+[PIT-0022](known-pitfalls.md#pit-0022-test-result-evidence-requires-one-shared-tree-writer).
 
 PR CI uses deterministic in-memory fakes as soon as their Module exists and
 adds bounded headless Gazebo tests with the v0.2 simulation milestones. At
@@ -172,18 +172,17 @@ This fixture contract proves deterministic test teardown. It does not prove
 the internal cause of a slow signal-only Gazebo shutdown, ordinary user
 `Ctrl+C` behavior, MotionGate crash-stop, controller deadman, or managed
 pause/resume semantics. See
-[VN-0010-C2](../work-items/0010-corrective-gazebo-teardown.md) and
-[PIT-0012](../../course/reference/engineering-pitfalls.md#pit-0012-no-residual-gazebo-process-is-not-a-clean-gazebo-exit).
+[PIT-0012](known-pitfalls.md#pit-0012-no-residual-gazebo-process-is-not-a-clean-gazebo-exit).
 
 The source/AST guards are cooperative correctness controls for ordinary
 reviewed changes. They do not claim to sandbox a malicious same-UID process or
 deliberate Python dynamic metaprogramming that rewrites files or imported
 objects at runtime.
 
-### Lesson 0009 normal-running Gate slice
+### Current normal-running Gate slice
 
-VN-0010 / Lesson 0009 proves the independent Gate without claiming process
-death or pause recovery:
+The current Gate slice proves normal independent operation without claiming
+process death or pause recovery:
 
 - Manual-clock Core tables cover the exact 250 ms authority and 150 ms
   candidate-freshness boundaries; a 20 ms wall output tick continuously
@@ -223,14 +222,14 @@ death or pause recovery:
   zero, and odometry stationarity after bounded motion and after each normal
   deadline expiry.
 
-Package-private IDL is an encapsulation boundary, not DDS security. Lesson 0009
-uses a test authority/candidate harness. It does not count an authority,
+Package-private IDL is an encapsulation boundary, not DDS security. The current
+tests use an authority/candidate harness. They do not count an authority,
 candidate, or MotionGate process kill, managed pause token, first-resume zero,
 or unmanaged-pause recovery as completed.
 
-### Lesson 0010 crash-stop and pause slice
+### Process-death and pause acceptance slice
 
-Lesson 0010 / VN-0011 supplies the process-death and Gazebo-time evidence:
+The process-death and Gazebo-time acceptance slice supplies evidence that:
 
 - killing the authority while valid-looking candidates continue still expires
   the independent Gate lease;
@@ -346,6 +345,6 @@ Acceptance uses the supported motherboard analog microphone input and speaker ou
 
 Automated evidence is a command, exit status, concise test-result summary, and the relevant coverage or latency report. Manual evidence may add a screenshot, pose sample, TF graph, sanitized audio clip, or model manifest, but cannot replace an automatable assertion.
 
-Evidence belongs in the Work Item or course record. Generated logs and private artifacts do not enter Git.
+Evidence belongs in the GitHub Issue or PR. Generated logs and private artifacts do not enter Git.
 
-At the v0.1 foundation audit, the unified gate covered repository metadata, model expansion, URDF/SDF semantics, build, and package tests. It did not yet contain `gz_ros2_control`, LiDAR, MotionGate, Mission Runtime, SLAM, Nav2, Agent, or voice behavior tests. Each gap is closed by the release and lessons assigned in the approved roadmap.
+At the v0.1 foundation audit, the unified gate covered repository metadata, model expansion, URDF/SDF semantics, build, and package tests. It did not yet contain `gz_ros2_control`, LiDAR, MotionGate, Mission Runtime, SLAM, Nav2, Agent, or voice behavior tests. Each gap is closed by the capability milestones in the approved roadmap.

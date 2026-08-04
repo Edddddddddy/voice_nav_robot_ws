@@ -1,6 +1,6 @@
 # VoiceNav Robot documentation
 
-This tree separates the approved v1.0 target from implementation evidence.
+This tree separates verified current behavior from the approved v1.0 target.
 Target documents are normative design contracts; they do not claim that the
 current source already implements the described behavior.
 
@@ -9,8 +9,6 @@ current source already implements the described behavior.
 - [v1.0 product specification](product/v1.0-product-spec.md)
 - [Product glossary](product/glossary.md)
 - [Engineering resources](product/resources.md)
-
-The versioned product specification is the detailed acceptance contract.
 
 ## Architecture
 
@@ -26,19 +24,20 @@ The versioned product specification is the detailed acceptance contract.
 - [Quality policy](process/quality-policy.md)
 - [Testing strategy](process/testing-strategy.md)
 - [Release policy and roadmap](process/release-policy.md)
-- [Problem learning and recurrence control](process/problem-learning.md)
+- [Problem recurrence control](process/problem-learning.md)
+- [Known pitfalls](process/known-pitfalls.md)
 
-## History and work
+## Governance
 
 - [Architecture decisions](adr/)
-- [Work items](work-items/)
+- [Agent control protocol](agents/README.md)
 
-ADRs and completed Work Items are historical records. Do not rewrite them to
-make an earlier decision look current; add a superseding ADR or a new Work Item
-instead.
+ADRs remain historical decision records. Do not rewrite a decision to make an
+earlier choice appear current; add a superseding ADR when the decision changes.
 
 ## Status vocabulary
 
 - **Current** means verified behavior present in the repository.
 - **Target v1.0** means approved behavior that may still require implementation.
-- **Evidence** means a command, result, or reviewed artifact tied to a Work Item.
+- **Evidence** means a command, result, or reviewed artifact tied to a GitHub
+  Issue, pull request, CI run, or immutable Git object.
