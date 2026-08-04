@@ -1545,8 +1545,18 @@ class ScopedTestResultsTest(unittest.TestCase):
             scripts_directory = workspace / "scripts"
             scripts_directory.mkdir(parents=True)
             shutil.copyfile(VERIFY_SCRIPT, scripts_directory / "verify.sh")
+            shutil.copyfile(
+                REPOSITORY_ROOT / "scripts" / "prepare_git_context.sh",
+                scripts_directory / "prepare_git_context.sh",
+            )
             (scripts_directory / "check_clean_motion_gate_install.sh").write_text(
                 "#!/usr/bin/env bash\nexit 0\n",
+                encoding="utf-8",
+            )
+            git_directory = workspace / ".git"
+            git_directory.mkdir()
+            (git_directory / "HEAD").write_text(
+                "ref: refs/heads/main\n",
                 encoding="utf-8",
             )
             (workspace / "install").mkdir()
@@ -1564,7 +1574,7 @@ rosdep() { return 0; }
 xacro() { return 0; }
 check_urdf() { return 0; }
 gz() { return 0; }
-realpath() { printf '%s\\n' "${1:-}"; }
+realpath() { printf '%s\\n' "${@: -1}"; }
 colcon() {
   case "${1:-}" in
     list)

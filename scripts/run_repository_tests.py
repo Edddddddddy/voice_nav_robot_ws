@@ -38,6 +38,10 @@ REQUIRED_TEST_IDS: frozenset[str] = frozenset(
             "test_repository_contract_passes"
         ),
         (
+            "test_git_context.GitContextContractTest."
+            "test_regular_git_directory_exports_context_to_child"
+        ),
+        (
             "test_scoped_test_results.ScopedTestResultsTest."
             "test_report_requires_complete_critical_launch_inventory"
         ),
