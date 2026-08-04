@@ -52,6 +52,19 @@ class RepositoryContractTest(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
 
+    def test_root_context_is_allowed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            self.create_minimal_course(root)
+            (root / "CONTEXT.md").write_text(
+                "# VoiceNav glossary\n\nA term has one stable meaning.\n",
+                encoding="utf-8",
+            )
+
+            completed = self.run_checker(root)
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
     def test_valid_course_catalog_passes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
