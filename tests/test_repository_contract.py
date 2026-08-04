@@ -105,6 +105,45 @@ class RepositoryContractTest(unittest.TestCase):
             pull_request_template.lower(), r"lesson|learning[- ]record|work[- ]item"
         )
 
+    def test_agent_workflow_docs_define_recoverable_protocol(self) -> None:
+        agents = (REPOSITORY_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        for marker in (
+            "## Roles",
+            "### Manager",
+            "### Worker",
+            "### Reviewer",
+            "## Skill routing",
+            "voice-nav-requirements",
+            "voice-nav-worker",
+            "voice-nav-review",
+            "## Event message",
+            "VOICE_NAV_EVENT:",
+            "## Context recovery",
+            "## Forbidden",
+            "polling",
+            "subagents",
+        ):
+            with self.subTest(document="AGENTS.md", marker=marker):
+                self.assertIn(marker, agents)
+
+        agent_docs = (
+            REPOSITORY_ROOT / "docs" / "agents" / "README.md"
+        ).read_text(encoding="utf-8")
+        for marker in (
+            "## GitHub Issue tracking",
+            "## Standard labels",
+            "type:prd",
+            "type:task",
+            "ready-for-agent",
+            "in-progress",
+            "blocked",
+            "## External PR intake",
+            "## Single-context layout",
+            "CONTEXT.md",
+        ):
+            with self.subTest(document="docs/agents/README.md", marker=marker):
+                self.assertIn(marker, agent_docs)
+
     def test_valid_course_catalog_passes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
