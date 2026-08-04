@@ -265,12 +265,12 @@ The barrier is required between consecutive Mission steps too, even when both
 steps use the same producer. Limits, timeouts, and queue bounds come from
 trusted configuration and are verified with deliberately delayed old commands.
 
-Lesson 0009 publicly delivers the normal-running Core, private seam,
+The current implementation delivers the normal-running Core, private seam,
 Gate-local binding, barriers, final ownership, and deadline expiry with an
 in-process test authority/candidate harness. It does not claim the complete
 Runtime/smoother/Collision Monitor integration. Process-kill crash-stop,
-consumer-deadman proof, and managed/unmanaged Gazebo pause behavior are
-reserved for Lesson 0010 / VN-0011.
+consumer-deadman proof, and managed/unmanaged Gazebo pause behavior remain
+separate target acceptance slices.
 
 ### Gazebo managed safe-pause and resume
 
@@ -402,14 +402,13 @@ above. Every Goal receives exactly one terminal result.
 
 ## Verification obligations
 
-- Current cumulative verification retains the three executable layers
-  established by Lesson 0009: pure-Core manual-clock GTest; a Fast-DDS-locked
+- Current cumulative verification retains three executable layers: pure-Core
+  manual-clock GTest; a Fast-DDS-locked
   Node launch test with neither Gazebo nor `/clock`; and a Fast-DDS-locked
   headless Gazebo product launch test. Repository-static contract checks are a
   prerequisite, not a substitute for any layer.
-- The immutable `course/0009-solution` used fixed ROS domains 91/92. After the
-  post-tag [VN-0010-C2](../work-items/0010-corrective-gazebo-teardown.md)
-  correction, both launch layers use the official
+- Historical fixed-domain evidence is not current acceptance evidence. Current
+  launch layers use the official
   `run_test_isolated.py` runner, clear inherited `ROS_DOMAIN_ID` and
   `DISABLE_ROS_ISOLATION`, and allocate a process-isolated ROS domain with
   localhost discovery. This current rule is not retroactive evidence for the

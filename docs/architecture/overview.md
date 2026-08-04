@@ -23,9 +23,9 @@ At the v0.1 checkpoint, the target ros2_control stack, 2D LiDAR bridge, SLAM,
 Nav2, Mission Runtime, Motion Gate, and local voice pipeline were not current
 claims.
 
-## Current v0.2 slice after Lesson 0009
+## Current v0.2 simulation and MotionGate slice
 
-Verified by the Lesson 0007–0009 static and headless-Gazebo gates:
+Verified by repository, static, and headless-Gazebo gates:
 
 - the product model uses `gz_ros2_control/GazeboSimSystem`;
 - Jazzy's `diff_drive_controller` owns both wheel velocity commands;
@@ -43,14 +43,14 @@ Verified by the Lesson 0007–0009 static and headless-Gazebo gates:
 
 SLAM, Nav2, Mission Runtime, Agent, and voice remain target claims. No
 `map → odom` owner exists yet. Controller timeout is configured but is not
-presented as Gate-death or physical-stop completion until Lesson 0010 executes
-the process-kill acceptance.
+presented as Gate-death or physical-stop completion; process-death acceptance
+remains a separate target slice.
 
-## Completed v0.2 slice: Lesson 0009
+## Current independent MotionGate slice
 
-VN-0010 / Lesson 0009 publicly delivers the first independent MotionGate
-vertical slice after exact-head local verification, independent review,
-required CI, rebase merge, and an immutable solution checkpoint:
+The repository publicly delivers an independently verified MotionGate vertical
+slice after exact-head local verification, independent review, required CI, and
+rebase merge:
 
 - a pure, package-internal static `MotionGateCore` behind typed
   `prepare`/`open`/`renew`/`inhibit`/`accept_candidate`/`tick`/`snapshot`/
@@ -84,10 +84,11 @@ required CI, rebase merge, and an immutable solution checkpoint:
   failing closed to zero/stamp-zero otherwise; plus pure-Core,
   no-Gazebo/no-`/clock` Node, and headless-Gazebo product acceptance layers.
 
-The private seam reduces product surface but is not DDS access control.
-Lesson 0009 uses a test authority/candidate harness and does not claim
-MissionRuntime, smoother, Collision Monitor, process-kill crash-stop, or
-Gazebo pause/resume completion. Crash-stop and pause recovery are Lesson 0010.
+The private seam reduces product surface but is not DDS access control. The
+current tests use an authority/candidate harness and do not claim Mission
+Runtime, smoother, Collision Monitor, process-kill crash-stop, or Gazebo
+pause/resume completion. Crash-stop and pause recovery are separate target
+acceptance slices.
 
 ## Target v1.0 topology
 

@@ -26,9 +26,9 @@ sources help diagnosis but do not override the target contracts.
 - [Nav2 transform setup](https://docs.nav2.org/setup_guides/transformation/setup_transforms.html)
 - [slam_toolbox](https://docs.ros.org/en/ros2_packages/jazzy/api/slam_toolbox/)
 
-The historical native-DiffDrive learning implementation used the
+The historical native-DiffDrive implementation used the
 [Gazebo Sim 8 DiffDrive system](https://gazebosim.org/api/sim/8/classgz_1_1sim_1_1systems_1_1DiffDrive.html).
-It is evidence for earlier lessons, not the v1.0 control target.
+It is historical evidence, not the v1.0 control target.
 
 ## Local audio and models
 

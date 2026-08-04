@@ -22,6 +22,27 @@ The wheel frame names are exactly `left_wheel` and `right_wheel`. Joint names
 are separate configuration identifiers and must not be substituted for frame
 names.
 
+The current model uses a cylindrical chassis with radius `0.20 m` and height
+`0.18 m`, wheel radius `0.035 m`, wheel width `0.025 m`, wheel centers at
+`y = ±0.20 m`, a caster radius of `0.045 m`, and a LiDAR cylinder of radius
+`0.04 m` and height `0.05 m`. `base_link` is `0.035 m` above the ground and
+the LiDAR pose relative to it is `[0.10, 0.00, 0.16]`, giving
+`base_footprint → laser_link = [0.100, 0.000, 0.195]`.
+
+For wheel radius `r` and wheel-center distance `L = 0.40 m`, the controller
+semantics are:
+
+```text
+v_left  = v - ωL/2       v_right = v + ωL/2
+v       = (v_right + v_left)/2
+ω       = (v_right - v_left)/L
+```
+
+Odometry is continuous but can drift; it is not global map localization. Every
+physical link has visual, collision, and inertial semantics as appropriate,
+with positive mass and physically valid principal inertias. `base_footprint` is
+only a logical frame and does not receive a fabricated collision or inertia.
+
 ## Unique TF ownership
 
 | Transform | Mapping Mode owner | Navigation Mode owner |
@@ -33,7 +54,7 @@ names.
 
 No composition may contain two publishers for one dynamic transform. An owner
 change removes the prior publisher and updates TF contract tests in the same
-Work Item.
+Issue.
 
 `LaserScan.header.frame_id` is exactly `laser_link`. Sensor placement is owned
 by Xacro and robot_state_publisher, not a duplicate static-transform process.

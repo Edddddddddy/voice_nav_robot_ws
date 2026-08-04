@@ -4,7 +4,7 @@ status: accepted
 
 # Migrate the product control path to gz_ros2_control
 
-The native Gazebo DiffDrive baseline made the first physics lessons small, but
+The native Gazebo DiffDrive baseline made the initial physics slice small, but
 it holds the last command, lacks a consumer timeout, and would require
 commands, odometry, and TF to cross a Gazebo bridge. Starting from the VN-0007
 target baseline and shipping in v0.2, VoiceNav Robot uses `gz_ros2_control`,
@@ -21,7 +21,7 @@ Candidate velocity never renews that lease. `ros_gz_bridge` remains only for
 
 ## Consequences
 
-Native-DiffDrive lessons remain historical evidence but are not the product
+The native-DiffDrive path remains historical evidence but is not the product
 path. `diff_drive_controller` becomes the sole owner of odometry and
 `odom → base_footprint`; joint state and control no longer use
 `ros_gz_bridge`. The migration adds controller-manager configuration, but makes
