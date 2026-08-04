@@ -1,6 +1,9 @@
 # Testing strategy
 
-Tests follow the deepest stable Interface. A behavior test should retain its value when the Implementation behind that Interface is refactored.
+Tests follow the deepest stable Interface and observable behavior. A behavior
+test should retain its value when the Implementation behind that Interface is
+refactored. Tests should exercise the highest stable public seam rather than
+private implementation details.
 
 ## Test layers
 
@@ -14,19 +17,26 @@ Tests follow the deepest stable Interface. A behavior test should retain its val
 | Model fixture | Verify locked local models and offline audio | KWS, ASR, TTS, LLM, AEC fixtures |
 | Manual release gate | Validate the supported WSL audio path | real single microphone, speaker, AEC, barge-in |
 
-## Developer and CI loops
+## Verification cadence
 
-During implementation:
+During implementation, run these focused repository checks as often as needed:
 
 ```bash
-bash scripts/verify.sh <changed-package>
+python3 -m unittest tests.test_repository_contract
+python3 scripts/check_repository.py --root .
 ```
 
-Before review or merge:
+Before review, after the final change and on the final PR HEAD, run the
+complete repository gate exactly once:
 
 ```bash
 bash scripts/verify.sh
 ```
+
+Consume and record that invocation's actual exit status. A later diagnostic,
+snapshot, cleanup, or successful shell command must not replace a failed gate
+status. Full logs remain outside Git; the PR records the command, true exit
+status, concise test summary, and any bounded manual evidence.
 
 The full gate starts from declared dependencies, validates repository and
 robot-model contracts, builds all packages, runs all tests, and reports a
@@ -49,10 +59,26 @@ cppcheck artifact/class allowlist.
 Scaffolded Python lint skips are removed and made to pass rather than added to
 that allowlist.
 
-Run a release gate as the terminal command whose exit status is consumed.
-Process snapshots and other diagnostics run as separate commands afterward;
-a trailing successful `ps`, `grep`, or cleanup command must never replace a
-failed CTest status.
+The complete gate is the terminal verification command whose exit status is
+consumed. Process snapshots and other diagnostics run as separate commands
+afterward; a trailing successful `ps`, `grep`, or cleanup command must never
+replace a failed CTest status.
+
+## Restricted structural checkers
+
+Existing safety, concurrency, test-result ownership, and Gazebo lifecycle
+checkers remain active. A new AST, source-shape, or full-file-fingerprint
+checker is admitted only when all three conditions hold:
+
+1. A real recurring failure is recorded in the parent Issue or Task Issue.
+2. The checker protects the narrowest stable public repository seam that can
+   express the failure; a global text ban is not a substitute.
+3. The parent Issue or Task Issue explicitly approves the checker before it is
+   implemented.
+
+The checker must test an observable repository contract and must not replace
+behavioral tests at a stable Interface. The change-volume and ten-commit stop
+rules are defined in the [change lifecycle](change-lifecycle.md#stop-and-re-scope).
 
 ### Shared test-result ownership
 
@@ -343,8 +369,15 @@ Acceptance uses the supported motherboard analog microphone input and speaker ou
 
 ## Evidence and current gaps
 
-Automated evidence is a command, exit status, concise test-result summary, and the relevant coverage or latency report. Manual evidence may add a screenshot, pose sample, TF graph, sanitized audio clip, or model manifest, but cannot replace an automatable assertion.
+Automated evidence is a command, its true exit status, a concise test-result
+summary, and the relevant coverage or latency report. Manual evidence may add
+a screenshot, pose sample, TF graph, sanitized audio clip, or model manifest,
+but cannot replace an automatable assertion.
 
-Evidence belongs in the GitHub Issue or PR. Generated logs and private artifacts do not enter Git.
+The Issue owns requirements, decisions, acceptance, dependencies, and status.
+The PR owns results, final HEAD, acceptance mapping, test summaries, interface
+impact, rollback, and residual risks. Do not duplicate the Issue body, paste
+complete logs, or keep a per-commit evidence diary; generated logs and private
+artifacts do not enter Git.
 
 At the v0.1 foundation audit, the unified gate covered repository metadata, model expansion, URDF/SDF semantics, build, and package tests. It did not yet contain `gz_ros2_control`, LiDAR, MotionGate, Mission Runtime, SLAM, Nav2, Agent, or voice behavior tests. Each gap is closed by the capability milestones in the approved roadmap.
