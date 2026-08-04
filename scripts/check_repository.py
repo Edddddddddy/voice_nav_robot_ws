@@ -23,7 +23,6 @@ LEGACY_DOCUMENT_PATHS = (
     "reference",
     "assets/lesson.css",
     "MISSION.md",
-    "CONTEXT.md",
     "NOTES.md",
     "RESOURCES.md",
 )
