@@ -24,8 +24,10 @@ The strictest repository policy applies to all six ROS packages.
 - Every change has a decision-complete Issue, short-lived branch, measurable
   acceptance, test plan, documentation impact, and reviewed diff.
 - Commits follow Conventional Commits.
-- The local `scripts/verify.sh` gate and required hosted CI check must both pass
-  before merge; remote hosting alone is not CI evidence.
+- The local complete `scripts/verify.sh` gate runs exactly once on the final PR
+  HEAD, and the required hosted CI check must pass before merge; remote hosting
+  alone is not local verification evidence. The cadence and true-exit-status
+  rule are defined in the [change lifecycle](change-lifecycle.md#verification-cadence).
 - Published release tags are immutable and release history is not rewritten.
 - Remote writes, repository visibility changes, and branch-protection changes
   require explicit user authority.
@@ -41,7 +43,11 @@ The strictest repository policy applies to all six ROS packages.
 - [The product glossary](../product/glossary.md) is the canonical project
   language.
 - `CHANGELOG.md` records notable behavior and Interface changes.
-- Issue and PR comments preserve decisions and verification evidence.
+- Issue comments preserve requirements, decisions, acceptance, dependencies,
+  and status. PR comments preserve results, final HEAD, test summaries,
+  acceptance mapping, interface impact, rollback, and residual risks. The
+  [testing strategy](testing-strategy.md#restricted-structural-checkers)
+  defines the approval gate for new structural checkers.
 
 ## Test policy
 
