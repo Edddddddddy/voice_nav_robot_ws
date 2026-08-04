@@ -24,6 +24,18 @@ command exit status and decisive output as evidence, not the transport warning.
 the repository owner. Run Git in the owning environment or use a narrowly
 approved repository-local trust setting; do not broaden global trust blindly.
 
+### PIT-0023: WSL Git cannot consume a Windows managed-worktree pointer
+
+A Codex managed worktree may contain a `.git` file whose `gitdir:` value is a
+Windows absolute path. WSL Git treats that value as a relative path and fails
+before it can inspect the worktree. `scripts/verify.sh` sources
+`scripts/prepare_git_context.sh` before its first Git subprocess; the helper
+resolves ordinary directories and relative pointers, converts Windows
+absolute pointers with `wslpath`, validates the target and `HEAD`, and exports
+`GIT_DIR` plus `GIT_WORK_TREE` to child processes. Do not pre-set those
+variables, edit `.git`, or guess another checkout. Missing, malformed,
+unconvertible, and nonexistent targets must fail closed with a safe diagnostic.
+
 ## ROS interface and model semantics
 
 ### PIT-0004: A ROS interface package must declare its group

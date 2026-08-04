@@ -62,7 +62,9 @@ python3 scripts/check_repository.py --root .
 ```
 
 The complete change-request gate is run exactly once after the final change,
-on the final PR HEAD:
+on the final PR HEAD. Run it from that managed worktree; the verification
+entry point automatically resolves the `.git` pointer and exports the Git
+context to its child processes:
 
 ```bash
 bash scripts/verify.sh
