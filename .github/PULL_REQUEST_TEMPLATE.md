@@ -1,48 +1,21 @@
-## Issue linkage
+## Issue 链接
 
 Closes #
 
-Parent PRD: #
+## 结果
 
-Related or blocked Issues:
+描述本 PR 交付的可观察行为或仓库能力，以及最终结果。
 
-## Outcome
+## 验收映射
 
-Describe the observable behavior or repository capability delivered by this PR.
+将 Issue 的每个验收标准映射到修改文件和证据。
 
-## Scope
+- [ ] AC-001：
 
-- Included:
-- Deliberately excluded:
+## 最终测试摘要
 
-## Acceptance
-
-Map every Issue acceptance criterion to changed files and evidence.
-
-- [ ] AC-001 — ...
-
-## Rollback
-
-Describe the smallest safe revert and any evidence that must remain available.
-
-## Interface impact
-
-- [ ] No Stable Interface change.
-- [ ] Stable Interface impact is documented in the Issue and affected docs.
-- [ ] Any changed names, types, QoS, parameters, units, ordering, errors, or cancellation behavior are covered by tests.
-- [ ] An ADR is linked when the change is a qualifying architectural trade-off.
-
-## Risks
-
-List residual safety, compatibility, data, privacy, dependency, and operational risks.
-
-## Dependencies
-
-List prerequisite Issues, external constraints, approvals, or state `None`.
-
-## Verification
-
-List exact commands and results. Run the repository's full gate once on the final PR HEAD.
+列出聚焦检查和最终完整门禁的精确命令、真实退出状态及简洁结果。完整
+`bash scripts/verify.sh` 仅在最终 PR HEAD 运行一次。
 
 ```text
 python3 -m unittest tests.test_repository_contract
@@ -50,10 +23,16 @@ python3 scripts/check_repository.py --root .
 bash scripts/verify.sh
 ```
 
-Additional bounded evidence:
+## 接口影响
 
-## Documentation and repository hygiene
+- [ ] 无 Stable Interface 或 ROS/runtime 接口变化。
+- [ ] Stable Interface 影响已在 Issue 和相关文档中说明，并有对应测试。
+- [ ] 需要时已链接 ADR。
 
-- [ ] User-visible behavior and current status documentation are accurate.
-- [ ] No build output, credentials, private audio/maps/bags, runtime evidence, or model weights are included.
-- [ ] I reviewed the complete diff and recorded verification evidence.
+## 回滚
+
+说明最小安全 revert，以及需要保留的证据。
+
+## 剩余风险
+
+列出剩余的安全、兼容性、数据、隐私、依赖和运维风险。

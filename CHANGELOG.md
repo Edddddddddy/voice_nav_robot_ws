@@ -34,6 +34,9 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Consolidated quality, testing, evidence, contributor, pull-request, and
+  release governance around focused development checks, one complete final
+  gate, Issue/PR evidence ownership, and the approved walking-skeleton order.
 - Locked the private Gate seam to
   `InternalMotionGateControl`/`InternalMotionGateState`, the operations
   `PREPARE`/`OPEN`/`RENEW`/`INHIBIT`, Gate-generated lease topics, global
