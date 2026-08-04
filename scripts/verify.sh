@@ -26,7 +26,7 @@ cd "${workspace_root}"
 export XML_CATALOG_FILES="${workspace_root}/tools/schema/catalog.xml"
 export PYTHONDONTWRITEBYTECODE=1
 
-echo "[1/6] Checking repository and course contracts"
+echo "[1/6] Checking repository contracts"
 python3 scripts/check_repository.py
 python3 scripts/check_motion_gate_contract.py --root .
 python3 scripts/check_gazebo_teardown_contract.py --root .

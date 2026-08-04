@@ -35,7 +35,7 @@ REQUIRED_TEST_IDS: frozenset[str] = frozenset(
         ),
         (
             "test_repository_contract.RepositoryContractTest."
-            "test_repository_course_catalog_passes"
+            "test_repository_contract_passes"
         ),
         (
             "test_scoped_test_results.ScopedTestResultsTest."

@@ -21,35 +21,13 @@ class RepositoryContractTest(unittest.TestCase):
             text=True,
         )
 
-    def write_catalog(self, root: Path, lessons: str) -> None:
-        catalog_path = root / "course" / "catalog.toml"
-        catalog_path.parent.mkdir(parents=True, exist_ok=True)
-        catalog_path.write_text(
-            "schema_version = 1\n\n" + textwrap.dedent(lessons),
-            encoding="utf-8",
-        )
+    def write_readme(self, root: Path, content: str = "# Example\n") -> Path:
+        path = root / "README.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return path
 
-    def create_minimal_course(self, root: Path) -> Path:
-        lesson_path = root / "course" / "lessons" / "0001-bootstrap.md"
-        record_path = root / "course" / "records" / "0001-bootstrap.md"
-        lesson_path.parent.mkdir(parents=True, exist_ok=True)
-        record_path.parent.mkdir(parents=True, exist_ok=True)
-        lesson_path.write_text("# Bootstrap\n", encoding="utf-8")
-        record_path.write_text("# Record\n", encoding="utf-8")
-        self.write_catalog(
-            root,
-            """\
-                [[lessons]]
-                id = "0001"
-                slug = "bootstrap"
-                status = "completed"
-                lesson = "course/lessons/0001-bootstrap.md"
-                record = "course/records/0001-bootstrap.md"
-            """,
-        )
-        return lesson_path
-
-    def test_repository_course_catalog_passes(self) -> None:
+    def test_repository_contract_passes(self) -> None:
         completed = self.run_checker(REPOSITORY_ROOT)
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -57,7 +35,7 @@ class RepositoryContractTest(unittest.TestCase):
     def test_root_context_is_allowed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            self.create_minimal_course(root)
+            self.write_readme(root)
             (root / "CONTEXT.md").write_text(
                 "# VoiceNav glossary\n\nA term has one stable meaning.\n",
                 encoding="utf-8",
@@ -66,6 +44,25 @@ class RepositoryContractTest(unittest.TestCase):
             completed = self.run_checker(root)
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_retired_documentation_paths_fail(self) -> None:
+        for relative_path in ("course", "docs/work-items"):
+            with self.subTest(relative_path=relative_path):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    retired_path = root / relative_path
+                    retired_path.mkdir(parents=True)
+                    (retired_path / "README.md").write_text(
+                        "# Retired\n", encoding="utf-8"
+                    )
+
+                    completed = self.run_checker(root)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(
+                    f"retired documentation path remains: {relative_path}",
+                    completed.stderr,
+                )
 
     def test_issue_and_pull_request_templates_are_decision_complete(self) -> None:
         issue_template_paths = (
@@ -206,167 +203,10 @@ class RepositoryContractTest(unittest.TestCase):
                 self.assertIn(marker, agent_docs)
         self.assertNotIn("needs-review", agent_docs)
 
-    def test_valid_course_catalog_passes(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            lesson_directory = root / "course" / "lessons"
-            record_directory = root / "course" / "records"
-            lesson_directory.mkdir(parents=True)
-            record_directory.mkdir(parents=True)
-            (lesson_directory / "0001-bootstrap.md").write_text(
-                "# Bootstrap\n", encoding="utf-8"
-            )
-            (record_directory / "0001-bootstrap.md").write_text(
-                "# Record\n", encoding="utf-8"
-            )
-            self.write_catalog(
-                root,
-                """\
-                    [[lessons]]
-                    id = "0001"
-                    slug = "bootstrap"
-                    status = "completed"
-                    lesson = "course/lessons/0001-bootstrap.md"
-                    record = "course/records/0001-bootstrap.md"
-                """,
-            )
-
-            completed = self.run_checker(root)
-
-        self.assertEqual(completed.returncode, 0, completed.stderr)
-        self.assertIn("Repository contract passed", completed.stdout)
-
-    def test_duplicate_lesson_ids_fail(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            lesson_directory = root / "course" / "lessons"
-            record_directory = root / "course" / "records"
-            lesson_directory.mkdir(parents=True)
-            record_directory.mkdir(parents=True)
-            for slug in ("bootstrap", "interfaces"):
-                (lesson_directory / f"0001-{slug}.md").write_text(
-                    f"# {slug}\n", encoding="utf-8"
-                )
-                (record_directory / f"0001-{slug}.md").write_text(
-                    f"# {slug}\n", encoding="utf-8"
-                )
-            self.write_catalog(
-                root,
-                """\
-                    [[lessons]]
-                    id = "0001"
-                    slug = "bootstrap"
-                    status = "completed"
-                    lesson = "course/lessons/0001-bootstrap.md"
-                    record = "course/records/0001-bootstrap.md"
-
-                    [[lessons]]
-                    id = "0001"
-                    slug = "interfaces"
-                    status = "completed"
-                    lesson = "course/lessons/0001-interfaces.md"
-                    record = "course/records/0001-interfaces.md"
-                """,
-            )
-
-            completed = self.run_checker(root)
-
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("duplicate course lesson id: 0001", completed.stderr)
-
-    def test_lesson_ids_must_be_sorted_and_contiguous(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            for lesson_id in ("0001", "0003"):
-                lesson_path = root / "course" / "lessons" / f"{lesson_id}-lesson.md"
-                record_path = root / "course" / "records" / f"{lesson_id}-lesson.md"
-                lesson_path.parent.mkdir(parents=True, exist_ok=True)
-                record_path.parent.mkdir(parents=True, exist_ok=True)
-                lesson_path.write_text("# Lesson\n", encoding="utf-8")
-                record_path.write_text("# Record\n", encoding="utf-8")
-            self.write_catalog(
-                root,
-                """\
-                    [[lessons]]
-                    id = "0001"
-                    slug = "first"
-                    status = "completed"
-                    lesson = "course/lessons/0001-lesson.md"
-                    record = "course/records/0001-lesson.md"
-
-                    [[lessons]]
-                    id = "0003"
-                    slug = "third"
-                    status = "planned"
-                    lesson = "course/lessons/0003-lesson.md"
-                    record = "course/records/0003-lesson.md"
-                """,
-            )
-
-            completed = self.run_checker(root)
-
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("sorted and contiguous", completed.stderr)
-
-    def test_course_paths_cannot_escape_their_directories(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            outside_lesson = root / "outside.md"
-            record_path = root / "course" / "records" / "0001-bootstrap.md"
-            outside_lesson.write_text("# Outside\n", encoding="utf-8")
-            record_path.parent.mkdir(parents=True)
-            record_path.write_text("# Record\n", encoding="utf-8")
-            self.write_catalog(
-                root,
-                """\
-                    [[lessons]]
-                    id = "0001"
-                    slug = "bootstrap"
-                    status = "completed"
-                    lesson = "course/lessons/../../outside.md"
-                    record = "course/records/0001-bootstrap.md"
-                """,
-            )
-
-            completed = self.run_checker(root)
-
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("must stay under course/lessons", completed.stderr)
-
-    def test_unknown_lesson_status_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            lesson_path = root / "course" / "lessons" / "0001-bootstrap.md"
-            record_path = root / "course" / "records" / "0001-bootstrap.md"
-            lesson_path.parent.mkdir(parents=True)
-            record_path.parent.mkdir(parents=True)
-            lesson_path.write_text("# Lesson\n", encoding="utf-8")
-            record_path.write_text("# Record\n", encoding="utf-8")
-            self.write_catalog(
-                root,
-                """\
-                    [[lessons]]
-                    id = "0001"
-                    slug = "bootstrap"
-                    status = "done-ish"
-                    lesson = "course/lessons/0001-bootstrap.md"
-                    record = "course/records/0001-bootstrap.md"
-                """,
-            )
-
-            completed = self.run_checker(root)
-
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("invalid status", completed.stderr)
-
     def test_missing_relative_markdown_link_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            lesson_path = self.create_minimal_course(root)
-            lesson_path.write_text(
-                "# Bootstrap\n\n[Missing](../reference/missing.md)\n",
-                encoding="utf-8",
-            )
+            self.write_readme(root, "# Example\n\n[Missing](missing.md)\n")
 
             completed = self.run_checker(root)
 
@@ -376,11 +216,7 @@ class RepositoryContractTest(unittest.TestCase):
     def test_unsupported_markdown_link_scheme_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            lesson_path = self.create_minimal_course(root)
-            lesson_path.write_text(
-                "# Bootstrap\n\n[Local secret](file:///tmp/secret)\n",
-                encoding="utf-8",
-            )
+            self.write_readme(root, "# Example\n\n[Local secret](file:///tmp/secret)\n")
 
             completed = self.run_checker(root)
 
@@ -390,11 +226,7 @@ class RepositoryContractTest(unittest.TestCase):
     def test_unclosed_markdown_fence_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            lesson_path = self.create_minimal_course(root)
-            lesson_path.write_text(
-                "# Bootstrap\n\n```text\nnever closed\n",
-                encoding="utf-8",
-            )
+            self.write_readme(root, "# Example\n\n```text\nnever closed\n")
 
             completed = self.run_checker(root)
 
@@ -404,7 +236,7 @@ class RepositoryContractTest(unittest.TestCase):
     def test_markdown_under_source_packages_is_checked(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            self.create_minimal_course(root)
+            self.write_readme(root)
             source_readme = root / "src" / "example" / "README.md"
             source_readme.parent.mkdir(parents=True)
             source_readme.write_text(
@@ -415,14 +247,12 @@ class RepositoryContractTest(unittest.TestCase):
             completed = self.run_checker(root)
 
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn(
-            "broken local Markdown link: src", completed.stderr
-        )
+        self.assertIn("broken local Markdown link: src", completed.stderr)
 
     def test_legacy_documentation_layout_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            self.create_minimal_course(root)
+            self.write_readme(root)
             legacy_directory = root / "lessons"
             legacy_directory.mkdir()
             (legacy_directory / "0001.html").write_text(
@@ -432,12 +262,12 @@ class RepositoryContractTest(unittest.TestCase):
             completed = self.run_checker(root)
 
         self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("legacy documentation path remains: lessons", completed.stderr)
+        self.assertIn("retired documentation path remains: lessons", completed.stderr)
 
     def test_untracked_text_with_trailing_whitespace_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            self.create_minimal_course(root)
+            self.write_readme(root)
             bad_source = root / "scripts" / "bad.py"
             bad_source.parent.mkdir()
             bad_source.write_text("value = 1  \n", encoding="utf-8")
@@ -450,7 +280,7 @@ class RepositoryContractTest(unittest.TestCase):
     def test_ros_package_versions_must_match_repository_version(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            self.create_minimal_course(root)
+            self.write_readme(root)
             (root / "VERSION").write_text("0.1.0\n", encoding="utf-8")
             package_directory = root / "src" / "example_package"
             package_directory.mkdir(parents=True)
@@ -478,7 +308,7 @@ class RepositoryContractTest(unittest.TestCase):
     def test_python_package_setup_version_must_match_repository_version(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            self.create_minimal_course(root)
+            self.write_readme(root)
             (root / "VERSION").write_text("0.1.0\n", encoding="utf-8")
             package_directory = root / "src" / "example_package"
             package_directory.mkdir(parents=True)
@@ -510,7 +340,7 @@ class RepositoryContractTest(unittest.TestCase):
     def test_setup_version_in_comment_is_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            self.create_minimal_course(root)
+            self.write_readme(root)
             (root / "VERSION").write_text("0.1.0\n", encoding="utf-8")
             package_directory = root / "src" / "example_package"
             package_directory.mkdir(parents=True)
