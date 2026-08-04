@@ -13,10 +13,12 @@ Issue, one isolated branch, and one Draft PR.
 3. Implement the smallest observable behavior. For behavior changes, record a
    focused RED test, make it GREEN, then refactor while it remains green.
 4. Update user documentation, the changelog, and an ADR only when applicable.
-5. Run focused checks during development and the complete repository gate once
-   on the final PR HEAD.
-6. Open a Draft PR with `Closes #NN`, map acceptance criteria to files and
-   evidence, and review the complete diff.
+5. Run the focused repository checks during development. After the final
+   change, run the complete repository gate exactly once on the final PR HEAD
+   and retain its true exit status.
+6. Open a Draft PR with `Closes #NN`, record the result, acceptance mapping,
+   final test summary, interface impact, rollback, and residual risks, then
+   review the complete diff.
 7. Rebase-merge only after independent review, required CI, and every
    Definition of Done item are satisfied.
 
@@ -50,25 +52,26 @@ Allowed primary types are `feat`, `fix`, `test`, `docs`, `refactor`, `perf`,
 `build`, `ci`, and `chore`. Each commit should represent one coherent reason
 for change. Avoid broad formatting mixed with behavior changes.
 
-## Local quality gates
+## Focused repository checks
 
-Fast package loop:
+Run these checks during development:
 
 ```bash
-bash scripts/verify.sh voice_nav_sim
+python3 -m unittest tests.test_repository_contract
+python3 scripts/check_repository.py --root .
 ```
 
-Full change-request gate:
+The complete change-request gate is run exactly once after the final change,
+on the final PR HEAD:
 
 ```bash
 bash scripts/verify.sh
 ```
 
-Run the repository-only checks before ROS work:
-
-```bash
-python3 -m unittest discover -s tests -p "test_*.py" -v
-```
+Record its actual exit status before running any separate diagnostics. A later
+successful command must not overwrite a failed gate result. See the
+[change lifecycle](docs/process/change-lifecycle.md) for the canonical
+cadence, evidence ownership, and stop rules.
 
 Review what will be committed with:
 
@@ -89,7 +92,8 @@ A change is done only when:
 - its linked Issue acceptance criteria are satisfied;
 - the relevant package builds from declared dependencies;
 - automated tests cover the new success path and important failure paths;
-- `bash scripts/verify.sh` passes on the final PR HEAD;
+- `bash scripts/verify.sh` was run exactly once on the final PR HEAD and its
+  true exit status is recorded;
 - ROS names, types, QoS, parameters, units, TF ownership, error behavior, and
   ordering constraints are documented when they form a Stable Interface;
 - motion tests request zero velocity during normal and failure cleanup;
@@ -98,7 +102,8 @@ A change is done only when:
   approved target architecture;
 - a qualifying architectural trade-off has an ADR;
 - the diff contains no generated data, secrets, private audio, or model weights;
-- exact verification evidence is recorded in the Issue or PR; and
+- the PR records exact verification evidence without a per-commit development
+  diary or duplicated Issue body; and
 - the author has reviewed the complete staged diff.
 
 ## Architecture decision threshold

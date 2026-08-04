@@ -70,19 +70,25 @@ and the Agent, Nav2, and Gazebo bridge cannot bypass it.
 
 ## Build and verification
 
-Run the complete quality gate in WSL:
+Run the focused repository checks during development:
+
+```bash
+python3 -m unittest tests.test_repository_contract
+python3 scripts/check_repository.py --root .
+```
+
+After the final change, run the complete quality gate exactly once on the
+final PR HEAD in WSL:
 
 ```bash
 cd /mnt/c/Users/lcy/code/ros2/voice_nav_robot_ws
 bash scripts/verify.sh
 ```
 
-To narrow build and package tests while retaining repository and install-boundary
-checks:
-
-```bash
-bash scripts/verify.sh voice_nav_sim
-```
+Record the gate's true exit status before running any separate diagnostics. A
+later successful command must not overwrite a failed result. The complete
+cadence and evidence ownership are defined in the
+[change lifecycle](docs/process/change-lifecycle.md).
 
 Generated `build/`, `install/`, and `log/` trees, model weights, maps,
 recordings, and runtime evidence must not be committed. The supported

@@ -138,13 +138,13 @@ class RepositoryContractTest(unittest.TestCase):
             REPOSITORY_ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md"
         ).read_text(encoding="utf-8")
         for heading in (
-            "## Issue linkage",
-            "## Acceptance",
-            "## Rollback",
-            "## Interface impact",
-            "## Risks",
-            "## Dependencies",
-            "## Verification",
+            "## Issue 链接",
+            "## 结果",
+            "## 验收映射",
+            "## 最终测试摘要",
+            "## 接口影响",
+            "## 回滚",
+            "## 剩余风险",
         ):
             with self.subTest(heading=heading):
                 self.assertIn(heading, pull_request_template)
