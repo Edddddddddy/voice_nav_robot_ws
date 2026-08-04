@@ -5,20 +5,25 @@ Before 1.0, compatibility may change, but every change remains explicit and
 reviewable. Roadmap milestones use short names such as `v0.1`; immutable
 release tags use complete SemVer, such as `v0.1.0`.
 
-## Approved capability roadmap
+## Approved walking-skeleton roadmap
+
+The `v0.1` repository foundation already exists. The approved capability
+sequence is fixed as:
+`v0.2` → `v0.3` → `v0.4` → `v0.5` → `v0.6` → `v0.7` → `v1.0`.
+These are capability milestones in one vertically runnable walking skeleton,
+not teaching checkpoints or Lesson numbers.
 
 | Milestone | Capability boundary |
 | --- | --- |
-| `v0.1` | Repository foundation, documentation, Issue/PR control plane, CI, and main protection |
-| `v0.2` | `gz_ros2_control`, TF ownership, LiDAR/world, independent MotionGate, and consumer deadman |
-| `v0.3` | slam_toolbox mapping, atomic map package, AMCL, Named Places, and Nav2 safety navigation |
-| `v0.4` | Mission v1 Interface, validator/FSM, in-memory adapters, relative motion, navigation, and map adapters |
-| `v0.5` | Deterministic Mandarin rules, local Qwen/llama.cpp fallback, clarification, and stale-result isolation |
-| `v0.6` | PortAudio, WebRTC APM, KWS/VAD/ASR, TTS, and offline audio fixtures |
-| `v0.7` | AEC, barge-in, voice STOP, and end-to-end Mapping and Navigation flows |
-| `v1.0` | Fault recovery, performance/soak, license and model inventory, and complete release evidence |
+| `v0.2` | 运动基线：`gz_ros2_control`, TF ownership, LiDAR/world, independent MotionGate, and consumer deadman |
+| `v0.3` | 建图与导航：slam_toolbox mapping, atomic map package, AMCL, Named Places, and Nav2 safety navigation |
+| `v0.4` | 文本 Mission：Mission v1 Interface, validator/FSM, in-memory adapters, relative motion, navigation, and map adapters |
+| `v0.5` | 本地 Agent：deterministic Mandarin rules, local Qwen/llama.cpp fallback, clarification, and stale-result isolation |
+| `v0.6` | 实时语音：PortAudio, WebRTC APM, KWS/VAD/ASR, TTS, and offline audio fixtures |
+| `v0.7` | 全双工语音：AEC, barge-in, voice STOP, and end-to-end Mapping and Navigation flows |
+| `v1.0` | 端到端 Hardening：fault recovery, performance/soak, license and model inventory, and complete end-to-end release evidence |
 
-The order keeps every milestone vertically runnable. LLM availability is never
+Each milestone extends the preceding runnable slice. LLM availability is never
 a prerequisite for simulation, mapping, navigation, deterministic rules,
 Mission safety, or the fixed STOP path.
 
