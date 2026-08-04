@@ -86,7 +86,6 @@ body:
         - No Stable Interface change
         - Backward-compatible Stable Interface change
         - Breaking Stable Interface change
-        - Not yet known
     validations:
       required: true
 
