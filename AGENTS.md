@@ -59,11 +59,12 @@ pr: #NN|none
 thread: <thread-id>
 head: <sha|none>
 evidence: <Issue-or-PR-comment-URL>
-decision_needed: <blocked only; otherwise none>
+decision_needed: <required for blocked or reviewed P0/P1 blockers; otherwise none>
 ```
 
 A `blocked` event must state what was attempted, the smallest unresolved
 decision, available options, and a recommendation in the persisted comment.
+A `reviewed` event with a P0/P1 finding that blocks merge must fill `decision_needed`; use `none` only when no decision/action is needed.
 An implementation Worker sends `completed` only after its Draft PR and
 verification evidence exist. A Reviewer sends `reviewed` after recording the
 review result. No event asks another context to poll for progress.

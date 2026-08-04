@@ -29,7 +29,7 @@ Keep the type label and at most one workflow-state label on an Issue:
 | `ready-for-agent` | Decision-complete and eligible for a fresh Worker |
 | `in-progress` | A Worker currently owns the Task |
 | `blocked` | Work cannot continue until a named decision or dependency changes |
-| `needs-review` | A Draft PR is ready for independent review |
+| `review-needed` | A Draft PR is ready for independent review |
 | `verified` | Acceptance evidence and required checks are complete |
 
 State changes are recorded in an Issue comment. A blocked Task names the

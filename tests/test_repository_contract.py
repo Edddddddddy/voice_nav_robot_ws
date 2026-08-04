@@ -5,6 +5,8 @@ import textwrap
 import unittest
 from pathlib import Path
 
+import yaml
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 CHECKER = REPOSITORY_ROOT / "scripts" / "check_repository.py"
@@ -80,11 +82,60 @@ class RepositoryContractTest(unittest.TestCase):
             "verification",
         )
         for template_path in issue_template_paths:
-            template = template_path.read_text(encoding="utf-8")
+            try:
+                form = yaml.safe_load(template_path.read_text(encoding="utf-8"))
+            except yaml.YAMLError as error:
+                self.fail(f"invalid Issue form YAML in {template_path}: {error}")
+            self.assertIsInstance(form, dict)
+            self.assertIsInstance(form.get("name"), str)
+            self.assertIsInstance(form.get("description"), str)
+            self.assertIsInstance(form.get("title"), str)
+            body = form.get("body")
+            self.assertIsInstance(body, list)
+            if not isinstance(body, list):
+                continue
+
+            fields = {}
+            for item in body:
+                self.assertIsInstance(item, dict)
+                if not isinstance(item, dict):
+                    continue
+                item_type = item.get("type")
+                self.assertIn(item_type, {"markdown", "textarea", "dropdown", "checkboxes"})
+                if item_type == "markdown":
+                    continue
+                field_id = item.get("id")
+                self.assertIsInstance(field_id, str)
+                self.assertNotIn(field_id, fields)
+                fields[field_id] = item
+                attributes = item.get("attributes")
+                self.assertIsInstance(attributes, dict)
+                if isinstance(attributes, dict):
+                    self.assertIsInstance(attributes.get("label"), str)
+                    if item_type == "dropdown":
+                        self.assertIsInstance(attributes.get("options"), list)
+
             for field in required_issue_fields:
                 with self.subTest(template=template_path.name, field=field):
-                    self.assertIn(f"id: {field}", template)
-            self.assertNotRegex(template.lower(), r"lesson|learning[- ]record|work[- ]item")
+                    self.assertIn(field, fields)
+                    validations = fields[field].get("validations")
+                    self.assertIsInstance(validations, dict)
+                    if isinstance(validations, dict):
+                        self.assertIs(validations.get("required"), True)
+
+            interface_options = fields["interface_impact"]["attributes"]["options"]
+            if template_path.name == "task.yml":
+                self.assertEqual(
+                    interface_options,
+                    [
+                        "No Stable Interface change",
+                        "Backward-compatible Stable Interface change",
+                        "Breaking Stable Interface change",
+                    ],
+                )
+                self.assertNotIn("Not yet known", interface_options)
+            else:
+                self.assertIn("Not yet known", interface_options)
 
         pull_request_template = (
             REPOSITORY_ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md"
@@ -125,6 +176,15 @@ class RepositoryContractTest(unittest.TestCase):
         ):
             with self.subTest(document="AGENTS.md", marker=marker):
                 self.assertIn(marker, agents)
+        self.assertIn(
+            "A `reviewed` event with a P0/P1 finding that blocks merge must fill "
+            "`decision_needed`",
+            agents,
+        )
+        self.assertIn(
+            "use `none` only when no decision/action is needed",
+            agents,
+        )
 
         agent_docs = (
             REPOSITORY_ROOT / "docs" / "agents" / "README.md"
@@ -137,12 +197,14 @@ class RepositoryContractTest(unittest.TestCase):
             "ready-for-agent",
             "in-progress",
             "blocked",
+            "review-needed",
             "## External PR intake",
             "## Single-context layout",
             "CONTEXT.md",
         ):
             with self.subTest(document="docs/agents/README.md", marker=marker):
                 self.assertIn(marker, agent_docs)
+        self.assertNotIn("needs-review", agent_docs)
 
     def test_valid_course_catalog_passes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
