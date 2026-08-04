@@ -34,6 +34,10 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Updated the canonical verification entry point to resolve ordinary and
+  managed-worktree `.git` contexts before Git subprocesses, including Windows
+  absolute `gitdir:` pointers under WSL, with fail-closed diagnostics and
+  temporary-fixture regression coverage.
 - Consolidated quality, testing, evidence, contributor, pull-request, and
   release governance around focused development checks, one complete final
   gate, Issue/PR evidence ownership, and the approved walking-skeleton order.

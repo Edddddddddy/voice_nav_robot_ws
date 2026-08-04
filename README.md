@@ -78,12 +78,16 @@ python3 scripts/check_repository.py --root .
 ```
 
 After the final change, run the complete quality gate exactly once on the
-final PR HEAD in WSL:
+final PR HEAD in the same managed worktree:
 
 ```bash
-cd /mnt/c/Users/lcy/code/ros2/voice_nav_robot_ws
 bash scripts/verify.sh
 ```
+
+The entry point resolves ordinary `.git` directories, relative worktree
+pointers, and Windows absolute `gitdir:` pointers automatically. Do not
+pre-set `GIT_DIR` or `GIT_WORK_TREE`, and do not point the command at another
+checkout.
 
 Record the gate's true exit status before running any separate diagnostics. A
 later successful command must not overwrite a failed result. The complete
