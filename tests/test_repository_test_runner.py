@@ -181,6 +181,7 @@ class RepositoryTestRunnerTest(unittest.TestCase):
             test_id.split(".", 1)[0]
             for test_id in runner.REQUIRED_TEST_IDS
         }
+        manifest_modules.update(runner.REQUIRED_TEST_MODULES)
 
         self.assertLessEqual(repository_modules, manifest_modules)
 
