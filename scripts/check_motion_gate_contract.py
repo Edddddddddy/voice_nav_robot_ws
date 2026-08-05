@@ -661,6 +661,22 @@ def require_source_tokens(
         )
 
 
+def require_source_token_alternatives(
+    source: str,
+    alternatives: tuple[tuple[str, ...], ...],
+    context: str,
+) -> None:
+    """Accept one of the approved equivalent source-shape marker sets."""
+    for tokens in alternatives:
+        if all(token in source for token in tokens):
+            return
+    missing = [token for token in alternatives[0] if token not in source]
+    raise MotionGateContractError(
+        f"{context} is missing contract marker(s): "
+        + ", ".join(missing)
+    )
+
+
 def _cpp_translation_phase2(source: str) -> str:
     """Remove physical backslash-newline pairs before C++ tokenization."""
     return re.sub(r"\\(?:\r\n|\n|\r)", "", source)
@@ -993,14 +1009,24 @@ def validate_core(header_path: Path, source_path: Path) -> None:
         "MotionGateCore::prepare(",
         "MotionGateCore",
     )
-    require_source_tokens(
+    require_source_token_alternatives(
         prepare,
         (
-            "State::Inhibited",
-            "replay_or_collision(request)",
-            "request.expected_control_seq",
-            "control_seq_",
-            "make_lease_id",
+            (
+                "State::Inhibited",
+                "request_id_cache_",
+                "cached->second.request_fingerprint",
+                "request.expected_control_seq",
+                "control_seq_",
+                "make_lease_id",
+            ),
+            (
+                "State::Inhibited",
+                "replay_or_collision(request)",
+                "request.expected_control_seq",
+                "control_seq_",
+                "make_lease_id",
+            ),
         ),
         "MotionGateCore::prepare",
     )
@@ -1105,9 +1131,12 @@ def validate_core(header_path: Path, source_path: Path) -> None:
         "MotionGateCore::inhibit(",
         "MotionGateCore",
     )
-    require_source_tokens(
+    require_source_token_alternatives(
         inhibit,
-        ("retire_lease", "replay_or_collision(request)"),
+        (
+            ("retire_lease", "request_id_cache_"),
+            ("retire_lease", "replay_or_collision(request)"),
+        ),
         "MotionGateCore::inhibit",
     )
     tick = function_body(
