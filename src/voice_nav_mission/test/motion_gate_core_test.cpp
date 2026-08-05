@@ -376,7 +376,7 @@ TEST(MotionGateCore, SameRequestIdWithDifferentBodyIsCollision)
   ASSERT_EQ(gate.prepare(original, at(0ms)).code, ResultCode::Applied);
 
   auto collision = original;
-  collision.expected_control_seq = 1U;
+  collision.operation = Operation::Open;
   const auto result = gate.prepare(collision, at(1ms));
 
   EXPECT_EQ(result.code, ResultCode::Rejected);
@@ -390,24 +390,25 @@ TEST(MotionGateCore, RequestReplayCacheIsStrictlyBounded)
   auto config = MotionGateConfig{};
   config.request_cache_size = 2U;
   MotionGateCore gate(config, kGateId);
+  ASSERT_EQ(
+    gate.prepare(prepare_request(identifier(99U)), at(0ms)).code,
+    ResultCode::Applied);
 
   for (std::uint64_t request_number = 1U;
-    request_number <= 3U; ++request_number)
+    request_number <= 2U; ++request_number)
   {
-    auto request = prepare_request(identifier(request_number));
-    request.gate_instance_id = kOtherGateId;
+    auto request = prepare_request(
+      identifier(request_number), gate.snapshot().control_seq);
     EXPECT_EQ(
       gate.prepare(request, at(0ms)).code,
       ResultCode::Rejected);
   }
 
-  auto evicted = prepare_request(identifier(1U));
-  evicted.gate_instance_id = kOtherGateId;
-  EXPECT_EQ(gate.prepare(evicted, at(0ms)).code, ResultCode::Rejected);
-
-  auto retained = prepare_request(identifier(3U));
-  retained.gate_instance_id = kOtherGateId;
+  auto retained = prepare_request(identifier(2U));
   EXPECT_EQ(gate.prepare(retained, at(0ms)).code, ResultCode::Duplicate);
+
+  auto evicted = prepare_request(identifier(99U));
+  EXPECT_EQ(gate.prepare(evicted, at(0ms)).code, ResultCode::Rejected);
 }
 
 TEST(MotionGateCore, PrepareDeadlineIsExclusiveForOpen)
@@ -1017,6 +1018,49 @@ TEST(MotionGateCore, AllControlOperationsAllowStaleTupleRebuild)
   EXPECT_EQ(gate.inhibit(inhibit, at(7ms)).code, ResultCode::Applied);
 }
 
+TEST(MotionGateCore, StaleGateTupleRebuildsAcrossAllOperations)
+{
+  MotionGateCore gate(MotionGateConfig{}, kGateId);
+
+  auto prepare = prepare_request(identifier(30U));
+  prepare.gate_instance_id = kOtherGateId;
+  EXPECT_EQ(
+    gate.prepare(prepare, at(0ms)).reason,
+    Reason::StaleGate);
+  prepare.gate_instance_id = kGateId;
+  ASSERT_EQ(gate.prepare(prepare, at(1ms)).code, ResultCode::Applied);
+
+  auto open = lease_request(Operation::Open, 31U, gate.snapshot());
+  open.gate_instance_id = kOtherGateId;
+  EXPECT_EQ(gate.open(open, at(2ms), {}).reason, Reason::StaleGate);
+  open.gate_instance_id = kGateId;
+  ASSERT_EQ(
+    gate.open(open, at(3ms), []() {
+      return OpenBinding{true, Reason::None, writer_gid(), "writer ready"};
+      }).code,
+    ResultCode::Applied);
+
+  auto renew = lease_request(Operation::Renew, 32U, gate.snapshot());
+  renew.gate_instance_id = kOtherGateId;
+  EXPECT_EQ(gate.renew(renew, at(4ms)).reason, Reason::StaleGate);
+  renew.gate_instance_id = kGateId;
+  ASSERT_EQ(gate.renew(renew, at(5ms)).code, ResultCode::Applied);
+
+  auto inhibit = lease_request(Operation::Inhibit, 33U, gate.snapshot());
+  inhibit.gate_instance_id = kOtherGateId;
+  EXPECT_EQ(gate.inhibit(inhibit, at(6ms)).reason, Reason::StaleGate);
+  inhibit.gate_instance_id = kGateId;
+  ASSERT_EQ(gate.inhibit(inhibit, at(7ms)).code, ResultCode::Applied);
+
+  auto operation_collision = prepare;
+  operation_collision.operation = Operation::Open;
+  operation_collision.gate_instance_id = kGateId;
+  operation_collision.expected_control_seq = gate.snapshot().control_seq;
+  EXPECT_EQ(
+    gate.open(operation_collision, at(8ms), {}).reason,
+    Reason::RequestIdCollision);
+}
+
 TEST(MotionGateCore, OldOpenReplayNeverResurrectsRetiredLease)
 {
   MotionGateCore gate(MotionGateConfig{}, kGateId);
@@ -1156,7 +1200,7 @@ TEST(MotionGateCore, PrepareAdmissionRejectionUsesGlobalRequestCache)
   EXPECT_EQ(admission_calls, 1U);
 
   auto collision = request;
-  collision.expected_control_seq = 1U;
+  collision.operation = Operation::Open;
   const auto collision_result =
     gate.prepare(collision, at(2ms), admission_provider);
   EXPECT_EQ(collision_result.code, ResultCode::Rejected);

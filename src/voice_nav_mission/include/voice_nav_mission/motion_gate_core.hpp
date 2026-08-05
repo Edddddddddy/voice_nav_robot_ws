@@ -224,15 +224,17 @@ public:
 private:
   struct CachedRequest
   {
-    std::string request_fingerprint;
+    std::string logical_fingerprint;
     ControlResult result;
+    bool replayable{true};
   };
 
   [[nodiscard]] std::optional<ControlResult> replay_or_collision(
     const ControlRequest & request) const;
   void remember(
     const ControlRequest & request,
-    const ControlResult & result);
+    const ControlResult & result,
+    bool replayable = true);
   [[nodiscard]] ControlResult reject(
     const ControlRequest & request,
     Reason reason,
@@ -248,8 +250,7 @@ private:
     const ControlRequest & request,
     Operation expected,
     bool lease_required,
-    ControlResult & rejection,
-    bool cache_stale = true);
+    ControlResult & rejection);
   [[nodiscard]] bool advance_control_seq();
   void advance_state_seq();
   void reconcile_deadlines(SteadyTimePoint now);
@@ -258,7 +259,7 @@ private:
     std::uint64_t next_control_seq) const;
   [[nodiscard]] std::string make_candidate_topic(
     const std::string & lease_id) const;
-  [[nodiscard]] static std::string request_fingerprint(
+  [[nodiscard]] static std::string logical_request_fingerprint(
     const ControlRequest & request);
   [[nodiscard]] static bool valid_identifier(const std::string & value);
   [[nodiscard]] static bool gid_is_nonzero(const WriterGid & gid);

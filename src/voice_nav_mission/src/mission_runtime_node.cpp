@@ -138,6 +138,22 @@ public:
           callback_(snapshot_);
         }
       });
+    authority_adapter_ = std::make_unique<MissionAuthorityAdapter>(
+      stop_barrier_,
+      control_response_deadline_,
+      []() {return std::chrono::steady_clock::now();},
+      [this](
+        const AuthorityOperation & current,
+        AuthorityOperationKind kind,
+        std::chrono::steady_clock::time_point attempt_deadline,
+        std::chrono::steady_clock::time_point overall_deadline) {
+        return send_once(
+            current,
+            operation_code(kind),
+            attempt_deadline,
+            overall_deadline);
+        },
+      [this]() {refresh_endpoint();});
   }
 
   [[nodiscard]] GateSnapshot snapshot() const override
@@ -148,28 +164,25 @@ public:
   [[nodiscard]] AuthorityResult prepare(
     const AuthorityOperation & operation) override
   {
-    return converge(
-      operation, AuthorityOperationKind::Prepare, control_response_deadline_);
+    return authority_adapter_->prepare(operation);
   }
 
   [[nodiscard]] AuthorityResult open(
     const AuthorityOperation & operation) override
   {
-    return converge(
-      operation, AuthorityOperationKind::Open, control_response_deadline_);
+    return authority_adapter_->open(operation);
   }
 
   [[nodiscard]] AuthorityResult renew(
     const AuthorityOperation & operation) override
   {
-    return converge(
-      operation, AuthorityOperationKind::Renew, control_response_deadline_);
+    return authority_adapter_->renew(operation);
   }
 
   [[nodiscard]] AuthorityResult inhibit(
     const AuthorityOperation & operation) override
   {
-    return converge(operation, AuthorityOperationKind::Inhibit, stop_barrier_);
+    return authority_adapter_->inhibit(operation);
   }
 
   void refresh_endpoint()
@@ -201,42 +214,20 @@ private:
            node_.count_publishers(kGateStateTopic) > 0U;
   }
 
-  [[nodiscard]] AuthorityResult converge(
-    const AuthorityOperation & operation,
-    AuthorityOperationKind kind,
-    std::chrono::milliseconds budget)
+  [[nodiscard]] static std::uint8_t operation_code(
+    AuthorityOperationKind kind)
   {
-    const auto operation_code = [kind]() {
-        switch (kind) {
-          case AuthorityOperationKind::Prepare:
-            return GateControl::Request::PREPARE;
-          case AuthorityOperationKind::Open:
-            return GateControl::Request::OPEN;
-          case AuthorityOperationKind::Renew:
-            return GateControl::Request::RENEW;
-          case AuthorityOperationKind::Inhibit:
-            return GateControl::Request::INHIBIT;
-        }
+    switch (kind) {
+      case AuthorityOperationKind::Prepare:
         return GateControl::Request::PREPARE;
-      }();
-    return MissionAuthorityConvergence::run(
-      operation,
-      kind,
-      budget,
-      control_response_deadline_,
-      []() {return std::chrono::steady_clock::now();},
-      [this, operation_code](
-        const AuthorityOperation & current,
-        std::chrono::steady_clock::time_point attempt_deadline,
-        std::chrono::steady_clock::time_point overall_deadline) {
-        return send_once(
-            current, operation_code, attempt_deadline, overall_deadline);
-        },
-      [this, kind]() {
-        if (kind == AuthorityOperationKind::Inhibit) {
-          refresh_endpoint();
-        }
-      });
+      case AuthorityOperationKind::Open:
+        return GateControl::Request::OPEN;
+      case AuthorityOperationKind::Renew:
+        return GateControl::Request::RENEW;
+      case AuthorityOperationKind::Inhibit:
+        return GateControl::Request::INHIBIT;
+    }
+    return GateControl::Request::PREPARE;
   }
 
   [[nodiscard]] AuthorityResult send_once(
@@ -332,6 +323,7 @@ private:
   rclcpp::Node & node_;
   std::chrono::milliseconds control_response_deadline_;
   std::chrono::milliseconds stop_barrier_;
+  std::unique_ptr<MissionAuthorityAdapter> authority_adapter_;
   GateChangedCallback callback_;
   rclcpp::CallbackGroup::SharedPtr client_callback_group_;
   rclcpp::Client<GateControl>::SharedPtr client_;
@@ -393,7 +385,7 @@ public:
         publish_feedback(mission_id, feedback);
       },
       [this](std::uint64_t mission_id, const MissionResult & result) {
-        action_results_.finish(mission_id, result);
+        action_adapter_.finish(mission_id, result);
       });
     core_->observe_gate(pending_gate_snapshot_.value_or(authority_->snapshot()));
 
@@ -530,7 +522,6 @@ private:
   void on_accepted(const std::shared_ptr<GoalHandle> & goal_handle)
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    action_results_.begin_admission();
     const auto goal_message = goal_handle->get_goal();
     MissionGoal goal;
     goal.source_instance_id = goal_message->source_instance_id;
@@ -542,42 +533,19 @@ private:
       goal.steps.push_back(MissionStep{
           step.kind, step.distance_m, step.angle_rad, step.target_id});
     }
-    AdmissionResult admission;
-    try {
-      admission = core_->admit(goal);
-    } catch (const std::exception & error) {
-      action_results_.reject_admission();
-      auto result = std::make_shared<ExecuteMission::Result>();
-      fill_result(
-        MissionResult{
-          MissionResultCode::InternalError, -1,
-          std::string{"Mission admission threw: "} + error.what()},
-        *result);
-      goal_handle->abort(result);
-      return;
-    } catch (...) {
-      action_results_.reject_admission();
-      auto result = std::make_shared<ExecuteMission::Result>();
-      fill_result(
-        MissionResult{
-          MissionResultCode::InternalError, -1,
-          "Mission admission threw an unknown exception"},
-        *result);
-      goal_handle->abort(result);
-      return;
-    }
-    if (!admission.accepted) {
-      action_results_.reject_admission();
-      auto result = std::make_shared<ExecuteMission::Result>();
-      fill_result(admission.result, *result);
-      goal_handle->abort(result);
-      return;
-    }
-    goals_.emplace(admission.mission_id, goal_handle);
-    action_results_.commit(
-      admission.mission_id,
+    action_adapter_.on_accepted(
+      goal,
+      [this](const MissionGoal & value) {return core_->admit(value);},
+      [this, goal_handle](std::uint64_t mission_id) {
+        goals_.emplace(mission_id, goal_handle);
+      },
       [this](std::uint64_t mission_id, const ActionResultDelivery & delivery) {
         finish_goal(mission_id, delivery);
+      },
+      [goal_handle](const MissionResult & result) {
+        auto action_result = std::make_shared<ExecuteMission::Result>();
+        fill_result(result, *action_result);
+        goal_handle->abort(action_result);
       });
   }
 
@@ -677,7 +645,7 @@ private:
   rclcpp_action::Server<ExecuteMission>::SharedPtr action_server_;
   rclcpp::Service<StopMission>::SharedPtr stop_service_;
   rclcpp::TimerBase::SharedPtr timer_;
-  MissionActionResultRouter action_results_;
+  MissionActionAdapterBoundary action_adapter_;
   std::unordered_map<std::uint64_t, std::shared_ptr<GoalHandle>> goals_;
 };
 

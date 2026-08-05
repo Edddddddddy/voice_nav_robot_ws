@@ -143,6 +143,10 @@ if(BUILD_TESTING)
     mission_authority_convergence_test
     PRIVATE include
   )
+  target_link_libraries(
+    mission_authority_convergence_test
+    motion_gate_core
+  )
 
   ament_add_gtest(
     writer_observation_test
