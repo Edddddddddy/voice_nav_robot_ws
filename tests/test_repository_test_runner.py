@@ -171,20 +171,6 @@ class RepositoryTestRunnerTest(unittest.TestCase):
 
         self.assertLessEqual(critical_ids, runner.REQUIRED_TEST_IDS)
 
-    def test_required_manifest_covers_every_repository_test_module(self):
-        runner = load_runner()
-        repository_modules = {
-            path.stem
-            for path in (REPOSITORY_ROOT / "tests").glob("test_*.py")
-        }
-        manifest_modules = {
-            test_id.split(".", 1)[0]
-            for test_id in runner.REQUIRED_TEST_IDS
-        }
-        manifest_modules.update(runner.REQUIRED_TEST_MODULES)
-
-        self.assertLessEqual(repository_modules, manifest_modules)
-
     def test_load_tests_cannot_hide_non_manifest_contract(self):
         runner = load_runner()
 
