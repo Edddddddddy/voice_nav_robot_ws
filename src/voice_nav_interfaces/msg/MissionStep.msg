@@ -6,4 +6,4 @@ uint8 SAVE_MAP=4
 uint8 kind
 float32 distance_m
 float32 angle_rad
-string target_id
+string<=64 target_id
