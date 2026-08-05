@@ -9,6 +9,17 @@ from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 PREPARE_SCRIPT = REPOSITORY_ROOT / "scripts" / "prepare_git_context.sh"
+GIT_FIXTURE_ENVIRONMENT_KEYS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+)
 
 
 class GitContextContractTest(unittest.TestCase):
@@ -26,12 +37,24 @@ class GitContextContractTest(unittest.TestCase):
         with path.open("w", encoding="utf-8", newline="\n") as stream:
             stream.write(content)
 
-    def run_git(self, workspace: Path, *arguments: str) -> None:
+    def fixture_git_environment(self) -> dict[str, str]:
+        environment = os.environ.copy()
+        for key in GIT_FIXTURE_ENVIRONMENT_KEYS:
+            environment.pop(key, None)
+        return environment
+
+    def run_git(
+        self,
+        workspace: Path,
+        *arguments: str,
+        environment: dict[str, str],
+    ) -> None:
         completed = subprocess.run(
             ["git", "-C", str(workspace), *arguments],
             check=False,
             capture_output=True,
             text=True,
+            env=environment,
         )
         if completed.returncode != 0:
             self.fail(
@@ -48,9 +71,20 @@ class GitContextContractTest(unittest.TestCase):
     ) -> tuple[Path, Path]:
         workspace = root / "workspace"
         workspace.mkdir()
-        self.run_git(workspace, "init", "--quiet")
+        git_environment = self.fixture_git_environment()
+        self.run_git(
+            workspace,
+            "init",
+            "--quiet",
+            environment=git_environment,
+        )
         self.write_lf(workspace / "tracked-marker.txt", "fixture\n")
-        self.run_git(workspace, "add", "tracked-marker.txt")
+        self.run_git(
+            workspace,
+            "add",
+            "tracked-marker.txt",
+            environment=git_environment,
+        )
         commit = subprocess.run(
             [
                 "git",
@@ -68,6 +102,7 @@ class GitContextContractTest(unittest.TestCase):
             check=False,
             capture_output=True,
             text=True,
+            env=git_environment,
         )
         if commit.returncode != 0:
             self.fail(
