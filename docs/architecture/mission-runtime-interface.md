@@ -212,11 +212,11 @@ The common safe-stop sequence is:
 
 ```text
 select terminal intent
+→ capture the original child token and invalidate its generation
 → inhibit MotionGate and publish zero
-→ invalidate child generation
-→ cancel or abandon downstream operation
+→ cancel or abandon the captured downstream operation
 → wait for bounded acknowledgement or cleanup grace
-→ commit exactly one Result
+→ commit exactly one Result and the matching Service outcome
 ```
 
 Failure to prove an inhibited Gate returns `SAFETY_FAULT` and keeps Runtime

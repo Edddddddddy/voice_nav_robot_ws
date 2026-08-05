@@ -125,6 +125,26 @@ if(BUILD_TESTING)
   )
 
   ament_add_gtest(
+    mission_action_result_router_test
+    test/mission_action_result_router_test.cpp
+  )
+  target_compile_features(mission_action_result_router_test PUBLIC cxx_std_17)
+  target_include_directories(
+    mission_action_result_router_test
+    PRIVATE include
+  )
+
+  ament_add_gtest(
+    mission_authority_convergence_test
+    test/mission_authority_convergence_test.cpp
+  )
+  target_compile_features(mission_authority_convergence_test PUBLIC cxx_std_17)
+  target_include_directories(
+    mission_authority_convergence_test
+    PRIVATE include
+  )
+
+  ament_add_gtest(
     writer_observation_test
     test/writer_observation_test.cpp
     src/writer_observation.cpp

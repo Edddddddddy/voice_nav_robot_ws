@@ -109,6 +109,7 @@ RuntimeCore::RuntimeCore(
     config_.max_steps == 0U || config_.max_steps > 3U ||
     config_.source_cache_size == 0U || config_.source_cache_size > 64U ||
     config_.stop_cache_size == 0U || config_.stop_cache_size > 64U ||
+    config_.initial_admission_epoch == 0U ||
     config_.mission_deadline.count() <= 0 ||
     config_.gate_discovery_deadline.count() <= 0 ||
     config_.control_response_deadline.count() <= 0 ||
@@ -132,6 +133,7 @@ RuntimeCore::RuntimeCore(
   }
 
   state_.operating_mode = config_.operating_mode;
+  state_.admission_epoch = config_.initial_admission_epoch;
   state_.max_steps = config_.max_steps;
   state_.named_place_ids = config_.named_place_ids;
   state_.runtime_instance_id = config_.runtime_instance_id.empty() ?
@@ -292,7 +294,7 @@ StopResponse RuntimeCore::stop(const StopRequest & request)
         epoch_ok = this->rotate_epoch();
       }
       const bool zero = inhibit_and_prove_zero();
-      return TerminalOutcome{zero, epoch_ok};
+      return TerminalOutcome{zero, true, epoch_ok};
     };
 
   if (!valid_bounded_id(request.request_id, kMaximumRuntimeIdLength, false)) {
@@ -363,7 +365,8 @@ StopResponse RuntimeCore::stop(const StopRequest & request)
     MissionResultCode::Stopped,
     "Mission stopped by Operational Stop",
     true);
-  const bool safe = outcome.zero_proven && outcome.cancel_acknowledged;
+  const bool safe = outcome.zero_proven && outcome.cancel_acknowledged &&
+    outcome.epoch_advanced;
   if (!safe) {
     state_.availability = RuntimeAvailability::Faulted;
     publish_state();
@@ -848,7 +851,9 @@ RuntimeCore::TerminalOutcome RuntimeCore::select_terminal_and_stop(
   const auto child_started = active_->child_started;
   active_->terminal_selected = true;
   ++active_->generation;
+  bool epoch_advanced = true;
   if (rotate_epoch && !increment_epoch(state_.admission_epoch)) {
+    epoch_advanced = false;
     state_.availability = RuntimeAvailability::Faulted;
     publish_state();
     detail = "admission epoch exhausted while stopping Mission";
@@ -870,12 +875,12 @@ RuntimeCore::TerminalOutcome RuntimeCore::select_terminal_and_stop(
         child_started ? static_cast<std::int32_t>(active_->step_index) : -1,
         !zero ? "terminal barrier could not prove Gate inhibit and zero" :
         "relative-motion cancel did not acknowledge before its deadline"});
-    return TerminalOutcome{zero, canceled};
+    return TerminalOutcome{zero, canceled, epoch_advanced};
   }
   const auto failed_step = child_started && code != MissionResultCode::Succeeded ?
     static_cast<std::int32_t>(active_->step_index) : -1;
   finish_active(MissionResult{code, failed_step, bounded_detail(std::move(detail))});
-  return TerminalOutcome{zero, canceled};
+  return TerminalOutcome{zero, canceled, epoch_advanced};
 }
 
 void RuntimeCore::finish_active(const MissionResult & result)

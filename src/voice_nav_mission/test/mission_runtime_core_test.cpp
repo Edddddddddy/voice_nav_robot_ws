@@ -204,6 +204,40 @@ TEST(RuntimeCore, StopRotatesEpochAndDuplicateDoesNotRotateAgain)
   EXPECT_EQ(fixture.authority->inhibit_count(), 2U);
 }
 
+TEST(RuntimeCore, ActiveStopEpochExhaustionFailsTheWholeTransaction)
+{
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  auto max_epoch_config = config();
+  max_epoch_config.initial_admission_epoch =
+    std::numeric_limits<std::uint64_t>::max();
+  std::vector<MissionResult> results;
+  RuntimeCore core(
+    max_epoch_config, clock, authority, relative, {}, {},
+    [&results](std::uint64_t, const MissionResult & result) {
+      results.push_back(result);
+    });
+  core.observe_gate(authority->snapshot());
+
+  auto mission = goal(1U);
+  mission.admission_epoch = std::numeric_limits<std::uint64_t>::max();
+  ASSERT_TRUE(core.admit(mission).accepted);
+
+  const auto response = core.stop(
+    StopRequest{"stop-epoch-exhausted", "", 0U, "operator"});
+
+  EXPECT_EQ(response.code, 2U);
+  EXPECT_TRUE(response.motion_inhibited);
+  EXPECT_EQ(response.admission_epoch,
+    std::numeric_limits<std::uint64_t>::max());
+  ASSERT_EQ(results.size(), 1U);
+  EXPECT_EQ(results.front().code, MissionResultCode::SafetyFault);
+  EXPECT_EQ(results.front().failed_step, 0);
+  EXPECT_EQ(core.state().availability, RuntimeAvailability::Faulted);
+  EXPECT_FALSE(core.has_active_mission());
+}
+
 TEST(RuntimeCore, UnsupportedUnionIsDistinguishedFromInvalidUnion)
 {
   Fixture fixture;

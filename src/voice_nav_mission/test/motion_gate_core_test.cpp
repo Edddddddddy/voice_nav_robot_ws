@@ -986,6 +986,37 @@ TEST(MotionGateCore, StaleInhibitCanConvergeWithTheSameRequestId)
   EXPECT_EQ(converged.state, State::Inhibited);
 }
 
+TEST(MotionGateCore, AllControlOperationsAllowStaleTupleRebuild)
+{
+  MotionGateCore gate(MotionGateConfig{}, kGateId);
+
+  auto prepare = prepare_request(identifier(20U), 1U);
+  EXPECT_EQ(gate.prepare(prepare, at(0ms)).reason, Reason::StaleSequence);
+  prepare.expected_control_seq = 0U;
+  ASSERT_EQ(gate.prepare(prepare, at(1ms)).code, ResultCode::Applied);
+
+  auto open = lease_request(Operation::Open, 21U, gate.snapshot());
+  --open.expected_control_seq;
+  EXPECT_EQ(gate.open(open, at(2ms), {}).reason, Reason::StaleSequence);
+  open.expected_control_seq = gate.snapshot().control_seq;
+  const auto provider = []() {
+      return OpenBinding{true, Reason::None, writer_gid(), "writer ready"};
+    };
+  ASSERT_EQ(gate.open(open, at(3ms), provider).code, ResultCode::Applied);
+
+  auto renew = lease_request(Operation::Renew, 22U, gate.snapshot());
+  --renew.expected_control_seq;
+  EXPECT_EQ(gate.renew(renew, at(4ms)).reason, Reason::StaleSequence);
+  renew.expected_control_seq = gate.snapshot().control_seq;
+  ASSERT_EQ(gate.renew(renew, at(5ms)).code, ResultCode::Applied);
+
+  auto inhibit = lease_request(Operation::Inhibit, 23U, gate.snapshot());
+  --inhibit.expected_control_seq;
+  EXPECT_EQ(gate.inhibit(inhibit, at(6ms)).reason, Reason::StaleSequence);
+  inhibit.expected_control_seq = gate.snapshot().control_seq;
+  EXPECT_EQ(gate.inhibit(inhibit, at(7ms)).code, ResultCode::Applied);
+}
+
 TEST(MotionGateCore, OldOpenReplayNeverResurrectsRetiredLease)
 {
   MotionGateCore gate(MotionGateConfig{}, kGateId);

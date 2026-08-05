@@ -95,7 +95,7 @@ ControlResult MotionGateCore::prepare(
 
   ControlResult rejection;
   if (!validate_common(
-      request, Operation::Prepare, false, rejection))
+      request, Operation::Prepare, false, rejection, true))
   {
     return rejection;
   }
@@ -107,7 +107,7 @@ ControlResult MotionGateCore::prepare(
   if (request.expected_control_seq != control_seq_) {
     return reject(
       request, Reason::StaleSequence,
-      "PREPARE expected_control_seq is stale");
+      "PREPARE expected_control_seq is stale", false);
   }
 
   if (admission_provider) {
@@ -181,7 +181,7 @@ ControlResult MotionGateCore::open(
   }
 
   ControlResult rejection;
-  if (!validate_common(request, Operation::Open, true, rejection)) {
+  if (!validate_common(request, Operation::Open, true, rejection, true)) {
     return rejection;
   }
   if (state_ != State::Prepared) {
@@ -192,12 +192,12 @@ ControlResult MotionGateCore::open(
   if (request.expected_control_seq != control_seq_) {
     return reject(
       request, Reason::StaleSequence,
-      "OPEN expected_control_seq is stale");
+      "OPEN expected_control_seq is stale", false);
   }
   if (request.lease_id != lease_id_) {
     return reject(
       request, Reason::StaleLease,
-      "OPEN lease_id is not the current prepared lease");
+      "OPEN lease_id is not the current prepared lease", false);
   }
   if (now >= prepare_deadline_) {
     retire_lease(Reason::PrepareExpired, "prepared lease expired");
@@ -303,7 +303,7 @@ ControlResult MotionGateCore::renew(
   }
 
   ControlResult rejection;
-  if (!validate_common(request, Operation::Renew, true, rejection)) {
+  if (!validate_common(request, Operation::Renew, true, rejection, true)) {
     return rejection;
   }
   if (state_ != State::Armed) {
@@ -314,12 +314,12 @@ ControlResult MotionGateCore::renew(
   if (request.expected_control_seq != control_seq_) {
     return reject(
       request, Reason::StaleSequence,
-      "RENEW expected_control_seq is stale");
+      "RENEW expected_control_seq is stale", false);
   }
   if (request.lease_id != lease_id_) {
     return reject(
       request, Reason::StaleLease,
-      "RENEW lease_id is not the current armed lease");
+      "RENEW lease_id is not the current armed lease", false);
   }
   if (now >= authority_deadline_) {
     retire_lease(Reason::AuthorityExpired, "authority lease expired");
@@ -362,7 +362,7 @@ ControlResult MotionGateCore::inhibit(
   ControlResult rejection;
   const bool lease_required = state_ != State::Inhibited;
   if (!validate_common(
-      request, Operation::Inhibit, lease_required, rejection, false))
+      request, Operation::Inhibit, lease_required, rejection, true))
   {
     return rejection;
   }
@@ -684,7 +684,7 @@ bool MotionGateCore::validate_common(
     rejection = reject(
       request, Reason::StaleSequence,
       "expected_control_seq does not match the Gate control sequence",
-      cache_stale);
+      false);
     return false;
   }
   return true;

@@ -177,6 +177,7 @@ struct AuthorityResult
   GateSnapshot snapshot;
   std::string lease_id;
   std::string detail;
+  bool tuple_stale{false};
 };
 
 class SteadyClockPort
@@ -255,6 +256,7 @@ struct RuntimeConfig
   std::size_t source_cache_size{64U};
   std::size_t stop_cache_size{64U};
   std::uint8_t max_steps{3U};
+  std::uint64_t initial_admission_epoch{1U};
   float move_distance_min_m{0.05F};
   float move_distance_max_m{2.0F};
   float rotate_angle_min_rad{0.05F};
@@ -325,6 +327,7 @@ private:
   {
     bool zero_proven{false};
     bool cancel_acknowledged{false};
+    bool epoch_advanced{true};
   };
 
   [[nodiscard]] MissionResult reject(

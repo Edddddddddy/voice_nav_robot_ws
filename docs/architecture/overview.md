@@ -42,10 +42,12 @@ Verified by repository, static, and headless-Gazebo gates:
   publisher GID, and fully qualified owner are exercised over a bounded
   observation window.
 
-SLAM, Nav2, Mission Runtime, Agent, and voice remain target claims. No
-`map → odom` owner exists yet. Controller timeout is configured but is not
-presented as Gate-death or physical-stop completion; process-death acceptance
-remains a separate target slice.
+SLAM, the physical Nav2 motion chain, Agent, and voice remain target claims.
+The Mission Runtime control plane is a current slice described below; its
+production RelativeMotion Adapter remains intentionally unavailable until
+Task #35. No `map → odom` owner exists yet. Controller timeout is configured
+but is not presented as Gate-death or physical-stop completion; process-death
+acceptance remains a separate target slice.
 
 ## Current independent MotionGate slice
 
@@ -164,12 +166,28 @@ The package-internal `motion_gate_core` static target is the deep Module behind
 the Adapter. It owns state, identity validation, deadlines, binding decisions,
 clamping, retirement, and the selected command. The Node Adapter owns ROS graph
 queries, reader A/B/C lifecycle, actual final/state publication, publication
-sequence counters, and the `zero_published` acknowledgement. Only
-`motion_gate_node` is installed.
+sequence counters, and the `zero_published` acknowledgement. Within this
+MotionGate slice, only `motion_gate_node` is installed; the Mission package's
+current Runtime control-plane target is documented in the next section.
 
 The caller learns one execution operation, one stop operation, and one state
 snapshot. Internal complexity remains local to one package while separate
 processes keep the final watchdog independent from orchestration.
+
+## Current Mission Runtime control-plane slice
+
+The repository currently installs `mission_runtime_node` as the Mission
+control-plane process. It provides the bounded public surface
+`/mission/execute`, `/mission/stop`, and transient-local `/mission/state`,
+with package-private Core, MotionGate Adapter, and scripted seams. Admission,
+identity/epoch fencing, STOP linearization, state/feedback/result projection,
+and fail-closed Gate coordination are implemented in this slice.
+
+The production `RelativeMotionPort` is an intentional unavailable Adapter
+until Task #35. Therefore this current slice validates and fences Missions but
+does not produce candidate velocities or perform physical MOVE/ROTATE motion.
+Task #35 may replace that private Adapter without changing the frozen public
+ROS IDL or the Mission endpoints.
 
 ### Simulation Module
 
