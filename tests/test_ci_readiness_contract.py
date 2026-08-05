@@ -26,6 +26,19 @@ GAZEBO_POSE_SUPPORT = (
 BRINGUP_CMAKE = (
     REPOSITORY_ROOT / "src" / "voice_nav_bringup" / "CMakeLists.txt"
 )
+MISSION_RUNTIME_YAML = (
+    REPOSITORY_ROOT
+    / "src"
+    / "voice_nav_bringup"
+    / "config"
+    / "mission_runtime.yaml"
+)
+MISSION_RUNTIME_INTERFACE_DOC = (
+    REPOSITORY_ROOT
+    / "docs"
+    / "architecture"
+    / "mission-runtime-interface.md"
+)
 MISSION_CMAKE = (
     REPOSITORY_ROOT / "src" / "voice_nav_mission" / "CMakeLists.txt"
 )
@@ -517,6 +530,37 @@ class CiReadinessContractTest(unittest.TestCase):
         self.assertIn(generated_check, verify)
         self.assertLess(verify.index("colcon build"), verify.index(generated_check))
         self.assertLess(verify.index(generated_check), verify.index("colcon test"))
+
+    def test_runtime_trusted_policy_is_frozen_and_documented(self):
+        yaml = MISSION_RUNTIME_YAML.read_text(encoding="utf-8")
+        policy = {
+            "mission_deadline_ms": "30000",
+            "gate_discovery_deadline_ms": "2000",
+            "control_response_deadline_ms": "100",
+            "stop_barrier_ms": "250",
+            "cancel_grace_ms": "250",
+            "source_cache_size": "64",
+            "stop_cache_size": "64",
+            "max_steps": "3",
+            "move_distance_min_m": "0.05",
+            "move_distance_max_m": "2.0",
+            "rotate_angle_min_rad": "0.05",
+            "rotate_angle_max_rad": "6.283185",
+        }
+        for key, value in policy.items():
+            with self.subTest(parameter=key):
+                self.assertRegex(yaml, rf"(?m)^    {key}: {value}$")
+
+        documentation = MISSION_RUNTIME_INTERFACE_DOC.read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "is the single audited\npolicy record",
+            documentation,
+        )
+        for key in policy:
+            with self.subTest(documented_parameter=key):
+                self.assertIn(f"`{key}`", documentation)
 
     def test_convergence_unit_test_allows_runner_teardown_headroom(self):
         cmake = BRINGUP_CMAKE.read_text(encoding="utf-8")

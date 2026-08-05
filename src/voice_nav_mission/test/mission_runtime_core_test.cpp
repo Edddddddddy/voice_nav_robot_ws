@@ -140,6 +140,10 @@ TEST(RuntimeCore, FakeFSMIsOrderedBusyAndExactlyOnce)
   EXPECT_GE(fixture.feedback.back().progress, 0.4F);
   fixture.relative->complete();
   ASSERT_EQ(fixture.relative->started_steps().size(), 2U);
+  ASSERT_FALSE(fixture.feedback.empty());
+  EXPECT_FLOAT_EQ(fixture.feedback.back().progress, 0.5F);
+  fixture.relative->feedback(0.2);
+  EXPECT_FLOAT_EQ(fixture.feedback.back().progress, 0.6F);
   fixture.relative->complete();
   ASSERT_EQ(fixture.results.size(), 1U);
   EXPECT_EQ(fixture.results.front().code, MissionResultCode::Succeeded);
@@ -150,6 +154,33 @@ TEST(RuntimeCore, FakeFSMIsOrderedBusyAndExactlyOnce)
   // produce a second result or reopen the Gate.
   fixture.relative->complete();
   EXPECT_EQ(fixture.results.size(), 1U);
+}
+
+TEST(RuntimeCore, ThreeStepFeedbackUsesExactMissionBoundaries)
+{
+  Fixture fixture;
+  const std::vector<MissionStep> steps{
+    MissionStep{
+      static_cast<std::uint8_t>(MissionStepKind::MoveDistance), 0.5F, 0.0F, ""},
+    MissionStep{
+      static_cast<std::uint8_t>(MissionStepKind::RotateAngle), 0.0F, 1.0F, ""},
+    MissionStep{
+      static_cast<std::uint8_t>(MissionStepKind::MoveDistance), 0.7F, 0.0F, ""}};
+
+  ASSERT_TRUE(fixture.core.admit(goal(1U, steps)).accepted);
+  fixture.relative->complete();
+  ASSERT_FALSE(fixture.feedback.empty());
+  EXPECT_FLOAT_EQ(fixture.feedback.back().progress, 1.0F / 3.0F);
+
+  fixture.relative->feedback(0.8);
+  EXPECT_FLOAT_EQ(fixture.feedback.back().progress, 0.6F);
+  fixture.relative->complete();
+  EXPECT_FLOAT_EQ(fixture.feedback.back().progress, 2.0F / 3.0F);
+
+  fixture.relative->complete();
+  ASSERT_EQ(fixture.results.size(), 1U);
+  EXPECT_EQ(fixture.results.front().code, MissionResultCode::Succeeded);
+  EXPECT_FLOAT_EQ(fixture.feedback.back().progress, 1.0F);
 }
 
 TEST(RuntimeCore, StopRotatesEpochAndDuplicateDoesNotRotateAgain)
@@ -170,7 +201,7 @@ TEST(RuntimeCore, StopRotatesEpochAndDuplicateDoesNotRotateAgain)
   EXPECT_EQ(duplicate.code, 1U);
   EXPECT_EQ(duplicate.admission_epoch, 2U);
   EXPECT_TRUE(duplicate.motion_inhibited);
-  EXPECT_EQ(fixture.authority->inhibit_count(), 3U);
+  EXPECT_EQ(fixture.authority->inhibit_count(), 2U);
 }
 
 TEST(RuntimeCore, UnsupportedUnionIsDistinguishedFromInvalidUnion)
@@ -211,6 +242,25 @@ TEST(RuntimeCore, StartupConvergesLegacyPreparedGateToCurrentZeroProof)
   EXPECT_EQ(core.state().availability, RuntimeAvailability::Available);
 }
 
+TEST(RuntimeCore, StartupLegacyLeaseFailureRemainsFaultedAndUnbound)
+{
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
+  authority->set_snapshot(GateSnapshot{
+        kGateId, 7U, std::string(32U, 'l'), GateState::Armed,
+        true, false, false, false});
+  authority->set_inhibit_failure("startup zero convergence failed");
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  RuntimeCore core(config(), clock, authority, relative);
+
+  core.observe_gate(authority->snapshot());
+
+  EXPECT_EQ(authority->snapshot().state, GateState::Armed);
+  EXPECT_EQ(core.state().availability, RuntimeAvailability::Faulted);
+  EXPECT_FALSE(core.usable());
+  EXPECT_FALSE(core.admit(goal(1U)).accepted);
+}
+
 TEST(RuntimeCore, ValidatesEveryStepBeforeAcquiringTheGate)
 {
   Fixture fixture;
@@ -230,6 +280,20 @@ TEST(RuntimeCore, ValidatesEveryStepBeforeAcquiringTheGate)
 
   const auto accepted = fixture.core.admit(goal(2U));
   EXPECT_TRUE(accepted.accepted);
+}
+
+TEST(RuntimeCore, OpenFailureWithCleanupFailureIsSafetyFault)
+{
+  Fixture fixture;
+  fixture.authority->set_open_failure("scripted OPEN failure");
+  fixture.authority->set_inhibit_failure("scripted cleanup failure");
+
+  const auto admission = fixture.core.admit(goal(1U));
+
+  EXPECT_FALSE(admission.accepted);
+  EXPECT_EQ(admission.result.code, MissionResultCode::SafetyFault);
+  EXPECT_EQ(fixture.core.state().availability, RuntimeAvailability::Faulted);
+  EXPECT_FALSE(fixture.core.has_active_mission());
 }
 
 TEST(RuntimeCore, ChildFailureReportsTheStartedStepAndSkipsTheRest)
@@ -319,6 +383,7 @@ TEST(RuntimeCore, ZeroProofFailureStillCancelsAndReturnsSafetyFault)
   EXPECT_FALSE(response.motion_inhibited);
   ASSERT_EQ(fixture.results.size(), 1U);
   EXPECT_EQ(fixture.results.front().code, MissionResultCode::SafetyFault);
+  EXPECT_EQ(fixture.results.front().failed_step, 0);
   EXPECT_FALSE(fixture.core.has_active_mission());
   EXPECT_EQ(fixture.relative->cancel_count(), 1U);
 }
@@ -357,6 +422,37 @@ TEST(RuntimeCore, ChildStartExceptionIsPreExecutionFailure)
   EXPECT_EQ(fixture.results.front().failed_step, -1);
 }
 
+TEST(RuntimeCore, StopSelectsTerminalBeforeBarrierReentrantCompletion)
+{
+  Fixture fixture;
+  bool first_barrier = true;
+  fixture.authority->set_inhibit_observer([&]() {
+      if (first_barrier) {
+        first_barrier = false;
+        fixture.relative->complete();
+      }
+    });
+  ASSERT_TRUE(fixture.core.admit(goal(1U)).accepted);
+
+  const auto response = fixture.core.stop(
+    StopRequest{"stop-reentrant", "", 0U, "operator"});
+
+  EXPECT_EQ(response.code, 0U);
+  ASSERT_EQ(fixture.results.size(), 1U);
+  EXPECT_EQ(fixture.results.front().code, MissionResultCode::Stopped);
+  EXPECT_EQ(fixture.relative->cancel_count(), 1U);
+  EXPECT_EQ(fixture.authority->inhibit_count(), 1U);
+  ASSERT_FALSE(fixture.relative->started_tokens().empty());
+  const auto original = fixture.relative->started_tokens().front();
+  EXPECT_EQ(fixture.relative->cancel_token().mission_id, original.mission_id);
+  EXPECT_EQ(
+    fixture.relative->cancel_token().mission_generation,
+    original.mission_generation);
+  EXPECT_EQ(
+    fixture.relative->cancel_token().step_generation,
+    original.step_generation);
+}
+
 TEST(RuntimeCore, CancelAcknowledgementFailureIsSafetyFault)
 {
   Fixture fixture;
@@ -369,6 +465,31 @@ TEST(RuntimeCore, CancelAcknowledgementFailureIsSafetyFault)
   EXPECT_EQ(fixture.results.front().code, MissionResultCode::SafetyFault);
   EXPECT_EQ(fixture.results.front().failed_step, 0);
   EXPECT_FALSE(fixture.core.has_active_mission());
+}
+
+TEST(RuntimeCore, SynchronousChildCompletionStillProducesExactlyOneResult)
+{
+  Fixture fixture;
+  fixture.relative->set_start_completion(true);
+
+  const auto admission = fixture.core.admit(goal(1U));
+
+  EXPECT_TRUE(admission.accepted);
+  ASSERT_EQ(fixture.results.size(), 1U);
+  EXPECT_EQ(fixture.results.front().code, MissionResultCode::Succeeded);
+  EXPECT_FALSE(fixture.core.has_active_mission());
+}
+
+TEST(RuntimeCore, StartedCancelReportsTheActiveStep)
+{
+  Fixture fixture;
+  ASSERT_TRUE(fixture.core.admit(goal(1U)).accepted);
+
+  fixture.core.cancel(1U);
+
+  ASSERT_EQ(fixture.results.size(), 1U);
+  EXPECT_EQ(fixture.results.front().code, MissionResultCode::Canceled);
+  EXPECT_EQ(fixture.results.front().failed_step, 0);
 }
 
 TEST(RuntimeCore, RestartCreatesNewRuntimeIdentityAtEpochOne)

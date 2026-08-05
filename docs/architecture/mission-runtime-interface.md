@@ -226,6 +226,31 @@ Mission deadlines, cancel grace, Gate lease, STOP barrier, and liveness use a
 steady clock. ROS time is used only for TF, sensor data, SLAM, Nav2, and
 simulation. Pausing or rewinding `/clock` cannot preserve an old lease.
 
+## Trusted Runtime policy
+
+`src/voice_nav_bringup/config/mission_runtime.yaml` is the single audited
+policy record for the Runtime control-plane slice. These parameters are
+read-only after startup, and the Node rejects any override that differs from
+the frozen values below; they are not additions to the public ROS IDL.
+
+| Parameter | Frozen value |
+| --- | ---: |
+| `mission_deadline_ms` | `30000` |
+| `gate_discovery_deadline_ms` | `2000` |
+| `control_response_deadline_ms` | `100` |
+| `stop_barrier_ms` | `250` |
+| `cancel_grace_ms` | `250` |
+| `source_cache_size` / `stop_cache_size` | `64` / `64` |
+| `max_steps` | `3` |
+| `move_distance_min_m` / `move_distance_max_m` | `0.05` / `2.0` |
+| `rotate_angle_min_rad` / `rotate_angle_max_rad` | `0.05` / `6.283185` |
+
+The MOVE and ROTATE union validators consume the same policy values rather
+than maintaining a second range definition. Gate discovery uses the bounded
+steady-clock window while continuing event-driven observation; a missed
+startup window leaves Runtime `UNAVAILABLE` and fail-closed until a healthy
+Gate snapshot is observed.
+
 ## Motion and map semantics
 
 `MOVE_DISTANCE` closes a feedback loop on signed odometry projection along the

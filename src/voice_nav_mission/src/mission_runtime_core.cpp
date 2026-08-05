@@ -116,6 +116,20 @@ RuntimeCore::RuntimeCore(
   {
     throw std::invalid_argument("invalid trusted Runtime configuration");
   }
+  if (
+    !std::isfinite(config_.move_distance_min_m) ||
+    !std::isfinite(config_.move_distance_max_m) ||
+    !std::isfinite(config_.rotate_angle_min_rad) ||
+    !std::isfinite(config_.rotate_angle_max_rad) ||
+    config_.move_distance_min_m <= 0.0F ||
+    config_.move_distance_min_m > config_.move_distance_max_m ||
+    config_.move_distance_max_m <= 0.0F ||
+    config_.rotate_angle_min_rad <= 0.0F ||
+    config_.rotate_angle_min_rad > config_.rotate_angle_max_rad ||
+    config_.rotate_angle_max_rad <= 0.0F)
+  {
+    throw std::invalid_argument("invalid trusted Mission step policy");
+  }
 
   state_.operating_mode = config_.operating_mode;
   state_.max_steps = config_.max_steps;
@@ -128,6 +142,7 @@ RuntimeCore::RuntimeCore(
     throw std::invalid_argument("runtime_instance_id is outside the IDL bound");
   }
   gate_snapshot_ = authority_->snapshot();
+  gate_discovery_started_at_ = clock_->now();
   state_.gate_state = gate_snapshot_.endpoint_available ?
     gate_snapshot_.state : GateState::Faulted;
   state_.availability = RuntimeAvailability::Unavailable;
@@ -219,7 +234,14 @@ AdmissionResult RuntimeCore::admit(const MissionGoal & goal)
   current_lease_id_ = prepare.lease_id;
   const auto open = authority_->open(make_operation(current_lease_id_));
   if (!open.applied) {
-    (void)inhibit_and_prove_zero();
+    const bool cleanup = inhibit_and_prove_zero();
+    if (!cleanup) {
+      state_.availability = RuntimeAvailability::Faulted;
+      publish_state();
+      return AdmissionResult{0U, false, reject(
+        MissionResultCode::SafetyFault,
+        "MotionGate OPEN failed and zero cleanup could not be proven")};
+    }
     return AdmissionResult{0U, false, reject(
       MissionResultCode::DependencyUnavailable,
       open.detail.empty() ? "MotionGate OPEN failed" : open.detail)};
@@ -258,85 +280,96 @@ void RuntimeCore::cancel(std::uint64_t mission_id)
 
 StopResponse RuntimeCore::stop(const StopRequest & request)
 {
+  const auto execute_terminal = [this](
+    MissionResultCode code,
+    const std::string & detail,
+    bool rotate_epoch) {
+      if (active_.has_value()) {
+        return select_terminal_and_stop(code, detail, rotate_epoch);
+      }
+      bool epoch_ok = true;
+      if (rotate_epoch) {
+        epoch_ok = this->rotate_epoch();
+      }
+      const bool zero = inhibit_and_prove_zero();
+      return TerminalOutcome{zero, epoch_ok};
+    };
+
   if (!valid_bounded_id(request.request_id, kMaximumRuntimeIdLength, false)) {
-    (void)inhibit_and_prove_zero();
     state_.availability = RuntimeAvailability::Faulted;
+    const auto outcome = execute_terminal(
+      MissionResultCode::SafetyFault,
+      "STOP request_id is empty or outside the IDL bound",
+      false);
     publish_state();
     return make_stop_response(
-      2U, false, "STOP request_id is empty or outside the IDL bound");
+      2U, outcome.zero_proven,
+      "STOP request_id is empty or outside the IDL bound");
   }
   if (!valid_bounded_id(
       request.source_instance_id, kMaximumSourceIdLength, true) ||
     request.reason.size() > kMaximumStopReasonLength)
   {
-    (void)inhibit_and_prove_zero();
     state_.availability = RuntimeAvailability::Faulted;
+    const auto outcome = execute_terminal(
+      MissionResultCode::SafetyFault,
+      "STOP metadata is outside the trusted bounds",
+      false);
     publish_state();
     return make_stop_response(
-      2U, false, "STOP metadata is outside the trusted bounds");
+      2U, outcome.zero_proven, "STOP metadata is outside the trusted bounds");
   }
 
   const auto fingerprint = stop_fingerprint(request);
   const auto cached = stop_cache_.find(request.request_id);
   if (cached != stop_cache_.end()) {
     if (cached->second.fingerprint != fingerprint) {
-      const bool zero = inhibit_and_prove_zero();
       state_.availability = RuntimeAvailability::Faulted;
-      if (active_.has_value()) {
-        select_terminal_and_stop(
-          MissionResultCode::SafetyFault,
-          "STOP request_id collision; Runtime is faulted");
-      }
+      const auto outcome = execute_terminal(
+        MissionResultCode::SafetyFault,
+        "STOP request_id collision; Runtime is faulted",
+        false);
       publish_state();
       return make_stop_response(
-        2U, zero, "STOP request_id collision; Runtime is faulted");
+        2U, outcome.zero_proven, "STOP request_id collision; Runtime is faulted");
     }
 
-    const bool zero = inhibit_and_prove_zero();
-    if (active_.has_value()) {
-      select_terminal_and_stop(
-        MissionResultCode::Stopped,
-        "duplicate STOP reasserted the current safety barrier");
-    }
+    const auto outcome = execute_terminal(
+      MissionResultCode::Stopped,
+      "duplicate STOP reasserted the current safety barrier",
+      false);
+    const bool safe = outcome.zero_proven && outcome.cancel_acknowledged;
     return make_stop_response(
-      zero ? 1U : 2U,
-      zero,
-      zero ? "duplicate STOP reasserted Gate inhibit and zero" :
+      safe ? 1U : 2U,
+      outcome.zero_proven,
+      safe ? "duplicate STOP reasserted Gate inhibit and zero" :
       "duplicate STOP could not prove Gate zero");
   }
 
   if (stop_cache_.size() >= config_.stop_cache_size) {
-    const bool zero = inhibit_and_prove_zero();
     state_.availability = RuntimeAvailability::Faulted;
-    if (active_.has_value()) {
-      select_terminal_and_stop(
-        MissionResultCode::SafetyFault,
-        "STOP idempotency cache is full; no request was evicted");
-    }
+    const auto outcome = execute_terminal(
+      MissionResultCode::SafetyFault,
+      "STOP idempotency cache is full; no request was evicted",
+      false);
     publish_state();
     return make_stop_response(
-      2U, zero, "STOP idempotency cache is full; no request was evicted");
+      2U, outcome.zero_proven,
+      "STOP idempotency cache is full; no request was evicted");
   }
   stop_cache_.emplace(request.request_id, StopCacheEntry{fingerprint});
 
-  if (!rotate_epoch()) {
-    const bool zero = inhibit_and_prove_zero();
-    state_.availability = RuntimeAvailability::Faulted;
-    publish_state();
-    return make_stop_response(2U, zero, "admission epoch exhausted");
-  }
-  const bool zero = inhibit_and_prove_zero();
-  if (active_.has_value()) {
-    select_terminal_and_stop(
-      zero ? MissionResultCode::Stopped : MissionResultCode::SafetyFault,
-      zero ? "Mission stopped by Operational Stop" :
-      "STOP could not prove MotionGate inhibit and zero");
-  }
-  if (!zero) {
+  const auto outcome = execute_terminal(
+    MissionResultCode::Stopped,
+    "Mission stopped by Operational Stop",
+    true);
+  const bool safe = outcome.zero_proven && outcome.cancel_acknowledged;
+  if (!safe) {
     state_.availability = RuntimeAvailability::Faulted;
     publish_state();
     return make_stop_response(
-      2U, false, "STOP could not prove MotionGate inhibit and zero");
+      2U, outcome.zero_proven,
+      "STOP transaction could not prove complete safe cleanup");
   }
   set_availability_from_dependencies();
   publish_state();
@@ -357,17 +390,24 @@ void RuntimeCore::observe_gate(const GateSnapshot & snapshot)
   if (!gate_bound_) {
     if (
       snapshot.endpoint_available && snapshot.state != GateState::Faulted &&
-      !zero_is_proven(snapshot))
+      !startup_gate_is_ready(snapshot))
     {
-      (void)inhibit_and_prove_zero();
+      const bool startup_barrier_proven = inhibit_and_prove_zero();
       gate_snapshot_ = authority_->snapshot();
       state_.gate_state = gate_snapshot_.endpoint_available ?
         gate_snapshot_.state : GateState::Faulted;
+      if (!startup_barrier_proven) {
+        state_.availability = RuntimeAvailability::Faulted;
+        gate_bound_ = false;
+        gate_fault_handled_ = true;
+        publish_state();
+        return;
+      }
     }
-    const bool is_healthy = gate_is_healthy(gate_snapshot_);
-    gate_bound_ = is_healthy;
-    gate_fault_handled_ = !is_healthy;
-    if (!is_healthy && snapshot.endpoint_available) {
+    const bool is_ready = startup_gate_is_ready(gate_snapshot_);
+    gate_bound_ = is_ready;
+    gate_fault_handled_ = !is_ready;
+    if (!is_ready && snapshot.endpoint_available) {
       state_.availability = RuntimeAvailability::Faulted;
       publish_state();
       return;
@@ -428,6 +468,15 @@ void RuntimeCore::on_tick()
 {
   observe_dependencies();
   const auto now = clock_->now();
+  if (
+    !gate_bound_ && !gate_snapshot_.endpoint_available &&
+    !gate_discovery_timed_out_ &&
+    now >= gate_discovery_started_at_ + config_.gate_discovery_deadline)
+  {
+    gate_discovery_timed_out_ = true;
+    state_.availability = RuntimeAvailability::Unavailable;
+    publish_state();
+  }
   relative_motion_->tick(now);
   if (!active_.has_value()) {
     return;
@@ -503,11 +552,15 @@ bool RuntimeCore::validate_step(
   const auto finite_distance = std::isfinite(step.distance_m);
   const auto finite_angle = std::isfinite(step.angle_rad);
   const auto distance_in_range =
-    (step.distance_m >= -2.0F && step.distance_m <= -0.05F) ||
-    (step.distance_m >= 0.05F && step.distance_m <= 2.0F);
+    (step.distance_m >= -config_.move_distance_max_m &&
+    step.distance_m <= -config_.move_distance_min_m) ||
+    (step.distance_m >= config_.move_distance_min_m &&
+    step.distance_m <= config_.move_distance_max_m);
   const auto angle_in_range =
-    (step.angle_rad >= -6.283185F && step.angle_rad <= -0.05F) ||
-    (step.angle_rad >= 0.05F && step.angle_rad <= 6.283185F);
+    (step.angle_rad >= -config_.rotate_angle_max_rad &&
+    step.angle_rad <= -config_.rotate_angle_min_rad) ||
+    (step.angle_rad >= config_.rotate_angle_min_rad &&
+    step.angle_rad <= config_.rotate_angle_max_rad);
   if (step.target_id.size() > kMaximumTargetIdLength) {
     result = reject(
       MissionResultCode::InvalidPlan,
@@ -584,6 +637,12 @@ bool RuntimeCore::gate_is_healthy(const GateSnapshot & snapshot) const
   return snapshot.endpoint_available && !snapshot.gate_instance_id.empty() &&
          snapshot.state != GateState::Faulted &&
          (snapshot.state == GateState::Armed || zero_is_proven(snapshot));
+}
+
+bool RuntimeCore::startup_gate_is_ready(const GateSnapshot & snapshot) const
+{
+  return snapshot.endpoint_available && !snapshot.gate_instance_id.empty() &&
+         snapshot.state == GateState::Inhibited && zero_is_proven(snapshot);
 }
 
 bool RuntimeCore::zero_is_proven(const GateSnapshot & snapshot) const
@@ -758,11 +817,11 @@ void RuntimeCore::on_child_result(
       result.detail.empty() ? "relative-motion child failed" : result.detail);
     return;
   }
-  ++active_->completed_steps;
-  last_feedback_progress_ = std::clamp(
-    static_cast<double>(active_->completed_steps) /
-    static_cast<double>(active_->steps.size()), 0.0, 1.0);
+  // The completed child contributes its terminal progress exactly once. The
+  // completed_steps counter is advanced only after publishing that boundary,
+  // so a two-step Mission reports 0.5 rather than 1.0 after step zero.
   publish_feedback(FeedbackPhase::Executing, active_->step_index, 1.0);
+  ++active_->completed_steps;
   if (active_->completed_steps >= active_->steps.size()) {
     select_terminal_and_stop(
       MissionResultCode::Succeeded,
@@ -774,16 +833,16 @@ void RuntimeCore::on_child_result(
   start_step();
 }
 
-void RuntimeCore::select_terminal_and_stop(
+RuntimeCore::TerminalOutcome RuntimeCore::select_terminal_and_stop(
   MissionResultCode code,
   std::string detail,
   bool rotate_epoch)
 {
   if (!active_.has_value()) {
-    return;
+    return TerminalOutcome{};
   }
   if (active_->terminal_selected) {
-    return;
+    return TerminalOutcome{};
   }
   const auto token = active_->child_token;
   const auto child_started = active_->child_started;
@@ -811,15 +870,12 @@ void RuntimeCore::select_terminal_and_stop(
         child_started ? static_cast<std::int32_t>(active_->step_index) : -1,
         !zero ? "terminal barrier could not prove Gate inhibit and zero" :
         "relative-motion cancel did not acknowledge before its deadline"});
-    return;
+    return TerminalOutcome{zero, canceled};
   }
-  const auto failed_step =
-    child_started &&
-    (code == MissionResultCode::ExecutionFailed ||
-    code == MissionResultCode::Timeout ||
-    code == MissionResultCode::InternalError) ?
+  const auto failed_step = child_started && code != MissionResultCode::Succeeded ?
     static_cast<std::int32_t>(active_->step_index) : -1;
   finish_active(MissionResult{code, failed_step, bounded_detail(std::move(detail))});
+  return TerminalOutcome{zero, canceled};
 }
 
 void RuntimeCore::finish_active(const MissionResult & result)
@@ -903,6 +959,11 @@ AuthorityResult ScriptedMotionAuthorityPort::prepare(
 AuthorityResult ScriptedMotionAuthorityPort::open(
   const AuthorityOperation & operation)
 {
+  if (!next_open_failure_.empty()) {
+    const auto detail = std::exchange(next_open_failure_, {});
+    operations_.push_back(operation);
+    return AuthorityResult{false, false, false, snapshot_, {}, detail};
+  }
   return apply(operation, GateState::Armed, false);
 }
 
@@ -924,6 +985,11 @@ AuthorityResult ScriptedMotionAuthorityPort::inhibit(
   ++inhibit_count_;
   if (inhibit_observer_) {
     inhibit_observer_();
+  }
+  if (!next_inhibit_failure_.empty()) {
+    const auto detail = std::exchange(next_inhibit_failure_, {});
+    operations_.push_back(operation);
+    return AuthorityResult{false, false, false, snapshot_, {}, detail};
   }
   return apply(operation, GateState::Inhibited, true);
 }
@@ -986,12 +1052,16 @@ void ScriptedRelativeMotionPort::start(
   children_.push_back(ChildCallbacks{
       token, feedback_callback_, result_callback_});
   started_steps_.push_back(step);
+  if (start_completion_ && result_callback_) {
+    result_callback_(token, ChildResult{ChildResultCode::Succeeded, "sync complete"});
+  }
 }
 
 bool ScriptedRelativeMotionPort::cancel(
-  const MotionToken &, SteadyClockPort::TimePoint deadline)
+  const MotionToken & token, SteadyClockPort::TimePoint deadline)
 {
   ++cancel_count_;
+  cancel_token_ = token;
   cancel_deadline_ = deadline;
   if (cancel_observer_) {
     cancel_observer_();

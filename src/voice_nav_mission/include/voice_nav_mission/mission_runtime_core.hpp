@@ -255,6 +255,10 @@ struct RuntimeConfig
   std::size_t source_cache_size{64U};
   std::size_t stop_cache_size{64U};
   std::uint8_t max_steps{3U};
+  float move_distance_min_m{0.05F};
+  float move_distance_max_m{2.0F};
+  float rotate_angle_min_rad{0.05F};
+  float rotate_angle_max_rad{6.283185F};
   std::vector<std::string> named_place_ids;
   std::string runtime_instance_id;
   std::function<std::string()> identifier_generator;
@@ -317,6 +321,12 @@ private:
     std::string fingerprint;
   };
 
+  struct TerminalOutcome
+  {
+    bool zero_proven{false};
+    bool cancel_acknowledged{false};
+  };
+
   [[nodiscard]] MissionResult reject(
     MissionResultCode code,
     std::string detail) const;
@@ -330,6 +340,7 @@ private:
     const MissionGoal & goal,
     MissionResult & result);
   [[nodiscard]] bool gate_is_healthy(const GateSnapshot & snapshot) const;
+  [[nodiscard]] bool startup_gate_is_ready(const GateSnapshot & snapshot) const;
   [[nodiscard]] bool zero_is_proven(const GateSnapshot & snapshot) const;
   [[nodiscard]] AuthorityOperation make_operation(
     const std::string & lease_id = {}) const;
@@ -344,7 +355,7 @@ private:
   void start_step();
   void on_child_feedback(const MotionToken & token, double progress);
   void on_child_result(const MotionToken & token, const ChildResult & result);
-  void select_terminal_and_stop(
+  TerminalOutcome select_terminal_and_stop(
     MissionResultCode code,
     std::string detail,
     bool rotate_epoch = false);
@@ -375,6 +386,8 @@ private:
   bool gate_fault_handled_{false};
   bool relative_health_initialized_{false};
   bool last_relative_healthy_{false};
+  SteadyClockPort::TimePoint gate_discovery_started_at_{};
+  bool gate_discovery_timed_out_{false};
   std::map<std::string, std::uint64_t> source_sequences_;
   std::map<std::string, StopCacheEntry> stop_cache_;
   std::optional<ActiveMission> active_;
@@ -412,6 +425,14 @@ public:
     const AuthorityOperation & operation) override;
 
   void set_next_failure(std::string detail);
+  void set_open_failure(std::string detail)
+  {
+    next_open_failure_ = std::move(detail);
+  }
+  void set_inhibit_failure(std::string detail)
+  {
+    next_inhibit_failure_ = std::move(detail);
+  }
   void set_snapshot(GateSnapshot snapshot) {snapshot_ = std::move(snapshot);}
   void set_inhibit_observer(std::function<void()> observer)
   {
@@ -432,6 +453,8 @@ private:
   GateSnapshot snapshot_;
   std::vector<AuthorityOperation> operations_;
   std::string next_failure_;
+  std::string next_open_failure_;
+  std::string next_inhibit_failure_;
   std::function<void()> inhibit_observer_;
   std::size_t inhibit_count_{0U};
 };
@@ -452,6 +475,7 @@ public:
 
   void set_healthy(bool value) {healthy_ = value;}
   void set_cancel_acknowledged(bool value) {cancel_acknowledged_ = value;}
+  void set_start_completion(bool value) {start_completion_ = value;}
   void set_start_failure(std::string detail) {next_start_failure_ = std::move(detail);}
   void set_cancel_observer(std::function<void()> observer)
   {
@@ -477,6 +501,10 @@ public:
     return tokens;
   }
   [[nodiscard]] std::size_t cancel_count() const noexcept {return cancel_count_;}
+  [[nodiscard]] const MotionToken & cancel_token() const noexcept
+  {
+    return cancel_token_;
+  }
   [[nodiscard]] SteadyClockPort::TimePoint cancel_deadline() const noexcept
   {
     return cancel_deadline_;
@@ -492,6 +520,7 @@ private:
 
   bool healthy_{true};
   bool cancel_acknowledged_{true};
+  bool start_completion_{false};
   std::string next_start_failure_;
   std::function<void()> cancel_observer_;
   std::optional<MotionToken> token_;
@@ -500,6 +529,7 @@ private:
   std::vector<ChildCallbacks> children_;
   std::vector<MissionStep> started_steps_;
   std::size_t cancel_count_{0U};
+  MotionToken cancel_token_{};
   SteadyClockPort::TimePoint cancel_deadline_{};
 };
 
