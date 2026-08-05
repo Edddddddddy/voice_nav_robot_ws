@@ -128,8 +128,11 @@ voice_nav_mission/msg/InternalMotionGateState
 ```
 
 `motion_gate_core` is a package-internal static build target. Its header and
-library are neither installed nor exported; only `motion_gate_node` is an
-installed runtime target. The Core Interface is the typed
+library are neither installed nor exported; `motion_gate_node` is the only
+installed runtime target owned by this MotionGate submodule. The same package
+also installs the current Mission control-plane target `mission_runtime_node`,
+whose public endpoints and unavailable production motion boundary are defined
+in `mission-runtime-interface.md`. The Core Interface is the typed
 `prepare`/`open`/`renew`/`inhibit`/`accept_candidate`/`tick`/`snapshot`
 surface plus the read-only `selected_command`. Adapter-only `force_fault`
 latches graph, reader, clock, or publication failures into fail-closed state;

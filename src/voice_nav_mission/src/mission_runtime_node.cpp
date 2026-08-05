@@ -39,6 +39,8 @@
 #include "voice_nav_interfaces/msg/mission_state.hpp"
 #include "voice_nav_interfaces/msg/mission_step.hpp"
 #include "voice_nav_interfaces/srv/stop_mission.hpp"
+#include "voice_nav_mission/mission_authority_convergence.hpp"
+#include "voice_nav_mission/mission_action_result_router.hpp"
 #include "voice_nav_mission/msg/internal_motion_gate_state.hpp"
 #include "voice_nav_mission/srv/internal_motion_gate_control.hpp"
 
@@ -147,27 +149,27 @@ public:
     const AuthorityOperation & operation) override
   {
     return converge(
-      operation, GateControl::Request::PREPARE, control_response_deadline_);
+      operation, AuthorityOperationKind::Prepare, control_response_deadline_);
   }
 
   [[nodiscard]] AuthorityResult open(
     const AuthorityOperation & operation) override
   {
     return converge(
-      operation, GateControl::Request::OPEN, control_response_deadline_);
+      operation, AuthorityOperationKind::Open, control_response_deadline_);
   }
 
   [[nodiscard]] AuthorityResult renew(
     const AuthorityOperation & operation) override
   {
     return converge(
-      operation, GateControl::Request::RENEW, control_response_deadline_);
+      operation, AuthorityOperationKind::Renew, control_response_deadline_);
   }
 
   [[nodiscard]] AuthorityResult inhibit(
     const AuthorityOperation & operation) override
   {
-    return converge(operation, GateControl::Request::INHIBIT, stop_barrier_);
+    return converge(operation, AuthorityOperationKind::Inhibit, stop_barrier_);
   }
 
   void refresh_endpoint()
@@ -201,50 +203,72 @@ private:
 
   [[nodiscard]] AuthorityResult converge(
     const AuthorityOperation & operation,
-    std::uint8_t operation_code,
+    AuthorityOperationKind kind,
     std::chrono::milliseconds budget)
   {
-    const auto deadline = std::chrono::steady_clock::now() + budget;
-    auto current = operation;
-    AuthorityResult last = unavailable(
-      "MotionGate control operation did not complete before its steady deadline",
-      true);
-    while (std::chrono::steady_clock::now() < deadline) {
-      if (operation_code == GateControl::Request::INHIBIT) {
-        refresh_endpoint();
-      }
-      last = send_once(current, operation_code, deadline);
-      if (
-        last.applied &&
-        (operation_code != GateControl::Request::INHIBIT || last.zero_proven))
-      {
-        return last;
-      }
-      if (!last.retryable) {
-        return last;
-      }
-      if (last.snapshot.endpoint_available) {
-        current.gate_instance_id = last.snapshot.gate_instance_id;
-        current.expected_control_seq = last.snapshot.control_seq;
-        current.lease_id = operation_code == GateControl::Request::PREPARE ?
-          std::string{} : last.snapshot.lease_id;
-      }
-    }
-    return last;
+    const auto operation_code = [kind]() {
+        switch (kind) {
+          case AuthorityOperationKind::Prepare:
+            return GateControl::Request::PREPARE;
+          case AuthorityOperationKind::Open:
+            return GateControl::Request::OPEN;
+          case AuthorityOperationKind::Renew:
+            return GateControl::Request::RENEW;
+          case AuthorityOperationKind::Inhibit:
+            return GateControl::Request::INHIBIT;
+        }
+        return GateControl::Request::PREPARE;
+      }();
+    return MissionAuthorityConvergence::run(
+      operation,
+      kind,
+      budget,
+      control_response_deadline_,
+      []() {return std::chrono::steady_clock::now();},
+      [this, operation_code](
+        const AuthorityOperation & current,
+        std::chrono::steady_clock::time_point attempt_deadline,
+        std::chrono::steady_clock::time_point overall_deadline) {
+        return send_once(
+            current, operation_code, attempt_deadline, overall_deadline);
+        },
+      [this, kind]() {
+        if (kind == AuthorityOperationKind::Inhibit) {
+          refresh_endpoint();
+        }
+      });
   }
 
   [[nodiscard]] AuthorityResult send_once(
     const AuthorityOperation & operation,
     std::uint8_t operation_code,
-    std::chrono::steady_clock::time_point deadline)
+    std::chrono::steady_clock::time_point rpc_deadline,
+    std::chrono::steady_clock::time_point overall_deadline)
   {
-    const auto remaining = [&deadline]() {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= overall_deadline) {
+      return unavailable(
+        "MotionGate control operation reached its steady deadline", false);
+    }
+    if (now >= rpc_deadline) {
+      return unavailable(
+        "MotionGate control operation reached its single-operation deadline",
+        now < overall_deadline);
+    }
+    const auto remaining = [&rpc_deadline]() {
         const auto now = std::chrono::steady_clock::now();
-        return now >= deadline ? std::chrono::milliseconds(0) :
-               std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+        return now >= rpc_deadline ? std::chrono::milliseconds(0) :
+               std::chrono::duration_cast<std::chrono::milliseconds>(
+          rpc_deadline - now);
       };
     if (!client_->wait_for_service(remaining())) {
-      return unavailable("MotionGate control service is unavailable", false);
+      return unavailable(
+        "MotionGate control service is unavailable",
+        std::chrono::steady_clock::now() < overall_deadline);
+    }
+    if (std::chrono::steady_clock::now() >= overall_deadline) {
+      return unavailable(
+        "MotionGate control operation reached its steady deadline", false);
     }
     auto request = std::make_shared<GateControl::Request>();
     request->operation = operation_code;
@@ -257,7 +281,12 @@ private:
       std::future_status::ready)
     {
       return unavailable(
-        "MotionGate control response exceeded the steady deadline", true);
+        "MotionGate control response exceeded its single-operation deadline",
+        std::chrono::steady_clock::now() < overall_deadline);
+    }
+    if (std::chrono::steady_clock::now() >= overall_deadline) {
+      return unavailable(
+        "MotionGate control operation reached its steady deadline", false);
     }
     const auto response = future.get();
     snapshot_ = GateSnapshot{
@@ -282,13 +311,15 @@ private:
       response->reason == GateControl::Response::STALE_GATE ||
       response->reason == GateControl::Response::STALE_SEQUENCE ||
       response->reason == GateControl::Response::STALE_LEASE;
-    return AuthorityResult{
+    auto result = AuthorityResult{
       applied,
       zero,
       retryable,
       snapshot_,
       response->lease_id,
       response->detail};
+    result.tuple_stale = retryable;
+    return result;
   }
 
   [[nodiscard]] AuthorityResult unavailable(
@@ -362,7 +393,7 @@ public:
         publish_feedback(mission_id, feedback);
       },
       [this](std::uint64_t mission_id, const MissionResult & result) {
-        finish_goal(mission_id, result);
+        action_results_.finish(mission_id, result);
       });
     core_->observe_gate(pending_gate_snapshot_.value_or(authority_->snapshot()));
 
@@ -499,7 +530,7 @@ private:
   void on_accepted(const std::shared_ptr<GoalHandle> & goal_handle)
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    pending_goal_ = goal_handle;
+    action_results_.begin_admission();
     const auto goal_message = goal_handle->get_goal();
     MissionGoal goal;
     goal.source_instance_id = goal_message->source_instance_id;
@@ -515,7 +546,7 @@ private:
     try {
       admission = core_->admit(goal);
     } catch (const std::exception & error) {
-      pending_goal_.reset();
+      action_results_.reject_admission();
       auto result = std::make_shared<ExecuteMission::Result>();
       fill_result(
         MissionResult{
@@ -525,7 +556,7 @@ private:
       goal_handle->abort(result);
       return;
     } catch (...) {
-      pending_goal_.reset();
+      action_results_.reject_admission();
       auto result = std::make_shared<ExecuteMission::Result>();
       fill_result(
         MissionResult{
@@ -536,20 +567,18 @@ private:
       return;
     }
     if (!admission.accepted) {
-      pending_goal_.reset();
+      action_results_.reject_admission();
       auto result = std::make_shared<ExecuteMission::Result>();
       fill_result(admission.result, *result);
       goal_handle->abort(result);
       return;
     }
-    goals_.emplace(
-      admission.mission_id, std::exchange(pending_goal_, std::nullopt).value());
-    const auto early = early_results_.find(admission.mission_id);
-    if (early != early_results_.end()) {
-      const auto result = early->second;
-      early_results_.erase(early);
-      finish_goal(admission.mission_id, result);
-    }
+    goals_.emplace(admission.mission_id, goal_handle);
+    action_results_.commit(
+      admission.mission_id,
+      [this](std::uint64_t mission_id, const ActionResultDelivery & delivery) {
+        finish_goal(mission_id, delivery);
+      });
   }
 
   void on_stop(
@@ -569,21 +598,20 @@ private:
     response.detail = stop.detail;
   }
 
-  void finish_goal(std::uint64_t mission_id, const MissionResult & result)
+  void finish_goal(
+    std::uint64_t mission_id,
+    const ActionResultDelivery & delivery)
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     const auto found = goals_.find(mission_id);
     if (found == goals_.end()) {
-      if (pending_goal_.has_value()) {
-        early_results_[mission_id] = result;
-      }
       return;
     }
     auto action_result = std::make_shared<ExecuteMission::Result>();
-    fill_result(result, *action_result);
-    if (result.code == MissionResultCode::Succeeded) {
+    fill_result(delivery.result, *action_result);
+    if (delivery.status == OuterActionStatus::Succeeded) {
       found->second->succeed(action_result);
-    } else if (result.code == MissionResultCode::Canceled) {
+    } else if (delivery.status == OuterActionStatus::Canceled) {
       found->second->canceled(action_result);
     } else {
       found->second->abort(action_result);
@@ -649,9 +677,8 @@ private:
   rclcpp_action::Server<ExecuteMission>::SharedPtr action_server_;
   rclcpp::Service<StopMission>::SharedPtr stop_service_;
   rclcpp::TimerBase::SharedPtr timer_;
+  MissionActionResultRouter action_results_;
   std::unordered_map<std::uint64_t, std::shared_ptr<GoalHandle>> goals_;
-  std::optional<std::shared_ptr<GoalHandle>> pending_goal_;
-  std::unordered_map<std::uint64_t, MissionResult> early_results_;
 };
 
 }  // namespace voice_nav_mission
