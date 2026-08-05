@@ -34,6 +34,12 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Finalized the pre-1.0 Mission V1 public Interface migration: bounded
+  `MissionStep`, fenced `ExecuteMission`, `MissionState`, and `StopMission`
+  types now generate successfully for C++ and Python, with public contract
+  tests covering field order, constants, bounds, and construction. This is a
+  breaking Interface change; downstream consumers must migrate before
+  rebuilding.
 - Updated the canonical verification entry point to resolve ordinary and
   managed-worktree `.git` contexts before Git subprocesses, including Windows
   absolute `gitdir:` pointers under WSL, with fail-closed diagnostics and

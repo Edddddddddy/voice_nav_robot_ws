@@ -7,7 +7,8 @@ target. Target Modules are not presented as implemented.
 
 Verified before this documentation migration:
 
-- provisional `MissionStep.msg` and `ExecuteMission.action`;
+- active bounded Mission V1 `MissionStep.msg`, `ExecuteMission.action`,
+  `MissionState.msg`, and `StopMission.srv` with generated type contract tests;
 - a hand-written physical differential-drive Xacro;
 - static robot-state-publisher launch and internal TF;
 - Gazebo native DiffDrive motion, configured limits, and odometry;
