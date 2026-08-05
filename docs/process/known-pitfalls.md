@@ -36,6 +36,25 @@ absolute pointers with `wslpath`, validates the target and `HEAD`, and exports
 variables, edit `.git`, or guess another checkout. Missing, malformed,
 unconvertible, and nonexistent targets must fail closed with a safe diagnostic.
 
+### PIT-0024: A WSL transport hang needs bounded diagnosis and manual recovery
+
+The WSL transport can recur in a state where
+`wsl.exe -d Ubuntu-24.04 --exec /bin/true` hangs or Codex/Worker reports
+`Bash/Service/0x8007274c`, even while `WslService`, `vmcompute`, and `hns` are
+Running and `wsl --version` succeeds. Distinguish this from a ROS test by
+running the `/bin/true` command as a seconds-scale red/green loop and recording
+the exact `wsl.exe`/`wslhost.exe` PIDs and command lines.
+
+Before recovery, confirm that no simulation, build, or unsaved WSL process must
+be preserved. The permitted recovery is one official `wsl --shutdown`; it
+terminates running processes in all WSL distributions, so it must not be
+automated or run without that activity check. Do not unregister a distribution,
+delete or move a VHD, reinstall Ubuntu, or add an automatic restart/polling
+script. Verify recovery with repeated `/bin/true` executions and then
+`source /opt/ros/jazzy/setup.bash && ros2 pkg prefix rclcpp`. If it still fails,
+stop and escalate to Windows/WSL service diagnosis rather than hiding the
+failure with a global kill loop.
+
 ## ROS interface and model semantics
 
 ### PIT-0004: A ROS interface package must declare its group

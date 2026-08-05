@@ -1,7 +1,9 @@
 # Mission Runtime Interface
 
-**Status:** Active pre-1.0 Mission V1 public Interface; Runtime behavior remains
-implemented by a later Task.
+**Status:** Active pre-1.0 Mission V1 public Interface; Issue #34 implements the
+Mission Runtime control plane behind this stable public Interface. The
+production RelativeMotion Adapter intentionally remains unavailable until #35;
+the physical motion chain is a later Task.
 
 Mission Runtime is a deep Module with two mutation operations and one read-only
 state projection:

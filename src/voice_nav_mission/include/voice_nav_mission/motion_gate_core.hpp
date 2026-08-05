@@ -248,7 +248,8 @@ private:
     const ControlRequest & request,
     Operation expected,
     bool lease_required,
-    ControlResult & rejection);
+    ControlResult & rejection,
+    bool cache_stale = true);
   [[nodiscard]] bool advance_control_seq();
   void advance_state_seq();
   void reconcile_deadlines(SteadyTimePoint now);

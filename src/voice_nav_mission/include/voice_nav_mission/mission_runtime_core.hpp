@@ -23,6 +23,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace voice_nav_mission
@@ -172,6 +173,7 @@ struct AuthorityResult
 {
   bool applied{false};
   bool zero_proven{false};
+  bool retryable{false};
   GateSnapshot snapshot;
   std::string lease_id;
   std::string detail;
@@ -236,7 +238,9 @@ public:
     const MissionStep & step,
     FeedbackCallback feedback,
     ResultCallback result) = 0;
-  virtual void cancel(const MotionToken & token) = 0;
+  [[nodiscard]] virtual bool cancel(
+    const MotionToken & token,
+    SteadyClockPort::TimePoint deadline) = 0;
   virtual void tick(SteadyClockPort::TimePoint now) = 0;
 };
 
@@ -268,9 +272,9 @@ class RuntimeCore final
 public:
   using StateCallback = std::function<void(const RuntimeState &)>;
   using FeedbackCallback = std::function<void(
-      std::uint64_t, const MissionFeedback &)>;
+        std::uint64_t, const MissionFeedback &)>;
   using ResultCallback = std::function<void(
-      std::uint64_t, const MissionResult &)>;
+        std::uint64_t, const MissionResult &)>;
 
   RuntimeCore(
     RuntimeConfig config,
@@ -285,6 +289,7 @@ public:
   void cancel(std::uint64_t mission_id);
   [[nodiscard]] StopResponse stop(const StopRequest & request);
   void observe_gate(const GateSnapshot & snapshot);
+  void observe_dependencies();
   void on_tick();
 
   [[nodiscard]] RuntimeState state() const;
@@ -302,6 +307,9 @@ private:
     std::uint64_t admission_epoch{0U};
     std::vector<MissionStep> steps;
     SteadyClockPort::TimePoint deadline{};
+    MotionToken child_token;
+    bool child_started{false};
+    bool terminal_selected{false};
   };
 
   struct StopCacheEntry
@@ -338,7 +346,8 @@ private:
   void on_child_result(const MotionToken & token, const ChildResult & result);
   void select_terminal_and_stop(
     MissionResultCode code,
-    std::string detail);
+    std::string detail,
+    bool rotate_epoch = false);
   void finish_active(const MissionResult & result);
   [[nodiscard]] bool inhibit_and_prove_zero();
   [[nodiscard]] StopResponse make_stop_response(
@@ -364,6 +373,8 @@ private:
   GateSnapshot gate_snapshot_;
   bool gate_bound_{false};
   bool gate_fault_handled_{false};
+  bool relative_health_initialized_{false};
+  bool last_relative_healthy_{false};
   std::map<std::string, std::uint64_t> source_sequences_;
   std::map<std::string, StopCacheEntry> stop_cache_;
   std::optional<ActiveMission> active_;
@@ -401,6 +412,11 @@ public:
     const AuthorityOperation & operation) override;
 
   void set_next_failure(std::string detail);
+  void set_snapshot(GateSnapshot snapshot) {snapshot_ = std::move(snapshot);}
+  void set_inhibit_observer(std::function<void()> observer)
+  {
+    inhibit_observer_ = std::move(observer);
+  }
   [[nodiscard]] std::size_t inhibit_count() const noexcept {return inhibit_count_;}
   [[nodiscard]] const std::vector<AuthorityOperation> & operations() const noexcept
   {
@@ -416,6 +432,7 @@ private:
   GateSnapshot snapshot_;
   std::vector<AuthorityOperation> operations_;
   std::string next_failure_;
+  std::function<void()> inhibit_observer_;
   std::size_t inhibit_count_{0U};
 };
 
@@ -428,27 +445,62 @@ public:
     const MissionStep & step,
     FeedbackCallback feedback,
     ResultCallback result) override;
-  void cancel(const MotionToken & token) override;
+  [[nodiscard]] bool cancel(
+    const MotionToken & token,
+    SteadyClockPort::TimePoint deadline) override;
   void tick(SteadyClockPort::TimePoint) override {}
 
   void set_healthy(bool value) {healthy_ = value;}
+  void set_cancel_acknowledged(bool value) {cancel_acknowledged_ = value;}
+  void set_start_failure(std::string detail) {next_start_failure_ = std::move(detail);}
+  void set_cancel_observer(std::function<void()> observer)
+  {
+    cancel_observer_ = std::move(observer);
+  }
   void feedback(double progress);
   void complete();
   void fail(std::string detail = "scripted child failure");
   void timeout(std::string detail = "scripted child timeout");
+  void complete_token(const MotionToken & token);
+  void feedback_token(const MotionToken & token, double progress);
   [[nodiscard]] const std::vector<MissionStep> & started_steps() const noexcept
   {
     return started_steps_;
   }
+  [[nodiscard]] std::vector<MotionToken> started_tokens() const
+  {
+    std::vector<MotionToken> tokens;
+    tokens.reserve(children_.size());
+    for (const auto & child : children_) {
+      tokens.push_back(child.token);
+    }
+    return tokens;
+  }
   [[nodiscard]] std::size_t cancel_count() const noexcept {return cancel_count_;}
+  [[nodiscard]] SteadyClockPort::TimePoint cancel_deadline() const noexcept
+  {
+    return cancel_deadline_;
+  }
 
 private:
+  struct ChildCallbacks
+  {
+    MotionToken token;
+    FeedbackCallback feedback;
+    ResultCallback result;
+  };
+
   bool healthy_{true};
+  bool cancel_acknowledged_{true};
+  std::string next_start_failure_;
+  std::function<void()> cancel_observer_;
   std::optional<MotionToken> token_;
   FeedbackCallback feedback_callback_;
   ResultCallback result_callback_;
+  std::vector<ChildCallbacks> children_;
   std::vector<MissionStep> started_steps_;
   std::size_t cancel_count_{0U};
+  SteadyClockPort::TimePoint cancel_deadline_{};
 };
 
 }  // namespace voice_nav_mission

@@ -13,6 +13,8 @@
 # limitations under the License.
 
 from collections import deque
+import os
+import signal
 import time
 import unittest
 
@@ -48,6 +50,8 @@ def generate_test_description():
         executable='mission_runtime_node',
         name=RUNTIME_NODE,
         output='screen',
+        respawn=True,
+        respawn_delay=0.0,
         parameters=[
             {
                 'operating_mode': 'mapping',
@@ -59,19 +63,27 @@ def generate_test_description():
                 'source_cache_size': 64,
                 'stop_cache_size': 64,
                 'max_steps': 3,
-                'named_place_ids': [],
             }
         ],
     )
-    return LaunchDescription(
-        [runtime, launch_testing.actions.ReadyToTest()]
+    return (
+        LaunchDescription([runtime, launch_testing.actions.ReadyToTest()]),
+        {'runtime': runtime},
     )
 
 
 class MissionRuntimeNodeTest(unittest.TestCase):
 
-    def setUp(self):
+    @classmethod
+    def setUpClass(cls):
         rclpy.init()
+
+    @classmethod
+    def tearDownClass(cls):
+        if rclpy.ok():
+            rclpy.shutdown()
+
+    def setUp(self):
         self.node = rclpy.create_node('mission_runtime_contract_client')
         self.executor = SingleThreadedExecutor()
         self.executor.add_node(self.node)
@@ -85,7 +97,7 @@ class MissionRuntimeNodeTest(unittest.TestCase):
         self.state_subscription = self.node.create_subscription(
             MissionState,
             STATE_TOPIC,
-            self.states.append,
+            lambda message: self.states.append(message),
             state_qos,
         )
         self.action_client = ActionClient(
@@ -97,7 +109,6 @@ class MissionRuntimeNodeTest(unittest.TestCase):
     def cleanup(self):
         self.action_client.destroy()
         self.node.destroy_node()
-        rclpy.shutdown()
 
     def spin_until(self, predicate, timeout=5.0):
         deadline = time.monotonic() + timeout
@@ -165,9 +176,48 @@ class MissionRuntimeNodeTest(unittest.TestCase):
         )
         self.assertEqual(wrapped.result.failed_step, -1)
 
+    def test_runtime_restart_rotates_identity_and_restarts_at_epoch_one(
+        self
+    ):
+        first = self.spin_until(lambda: self.states[-1] if self.states else None)
+        first_id = first.runtime_instance_id
+        first_pid = None
+        runtime_executable = b'/lib/voice_nav_mission/mission_runtime_node'
+        for entry in os.scandir('/proc'):
+            if not entry.name.isdigit():
+                continue
+            pid = int(entry.name)
+            try:
+                with open(f'/proc/{pid}/cmdline', 'rb') as stream:
+                    command_line = stream.read()
+            except (FileNotFoundError, PermissionError, OSError):
+                continue
+            if (
+                pid != os.getpid()
+                and runtime_executable in command_line
+            ):
+                first_pid = pid
+                break
+        self.assertIsNotNone(first_pid)
+        os.kill(first_pid, signal.SIGINT)
+        second = self.spin_until(
+            lambda: next(
+                (
+                    state for state in self.states
+                    if state.runtime_instance_id != first_id
+                ),
+                None,
+            ),
+            timeout=10.0,
+        )
+        self.assertNotEqual(second.runtime_instance_id, first_id)
+        self.assertEqual(second.admission_epoch, 1)
+        self.assertEqual(second.availability, MissionState.UNAVAILABLE)
+        self.assertEqual(second.gate_state, MissionState.GATE_FAULTED)
+
 
 @launch_testing.post_shutdown_test()
 class MissionRuntimeShutdownTest(unittest.TestCase):
 
-    def test_runtime_exits_cleanly(self, proc_info):
-        assertExitCodes(proc_info)
+    def test_runtime_exits_cleanly(self, proc_info, runtime):
+        assertExitCodes(proc_info, process=runtime, allowable_exit_codes=[0, -2])

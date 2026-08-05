@@ -360,8 +360,18 @@ ControlResult MotionGateCore::inhibit(
   }
 
   ControlResult rejection;
-  if (!validate_common(request, Operation::Inhibit, true, rejection)) {
+  const bool lease_required = state_ != State::Inhibited;
+  if (!validate_common(
+      request, Operation::Inhibit, lease_required, rejection, false))
+  {
     return rejection;
+  }
+  if (state_ == State::Inhibited) {
+    reason_ = Reason::None;
+    detail_ = "inhibit reasserted";
+    auto result = applied(request);
+    remember(request, result);
+    return result;
   }
   if (state_ != State::Prepared && state_ != State::Armed) {
     return reject(
@@ -371,12 +381,12 @@ ControlResult MotionGateCore::inhibit(
   if (request.expected_control_seq != control_seq_) {
     return reject(
       request, Reason::StaleSequence,
-      "INHIBIT expected_control_seq is stale");
+      "INHIBIT expected_control_seq is stale", false);
   }
   if (request.lease_id != lease_id_) {
     return reject(
       request, Reason::StaleLease,
-      "INHIBIT lease_id is not the current lease");
+      "INHIBIT lease_id is not the current lease", false);
   }
 
   retire_lease(Reason::None, "lease inhibited");
@@ -617,7 +627,8 @@ bool MotionGateCore::validate_common(
   const ControlRequest & request,
   Operation expected,
   bool lease_required,
-  ControlResult & rejection)
+  ControlResult & rejection,
+  bool cache_stale)
 {
   if (!valid_identifier(request.request_id)) {
     rejection = reject(
@@ -641,7 +652,7 @@ bool MotionGateCore::validate_common(
   if (request.gate_instance_id != gate_instance_id_) {
     rejection = reject(
       request, Reason::StaleGate,
-      "request targets a different Gate instance");
+      "request targets a different Gate instance", cache_stale);
     return false;
   }
   if (state_ == State::Faulted) {
@@ -658,13 +669,14 @@ bool MotionGateCore::validate_common(
   } else if (!request.lease_id.empty()) {
     rejection = reject(
       request, Reason::InvalidRequest,
-      "PREPARE must not carry a lease_id");
+      "this operation must not carry a lease_id");
     return false;
   }
   if (request.expected_control_seq != control_seq_) {
     rejection = reject(
       request, Reason::StaleSequence,
-      "expected_control_seq does not match the Gate control sequence");
+      "expected_control_seq does not match the Gate control sequence",
+      cache_stale);
     return false;
   }
   return true;
