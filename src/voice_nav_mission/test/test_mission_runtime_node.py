@@ -13,12 +13,12 @@
 # limitations under the License.
 
 from collections import deque
-import os
 import signal
 import time
 import unittest
 
 from action_msgs.msg import GoalStatus
+import launch
 from launch import LaunchDescription
 from launch_ros.actions import Node
 import launch_testing
@@ -88,6 +88,7 @@ class MissionRuntimeNodeTest(unittest.TestCase):
         self.executor = SingleThreadedExecutor()
         self.executor.add_node(self.node)
         self.states = deque(maxlen=10)
+        self.runtime_ids = set()
         state_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
@@ -97,7 +98,7 @@ class MissionRuntimeNodeTest(unittest.TestCase):
         self.state_subscription = self.node.create_subscription(
             MissionState,
             STATE_TOPIC,
-            lambda message: self.states.append(message),
+            self.on_state,
             state_qos,
         )
         self.action_client = ActionClient(
@@ -109,6 +110,10 @@ class MissionRuntimeNodeTest(unittest.TestCase):
     def cleanup(self):
         self.action_client.destroy()
         self.node.destroy_node()
+
+    def on_state(self, message):
+        self.states.append(message)
+        self.runtime_ids.add(message.runtime_instance_id)
 
     def spin_until(self, predicate, timeout=5.0):
         deadline = time.monotonic() + timeout
@@ -177,29 +182,16 @@ class MissionRuntimeNodeTest(unittest.TestCase):
         self.assertEqual(wrapped.result.failed_step, -1)
 
     def test_runtime_restart_rotates_identity_and_restarts_at_epoch_one(
-        self
+        self, launch_service, proc_info, runtime
     ):
         first = self.spin_until(lambda: self.states[-1] if self.states else None)
         first_id = first.runtime_instance_id
-        first_pid = None
-        runtime_executable = b'/lib/voice_nav_mission/mission_runtime_node'
-        for entry in os.scandir('/proc'):
-            if not entry.name.isdigit():
-                continue
-            pid = int(entry.name)
-            try:
-                with open(f'/proc/{pid}/cmdline', 'rb') as stream:
-                    command_line = stream.read()
-            except (FileNotFoundError, PermissionError, OSError):
-                continue
-            if (
-                pid != os.getpid()
-                and runtime_executable in command_line
-            ):
-                first_pid = pid
-                break
-        self.assertIsNotNone(first_pid)
-        os.kill(first_pid, signal.SIGINT)
+        launch_service.emit_event(
+            launch.events.process.SignalProcess(
+                signal_number=signal.SIGINT,
+                process_matcher=launch.events.matches_action(runtime),
+            )
+        )
         second = self.spin_until(
             lambda: next(
                 (
@@ -214,6 +206,8 @@ class MissionRuntimeNodeTest(unittest.TestCase):
         self.assertEqual(second.admission_epoch, 1)
         self.assertEqual(second.availability, MissionState.UNAVAILABLE)
         self.assertEqual(second.gate_state, MissionState.GATE_FAULTED)
+        self.assertEqual(self.runtime_ids - {first_id}, {second.runtime_instance_id})
+        proc_info.assertWaitForStartup(runtime, timeout=10.0)
 
 
 @launch_testing.post_shutdown_test()

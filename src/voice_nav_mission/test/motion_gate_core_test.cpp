@@ -179,6 +179,29 @@ TEST(MotionGateCore, StartsFailClosed)
   EXPECT_TRUE(gate.tick(at(0ms)).is_zero());
 }
 
+TEST(MotionGateCore, InhibitReassertionAdvancesTheGateWideControlSequence)
+{
+  MotionGateCore gate(MotionGateConfig{}, kGateId);
+  const auto first = gate.inhibit(
+    ControlRequest{
+        Operation::Inhibit, identifier(10U), kGateId, 0U, ""}, at(0ms));
+  ASSERT_EQ(first.code, ResultCode::Applied);
+  EXPECT_EQ(first.control_seq, 1U);
+
+  const auto stale = gate.inhibit(
+    ControlRequest{
+        Operation::Inhibit, identifier(11U), kGateId, 0U, ""}, at(1ms));
+  EXPECT_EQ(stale.code, ResultCode::Rejected);
+  EXPECT_EQ(stale.reason, Reason::StaleSequence);
+  EXPECT_EQ(gate.snapshot().control_seq, 1U);
+
+  const auto second = gate.inhibit(
+    ControlRequest{
+        Operation::Inhibit, identifier(11U), kGateId, 1U, ""}, at(2ms));
+  EXPECT_EQ(second.code, ResultCode::Applied);
+  EXPECT_EQ(second.control_seq, 2U);
+}
+
 TEST(MotionGateCore, InvalidConfigurationStartsFaultedAndCannotPrepare)
 {
   auto config = MotionGateConfig{};

@@ -17,6 +17,7 @@
 #include <rmw/qos_profiles.h>
 
 #include <algorithm>
+#include <cmath>
 #include <chrono>
 #include <cstdint>
 #include <future>
@@ -59,6 +60,15 @@ constexpr char kStopService[] = "/mission/stop";
 constexpr char kStateTopic[] = "/mission/state";
 constexpr char kGateControlService[] = "/motion_gate/internal/control";
 constexpr char kGateStateTopic[] = "/motion_gate/internal/state";
+constexpr std::int64_t kTrustedMissionDeadlineMs = 30000;
+constexpr std::int64_t kTrustedGateDiscoveryDeadlineMs = 2000;
+constexpr std::int64_t kTrustedControlResponseDeadlineMs = 100;
+constexpr std::int64_t kTrustedStopBarrierMs = 250;
+constexpr std::int64_t kTrustedCancelGraceMs = 250;
+constexpr float kTrustedMoveDistanceMinM = 0.05F;
+constexpr float kTrustedMoveDistanceMaxM = 2.0F;
+constexpr float kTrustedRotateAngleMinRad = 0.05F;
+constexpr float kTrustedRotateAngleMaxRad = 6.283185F;
 
 class RosSteadyClock final : public SteadyClockPort
 {
@@ -136,41 +146,28 @@ public:
   [[nodiscard]] AuthorityResult prepare(
     const AuthorityOperation & operation) override
   {
-    return send(operation, GateControl::Request::PREPARE);
+    return converge(
+      operation, GateControl::Request::PREPARE, control_response_deadline_);
   }
 
   [[nodiscard]] AuthorityResult open(
     const AuthorityOperation & operation) override
   {
-    return send(operation, GateControl::Request::OPEN);
+    return converge(
+      operation, GateControl::Request::OPEN, control_response_deadline_);
   }
 
   [[nodiscard]] AuthorityResult renew(
     const AuthorityOperation & operation) override
   {
-    return send(operation, GateControl::Request::RENEW);
+    return converge(
+      operation, GateControl::Request::RENEW, control_response_deadline_);
   }
 
   [[nodiscard]] AuthorityResult inhibit(
     const AuthorityOperation & operation) override
   {
-    const auto deadline = std::chrono::steady_clock::now() + stop_barrier_;
-    while (true) {
-      refresh_endpoint();
-      auto current = operation;
-      if (snapshot_.endpoint_available) {
-        current.gate_instance_id = snapshot_.gate_instance_id;
-        current.expected_control_seq = snapshot_.control_seq;
-        current.lease_id = snapshot_.lease_id;
-      }
-      auto result = send(current, GateControl::Request::INHIBIT);
-      if (result.applied && result.zero_proven) {
-        return result;
-      }
-      if (!result.retryable || std::chrono::steady_clock::now() >= deadline) {
-        return result;
-      }
-    }
+    return converge(operation, GateControl::Request::INHIBIT, stop_barrier_);
   }
 
   void refresh_endpoint()
@@ -202,19 +199,52 @@ private:
            node_.count_publishers(kGateStateTopic) > 0U;
   }
 
-  [[nodiscard]] AuthorityResult send(
+  [[nodiscard]] AuthorityResult converge(
     const AuthorityOperation & operation,
-    std::uint8_t operation_code)
+    std::uint8_t operation_code,
+    std::chrono::milliseconds budget)
   {
-    const auto deadline =
-      std::chrono::steady_clock::now() + control_response_deadline_;
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    auto current = operation;
+    AuthorityResult last = unavailable(
+      "MotionGate control operation did not complete before its steady deadline",
+      true);
+    while (std::chrono::steady_clock::now() < deadline) {
+      if (operation_code == GateControl::Request::INHIBIT) {
+        refresh_endpoint();
+      }
+      last = send_once(current, operation_code, deadline);
+      if (
+        last.applied &&
+        (operation_code != GateControl::Request::INHIBIT || last.zero_proven))
+      {
+        return last;
+      }
+      if (!last.retryable) {
+        return last;
+      }
+      if (last.snapshot.endpoint_available) {
+        current.gate_instance_id = last.snapshot.gate_instance_id;
+        current.expected_control_seq = last.snapshot.control_seq;
+        current.lease_id = operation_code == GateControl::Request::PREPARE ?
+          std::string{} : last.snapshot.lease_id;
+      }
+    }
+    return last;
+  }
+
+  [[nodiscard]] AuthorityResult send_once(
+    const AuthorityOperation & operation,
+    std::uint8_t operation_code,
+    std::chrono::steady_clock::time_point deadline)
+  {
     const auto remaining = [&deadline]() {
         const auto now = std::chrono::steady_clock::now();
         return now >= deadline ? std::chrono::milliseconds(0) :
                std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
       };
     if (!client_->wait_for_service(remaining())) {
-      return unavailable("MotionGate control service is unavailable");
+      return unavailable("MotionGate control service is unavailable", false);
     }
     auto request = std::make_shared<GateControl::Request>();
     request->operation = operation_code;
@@ -226,7 +256,8 @@ private:
     if (future.wait_for(remaining()) !=
       std::future_status::ready)
     {
-      return unavailable("MotionGate control response exceeded the steady deadline");
+      return unavailable(
+        "MotionGate control response exceeded the steady deadline", true);
     }
     const auto response = future.get();
     snapshot_ = GateSnapshot{
@@ -242,7 +273,9 @@ private:
     if (callback_) {
       callback_(snapshot_);
     }
-    const bool applied = response->code == GateControl::Response::APPLIED;
+    const bool applied =
+      response->code == GateControl::Response::APPLIED ||
+      response->code == GateControl::Response::DUPLICATE;
     const bool zero = response->motion_inhibited && response->zero_selected &&
       response->zero_published;
     const bool retryable =
@@ -258,9 +291,11 @@ private:
       response->detail};
   }
 
-  [[nodiscard]] AuthorityResult unavailable(std::string detail) const
+  [[nodiscard]] AuthorityResult unavailable(
+    std::string detail, bool retryable) const
   {
-    return AuthorityResult{false, false, false, snapshot_, {}, std::move(detail)};
+    return AuthorityResult{
+      false, false, retryable, snapshot_, {}, std::move(detail)};
   }
 
   rclcpp::Node & node_;
@@ -369,31 +404,50 @@ private:
     const auto mode = declare_parameter<std::string>(
       "operating_mode", "mapping", descriptor);
     const auto mission_deadline_ms = declare_parameter<std::int64_t>(
-      "mission_deadline_ms", 30000, descriptor);
+      "mission_deadline_ms", kTrustedMissionDeadlineMs, descriptor);
     const auto gate_discovery_deadline_ms = declare_parameter<std::int64_t>(
-      "gate_discovery_deadline_ms", 2000, descriptor);
+      "gate_discovery_deadline_ms", kTrustedGateDiscoveryDeadlineMs, descriptor);
     const auto control_response_deadline_ms = declare_parameter<std::int64_t>(
-      "control_response_deadline_ms", 100, descriptor);
+      "control_response_deadline_ms", kTrustedControlResponseDeadlineMs, descriptor);
     const auto stop_barrier_ms = declare_parameter<std::int64_t>(
-      "stop_barrier_ms", 250, descriptor);
+      "stop_barrier_ms", kTrustedStopBarrierMs, descriptor);
     const auto cancel_grace_ms = declare_parameter<std::int64_t>(
-      "cancel_grace_ms", 250, descriptor);
+      "cancel_grace_ms", kTrustedCancelGraceMs, descriptor);
     const auto source_cache_size = declare_parameter<std::int64_t>(
       "source_cache_size", 64, descriptor);
     const auto stop_cache_size = declare_parameter<std::int64_t>(
       "stop_cache_size", 64, descriptor);
     const auto max_steps = declare_parameter<std::int64_t>(
       "max_steps", 3, descriptor);
+    const auto move_distance_min_m = declare_parameter<double>(
+      "move_distance_min_m", kTrustedMoveDistanceMinM, descriptor);
+    const auto move_distance_max_m = declare_parameter<double>(
+      "move_distance_max_m", kTrustedMoveDistanceMaxM, descriptor);
+    const auto rotate_angle_min_rad = declare_parameter<double>(
+      "rotate_angle_min_rad", kTrustedRotateAngleMinRad, descriptor);
+    const auto rotate_angle_max_rad = declare_parameter<double>(
+      "rotate_angle_max_rad", kTrustedRotateAngleMaxRad, descriptor);
     const auto named_place_ids = declare_parameter<std::vector<std::string>>(
       "named_place_ids", {}, descriptor);
     if (mode != "mapping" && mode != "navigation") {
       throw std::invalid_argument("operating_mode must be mapping or navigation");
     }
     if (
-      mission_deadline_ms <= 0 || gate_discovery_deadline_ms <= 0 ||
-      control_response_deadline_ms <= 0 || stop_barrier_ms <= 0 ||
-      cancel_grace_ms <= 0 || source_cache_size != 64 ||
-      stop_cache_size != 64 || max_steps != 3 || named_place_ids.size() > 32U)
+      mission_deadline_ms != kTrustedMissionDeadlineMs ||
+      gate_discovery_deadline_ms != kTrustedGateDiscoveryDeadlineMs ||
+      control_response_deadline_ms != kTrustedControlResponseDeadlineMs ||
+      stop_barrier_ms != kTrustedStopBarrierMs ||
+      cancel_grace_ms != kTrustedCancelGraceMs || source_cache_size != 64 ||
+      stop_cache_size != 64 || max_steps != 3 ||
+      !std::isfinite(move_distance_min_m) ||
+      !std::isfinite(move_distance_max_m) ||
+      !std::isfinite(rotate_angle_min_rad) ||
+      !std::isfinite(rotate_angle_max_rad) ||
+      static_cast<float>(move_distance_min_m) != kTrustedMoveDistanceMinM ||
+      static_cast<float>(move_distance_max_m) != kTrustedMoveDistanceMaxM ||
+      static_cast<float>(rotate_angle_min_rad) != kTrustedRotateAngleMinRad ||
+      static_cast<float>(rotate_angle_max_rad) != kTrustedRotateAngleMaxRad ||
+      named_place_ids.size() > 32U)
     {
       throw std::invalid_argument("Mission Runtime trusted YAML is not frozen");
     }
@@ -410,6 +464,10 @@ private:
     config.control_response_deadline = std::chrono::milliseconds(control_response_deadline_ms);
     config.stop_barrier = std::chrono::milliseconds(stop_barrier_ms);
     config.cancel_grace = std::chrono::milliseconds(cancel_grace_ms);
+    config.move_distance_min_m = static_cast<float>(move_distance_min_m);
+    config.move_distance_max_m = static_cast<float>(move_distance_max_m);
+    config.rotate_angle_min_rad = static_cast<float>(rotate_angle_min_rad);
+    config.rotate_angle_max_rad = static_cast<float>(rotate_angle_max_rad);
     config.named_place_ids = named_place_ids;
     return config;
   }
@@ -441,6 +499,7 @@ private:
   void on_accepted(const std::shared_ptr<GoalHandle> & goal_handle)
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
+    pending_goal_ = goal_handle;
     const auto goal_message = goal_handle->get_goal();
     MissionGoal goal;
     goal.source_instance_id = goal_message->source_instance_id;
@@ -452,14 +511,45 @@ private:
       goal.steps.push_back(MissionStep{
           step.kind, step.distance_m, step.angle_rad, step.target_id});
     }
-    const auto admission = core_->admit(goal);
+    AdmissionResult admission;
+    try {
+      admission = core_->admit(goal);
+    } catch (const std::exception & error) {
+      pending_goal_.reset();
+      auto result = std::make_shared<ExecuteMission::Result>();
+      fill_result(
+        MissionResult{
+          MissionResultCode::InternalError, -1,
+          std::string{"Mission admission threw: "} + error.what()},
+        *result);
+      goal_handle->abort(result);
+      return;
+    } catch (...) {
+      pending_goal_.reset();
+      auto result = std::make_shared<ExecuteMission::Result>();
+      fill_result(
+        MissionResult{
+          MissionResultCode::InternalError, -1,
+          "Mission admission threw an unknown exception"},
+        *result);
+      goal_handle->abort(result);
+      return;
+    }
     if (!admission.accepted) {
+      pending_goal_.reset();
       auto result = std::make_shared<ExecuteMission::Result>();
       fill_result(admission.result, *result);
       goal_handle->abort(result);
       return;
     }
-    goals_.emplace(admission.mission_id, goal_handle);
+    goals_.emplace(
+      admission.mission_id, std::exchange(pending_goal_, std::nullopt).value());
+    const auto early = early_results_.find(admission.mission_id);
+    if (early != early_results_.end()) {
+      const auto result = early->second;
+      early_results_.erase(early);
+      finish_goal(admission.mission_id, result);
+    }
   }
 
   void on_stop(
@@ -484,6 +574,9 @@ private:
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     const auto found = goals_.find(mission_id);
     if (found == goals_.end()) {
+      if (pending_goal_.has_value()) {
+        early_results_[mission_id] = result;
+      }
       return;
     }
     auto action_result = std::make_shared<ExecuteMission::Result>();
@@ -557,6 +650,8 @@ private:
   rclcpp::Service<StopMission>::SharedPtr stop_service_;
   rclcpp::TimerBase::SharedPtr timer_;
   std::unordered_map<std::uint64_t, std::shared_ptr<GoalHandle>> goals_;
+  std::optional<std::shared_ptr<GoalHandle>> pending_goal_;
+  std::unordered_map<std::uint64_t, MissionResult> early_results_;
 };
 
 }  // namespace voice_nav_mission

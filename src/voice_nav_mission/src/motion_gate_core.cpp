@@ -367,8 +367,16 @@ ControlResult MotionGateCore::inhibit(
     return rejection;
   }
   if (state_ == State::Inhibited) {
+    if (!advance_control_seq()) {
+      auto fault = result_from_snapshot(
+        ResultCode::Faulted, Reason::SequenceExhausted,
+        "control sequence exhausted while inhibiting");
+      remember(request, fault);
+      return fault;
+    }
     reason_ = Reason::None;
     detail_ = "inhibit reasserted";
+    advance_state_seq();
     auto result = applied(request);
     remember(request, result);
     return result;
