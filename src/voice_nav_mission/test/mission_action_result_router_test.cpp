@@ -77,5 +77,69 @@ TEST(MissionActionResultRouter, SynchronousStartExceptionIsAbortedExactlyOnce)
     deliveries.front().delivery.result.code, MissionResultCode::InternalError);
 }
 
+TEST(MissionActionAdapterBoundary, SynchronousSuccessCrossesGoalHandleBoundaryOnce)
+{
+  MissionActionAdapterBoundary adapter;
+  std::vector<DeliveryRecord> deliveries;
+  std::vector<MissionResult> rejections;
+  std::size_t registered = 0U;
+
+  adapter.on_accepted(
+    MissionGoal{},
+    [&adapter](const MissionGoal &) {
+      adapter.finish(7U, MissionResult{MissionResultCode::Succeeded, -1, "done"});
+      return AdmissionResult{7U, true, {}};
+    },
+    [&registered](std::uint64_t) {++registered;},
+    [&deliveries](std::uint64_t mission_id, const ActionResultDelivery & delivery) {
+      deliveries.push_back(DeliveryRecord{mission_id, delivery});
+    },
+    [&rejections](const MissionResult & result) {rejections.push_back(result);});
+  adapter.finish(7U, MissionResult{
+        MissionResultCode::Succeeded, -1, "late duplicate"});
+
+  ASSERT_EQ(registered, 1U);
+  ASSERT_TRUE(rejections.empty());
+  ASSERT_EQ(deliveries.size(), 1U);
+  EXPECT_EQ(deliveries.front().mission_id, 7U);
+  EXPECT_EQ(deliveries.front().delivery.status, OuterActionStatus::Succeeded);
+  EXPECT_EQ(deliveries.front().delivery.result.code, MissionResultCode::Succeeded);
+  EXPECT_EQ(deliveries.front().delivery.result.detail, "done");
+}
+
+TEST(MissionActionAdapterBoundary, SynchronousStartExceptionCrossesGoalHandleBoundaryOnce)
+{
+  MissionActionAdapterBoundary adapter;
+  std::vector<DeliveryRecord> deliveries;
+  std::vector<MissionResult> rejections;
+  std::size_t registered = 0U;
+
+  adapter.on_accepted(
+    MissionGoal{},
+    [&adapter](const MissionGoal &) {
+      // Equivalent to RuntimeCore::start_step() invoking its result callback
+      // before admit() returns after a child start exception.
+      adapter.finish(9U, MissionResult{
+          MissionResultCode::InternalError, -1, "child start threw"});
+      return AdmissionResult{9U, true, {}};
+    },
+    [&registered](std::uint64_t) {++registered;},
+    [&deliveries](std::uint64_t mission_id, const ActionResultDelivery & delivery) {
+      deliveries.push_back(DeliveryRecord{mission_id, delivery});
+    },
+    [&rejections](const MissionResult & result) {rejections.push_back(result);});
+  adapter.finish(9U, MissionResult{
+        MissionResultCode::InternalError, 0, "late duplicate"});
+
+  ASSERT_EQ(registered, 1U);
+  ASSERT_TRUE(rejections.empty());
+  ASSERT_EQ(deliveries.size(), 1U);
+  EXPECT_EQ(deliveries.front().mission_id, 9U);
+  EXPECT_EQ(deliveries.front().delivery.status, OuterActionStatus::Aborted);
+  EXPECT_EQ(
+    deliveries.front().delivery.result.code, MissionResultCode::InternalError);
+  EXPECT_EQ(deliveries.front().delivery.result.failed_step, -1);
+}
+
 }  // namespace
 }  // namespace voice_nav_mission

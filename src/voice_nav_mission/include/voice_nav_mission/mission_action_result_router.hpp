@@ -19,6 +19,7 @@
 #include <functional>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 #include "voice_nav_mission/mission_runtime_core.hpp"
@@ -119,6 +120,66 @@ private:
   bool pending_admission_{false};
   std::optional<std::pair<std::uint64_t, MissionResult>> early_result_;
   std::optional<Active> active_;
+};
+
+// Package-private ROS Adapter seam. It mirrors MissionRuntimeNode::on_accepted
+// while keeping GoalHandle-specific calls injectable for deterministic tests.
+// Runtime Core may synchronously finish a mission from inside admit() (for
+// example when child start throws), so the router's provisional window must
+// surround the entire admission callback.
+class MissionActionAdapterBoundary final
+{
+public:
+  using AdmitCallback = std::function<AdmissionResult(const MissionGoal &)>;
+  using RegisterCallback = std::function<void(std::uint64_t)>;
+  using DeliveryCallback = MissionActionResultRouter::DeliveryCallback;
+  using RejectionCallback = std::function<void(const MissionResult &)>;
+
+  void on_accepted(
+    const MissionGoal & goal,
+    AdmitCallback admit,
+    RegisterCallback register_goal,
+    DeliveryCallback deliver,
+    RejectionCallback reject)
+  {
+    if (!admit || !register_goal || !deliver || !reject) {
+      throw std::invalid_argument("Mission Action Adapter callbacks are incomplete");
+    }
+    router_.begin_admission();
+    AdmissionResult admission;
+    try {
+      admission = admit(goal);
+    } catch (const std::exception & error) {
+      router_.reject_admission();
+      reject(MissionResult{
+          MissionResultCode::InternalError,
+          -1,
+          std::string{"Mission admission threw: "} + error.what()});
+      return;
+    } catch (...) {
+      router_.reject_admission();
+      reject(MissionResult{
+          MissionResultCode::InternalError,
+          -1,
+          "Mission admission threw an unknown exception"});
+      return;
+    }
+    if (!admission.accepted) {
+      router_.reject_admission();
+      reject(admission.result);
+      return;
+    }
+    register_goal(admission.mission_id);
+    router_.commit(admission.mission_id, std::move(deliver));
+  }
+
+  void finish(std::uint64_t mission_id, const MissionResult & result)
+  {
+    router_.finish(mission_id, result);
+  }
+
+private:
+  MissionActionResultRouter router_;
 };
 
 }  // namespace voice_nav_mission

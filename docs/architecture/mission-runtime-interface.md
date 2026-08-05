@@ -163,6 +163,15 @@ cancel, success, timeout, and dependency completion pass through the same
 terminal-intent linearization point. Runtime synchronously controls the
 separate Gate through a package-private seam.
 
+The production Gate Adapter gives each PREPARE, OPEN, RENEW, and INHIBIT
+logical operation one shared **250 ms steady-clock overall convergence
+deadline**. Each service discovery or response wait uses the smaller of the
+remaining overall time and the trusted **100 ms single-attempt budget**; the
+overall deadline is checked again after every response. A timeout retries the
+same request ID and payload. Only an explicit `STALE_GATE`, `STALE_SEQUENCE`,
+or `STALE_LEASE` response may rebuild the authority tuple; operation kind and
+other immutable logical payload remain bound to that request ID.
+
 A new request unconditionally rotates the epoch, inhibits the Gate, publishes
 zero, and cancels the downstream operation. A retry with the same `request_id`
 returns the cached logical outcome and does not rotate state again. Stale
@@ -195,7 +204,9 @@ physically stopped; odometry proves stationarity separately.
   lease.
 - Timeout, cancel, STOP, dependency loss, exception, and success all pass
   through one serial terminal-intent linearization point.
-- Every Goal produces exactly one Result.
+- Every Goal produces exactly one Result. The private Action Adapter keeps a
+  provisional GoalHandle delivery window across Core admission so a
+  synchronous child result is registered and delivered exactly once.
 
 ## Terminal ordering and races
 
@@ -221,6 +232,11 @@ select terminal intent
 
 Failure to prove an inhibited Gate returns `SAFETY_FAULT` and keeps Runtime
 unavailable.
+
+If an active STOP cannot advance `admission_epoch` because the trusted counter
+is exhausted, Runtime remains `FAULTED`, does not claim a successful epoch
+rotation, still completes the bounded Gate-zero and child-cancel transaction,
+and delivers one typed `SAFETY_FAULT` Result.
 
 Mission deadlines, cancel grace, Gate lease, STOP barrier, and liveness use a
 steady clock. ROS time is used only for TF, sensor data, SLAM, Nav2, and

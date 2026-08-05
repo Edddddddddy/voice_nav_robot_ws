@@ -74,29 +74,12 @@ ControlResult MotionGateCore::prepare(
 
   // Keep this lookup local: PREPARE is the protocol entry point and must
   // prove that idempotence precedes all state mutation.
-  if (valid_identifier(request.request_id)) {
-    const auto cached = request_id_cache_.find(request.request_id);
-    if (cached != request_id_cache_.end()) {
-      if (cached->second.request_fingerprint == request_fingerprint(request)) {
-        if (state_ == State::Faulted) {
-          return result_from_snapshot(
-            ResultCode::Faulted, reason_, detail_);
-        }
-        return result_from_snapshot(
-          ResultCode::Duplicate,
-          cached->second.result.reason,
-          cached->second.result.detail);
-      }
-      return reject(
-        request, Reason::RequestIdCollision,
-        "request_id was reused with a different request body", false);
-    }
+  if (const auto replay = replay_or_collision(request)) {
+    return *replay;
   }
 
   ControlResult rejection;
-  if (!validate_common(
-      request, Operation::Prepare, false, rejection, true))
-  {
+  if (!validate_common(request, Operation::Prepare, false, rejection)) {
     return rejection;
   }
   if (state_ != State::Inhibited) {
@@ -181,7 +164,7 @@ ControlResult MotionGateCore::open(
   }
 
   ControlResult rejection;
-  if (!validate_common(request, Operation::Open, true, rejection, true)) {
+  if (!validate_common(request, Operation::Open, true, rejection)) {
     return rejection;
   }
   if (state_ != State::Prepared) {
@@ -303,7 +286,7 @@ ControlResult MotionGateCore::renew(
   }
 
   ControlResult rejection;
-  if (!validate_common(request, Operation::Renew, true, rejection, true)) {
+  if (!validate_common(request, Operation::Renew, true, rejection)) {
     return rejection;
   }
   if (state_ != State::Armed) {
@@ -353,17 +336,13 @@ ControlResult MotionGateCore::inhibit(
   reconcile_deadlines(now);
 
   // Idempotent STOP retries are served before validating current state.
-  if (request_id_cache_.find(request.request_id) != request_id_cache_.end()) {
-    if (const auto replay = replay_or_collision(request)) {
-      return *replay;
-    }
+  if (const auto replay = replay_or_collision(request)) {
+    return *replay;
   }
 
   ControlResult rejection;
   const bool lease_required = state_ != State::Inhibited;
-  if (!validate_common(
-      request, Operation::Inhibit, lease_required, rejection, true))
-  {
+  if (!validate_common(request, Operation::Inhibit, lease_required, rejection)) {
     return rejection;
   }
   if (state_ == State::Inhibited) {
@@ -546,10 +525,13 @@ std::optional<ControlResult> MotionGateCore::replay_or_collision(
   if (cached == request_id_cache_.end()) {
     return std::nullopt;
   }
-  if (cached->second.request_fingerprint != request_fingerprint(request)) {
+  if (cached->second.logical_fingerprint != logical_request_fingerprint(request)) {
     return result_from_snapshot(
       ResultCode::Rejected, Reason::RequestIdCollision,
       "request_id was reused with a different request body");
+  }
+  if (!cached->second.replayable) {
+    return std::nullopt;
   }
   if (state_ == State::Faulted) {
     return result_from_snapshot(ResultCode::Faulted, reason_, detail_);
@@ -563,13 +545,23 @@ std::optional<ControlResult> MotionGateCore::replay_or_collision(
 
 void MotionGateCore::remember(
   const ControlRequest & request,
-  const ControlResult & result)
+  const ControlResult & result,
+  bool replayable)
 {
   if (
     !valid_identifier(request.request_id) ||
-    config_.request_cache_size == 0U ||
-    request_id_cache_.find(request.request_id) != request_id_cache_.end())
+    config_.request_cache_size == 0U)
   {
+    return;
+  }
+
+  const auto logical_fingerprint = logical_request_fingerprint(request);
+  const auto existing = request_id_cache_.find(request.request_id);
+  if (existing != request_id_cache_.end()) {
+    if (existing->second.logical_fingerprint == logical_fingerprint) {
+      existing->second.result = result;
+      existing->second.replayable = replayable;
+    }
     return;
   }
 
@@ -582,7 +574,7 @@ void MotionGateCore::remember(
   request_cache_order_.push_back(request.request_id);
   request_id_cache_.emplace(
     request.request_id,
-    CachedRequest{request_fingerprint(request), result});
+    CachedRequest{logical_fingerprint, result, replayable});
 }
 
 ControlResult MotionGateCore::reject(
@@ -596,8 +588,11 @@ ControlResult MotionGateCore::reject(
     faulted ? ResultCode::Faulted : ResultCode::Rejected,
     faulted ? reason_ : reason,
     faulted ? detail_ : std::move(detail));
-  if (cache) {
-    remember(request, result);
+  const bool stale_tuple =
+    reason == Reason::StaleGate || reason == Reason::StaleSequence ||
+    reason == Reason::StaleLease;
+  if (cache || stale_tuple) {
+    remember(request, result, !stale_tuple);
   }
   return result;
 }
@@ -635,8 +630,7 @@ bool MotionGateCore::validate_common(
   const ControlRequest & request,
   Operation expected,
   bool lease_required,
-  ControlResult & rejection,
-  bool cache_stale)
+  ControlResult & rejection)
 {
   if (!valid_identifier(request.request_id)) {
     rejection = reject(
@@ -660,7 +654,7 @@ bool MotionGateCore::validate_common(
   if (request.gate_instance_id != gate_instance_id_) {
     rejection = reject(
       request, Reason::StaleGate,
-      "request targets a different Gate instance", cache_stale);
+      "request targets a different Gate instance", false);
     return false;
   }
   if (state_ == State::Faulted) {
@@ -783,12 +777,13 @@ std::string MotionGateCore::make_candidate_topic(
   return std::string{kCandidateTopicPrefix} + lease_id;
 }
 
-std::string MotionGateCore::request_fingerprint(
+std::string MotionGateCore::logical_request_fingerprint(
   const ControlRequest & request)
 {
-  return std::to_string(static_cast<std::uint8_t>(request.operation)) + "|" +
-         request.request_id + "|" + request.gate_instance_id + "|" +
-         std::to_string(request.expected_control_seq) + "|" + request.lease_id;
+  // Authority tuple fields are intentionally excluded. The request ID is the
+  // cache key; the operation is the only immutable business payload in the
+  // private control protocol.
+  return std::to_string(static_cast<std::uint8_t>(request.operation));
 }
 
 bool MotionGateCore::valid_identifier(const std::string & value)

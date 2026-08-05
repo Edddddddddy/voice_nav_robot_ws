@@ -81,6 +81,14 @@ public:
       const auto attempt_deadline = std::min(
         overall_deadline, attempt_started + single_attempt_budget);
       last = attempt(current, attempt_deadline, overall_deadline);
+      if (now() >= overall_deadline) {
+        last.applied = false;
+        last.zero_proven = false;
+        last.retryable = false;
+        last.detail =
+          "MotionGate control operation reached its steady deadline";
+        return last;
+      }
       if (
         last.applied &&
         (kind != AuthorityOperationKind::Inhibit || last.zero_proven))
@@ -99,6 +107,87 @@ public:
     }
     return last;
   }
+};
+
+// Package-private production Adapter wiring. The ROS Adapter and deterministic
+// tests use the same four-operation boundary, with one bounded overall window
+// and a shorter per-service attempt window. The overall value is supplied by
+// the trusted 250 ms STOP barrier; it is deliberately shared by PREPARE, OPEN,
+// RENEW, and INHIBIT rather than chaining separate budgets.
+class MissionAuthorityAdapter final
+{
+public:
+  using TimePoint = MissionAuthorityConvergence::TimePoint;
+  using Now = MissionAuthorityConvergence::Now;
+  using Attempt = std::function<AuthorityResult(
+        const AuthorityOperation &, AuthorityOperationKind, TimePoint, TimePoint)>;
+  using Refresh = MissionAuthorityConvergence::Refresh;
+
+  MissionAuthorityAdapter(
+    std::chrono::milliseconds overall_budget,
+    std::chrono::milliseconds single_attempt_budget,
+    Now now,
+    Attempt attempt,
+    Refresh refresh = {})
+  : overall_budget_(overall_budget),
+    single_attempt_budget_(single_attempt_budget),
+    now_(std::move(now)),
+    attempt_(std::move(attempt)),
+    refresh_(std::move(refresh))
+  {
+    if (
+      overall_budget_.count() <= 0 || single_attempt_budget_.count() <= 0 ||
+      !now_ || !attempt_)
+    {
+      throw std::invalid_argument("invalid Mission Authority Adapter policy");
+    }
+  }
+
+  [[nodiscard]] AuthorityResult prepare(const AuthorityOperation & operation)
+  {
+    return run(operation, AuthorityOperationKind::Prepare);
+  }
+
+  [[nodiscard]] AuthorityResult open(const AuthorityOperation & operation)
+  {
+    return run(operation, AuthorityOperationKind::Open);
+  }
+
+  [[nodiscard]] AuthorityResult renew(const AuthorityOperation & operation)
+  {
+    return run(operation, AuthorityOperationKind::Renew);
+  }
+
+  [[nodiscard]] AuthorityResult inhibit(const AuthorityOperation & operation)
+  {
+    return run(operation, AuthorityOperationKind::Inhibit);
+  }
+
+private:
+  [[nodiscard]] AuthorityResult run(
+    const AuthorityOperation & operation,
+    AuthorityOperationKind kind)
+  {
+    return MissionAuthorityConvergence::run(
+      operation,
+      kind,
+      overall_budget_,
+      single_attempt_budget_,
+      now_,
+      [this, kind](
+        const AuthorityOperation & current,
+        TimePoint attempt_deadline,
+        TimePoint overall_deadline) {
+        return attempt_(current, kind, attempt_deadline, overall_deadline);
+        },
+      refresh_);
+  }
+
+  std::chrono::milliseconds overall_budget_;
+  std::chrono::milliseconds single_attempt_budget_;
+  Now now_;
+  Attempt attempt_;
+  Refresh refresh_;
 };
 
 }  // namespace voice_nav_mission
