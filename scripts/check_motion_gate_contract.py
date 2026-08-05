@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the Lesson 0009 MotionGate product contract without starting ROS."""
+"""Validate the MotionGate product contract without starting ROS."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 class MotionGateContractError(ValueError):
-    """A checked artifact violates the Lesson 0009 MotionGate contract."""
+    """A checked artifact violates the MotionGate contract."""
 
 
 ARTIFACTS = {
@@ -29,6 +29,15 @@ ARTIFACTS = {
     ),
     "core_source": "src/voice_nav_mission/src/motion_gate_core.cpp",
     "node_source": "src/voice_nav_mission/src/motion_gate_node.cpp",
+    "writer_observation_header": (
+        "src/voice_nav_mission/src/writer_observation.hpp"
+    ),
+    "writer_observation_source": (
+        "src/voice_nav_mission/src/writer_observation.cpp"
+    ),
+    "writer_observation_test": (
+        "src/voice_nav_mission/test/writer_observation_test.cpp"
+    ),
     "mission_package": "src/voice_nav_mission/package.xml",
     "mission_cmake": "src/voice_nav_mission/CMakeLists.txt",
     "gate_config": "src/voice_nav_bringup/config/motion_gate.yaml",
@@ -37,6 +46,9 @@ ARTIFACTS = {
     ),
     "bringup_package": "src/voice_nav_bringup/package.xml",
     "bringup_cmake": "src/voice_nav_bringup/CMakeLists.txt",
+    "open_convergence": (
+        "src/voice_nav_bringup/test/motion_gate_open_convergence.py"
+    ),
     "controller_config": "src/voice_nav_sim/config/controllers.yaml",
 }
 
@@ -82,6 +94,7 @@ REASON_CONSTANTS = {
     "uint16 CONFIGURATION_INVALID=16",
     "uint16 PUBLISH_FAILED=17",
     "uint16 INTERNAL_FAILURE=18",
+    "uint16 WRITER_METADATA_PENDING=19",
 }
 
 CONTROL_RESPONSE_FIELDS = {
@@ -202,7 +215,7 @@ def required_artifacts(root: Path) -> dict[str, Path]:
         if not path.is_file():
             relative = path.relative_to(root).as_posix()
             raise MotionGateContractError(
-                f"missing Lesson 0009 MotionGate artifact: {relative}"
+                f"missing MotionGate artifact: {relative}"
             )
     return resolved
 
@@ -648,29 +661,249 @@ def require_source_tokens(
         )
 
 
+def _cpp_translation_phase2(source: str) -> str:
+    """Remove physical backslash-newline pairs before C++ tokenization."""
+    return re.sub(r"\\(?:\r\n|\n|\r)", "", source)
+
+
+def _cpp_lexical_views(source: str) -> tuple[str, str]:
+    """Return same-length views of the phase-2 logical C++ source."""
+    source = _cpp_translation_phase2(source)
+    comment_free: list[str] = []
+    code_only: list[str] = []
+
+    def append_masked(fragment: str, preserve_literal: bool) -> None:
+        if preserve_literal:
+            comment_free.extend(fragment)
+        else:
+            comment_free.extend(
+                "\n" if character == "\n" else " "
+                for character in fragment
+            )
+        code_only.extend(
+            "\n" if character == "\n" else " "
+            for character in fragment
+        )
+
+    index = 0
+    while index < len(source):
+        following = source[index + 1] if index + 1 < len(source) else ""
+        if source[index] == "/" and following == "/":
+            end = source.find("\n", index + 2)
+            end = len(source) if end < 0 else end
+            append_masked(source[index:end], preserve_literal=False)
+            index = end
+            continue
+        if source[index] == "/" and following == "*":
+            closing = source.find("*/", index + 2)
+            end = len(source) if closing < 0 else closing + 2
+            append_masked(source[index:end], preserve_literal=False)
+            index = end
+            continue
+
+        raw_match = re.match(r'(?:u8|u|U|L)?R"', source[index:])
+        previous_is_identifier = index > 0 and (
+            source[index - 1].isalnum() or source[index - 1] == "_"
+        )
+        if raw_match is not None and not previous_is_identifier:
+            delimiter_start = index + len(raw_match.group(0))
+            opening = source.find("(", delimiter_start, delimiter_start + 17)
+            if opening >= 0:
+                delimiter = source[delimiter_start:opening]
+                delimiter_is_valid = not any(
+                    character.isspace() or character in "()\\"
+                    for character in delimiter
+                )
+                if delimiter_is_valid:
+                    terminator = ")" + delimiter + '"'
+                    closing = source.find(terminator, opening + 1)
+                    end = (
+                        len(source) if closing < 0
+                        else closing + len(terminator)
+                    )
+                    append_masked(
+                        source[index:end], preserve_literal=True
+                    )
+                    index = end
+                    continue
+
+        if source[index] in {'"', "'"}:
+            quote = source[index]
+            end = index + 1
+            while end < len(source):
+                if source[end] == "\\" and end + 1 < len(source):
+                    end += 2
+                    continue
+                end += 1
+                if source[end - 1] == quote:
+                    break
+            append_masked(source[index:end], preserve_literal=True)
+            index = end
+            continue
+
+        comment_free.append(source[index])
+        code_only.append(source[index])
+        index += 1
+
+    return "".join(comment_free), "".join(code_only)
+
+
+def strip_cpp_comments(source: str) -> str:
+    """Remove C++ comments while preserving literals and source offsets."""
+    return _cpp_lexical_views(source)[0]
+
+
+def cpp_code_mask(source: str) -> str:
+    """Mask C++ comments and literals while preserving code source offsets."""
+    return _cpp_lexical_views(source)[1]
+
+
 def function_body(source: str, signature: str, context: str) -> str:
-    signature_index = source.find(signature)
+    comment_free, code_only = _cpp_lexical_views(source)
+    signature_index = code_only.find(signature)
     if signature_index < 0:
         raise MotionGateContractError(
             f"{context} must define {signature}"
         )
-    opening = source.find("{", signature_index)
+    opening = code_only.find("{", signature_index)
     if opening < 0:
         raise MotionGateContractError(
             f"{context} has no body for {signature}"
         )
     depth = 0
-    for index in range(opening, len(source)):
-        character = source[index]
+    for index in range(opening, len(code_only)):
+        character = code_only[index]
         if character == "{":
             depth += 1
         elif character == "}":
             depth -= 1
             if depth == 0:
-                return source[opening + 1 : index]
+                return comment_free[opening + 1 : index]
     raise MotionGateContractError(
         f"{context} has an unterminated body for {signature}"
     )
+
+
+def reject_test_short_circuit(
+    body: str,
+    context: str,
+    *,
+    require_linear: bool = False,
+) -> None:
+    body_code = cpp_code_mask(body)
+    if (
+        re.search(r"\bGTEST_SKIP\s*\(", body_code)
+        or re.search(r"\breturn\b", body_code)
+    ):
+        raise MotionGateContractError(
+            f"{context} must execute without skip or early return"
+        )
+    if require_linear and re.search(
+        r"\b(?:if|else|for|while|do|switch|goto|try|catch)\b",
+        body_code,
+    ):
+        raise MotionGateContractError(
+            f"{context} must remain a linear, unconditionally executed test"
+        )
+
+
+def require_top_level_source_snippets(
+    source: str,
+    snippets: tuple[str, ...],
+    context: str,
+) -> None:
+    comment_free, code_only = _cpp_lexical_views(source)
+    missing: list[str] = []
+    for snippet in snippets:
+        words = re.split(r"\s+", snippet.strip())
+        pattern = re.compile(r"\s+".join(re.escape(word) for word in words))
+        matched_at_top_level = False
+        for match in pattern.finditer(comment_free):
+            first_word = words[0]
+            first_word_in_code = code_only[
+                match.start() : match.start() + len(first_word)
+            ]
+            if first_word_in_code != first_word:
+                continue
+            prefix = code_only[: match.start()]
+            if prefix.count("{") == prefix.count("}"):
+                matched_at_top_level = True
+                break
+        if not matched_at_top_level:
+            missing.append(snippet)
+    if missing:
+        raise MotionGateContractError(
+            f"{context} must execute top-level statement(s): "
+            + ", ".join(missing)
+        )
+
+
+def require_top_level_source_sequence(
+    source: str,
+    snippets: tuple[str, ...],
+    context: str,
+) -> None:
+    comment_free, code_only = _cpp_lexical_views(source)
+    search_start = 0
+    for snippet in snippets:
+        words = re.split(r"\s+", snippet.strip())
+        pattern = re.compile(r"\s+".join(re.escape(word) for word in words))
+        matching_position = None
+        for match in pattern.finditer(comment_free, search_start):
+            first_word = words[0]
+            first_word_in_code = code_only[
+                match.start() : match.start() + len(first_word)
+            ]
+            if first_word_in_code != first_word:
+                continue
+            prefix = code_only[: match.start()]
+            if prefix.count("{") == prefix.count("}"):
+                matching_position = match.end()
+                break
+        if matching_position is None:
+            raise MotionGateContractError(
+                f"{context} must execute ordered top-level statement: "
+                + snippet
+            )
+        search_start = matching_position
+
+
+def active_gtest_body(
+    source: str,
+    suite: str,
+    name: str,
+    context: str,
+) -> str:
+    cleaned, code_only = _cpp_lexical_views(source)
+    if re.search(r"^\s*#\s*define\s+TEST\b", code_only, re.MULTILINE):
+        raise MotionGateContractError(
+            f"{context} must not redefine the TEST macro"
+        )
+    # This dedicated safety-regression source is intentionally free of all
+    # conditional compilation, so a required TEST cannot be hidden by a
+    # platform branch. The lexical view has already applied translation
+    # phase 2, including removal of spliced physical newlines.
+    if re.search(
+        r"^\s*#\s*(?:if|ifdef|ifndef|elif)\b",
+        code_only,
+        re.MULTILINE,
+    ):
+        raise MotionGateContractError(
+            f"{context}: dedicated test source forbids all conditional "
+            "compilation"
+        )
+    signature_pattern = re.compile(
+        rf"\bTEST\s*\(\s*{re.escape(suite)}\s*,\s*"
+        rf"{re.escape(name)}\s*\)"
+    )
+    matches = list(signature_pattern.finditer(code_only))
+    if len(matches) != 1:
+        raise MotionGateContractError(
+            f"{context} must define exactly one active TEST({suite}, {name})"
+        )
+    body = function_body(cleaned, matches[0].group(0), context)
+    reject_test_short_circuit(body, context, require_linear=True)
+    return body
 
 
 def method_body(
@@ -805,8 +1038,28 @@ def validate_core(header_path: Path, source_path: Path) -> None:
             "now >= prepare_deadline_",
             "!binding_provider",
             "binding_provider()",
+            "!binding.ready",
+            "binding.reason != Reason::None",
+            "gid_is_nonzero(binding.writer_gid)",
         ),
         "MotionGateCore::open pure validation before graph provider",
+    )
+    contradictory_ready = function_body(
+        open_body,
+        "if (binding.reason != Reason::None)",
+        "MotionGateCore::open contradictory ready binding",
+    )
+    validate_order(
+        contradictory_ready,
+        (
+            "force_fault(",
+            "Reason::InternalFailure",
+            "result_from_snapshot(",
+            "ResultCode::Faulted",
+            "remember(request, fault)",
+            "return fault",
+        ),
+        "MotionGateCore::open contradictory ready binding",
     )
     renew = function_body(
         source,
@@ -938,6 +1191,381 @@ def parenthesized_call_bodies(
             )
 
 
+def validate_writer_observation(
+    header_path: Path,
+    source_path: Path,
+    test_path: Path,
+) -> None:
+    header = read_text(header_path)
+    source = read_text(source_path)
+    test = read_text(test_path)
+
+    require_source_tokens(
+        header,
+        (
+            "struct WriterEndpointObservation",
+            "std::string topic_type",
+            "std::string node_name",
+            "std::string node_namespace",
+            "rmw_endpoint_type_t endpoint_type",
+            "rmw_qos_profile_t qos",
+            "WriterGid writer_gid",
+            "struct WriterObservationPolicy",
+            "class WriterObservationSession",
+            "OpenBinding observe(",
+            "void reset() noexcept",
+            "std::optional<WriterGid> pinned_writer_gid_",
+            "bool identity_confirmed_",
+            "bool terminal_mismatch_",
+            "std::string terminal_detail_",
+        ),
+        "private WriterObservationSession header",
+    )
+    require_source_tokens(
+        source,
+        (
+            'include "writer_observation.hpp"',
+            "constexpr std::size_t kMaximumDetailLength = 160U",
+            "constexpr std::size_t kDigestSuffixLength = 9U",
+            "constexpr std::size_t kSummaryFixedLength = 55U",
+            "kMinimumSummaryLength",
+            'constexpr char kUnknownNodeName[] = "_NODE_NAME_UNKNOWN_"',
+            (
+                'constexpr char kUnknownNodeNamespace[] = '
+                '"_NODE_NAMESPACE_UNKNOWN_"'
+            ),
+            "detail.resize(kMaximumDetailLength)",
+            "digest_text",
+            "2166136261U",
+            "16777619U",
+            "compact_field",
+            "observation_detail",
+            "std::all_of(",
+            "value == 0U",
+            "candidate_qos_is_compatible",
+            "normalized_namespace",
+            "node_name_is_unresolved",
+            "node_namespace_is_unresolved",
+            "fqn_namespace",
+            "fqn_name",
+            "observation_summary",
+            '"n=1 k="',
+            '" id="',
+            '" q="',
+            '" g="',
+            '" ms="',
+            '" t="',
+            "Reason::WriterMetadataPending",
+            "Reason::WriterMismatch",
+            "terminal_mismatch_ = true",
+            "identity_confirmed_ = true",
+            "pinned_writer_gid_ = endpoint.writer_gid",
+            "return mismatch(terminal_detail_)",
+            "void WriterObservationSession::reset() noexcept",
+        ),
+        "private WriterObservationSession implementation",
+    )
+    if source.count("Reason::WriterMetadataPending") != 1:
+        raise MotionGateContractError(
+            "WriterObservationSession may classify only unresolved node "
+            "identity as WRITER_METADATA_PENDING"
+        )
+
+    unresolved_name = function_body(
+        source,
+        "bool node_name_is_unresolved",
+        "WriterObservationSession unresolved node-name classifier",
+    )
+    require_source_tokens(
+        unresolved_name,
+        (
+            "node_name.empty()",
+            "node_name == kUnknownNodeName",
+        ),
+        "WriterObservationSession unresolved node-name classifier",
+    )
+    if re.fullmatch(
+        r"\s*return\s+node_name\.empty\(\)\s*\|\|\s*"
+        r"node_name\s*==\s*kUnknownNodeName\s*;\s*",
+        unresolved_name,
+    ) is None:
+        raise MotionGateContractError(
+            "WriterObservationSession may treat only an empty node name or "
+            "the exact Jazzy unknown-name marker as unresolved"
+        )
+    unresolved_namespace = function_body(
+        source,
+        "bool node_namespace_is_unresolved",
+        "WriterObservationSession unresolved namespace classifier",
+    )
+    require_source_tokens(
+        unresolved_namespace,
+        ("node_namespace == kUnknownNodeNamespace",),
+        "WriterObservationSession unresolved namespace classifier",
+    )
+    if re.fullmatch(
+        r"\s*return\s+node_namespace\s*==\s*"
+        r"kUnknownNodeNamespace\s*;\s*",
+        unresolved_namespace,
+    ) is None:
+        raise MotionGateContractError(
+            "WriterObservationSession may treat only the exact Jazzy "
+            "unknown-namespace marker as unresolved"
+        )
+
+    observe = method_body(
+        source,
+        "WriterObservationSession",
+        "observe",
+        "private WriterObservationSession implementation",
+    )
+    validate_order(
+        observe,
+        (
+            "terminal_mismatch_",
+            "endpoints.empty()",
+            "endpoints.size() != 1U",
+            "endpoint.endpoint_type",
+            "endpoint.topic_type",
+            "candidate_qos_is_compatible(endpoint.qos)",
+            "gid_is_zero(endpoint.writer_gid)",
+            "*pinned_writer_gid_ != endpoint.writer_gid",
+            "node_name_is_unresolved(endpoint.node_name)",
+            "node_namespace_is_unresolved(endpoint.node_namespace)",
+            "fqn_namespace(policy_.expected_writer_fqn)",
+            "fqn_name(policy_.expected_writer_fqn)",
+            "!name_unresolved && endpoint.node_name != expected_name",
+            "!namespace_unresolved",
+            "observed_namespace != expected_namespace",
+            "name_unresolved || namespace_unresolved",
+            "endpoint_fqn(endpoint)",
+            "identity_confirmed_ = true",
+        ),
+        "WriterObservationSession fail-closed classification",
+    )
+    pending_branch = function_body(
+        observe,
+        "if (name_unresolved || namespace_unresolved)",
+        "WriterObservationSession unresolved node-identity branch",
+    )
+    require_source_tokens(
+        pending_branch,
+        (
+            "identity_confirmed_",
+            "true",
+            "Reason::None",
+            "!pinned_writer_gid_",
+            "pinned_writer_gid_ = endpoint.writer_gid",
+            "Reason::WriterMetadataPending",
+            "endpoint.writer_gid",
+            "summary",
+        ),
+        "WriterObservationSession unresolved node-identity branch",
+    )
+    validate_order(
+        pending_branch,
+        (
+            "identity_confirmed_",
+            "!pinned_writer_gid_",
+            "pinned_writer_gid_ = endpoint.writer_gid",
+            "Reason::WriterMetadataPending",
+            "summary",
+        ),
+        "WriterObservationSession node-identity convergence",
+    )
+
+    reject_mismatch = function_body(
+        observe,
+        "[this](std::string detail)",
+        "WriterObservationSession terminal mismatch closure",
+    )
+    require_source_tokens(
+        reject_mismatch,
+        (
+            "if (pinned_writer_gid_)",
+            "terminal_mismatch_ = true",
+            "terminal_detail_ = detail",
+            "return mismatch(",
+        ),
+        "WriterObservationSession terminal mismatch closure",
+    )
+
+    reset = method_body(
+        source,
+        "WriterObservationSession",
+        "reset",
+        "private WriterObservationSession implementation",
+    )
+    require_source_tokens(
+        reset,
+        (
+            "pinned_writer_gid_.reset()",
+            "identity_confirmed_ = false",
+            "terminal_mismatch_ = false",
+            "terminal_detail_.clear()",
+        ),
+        "WriterObservationSession generation reset",
+    )
+    require_source_tokens(
+        test,
+        (
+            '#include "writer_observation.hpp"',
+            "PinsUnresolvedIdentityUntilTheSameWriterResolves",
+            "ReplacementPoisonsPinnedGenerationUntilReset",
+            "ConfirmedSameGidSurvivesIdentityOnlyGraphRegression",
+            "KnownWrongNamespaceCannotEnterPending",
+            "ExactUnknownIdentityMarkersConvergeForPinnedGid",
+            "KnownPartialIdentityMustAgreeBeforePending",
+            '"_NODE_NAME_UNKNOWN_"',
+            '"_NODE_NAMESPACE_UNKNOWN_"',
+            "Reason::WriterMetadataPending",
+            "Reason::WriterMismatch",
+            "session.reset()",
+            "EXPECT_LE(pending.detail.size(), 160U)",
+            '"n=1"',
+            '"t="',
+            '"id="',
+            '"q="',
+            '"g="',
+            '"ms=7"',
+        ),
+        "writer_observation_test",
+    )
+
+    diagnostic_helper = function_body(
+        strip_cpp_comments(test),
+        "void expect_complete_bounded_diagnostic(",
+        "bounded writer diagnostic helper",
+    )
+    reject_test_short_circuit(
+        diagnostic_helper,
+        "bounded writer diagnostic helper",
+    )
+    require_source_tokens(
+        diagnostic_helper,
+        (
+            "EXPECT_LE(observation.detail.size(), 160U)",
+            '"n=1"',
+            '" k="',
+            '" id="',
+            '" q="',
+            '" g="',
+            '" ms="',
+            '" t="',
+            "ASSERT_NE(positions[index], std::string::npos)",
+            "ASSERT_LT(positions[index - 1U], positions[index])",
+            "EXPECT_LT(value_start, value_end)",
+            "const auto gid_start = positions[4] + 3U",
+            "observation.detail.substr(",
+            "gid_start, positions[5] - gid_start",
+            "EXPECT_EQ(gid.size(), 32U)",
+            'gid.find_first_not_of("0123456789abcdefABCDEF")',
+            "std::string::npos",
+        ),
+        "bounded writer diagnostic helper",
+    )
+    require_top_level_source_sequence(
+        diagnostic_helper,
+        (
+            "const auto gid_start = positions[4] + 3U;",
+            (
+                "const auto gid = observation.detail.substr( "
+                "gid_start, positions[5] - gid_start);"
+            ),
+            "EXPECT_EQ(gid.size(), 32U);",
+            (
+                "EXPECT_EQ( gid.find_first_not_of("
+                '"0123456789abcdefABCDEF"), std::string::npos);'
+            ),
+        ),
+        "bounded writer diagnostic helper",
+    )
+
+    long_fields = active_gtest_body(
+        test,
+        "WriterObservationSession",
+        "LongVariableFieldsPreserveEveryDiagnosticMarker",
+        "bounded writer diagnostic regression",
+    )
+    require_source_tokens(
+        long_fields,
+        (
+            "std::string(240U, 'n')",
+            "std::string(240U, 's')",
+            "std::string(240U, 't')",
+            "expect_complete_bounded_diagnostic(long_name_rejected)",
+            "expect_complete_bounded_diagnostic(long_namespace_rejected)",
+            "expect_complete_bounded_diagnostic(long_type_rejected)",
+            "first_name.back() = 'a'",
+            "second_name.back() = 'b'",
+            "EXPECT_NE(first.detail, second.detail)",
+        ),
+        "bounded writer diagnostic regression",
+    )
+    require_top_level_source_sequence(
+        long_fields,
+        (
+            (
+                "const auto long_name_rejected = long_name_session.observe( "
+                "{endpoint(writer_gid(0x66U), std::string(240U, 'n'))}, "
+                "123456ms);"
+            ),
+            "EXPECT_FALSE(long_name_rejected.ready);",
+            (
+                "EXPECT_EQ(long_name_rejected.reason, "
+                "Reason::WriterMismatch);"
+            ),
+            "expect_complete_bounded_diagnostic(long_name_rejected);",
+            (
+                "const auto long_namespace_rejected = "
+                "long_namespace_session.observe( { endpoint( "
+                "writer_gid(0x67U), \"collision_monitor\", \"/\" + "
+                "std::string(240U, 's'))}, 123456ms);"
+            ),
+            "EXPECT_FALSE(long_namespace_rejected.ready);",
+            (
+                "EXPECT_EQ(long_namespace_rejected.reason, "
+                "Reason::WriterMismatch);"
+            ),
+            (
+                "expect_complete_bounded_diagnostic("
+                "long_namespace_rejected);"
+            ),
+            (
+                "const auto long_type_rejected = long_type_session.observe( "
+                "{WriterEndpointObservation{ std::string(240U, 't'), "
+                '"collision_monitor", "/", RMW_ENDPOINT_PUBLISHER, '
+                "candidate_qos(), writer_gid(0x68U)}}, 123456ms);"
+            ),
+            "EXPECT_FALSE(long_type_rejected.ready);",
+            (
+                "EXPECT_EQ(long_type_rejected.reason, "
+                "Reason::WriterMismatch);"
+            ),
+            "expect_complete_bounded_diagnostic(long_type_rejected);",
+        ),
+        "bounded writer diagnostic observation flow",
+    )
+
+    terminal_replay = active_gtest_body(
+        test,
+        "WriterObservationSession",
+        "PinnedReplacementAndTerminalReplayPreserveEveryDiagnosticMarker",
+        "writer terminal diagnostic replay regression",
+    )
+    require_source_tokens(
+        terminal_replay,
+        (
+            "Reason::WriterMetadataPending",
+            "Reason::WriterMismatch",
+            "expect_complete_bounded_diagnostic(replacement)",
+            "expect_complete_bounded_diagnostic(replayed)",
+            "EXPECT_EQ(replayed.detail, replacement.detail)",
+        ),
+        "writer terminal diagnostic replay regression",
+    )
+
+
 def validate_node(path: Path) -> None:
     source = read_text(path)
     require_source_tokens(
@@ -959,6 +1587,7 @@ def validate_node(path: Path) -> None:
             "rclcpp::MessageInfo",
             "publisher_gid",
             "discover_unique_writer_gid_on_topic",
+            "WriterObservationSession writer_observation_session_",
             "SingleThreadedExecutor",
             "command.header.stamp",
             "get_clock()->now()",
@@ -1038,10 +1667,21 @@ def validate_node(path: Path) -> None:
         discovery,
         (
             "get_publishers_info_by_topic",
-            "endpoints.size() != 1",
+            "std::vector<WriterEndpointObservation> observations",
+            "observations.reserve(endpoints.size())",
+            "for (const auto & endpoint : endpoints)",
+            "endpoint.topic_type()",
+            "endpoint.node_name()",
+            "endpoint.node_namespace()",
+            "endpoint.endpoint_type()",
+            "endpoint.qos_profile().get_rmw_qos_profile()",
             "endpoint_gid()",
+            "std::copy(",
+            "writer_gid.begin()",
+            "writer_observation_started_at_",
+            "writer_observation_session_.observe(observations, elapsed)",
         ),
-        "MotionGate Gate-local writer discovery",
+        "MotionGate Gate-local TopicEndpointInfo adapter",
     )
 
     open_reader = method_body(
@@ -1055,6 +1695,19 @@ def validate_node(path: Path) -> None:
         raise MotionGateContractError(
             "MotionGate OPEN adapter must delegate admission to core_.open"
         )
+    provider = function_body(
+        open_reader,
+        "[this, &request, &expected_binding]()",
+        "MotionGate OPEN graph provider",
+    )
+    validate_order(
+        provider,
+        (
+            "final_controller_health_error()",
+            "discover_unique_writer_gid_on_topic",
+        ),
+        "MotionGate OPEN graph provider health-before-observation",
+    )
     graph_before_core = open_reader[:core_open_index]
     forbidden_graph_before_core = [
         token
@@ -1080,6 +1733,7 @@ def validate_node(path: Path) -> None:
         open_reader,
         (
             "core_.open(",
+            "final_controller_health_error()",
             "discover_unique_writer_gid_on_topic",
             "candidate_subscription_.reset()",
             "create_candidate_subscription",
@@ -1104,6 +1758,27 @@ def validate_node(path: Path) -> None:
             "MotionGate OPEN must build a discard reader inside the "
             "validated provider and an accepting reader only after APPLIED"
         )
+
+    prepare = method_body(
+        source,
+        "MotionGateNode",
+        "handle_prepare",
+        "motion_gate_node",
+    )
+    applied_prepare = function_body(
+        prepare,
+        "if (result.code == ResultCode::Applied)",
+        "MotionGate successful PREPARE adapter transition",
+    )
+    validate_order(
+        applied_prepare,
+        (
+            "writer_observation_session_.reset()",
+            "writer_observation_started_at_ = now",
+            "create_candidate_subscription",
+        ),
+        "MotionGate successful PREPARE writer-observation reset",
+    )
 
     candidate = method_body(
         source,
@@ -1245,11 +1920,21 @@ def validate_launch_test_registration(
     expected_path: str,
     timeout_seconds: int,
 ) -> None:
-    if "find_package(launch_testing_ament_cmake REQUIRED)" not in source:
-        raise MotionGateContractError(
-            f"{package_name} CMake must require "
-            "launch_testing_ament_cmake before add_launch_test"
+    launch_test_position = source.find("add_launch_test")
+    for dependency in (
+        "ament_cmake_ros",
+        "launch_testing_ament_cmake",
+    ):
+        dependency_position = source.find(
+            f"find_package({dependency} REQUIRED)"
         )
+        if dependency_position < 0 or not (
+            dependency_position < launch_test_position
+        ):
+            raise MotionGateContractError(
+                f"{package_name} CMake must require {dependency} "
+                "before add_launch_test"
+            )
     launch_tests = cmake_call_bodies(source, "add_launch_test")
     if len(launch_tests) != 1:
         raise MotionGateContractError(
@@ -1260,12 +1945,15 @@ def validate_launch_test_registration(
         expected_path,
         "TIMEOUT",
         str(timeout_seconds),
+        "RUNNER",
+        "${ament_cmake_ros_DIR}/run_test_isolated.py",
     ]
     actual_arguments = cmake_arguments(launch_tests[0])
     if actual_arguments != expected_arguments:
         raise MotionGateContractError(
             f"{package_name} add_launch_test must be exactly "
-            f"{expected_path} TIMEOUT {timeout_seconds}; found "
+            f"{expected_path} TIMEOUT {timeout_seconds} with the official "
+            "isolated RUNNER; found "
             + " ".join(actual_arguments)
         )
 
@@ -1276,12 +1964,32 @@ def validate_launch_test_registration(
         for body in properties_calls
         if cmake_arguments(body)[:1] == [generated_test_name]
     ]
-    if len(matching_properties) != 1:
+    if any(
+        forbidden in properties
+        for properties in matching_properties
+        for forbidden in (
+            "DISABLED",
+            "PASS_REGULAR_EXPRESSION",
+            "SKIP_REGULAR_EXPRESSION",
+            "SKIP_RETURN_CODE",
+            "WILL_FAIL",
+        )
+    ):
+        raise MotionGateContractError(
+            f"{package_name} launch test {generated_test_name} "
+            "must remain enabled"
+        )
+    run_serial_properties = [
+        properties
+        for properties in matching_properties
+        if "RUN_SERIAL" in properties
+    ]
+    if len(run_serial_properties) != 1:
         raise MotionGateContractError(
             f"{package_name} launch test {generated_test_name} must have "
             "one set_tests_properties call with RUN_SERIAL TRUE"
         )
-    properties = matching_properties[0]
+    properties = run_serial_properties[0]
     run_serial_indices = [
         index
         for index, token in enumerate(properties)
@@ -1295,6 +2003,23 @@ def validate_launch_test_registration(
         raise MotionGateContractError(
             f"{package_name} launch test {generated_test_name} must set "
             "RUN_SERIAL TRUE"
+        )
+
+    isolation_properties = [
+        properties
+        for properties in matching_properties
+        if "ENVIRONMENT_MODIFICATION" in properties
+    ]
+    expected_isolation_properties = [
+        generated_test_name,
+        "PROPERTIES",
+        "ENVIRONMENT_MODIFICATION",
+        "ROS_DOMAIN_ID=unset:;DISABLE_ROS_ISOLATION=unset:",
+    ]
+    if isolation_properties != [expected_isolation_properties]:
+        raise MotionGateContractError(
+            f"{package_name} launch test {generated_test_name} must keep "
+            "one exact process-scoped Domain isolation reset"
         )
 
 
@@ -1333,6 +2058,11 @@ def validate_mission_cmake(path: Path) -> None:
 
     for body in cmake_call_bodies(source, "install"):
         arguments = cmake_arguments(body)
+        if any("writer_observation" in argument for argument in arguments):
+            raise MotionGateContractError(
+                "writer observation adapter and session must remain "
+                "package-private"
+            )
         if any("motion_gate_core" in argument for argument in arguments):
             if any(
                 argument.endswith("motion_gate_core.hpp")
@@ -1361,6 +2091,11 @@ def validate_mission_cmake(path: Path) -> None:
     ):
         for body in cmake_call_bodies(source, command):
             arguments = cmake_arguments(body)
+            if any("writer_observation" in argument for argument in arguments):
+                raise MotionGateContractError(
+                    "writer observation adapter and session must remain "
+                    "package-private"
+                )
             if any("motion_gate_core" in argument for argument in arguments):
                 raise MotionGateContractError(
                     "motion_gate_core must not be exported"
@@ -1376,6 +2111,38 @@ def validate_mission_cmake(path: Path) -> None:
                     "motion_gate_core.hpp must not be exported through the "
                     "package include directory"
                 )
+
+    node_executable_calls = [
+        cmake_arguments(body)
+        for body in cmake_call_bodies(source, "add_executable")
+        if cmake_arguments(body)[:1] == ["motion_gate_node"]
+    ]
+    expected_node_executable = [
+        "motion_gate_node",
+        "src/motion_gate_node.cpp",
+        "src/writer_observation.cpp",
+    ]
+    if node_executable_calls != [expected_node_executable]:
+        raise MotionGateContractError(
+            "motion_gate_node must compile the private "
+            "src/writer_observation.cpp adapter"
+        )
+
+    writer_test_calls = [
+        cmake_arguments(body)
+        for body in cmake_call_bodies(source, "ament_add_gtest")
+        if cmake_arguments(body)[:1] == ["writer_observation_test"]
+    ]
+    expected_writer_test = [
+        "writer_observation_test",
+        "test/writer_observation_test.cpp",
+        "src/writer_observation.cpp",
+    ]
+    if writer_test_calls != [expected_writer_test]:
+        raise MotionGateContractError(
+            "writer_observation_test must compile the same private "
+            "writer_observation.cpp implementation"
+        )
 
     target_patterns = {
         r"add_executable\s*\(\s*motion_gate_node\b": (
@@ -1425,6 +2192,138 @@ def validate_bringup_cmake(path: Path) -> None:
     if installed != {"config", "launch"}:
         raise MotionGateContractError(
             "voice_nav_bringup CMake must install both config and launch"
+        )
+
+
+def validate_open_convergence(path: Path) -> None:
+    context = "MotionGate OPEN immediate post-attempt deadline"
+    try:
+        tree = ast.parse(read_text(path), filename=str(path))
+    except SyntaxError as error:
+        raise MotionGateContractError(
+            f"{path.name} is not valid Python: {error}"
+        ) from error
+
+    functions = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "converge_open"
+    ]
+    if len(functions) != 1:
+        raise MotionGateContractError(
+            f"{context} requires exactly one converge_open function"
+        )
+    loops = [
+        statement
+        for statement in functions[0].body
+        if isinstance(statement, ast.While)
+        and isinstance(statement.test, ast.Constant)
+        and statement.test.value is True
+    ]
+    if len(loops) != 1:
+        raise MotionGateContractError(
+            f"{context} requires exactly one top-level while True loop"
+        )
+    statements = loops[0].body
+
+    def simple_assignment(
+        statement: ast.stmt,
+        target_name: str,
+        value_text: str,
+    ) -> bool:
+        return (
+            isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+            and statement.targets[0].id == target_name
+            and ast.unparse(statement.value) == value_text
+        )
+
+    response_indices = [
+        index
+        for index, statement in enumerate(statements)
+        if simple_assignment(
+            statement,
+            "response",
+            "attempt(request_id, remaining)",
+        )
+    ]
+    if len(response_indices) != 1:
+        raise MotionGateContractError(
+            f"{context} requires one response = attempt(...) statement"
+        )
+    response_index = response_indices[0]
+    if response_index + 4 >= len(statements):
+        raise MotionGateContractError(
+            f"{context} check is missing after the attempt"
+        )
+
+    last_response = statements[response_index + 1]
+    attempts = statements[response_index + 2]
+    remaining = statements[response_index + 3]
+    deadline_check = statements[response_index + 4]
+    if not simple_assignment(last_response, "last_response", "response"):
+        raise MotionGateContractError(
+            f"{context} must record last_response first"
+        )
+    if not (
+        isinstance(attempts, ast.AugAssign)
+        and isinstance(attempts.target, ast.Name)
+        and attempts.target.id == "attempts"
+        and isinstance(attempts.op, ast.Add)
+        and isinstance(attempts.value, ast.Constant)
+        and attempts.value.value == 1
+    ):
+        raise MotionGateContractError(
+            f"{context} must increment attempts before checking time"
+        )
+    if not simple_assignment(remaining, "remaining", "deadline - now()"):
+        raise MotionGateContractError(
+            f"{context} must immediately recompute remaining time"
+        )
+    if not (
+        isinstance(deadline_check, ast.If)
+        and ast.unparse(deadline_check.test) == "remaining <= 0.0"
+        and len(deadline_check.body) == 1
+        and isinstance(deadline_check.body[0], ast.Raise)
+        and isinstance(deadline_check.body[0].exc, ast.Call)
+        and ast.unparse(deadline_check.body[0].exc)
+        == "OpenConvergenceTimeout(last_response, attempts)"
+    ):
+        raise MotionGateContractError(
+            f"{context} must immediately raise the typed timeout"
+        )
+
+    terminal_indices = [
+        index
+        for index, statement in enumerate(statements)
+        if isinstance(statement, ast.If)
+        and ast.unparse(statement.test)
+        == "not _is_writer_discovery_pending(response, protocol)"
+        and len(statement.body) == 1
+        and isinstance(statement.body[0], ast.Return)
+        and ast.unparse(statement.body[0].value) == "response"
+    ]
+    pending_validation_indices = [
+        index
+        for index, statement in enumerate(statements)
+        if isinstance(statement, ast.Expr)
+        and isinstance(statement.value, ast.Call)
+        and ast.unparse(statement.value)
+        == "_validate_pending_snapshot(response, expected, protocol)"
+    ]
+    if (
+        len(terminal_indices) != 1
+        or len(pending_validation_indices) != 1
+        or not (
+            response_index + 4
+            < terminal_indices[0]
+            < pending_validation_indices[0]
+        )
+    ):
+        raise MotionGateContractError(
+            f"{context} must precede terminal return and pending validation"
         )
 
 
@@ -1721,7 +2620,7 @@ def validate_product_launch(path: Path) -> None:
     if keyword_value(gate, "on_exit") is not None:
         raise MotionGateContractError(
             "motion_gate_node exit must leave simulation and the controller "
-            "running so Lesson 0010 can verify the consumer deadman"
+            "running so process-death tests can verify the consumer deadman"
         )
     if keyword_value(gate, "respawn") is not None:
         raise MotionGateContractError(
@@ -1808,9 +2707,15 @@ def validate_contract(root: Path) -> None:
         paths["controller_config"],
     )
     validate_core(paths["core_header"], paths["core_source"])
+    validate_writer_observation(
+        paths["writer_observation_header"],
+        paths["writer_observation_source"],
+        paths["writer_observation_test"],
+    )
     validate_node(paths["node_source"])
     validate_mission_cmake(paths["mission_cmake"])
     validate_bringup_cmake(paths["bringup_cmake"])
+    validate_open_convergence(paths["open_convergence"])
     validate_product_launch(paths["product_launch"])
     validate_unique_final_publisher(root, paths["node_source"])
 

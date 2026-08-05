@@ -7,7 +7,8 @@ target. Target Modules are not presented as implemented.
 
 Verified before this documentation migration:
 
-- provisional `MissionStep.msg` and `ExecuteMission.action`;
+- active bounded Mission V1 `MissionStep.msg`, `ExecuteMission.action`,
+  `MissionState.msg`, and `StopMission.srv` with generated type contract tests;
 - a hand-written physical differential-drive Xacro;
 - static robot-state-publisher launch and internal TF;
 - Gazebo native DiffDrive motion, configured limits, and odometry;
@@ -23,9 +24,9 @@ At the v0.1 checkpoint, the target ros2_control stack, 2D LiDAR bridge, SLAM,
 Nav2, Mission Runtime, Motion Gate, and local voice pipeline were not current
 claims.
 
-## Current v0.2 slice after Lesson 0008
+## Current v0.2 simulation and MotionGate slice
 
-Verified by the Lesson 0007 and Lesson 0008 static and headless-Gazebo gates:
+Verified by repository, static, and headless-Gazebo gates:
 
 - the product model uses `gz_ros2_control/GazeboSimSystem`;
 - Jazzy's `diff_drive_controller` owns both wheel velocity commands;
@@ -41,17 +42,16 @@ Verified by the Lesson 0007 and Lesson 0008 static and headless-Gazebo gates:
   publisher GID, and fully qualified owner are exercised over a bounded
   observation window.
 
-SLAM, Nav2, Mission Runtime, Agent, and voice remain target claims. MotionGate
-is local GREEN but not yet merged public behavior. No `map → odom` owner exists
-yet. Controller timeout is not presented as Gate-death or physical-stop
-completion.
+SLAM, Nav2, Mission Runtime, Agent, and voice remain target claims. No
+`map → odom` owner exists yet. Controller timeout is configured but is not
+presented as Gate-death or physical-stop completion; process-death acceptance
+remains a separate target slice.
 
-## In-progress v0.2 slice: Lesson 0009
+## Current independent MotionGate slice
 
-VN-0010 / Lesson 0009 now has a local-GREEN implementation of the first
-independent MotionGate vertical slice. Its full local gate and independent
-evidence review pass. It remains unmerged product behavior until the PR,
-required CI, rebase merge, and solution tag close:
+The repository publicly delivers an independently verified MotionGate vertical
+slice after exact-head local verification, independent review, required CI, and
+rebase merge:
 
 - a pure, package-internal static `MotionGateCore` behind typed
   `prepare`/`open`/`renew`/`inhibit`/`accept_candidate`/`tick`/`snapshot`/
@@ -85,10 +85,11 @@ required CI, rebase merge, and solution tag close:
   failing closed to zero/stamp-zero otherwise; plus pure-Core,
   no-Gazebo/no-`/clock` Node, and headless-Gazebo product acceptance layers.
 
-The private seam reduces product surface but is not DDS access control.
-Lesson 0009 uses a test authority/candidate harness and does not claim
-MissionRuntime, smoother, Collision Monitor, process-kill crash-stop, or
-Gazebo pause/resume completion. Crash-stop and pause recovery are Lesson 0010.
+The private seam reduces product surface but is not DDS access control. The
+current tests use an authority/candidate harness and do not claim Mission
+Runtime, smoother, Collision Monitor, process-kill crash-stop, or Gazebo
+pause/resume completion. Crash-stop and pause recovery are separate target
+acceptance slices.
 
 ## Target v1.0 topology
 

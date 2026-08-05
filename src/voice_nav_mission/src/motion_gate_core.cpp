@@ -238,7 +238,8 @@ ControlResult MotionGateCore::open(
       binding_reason != Reason::WriterUnavailable &&
       binding_reason != Reason::WriterAmbiguous &&
       binding_reason != Reason::WriterMismatch &&
-      binding_reason != Reason::WriterStillPresent)
+      binding_reason != Reason::WriterStillPresent &&
+      binding_reason != Reason::WriterMetadataPending)
     {
       binding_reason = Reason::WriterUnavailable;
     }
@@ -246,6 +247,15 @@ ControlResult MotionGateCore::open(
       request, binding_reason,
       binding.detail.empty() ? "candidate writer is not ready" :
       binding.detail);
+  }
+  if (binding.reason != Reason::None) {
+    force_fault(
+      Reason::InternalFailure,
+      "writer binding provider returned ready with a non-NONE reason");
+    auto fault = result_from_snapshot(
+      ResultCode::Faulted, reason_, detail_);
+    remember(request, fault);
+    return fault;
   }
   if (!gid_is_nonzero(binding.writer_gid)) {
     return reject(

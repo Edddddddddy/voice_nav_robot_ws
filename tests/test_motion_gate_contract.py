@@ -45,6 +45,7 @@ uint16 SEQUENCE_EXHAUSTED=15
 uint16 CONFIGURATION_INVALID=16
 uint16 PUBLISH_FAILED=17
 uint16 INTERNAL_FAILURE=18
+uint16 WRITER_METADATA_PENDING=19
 
 uint16 code
 uint16 reason
@@ -90,6 +91,7 @@ uint16 SEQUENCE_EXHAUSTED=15
 uint16 CONFIGURATION_INVALID=16
 uint16 PUBLISH_FAILED=17
 uint16 INTERNAL_FAILURE=18
+uint16 WRITER_METADATA_PENDING=19
 
 string<=36 gate_instance_id
 uint64 state_seq
@@ -212,6 +214,18 @@ ControlResult MotionGateCore::open(
   if (!binding.ready) {
     return stale_request();
   }
+  if (binding.reason != Reason::None) {
+    force_fault(
+      Reason::InternalFailure,
+      "writer binding provider returned ready with a non-NONE reason");
+    auto fault = result_from_snapshot(
+      ResultCode::Faulted, reason_, detail_);
+    remember(request, fault);
+    return fault;
+  }
+  if (!gid_is_nonzero(binding.writer_gid)) {
+    return stale_request();
+  }
   bound_writer_gid_ = binding.writer_gid;
   writer_bound_ = true;
   authority_deadline_ = now + authority_lease_;
@@ -286,6 +300,376 @@ Command MotionGateCore::tick(SteadyTimePoint now)
 }  // namespace voice_nav_mission
 """
 
+WRITER_OBSERVATION_HEADER = """\
+#pragma once
+
+#include "voice_nav_mission/motion_gate_core.hpp"
+#include <rmw/types.h>
+#include <chrono>
+#include <optional>
+#include <string>
+#include <vector>
+
+namespace voice_nav_mission
+{
+struct WriterEndpointObservation
+{
+  std::string topic_type;
+  std::string node_name;
+  std::string node_namespace;
+  rmw_endpoint_type_t endpoint_type;
+  rmw_qos_profile_t qos;
+  WriterGid writer_gid;
+};
+
+struct WriterObservationPolicy
+{
+  std::string expected_topic_type;
+  std::string expected_writer_fqn;
+};
+
+class WriterObservationSession
+{
+public:
+  explicit WriterObservationSession(WriterObservationPolicy policy);
+  OpenBinding observe(
+    const std::vector<WriterEndpointObservation> & endpoints,
+    std::chrono::milliseconds elapsed);
+  void reset() noexcept;
+
+private:
+  WriterObservationPolicy policy_;
+  std::optional<WriterGid> pinned_writer_gid_;
+  bool identity_confirmed_{false};
+  bool terminal_mismatch_{false};
+  std::string terminal_detail_;
+};
+}  // namespace voice_nav_mission
+"""
+
+WRITER_OBSERVATION_SOURCE = """\
+#include "writer_observation.hpp"
+
+#include <algorithm>
+
+namespace voice_nav_mission
+{
+namespace
+{
+constexpr std::size_t kMaximumDetailLength = 160U;
+constexpr std::size_t kDigestSuffixLength = 9U;
+constexpr std::size_t kSummaryFixedLength = 55U;
+constexpr std::size_t kSummaryValueCount = 5U;
+constexpr std::size_t kMinimumSummaryLength =
+  kSummaryFixedLength + kSummaryValueCount * kDigestSuffixLength;
+constexpr char kUnknownNodeName[] = "_NODE_NAME_UNKNOWN_";
+constexpr char kUnknownNodeNamespace[] = "_NODE_NAMESPACE_UNKNOWN_";
+
+std::string bounded_detail(std::string detail)
+{
+  if (detail.size() > kMaximumDetailLength) {
+    detail.resize(kMaximumDetailLength);
+  }
+  return detail;
+}
+
+std::string digest_text(const std::string & value)
+{
+  std::uint32_t digest = 2166136261U;
+  digest *= 16777619U;
+  return std::to_string(digest + value.size());
+}
+
+std::string compact_field(
+  const std::string & value,
+  std::size_t maximum_length)
+{
+  return value.size() <= maximum_length ? value : digest_text(value);
+}
+
+std::string observation_detail(
+  std::string reason,
+  const WriterEndpointObservation &,
+  std::chrono::milliseconds)
+{
+  return compact_field(reason, kMaximumDetailLength);
+}
+
+bool gid_is_zero(const WriterGid & gid)
+{
+  return std::all_of(
+    gid.cbegin(), gid.cend(),
+    [](std::uint8_t value) {return value == 0U;});
+}
+
+bool candidate_qos_is_compatible(const rmw_qos_profile_t & qos)
+{
+  return qos.depth == 1U;
+}
+
+std::string normalized_namespace(std::string node_namespace)
+{
+  return node_namespace.empty() ? "/" : node_namespace;
+}
+
+bool node_name_is_unresolved(const std::string & node_name)
+{
+  return node_name.empty() || node_name == kUnknownNodeName;
+}
+
+bool node_namespace_is_unresolved(const std::string & node_namespace)
+{
+  return node_namespace == kUnknownNodeNamespace;
+}
+
+std::string endpoint_fqn(const WriterEndpointObservation & endpoint)
+{
+  return normalized_namespace(endpoint.node_namespace) + endpoint.node_name;
+}
+
+std::string fqn_namespace(const std::string & fqn)
+{
+  return fqn.substr(0U, fqn.rfind('/') + 1U);
+}
+
+std::string fqn_name(const std::string & fqn)
+{
+  return fqn.substr(fqn.rfind('/') + 1U);
+}
+
+std::string observation_summary(
+  const WriterEndpointObservation & endpoint,
+  std::chrono::milliseconds elapsed)
+{
+  return
+    "n=1 k=" + std::to_string(endpoint.endpoint_type) +
+    " id=" + endpoint.node_name +
+    " q=" + std::to_string(endpoint.qos.depth) +
+    " g=" + std::to_string(endpoint.writer_gid.back()) +
+    " ms=" + std::to_string(elapsed.count()) +
+    " t=" + endpoint.topic_type;
+}
+
+OpenBinding mismatch(std::string detail)
+{
+  return {false, Reason::WriterMismatch, {}, bounded_detail(detail)};
+}
+}  // namespace
+
+OpenBinding WriterObservationSession::observe(
+  const std::vector<WriterEndpointObservation> & endpoints,
+  std::chrono::milliseconds elapsed)
+{
+  if (terminal_mismatch_) {
+    return mismatch(terminal_detail_);
+  }
+  const auto reject_mismatch = [this](std::string detail) {
+      if (pinned_writer_gid_) {
+        terminal_mismatch_ = true;
+        terminal_detail_ = detail;
+      }
+      return mismatch(detail);
+    };
+  if (endpoints.empty()) {
+    return {false, Reason::WriterUnavailable, {}, "no writer"};
+  }
+  if (endpoints.size() != 1U) {
+    return {false, Reason::WriterAmbiguous, {}, "ambiguous"};
+  }
+  const auto & endpoint = endpoints.front();
+  const auto summary = observation_summary(endpoint, elapsed);
+  if (endpoint.endpoint_type != RMW_ENDPOINT_PUBLISHER) {
+    return reject_mismatch("wrong endpoint kind");
+  }
+  if (endpoint.topic_type != policy_.expected_topic_type) {
+    return reject_mismatch("wrong type");
+  }
+  if (!candidate_qos_is_compatible(endpoint.qos)) {
+    return reject_mismatch("wrong qos");
+  }
+  if (gid_is_zero(endpoint.writer_gid)) {
+    return reject_mismatch("zero gid");
+  }
+  if (pinned_writer_gid_ &&
+    *pinned_writer_gid_ != endpoint.writer_gid)
+  {
+    return reject_mismatch("replacement writer");
+  }
+  const bool name_unresolved =
+    node_name_is_unresolved(endpoint.node_name);
+  const bool namespace_unresolved =
+    node_namespace_is_unresolved(endpoint.node_namespace);
+  const auto expected_namespace =
+    fqn_namespace(policy_.expected_writer_fqn);
+  const auto expected_name =
+    fqn_name(policy_.expected_writer_fqn);
+  if (!name_unresolved && endpoint.node_name != expected_name) {
+    return reject_mismatch("partial node name mismatch; " + summary);
+  }
+  if (!namespace_unresolved) {
+    const auto observed_namespace =
+      normalized_namespace(endpoint.node_namespace);
+    if (observed_namespace != expected_namespace) {
+      return reject_mismatch("partial identity mismatch; " + summary);
+    }
+  }
+  if (name_unresolved || namespace_unresolved) {
+    if (identity_confirmed_) {
+      return {true, Reason::None, endpoint.writer_gid, "retained"};
+    }
+    if (!pinned_writer_gid_) {
+      pinned_writer_gid_ = endpoint.writer_gid;
+    }
+    return {
+      false,
+      Reason::WriterMetadataPending,
+      endpoint.writer_gid,
+      bounded_detail("identity unresolved; " + summary)};
+  }
+  const auto observed_fqn = endpoint_fqn(endpoint);
+  if (observed_fqn != policy_.expected_writer_fqn) {
+    return reject_mismatch("wrong fqn");
+  }
+  if (!pinned_writer_gid_) {
+    pinned_writer_gid_ = endpoint.writer_gid;
+  }
+  identity_confirmed_ = true;
+  return {true, Reason::None, endpoint.writer_gid, "ready"};
+}
+
+void WriterObservationSession::reset() noexcept
+{
+  pinned_writer_gid_.reset();
+  identity_confirmed_ = false;
+  terminal_mismatch_ = false;
+  terminal_detail_.clear();
+}
+}  // namespace voice_nav_mission
+"""
+
+WRITER_OBSERVATION_TEST = """\
+#include "writer_observation.hpp"
+#include <gtest/gtest.h>
+
+#include <array>
+
+void expect_complete_bounded_diagnostic(const OpenBinding & observation)
+{
+  EXPECT_LE(observation.detail.size(), 160U);
+  constexpr std::array<const char *, 7U> markers{
+    "n=1", " k=", " id=", " q=", " g=", " ms=", " t="};
+  std::array<std::size_t, markers.size()> positions{};
+  for (std::size_t index = 0U; index < markers.size(); ++index) {
+    positions[index] = observation.detail.find(markers[index]);
+    ASSERT_NE(positions[index], std::string::npos);
+    if (index > 0U) {
+      ASSERT_LT(positions[index - 1U], positions[index]);
+    }
+  }
+  for (std::size_t index = 1U; index < markers.size(); ++index) {
+    const auto value_start = positions[index] + 3U;
+    const auto value_end = index + 1U < markers.size() ?
+      positions[index + 1U] : observation.detail.size();
+    EXPECT_LT(value_start, value_end);
+  }
+  const auto gid_start = positions[4] + 3U;
+  const auto gid = observation.detail.substr(
+    gid_start, positions[5] - gid_start);
+  EXPECT_EQ(gid.size(), 32U);
+  EXPECT_EQ(
+    gid.find_first_not_of("0123456789abcdefABCDEF"),
+    std::string::npos);
+}
+
+TEST(WriterObservationSession, PinsUnresolvedIdentityUntilTheSameWriterResolves)
+{
+  EXPECT_EQ(pending.reason, Reason::WriterMetadataPending);
+  EXPECT_LE(pending.detail.size(), 160U);
+  for (const auto * field : {"n=1", "t=", "id=", "q=", "g=", "ms=7"}) {
+    EXPECT_NE(pending.detail.find(field), std::string::npos);
+  }
+}
+
+TEST(WriterObservationSession, ReplacementPoisonsPinnedGenerationUntilReset)
+{
+  EXPECT_EQ(replacement.reason, Reason::WriterMismatch);
+  session.reset();
+}
+
+TEST(WriterObservationSession, ConfirmedSameGidSurvivesIdentityOnlyGraphRegression)
+{
+  EXPECT_TRUE(regressed.ready);
+}
+
+TEST(WriterObservationSession, KnownWrongNamespaceCannotEnterPending)
+{
+  EXPECT_EQ(result.reason, Reason::WriterMismatch);
+}
+
+TEST(WriterObservationSession, ExactUnknownIdentityMarkersConvergeForPinnedGid)
+{
+  const auto name = "_NODE_NAME_UNKNOWN_";
+  const auto ns = "_NODE_NAMESPACE_UNKNOWN_";
+  EXPECT_EQ(pending.reason, Reason::WriterMetadataPending);
+}
+
+TEST(WriterObservationSession, KnownPartialIdentityMustAgreeBeforePending)
+{
+  EXPECT_EQ(contradiction.reason, Reason::WriterMismatch);
+}
+
+TEST(WriterObservationSession, LongVariableFieldsPreserveEveryDiagnosticMarker)
+{
+  WriterObservationSession long_name_session(policy);
+  const auto long_name_rejected = long_name_session.observe(
+    {endpoint(writer_gid(0x66U), std::string(240U, 'n'))}, 123456ms);
+  EXPECT_FALSE(long_name_rejected.ready);
+  EXPECT_EQ(long_name_rejected.reason, Reason::WriterMismatch);
+  expect_complete_bounded_diagnostic(long_name_rejected);
+  WriterObservationSession long_namespace_session(policy);
+  const auto long_namespace_rejected = long_namespace_session.observe(
+      {
+        endpoint(
+          writer_gid(0x67U), "collision_monitor",
+          "/" + std::string(240U, 's'))},
+    123456ms);
+  EXPECT_FALSE(long_namespace_rejected.ready);
+  EXPECT_EQ(long_namespace_rejected.reason, Reason::WriterMismatch);
+  expect_complete_bounded_diagnostic(long_namespace_rejected);
+  WriterObservationSession long_type_session(policy);
+  const auto long_type_rejected = long_type_session.observe(
+    {WriterEndpointObservation{
+        std::string(240U, 't'),
+        "collision_monitor",
+        "/",
+        RMW_ENDPOINT_PUBLISHER,
+        candidate_qos(),
+        writer_gid(0x68U)}},
+    123456ms);
+  EXPECT_FALSE(long_type_rejected.ready);
+  EXPECT_EQ(long_type_rejected.reason, Reason::WriterMismatch);
+  expect_complete_bounded_diagnostic(long_type_rejected);
+  auto first_name = std::string(240U, 'p');
+  auto second_name = first_name;
+  first_name.back() = 'a';
+  second_name.back() = 'b';
+  const auto first = observe(first_name);
+  const auto second = observe(second_name);
+  EXPECT_NE(first.detail, second.detail);
+}
+
+TEST(
+  WriterObservationSession,
+  PinnedReplacementAndTerminalReplayPreserveEveryDiagnosticMarker)
+{
+  EXPECT_EQ(pending.reason, Reason::WriterMetadataPending);
+  EXPECT_EQ(replacement.reason, Reason::WriterMismatch);
+  expect_complete_bounded_diagnostic(replacement);
+  expect_complete_bounded_diagnostic(replayed);
+  EXPECT_EQ(replayed.detail, replacement.detail);
+}
+"""
+
 NODE_SOURCE = """\
 #include <chrono>
 #include <mutex>
@@ -293,6 +677,7 @@ NODE_SOURCE = """\
 #include "geometry_msgs/msg/twist_stamped.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rmw/types.h"
+#include "writer_observation.hpp"
 
 using namespace std::chrono_literals;
 static_assert(RMW_GID_STORAGE_SIZE == 16u);
@@ -301,7 +686,10 @@ class MotionGateNode : public rclcpp::Node
 {
 public:
   MotionGateNode()
-  : Node("motion_gate_node")
+  : Node("motion_gate_node"),
+    writer_observation_session_({
+      "geometry_msgs/msg/TwistStamped",
+      "/collision_monitor"})
   {
     auto candidate_qos = rclcpp::QoS(rclcpp::KeepLast(1))
       .best_effort().durability_volatile();
@@ -338,14 +726,33 @@ public:
       });
   }
 
-  std::array<std::uint8_t, RMW_GID_STORAGE_SIZE>
+  OpenBinding
   discover_unique_writer_gid_on_topic(const std::string & topic)
   {
     const auto endpoints = get_publishers_info_by_topic(topic);
-    if (endpoints.size() != 1) {
-      throw std::runtime_error("candidate topic must have one writer");
+    std::vector<WriterEndpointObservation> observations;
+    observations.reserve(endpoints.size());
+    for (const auto & endpoint : endpoints) {
+      WriterGid writer_gid{};
+      const auto & endpoint_gid = endpoint.endpoint_gid();
+      std::copy(
+        endpoint_gid.cbegin(), endpoint_gid.cend(), writer_gid.begin());
+      observations.push_back(WriterEndpointObservation{
+        endpoint.topic_type(),
+        endpoint.node_name(),
+        endpoint.node_namespace(),
+        static_cast<rmw_endpoint_type_t>(endpoint.endpoint_type()),
+        endpoint.qos_profile().get_rmw_qos_profile(),
+        writer_gid});
     }
-    return endpoints.front().endpoint_gid();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - writer_observation_started_at_);
+    return writer_observation_session_.observe(observations, elapsed);
+  }
+
+  std::optional<std::string> final_controller_health_error() const
+  {
+    return std::nullopt;
   }
 
   void open_candidate_reader(
@@ -357,8 +764,15 @@ public:
       request,
       std::chrono::steady_clock::now(),
       [this, &request, &expected_binding]() {
+        if (const auto error = final_controller_health_error()) {
+          return OpenBinding{
+            false, Reason::WriterUnavailable, {}, *error};
+        }
         const auto first =
           discover_unique_writer_gid_on_topic(candidate_topic_);
+        if (!first.ready) {
+          return first;
+        }
         candidate_subscription_.reset();
         candidate_subscription_ =
           create_candidate_subscription(
@@ -383,6 +797,20 @@ public:
     (void)third;
     (void)expected_binding;
     response.code = response.APPLIED;
+  }
+
+  ControlResult handle_prepare(
+    const ControlRequest & request,
+    SteadyTimePoint now)
+  {
+    auto result = core_.prepare(request, now);
+    if (result.code == ResultCode::Applied) {
+      writer_observation_session_.reset();
+      writer_observation_started_at_ = now;
+      candidate_subscription_ = create_candidate_subscription(
+        result.candidate_topic, result.lease_id, true);
+    }
+    return result;
   }
 
   void on_candidate(
@@ -455,6 +883,8 @@ public:
 
 private:
   std::mutex publication_mutex_;
+  WriterObservationSession writer_observation_session_;
+  MotionGateCore::SteadyTimePoint writer_observation_started_at_{};
 };
 
 int main(int argc, char ** argv)
@@ -485,6 +915,7 @@ MISSION_PACKAGE = """\
   <exec_depend>rosidl_default_runtime</exec_depend>
   <exec_depend>rmw_fastrtps_cpp</exec_depend>
   <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>ament_cmake_ros</test_depend>
   <test_depend>launch_ros</test_depend>
   <test_depend>launch_testing</test_depend>
   <test_depend>launch_testing_ament_cmake</test_depend>
@@ -493,10 +924,11 @@ MISSION_PACKAGE = """\
 """
 
 MISSION_CMAKE = """\
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.22)
 project(voice_nav_mission)
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_ros REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(launch_testing_ament_cmake REQUIRED)
 
@@ -506,7 +938,11 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 )
 
 add_library(motion_gate_core STATIC src/motion_gate_core.cpp)
-add_executable(motion_gate_node src/motion_gate_node.cpp)
+add_executable(
+  motion_gate_node
+  src/motion_gate_node.cpp
+  src/writer_observation.cpp
+)
 rosidl_get_typesupport_target(
   motion_gate_typesupport
   ${PROJECT_NAME}
@@ -516,14 +952,26 @@ target_link_libraries(motion_gate_node motion_gate_core "${motion_gate_typesuppo
 
 if(BUILD_TESTING)
   ament_add_gtest(motion_gate_core_test test/motion_gate_core_test.cpp)
+  ament_add_gtest(
+    writer_observation_test
+    test/writer_observation_test.cpp
+    src/writer_observation.cpp
+  )
   add_launch_test(
     test/test_motion_gate_node.py
     TIMEOUT 60
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
   )
   set_tests_properties(
     test_test_motion_gate_node.py
     PROPERTIES
       RUN_SERIAL TRUE
+  )
+  set_tests_properties(
+    test_test_motion_gate_node.py
+    PROPERTIES
+      ENVIRONMENT_MODIFICATION
+        "ROS_DOMAIN_ID=unset:;DISABLE_ROS_ISOLATION=unset:"
   )
 endif()
 
@@ -607,20 +1055,28 @@ BRINGUP_PACKAGE = """\
 """
 
 BRINGUP_CMAKE = """\
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.22)
 project(voice_nav_bringup)
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_ros REQUIRED)
 find_package(launch_testing_ament_cmake REQUIRED)
 if(BUILD_TESTING)
   add_launch_test(
     test/test_motion_gate_product.py
     TIMEOUT 180
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
   )
   set_tests_properties(
     test_test_motion_gate_product.py
     PROPERTIES
       RUN_SERIAL TRUE
+  )
+  set_tests_properties(
+    test_test_motion_gate_product.py
+    PROPERTIES
+      ENVIRONMENT_MODIFICATION
+        "ROS_DOMAIN_ID=unset:;DISABLE_ROS_ISOLATION=unset:"
   )
 endif()
 install(
@@ -630,6 +1086,42 @@ install(
   DESTINATION share/${PROJECT_NAME}
 )
 ament_package()
+"""
+
+OPEN_CONVERGENCE = """\
+def converge_open(
+    *,
+    expected,
+    protocol,
+    attempt,
+    new_request_id,
+    deadline,
+    now,
+    sleep,
+    backoff_seconds,
+):
+    last_response = None
+    attempts = 0
+    seen_request_ids = set()
+    while True:
+        remaining = deadline - now()
+        if remaining <= 0.0:
+            raise OpenConvergenceTimeout(last_response, attempts)
+        request_id = new_request_id()
+        seen_request_ids.add(request_id)
+        response = attempt(request_id, remaining)
+        last_response = response
+        attempts += 1
+        remaining = deadline - now()
+        if remaining <= 0.0:
+            raise OpenConvergenceTimeout(last_response, attempts)
+        if not _is_writer_discovery_pending(response, protocol):
+            return response
+        _validate_pending_snapshot(response, expected, protocol)
+        remaining = deadline - now()
+        if remaining <= 0.0:
+            raise OpenConvergenceTimeout(last_response, attempts)
+        sleep(min(backoff_seconds[0], remaining))
 """
 
 CONTROLLERS = """\
@@ -658,6 +1150,15 @@ FIXTURE_FILES = {
         "motion_gate_core.hpp"
     ): CORE_HEADER,
     "src/voice_nav_mission/src/motion_gate_core.cpp": CORE_SOURCE,
+    (
+        "src/voice_nav_mission/src/writer_observation.hpp"
+    ): WRITER_OBSERVATION_HEADER,
+    (
+        "src/voice_nav_mission/src/writer_observation.cpp"
+    ): WRITER_OBSERVATION_SOURCE,
+    (
+        "src/voice_nav_mission/test/writer_observation_test.cpp"
+    ): WRITER_OBSERVATION_TEST,
     "src/voice_nav_mission/src/motion_gate_node.cpp": NODE_SOURCE,
     "src/voice_nav_mission/package.xml": MISSION_PACKAGE,
     "src/voice_nav_mission/CMakeLists.txt": MISSION_CMAKE,
@@ -667,6 +1168,10 @@ FIXTURE_FILES = {
     ): PRODUCT_LAUNCH,
     "src/voice_nav_bringup/package.xml": BRINGUP_PACKAGE,
     "src/voice_nav_bringup/CMakeLists.txt": BRINGUP_CMAKE,
+    (
+        "src/voice_nav_bringup/test/"
+        "motion_gate_open_convergence.py"
+    ): OPEN_CONVERGENCE,
     "src/voice_nav_sim/config/controllers.yaml": CONTROLLERS,
 }
 
@@ -737,6 +1242,650 @@ class MotionGateContractTest(unittest.TestCase):
         )
 
         self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_node_must_delegate_gate_local_snapshot_to_observation_session(
+        self,
+    ) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_mission/src/motion_gate_node.cpp",
+                (
+                    "return writer_observation_session_.observe("
+                    "observations, elapsed);"
+                ),
+                "return OpenBinding{};",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("Gate-local TopicEndpointInfo adapter", completed.stderr)
+
+    def test_pending_identity_must_pin_the_nonzero_writer_gid(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_mission/src/writer_observation.cpp",
+                "pinned_writer_gid_ = endpoint.writer_gid;",
+                "// unresolved identity is not pinned",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("unresolved node-identity branch", completed.stderr)
+
+    def test_writer_mismatch_cannot_be_broadened_into_typed_pending(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_mission/src/writer_observation.cpp",
+                "Reason::WriterMismatch",
+                "Reason::WriterMetadataPending",
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("WriterObservationSession implementation", completed.stderr)
+
+    def test_long_writer_diagnostic_regression_must_remain_active(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_mission/test/writer_observation_test.cpp",
+                (
+                    "TEST(WriterObservationSession, "
+                    "LongVariableFieldsPreserveEveryDiagnosticMarker)"
+                ),
+                (
+                    "TEST(WriterObservationSession, "
+                    "DISABLED_LongVariableFieldsPreserveEveryDiagnosticMarker)"
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("bounded writer diagnostic regression", completed.stderr)
+
+    def test_required_gtest_rejects_inactive_and_literal_decoys(self) -> None:
+        test_path = (
+            "src/voice_nav_mission/test/writer_observation_test.cpp"
+        )
+        test_signature = (
+            "TEST(WriterObservationSession, "
+            "LongVariableFieldsPreserveEveryDiagnosticMarker)"
+        )
+
+        def conditionally_disabled(root: Path) -> None:
+            path = root / test_path
+            source = path.read_text(encoding="utf-8")
+            source = source.replace(
+                test_signature,
+                "#if false\n" + test_signature,
+                1,
+            )
+            source = source.replace(
+                (
+                    "\nTEST(\n"
+                    "  WriterObservationSession,\n"
+                    "  PinnedReplacementAndTerminalReplay"
+                ),
+                (
+                    "\n#endif\n\nTEST(\n"
+                    "  WriterObservationSession,\n"
+                    "  PinnedReplacementAndTerminalReplay"
+                ),
+                1,
+            )
+            path.write_text(source, encoding="utf-8")
+
+        def whitespace_skip(root: Path) -> None:
+            self.replace(
+                root,
+                test_path,
+                test_signature + "\n{",
+                test_signature + "\n{\n  GTEST_SKIP ();",
+            )
+
+        def line_spliced_skip(root: Path) -> None:
+            self.replace(
+                root,
+                test_path,
+                test_signature + "\n{",
+                (
+                    test_signature + "\n{\n  "
+                    "GTEST_\\\nSKIP ();"
+                ),
+            )
+
+        def nested_early_return(root: Path) -> None:
+            self.replace(
+                root,
+                test_path,
+                test_signature + "\n{",
+                (
+                    test_signature + "\n{\n"
+                    "  if (true) { return void(); }"
+                ),
+            )
+
+        def line_spliced_conditional(root: Path) -> None:
+            path = root / test_path
+            source = path.read_text(encoding="utf-8")
+            source = source.replace(
+                test_signature,
+                "#\\\nif false\n" + test_signature,
+                1,
+            )
+            source = source.replace(
+                (
+                    "\nTEST(\n"
+                    "  WriterObservationSession,\n"
+                    "  PinnedReplacementAndTerminalReplay"
+                ),
+                (
+                    "\n#endif\n\nTEST(\n"
+                    "  WriterObservationSession,\n"
+                    "  PinnedReplacementAndTerminalReplay"
+                ),
+                1,
+            )
+            path.write_text(source, encoding="utf-8")
+
+        def line_spliced_block_comment(root: Path) -> None:
+            path = root / test_path
+            source = path.read_text(encoding="utf-8")
+            source = source.replace(
+                test_signature,
+                "/\\\n*\n" + test_signature,
+                1,
+            )
+            source = source.replace(
+                (
+                    "\nTEST(\n"
+                    "  WriterObservationSession,\n"
+                    "  PinnedReplacementAndTerminalReplay"
+                ),
+                (
+                    "\n*\\\n/\n\nTEST(\n"
+                    "  WriterObservationSession,\n"
+                    "  PinnedReplacementAndTerminalReplay"
+                ),
+                1,
+            )
+            path.write_text(source, encoding="utf-8")
+
+        def disabled_with_literal_decoy(root: Path) -> None:
+            path = root / test_path
+            source = path.read_text(encoding="utf-8")
+            source = source.replace(
+                test_signature,
+                (
+                    'const char * decoy = "' + test_signature + '";\n'
+                    + test_signature.replace(
+                        "LongVariableFields",
+                        "DISABLED_LongVariableFields",
+                    )
+                ),
+                1,
+            )
+            path.write_text(source, encoding="utf-8")
+
+        for mutation in (
+            conditionally_disabled,
+            whitespace_skip,
+            line_spliced_skip,
+            nested_early_return,
+            line_spliced_conditional,
+            line_spliced_block_comment,
+            disabled_with_literal_decoy,
+        ):
+            with self.subTest(mutation=mutation.__name__):
+                completed = self.run_checker(mutation)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(
+                    "bounded writer diagnostic regression",
+                    completed.stderr,
+                )
+
+    def test_active_gtest_parser_ignores_literal_braces(self) -> None:
+        def mutation(root: Path) -> None:
+            self.replace(
+                root,
+                "src/voice_nav_mission/test/writer_observation_test.cpp",
+                (
+                    "TEST(WriterObservationSession, "
+                    "LongVariableFieldsPreserveEveryDiagnosticMarker)\n{"
+                ),
+                (
+                    "TEST(WriterObservationSession, "
+                    "LongVariableFieldsPreserveEveryDiagnosticMarker)\n{\n"
+                    '  const auto brace = "}";\n'
+                    '  const auto raw_braces = R"tag({})tag";\n'
+                    "  (void)brace;\n"
+                    "  (void)raw_braces;"
+                ),
+            )
+
+        completed = self.run_checker(mutation)
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+
+    def test_conditional_policy_error_names_the_whole_file_rule(self) -> None:
+        def mutation(root: Path) -> None:
+            path = (
+                root
+                / "src/voice_nav_mission/test/writer_observation_test.cpp"
+            )
+            source = path.read_text(encoding="utf-8")
+            source += "\n#if defined(UNRELATED_PLATFORM_HELPER)\n#endif\n"
+            path.write_text(source, encoding="utf-8")
+
+        completed = self.run_checker(mutation)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn(
+            "dedicated test source forbids all conditional compilation",
+            completed.stderr,
+        )
+
+    def test_diagnostic_helper_cannot_skip_or_return_early(self) -> None:
+        signature = (
+            "void expect_complete_bounded_diagnostic("
+            "const OpenBinding & observation)\n{"
+        )
+        for short_circuit in ("GTEST_SKIP ();", "return void();"):
+            with self.subTest(short_circuit=short_circuit):
+                def mutation(
+                    root: Path,
+                    statement: str = short_circuit,
+                ) -> None:
+                    self.replace(
+                        root,
+                        (
+                            "src/voice_nav_mission/test/"
+                            "writer_observation_test.cpp"
+                        ),
+                        signature,
+                        signature + "\n  " + statement,
+                    )
+
+                completed = self.run_checker(mutation)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(
+                    "bounded writer diagnostic helper",
+                    completed.stderr,
+                )
+
+    def test_long_writer_diagnostic_regression_covers_all_fields(self) -> None:
+        mutations = (
+            ("std::string(240U, 'n')", "std::string(24U, 'n')"),
+            ("std::string(240U, 's')", "std::string(24U, 's')"),
+            ("std::string(240U, 't')", "std::string(24U, 't')"),
+            ('" g="', '" gid="'),
+            (
+                "EXPECT_NE(first.detail, second.detail);",
+                "EXPECT_EQ(first.detail, second.detail);",
+            ),
+        )
+        for old, new in mutations:
+            with self.subTest(mutation=old):
+                def mutation(
+                    root: Path,
+                    old_value: str = old,
+                    new_value: str = new,
+                ) -> None:
+                    self.replace(
+                        root,
+                        (
+                            "src/voice_nav_mission/test/"
+                            "writer_observation_test.cpp"
+                        ),
+                        old_value,
+                        new_value,
+                    )
+
+                completed = self.run_checker(mutation)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertTrue(
+                    "bounded writer diagnostic" in completed.stderr,
+                    completed.stderr,
+                )
+
+    def test_long_values_must_flow_into_observation_and_gid_is_parsed(
+        self,
+    ) -> None:
+        mutations = (
+            (
+                (
+                    "const auto long_name_rejected = long_name_session.observe(\n"
+                    "    {endpoint(writer_gid(0x66U), "
+                    "std::string(240U, 'n'))}, 123456ms);"
+                ),
+                (
+                    "const auto unused_long_name = std::string(240U, 'n');\n"
+                    "  const auto long_name_rejected = OpenBinding{};"
+                ),
+            ),
+            (
+                (
+                    "const auto long_namespace_rejected = "
+                    "long_namespace_session.observe(\n"
+                    "      {\n"
+                    "        endpoint(\n"
+                    "          writer_gid(0x67U), \"collision_monitor\",\n"
+                    "          \"/\" + std::string(240U, 's'))},\n"
+                    "    123456ms);"
+                ),
+                (
+                    "const auto unused_long_namespace = "
+                    "std::string(240U, 's');\n"
+                    "  const auto long_namespace_rejected = OpenBinding{};"
+                ),
+            ),
+            (
+                (
+                    "const auto long_type_rejected = long_type_session.observe(\n"
+                    "    {WriterEndpointObservation{\n"
+                    "        std::string(240U, 't'),\n"
+                    "        \"collision_monitor\",\n"
+                    "        \"/\",\n"
+                    "        RMW_ENDPOINT_PUBLISHER,\n"
+                    "        candidate_qos(),\n"
+                    "        writer_gid(0x68U)}},\n"
+                    "    123456ms);"
+                ),
+                "const auto long_type_rejected = OpenBinding{};",
+            ),
+            (
+                (
+                    "const auto long_type_rejected = long_type_session.observe(\n"
+                    "    {WriterEndpointObservation{\n"
+                    "        std::string(240U, 't'),\n"
+                    "        \"collision_monitor\",\n"
+                    "        \"/\",\n"
+                    "        RMW_ENDPOINT_PUBLISHER,\n"
+                    "        candidate_qos(),\n"
+                    "        writer_gid(0x68U)}},\n"
+                    "    123456ms);"
+                ),
+                (
+                    "if (false) {\n"
+                    "    const auto long_type_rejected = "
+                    "long_type_session.observe(\n"
+                    "      {WriterEndpointObservation{\n"
+                    "          std::string(240U, 't'),\n"
+                    "          \"collision_monitor\",\n"
+                    "          \"/\",\n"
+                    "          RMW_ENDPOINT_PUBLISHER,\n"
+                    "          candidate_qos(),\n"
+                    "          writer_gid(0x68U)}},\n"
+                    "      123456ms);\n"
+                    "    (void)long_type_rejected;\n"
+                    "  }\n"
+                    "  const auto long_type_rejected = OpenBinding{};"
+                ),
+            ),
+            (
+                (
+                    "const auto gid = observation.detail.substr(\n"
+                    "    gid_start, positions[5] - gid_start);"
+                ),
+                "const auto gid = std::string(32U, '0');",
+            ),
+            (
+                (
+                    "const auto gid = observation.detail.substr(\n"
+                    "    gid_start, positions[5] - gid_start);"
+                ),
+                (
+                    "const auto gid = true ? std::string(32U, '0') :\n"
+                    "    observation.detail.substr(\n"
+                    "    gid_start, positions[5] - gid_start);"
+                ),
+            ),
+            (
+                (
+                    "EXPECT_EQ(\n"
+                    "    gid.find_first_not_of("
+                    "\"0123456789abcdefABCDEF\"),\n"
+                    "    std::string::npos);"
+                ),
+                "EXPECT_EQ(std::string::npos, std::string::npos);",
+            ),
+        )
+        for old, new in mutations:
+            with self.subTest(mutation=old):
+                def mutation(
+                    root: Path,
+                    old_value: str = old,
+                    new_value: str = new,
+                ) -> None:
+                    self.replace(
+                        root,
+                        (
+                            "src/voice_nav_mission/test/"
+                            "writer_observation_test.cpp"
+                        ),
+                        old_value,
+                        new_value,
+                    )
+
+                completed = self.run_checker(mutation)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertTrue(
+                    "bounded writer diagnostic" in completed.stderr,
+                    completed.stderr,
+                )
+
+    def test_long_writer_diagnostic_flow_is_direct_and_rejected(
+        self,
+    ) -> None:
+        test_path = (
+            "src/voice_nav_mission/test/writer_observation_test.cpp"
+        )
+
+        def detached_long_type_value(root: Path) -> None:
+            path = root / test_path
+            source = path.read_text(encoding="utf-8")
+            direct_observation = (
+                "  const auto long_type_rejected = "
+                "long_type_session.observe(\n"
+                "    {WriterEndpointObservation{\n"
+                "        std::string(240U, 't'),\n"
+                "        \"collision_monitor\",\n"
+                "        \"/\",\n"
+                "        RMW_ENDPOINT_PUBLISHER,\n"
+                "        candidate_qos(),\n"
+                "        writer_gid(0x68U)}},\n"
+                "    123456ms);"
+            )
+            detached_observation = (
+                "  const auto unused_long_type = std::string(240U, 't');\n"
+                "  const auto long_type_rejected = "
+                "long_type_session.observe(\n"
+                "    {WriterEndpointObservation{\n"
+                "        \"geometry_msgs/msg/TwistStamped\",\n"
+                "        \"collision_monitor\",\n"
+                "        \"/\",\n"
+                "        RMW_ENDPOINT_SUBSCRIPTION,\n"
+                "        candidate_qos(),\n"
+                "        writer_gid(0x68U)}},\n"
+                "    123456ms);\n"
+                "  (void)unused_long_type;"
+            )
+            self.assertEqual(source.count(direct_observation), 1)
+            source = source.replace(
+                direct_observation,
+                detached_observation,
+                1,
+            )
+            path.write_text(source, encoding="utf-8")
+
+        mutations = [detached_long_type_value]
+        for result_name in (
+            "long_name_rejected",
+            "long_namespace_rejected",
+            "long_type_rejected",
+        ):
+            def accepts_ready_result(
+                root: Path,
+                name: str = result_name,
+            ) -> None:
+                self.replace(
+                    root,
+                    test_path,
+                    f"EXPECT_FALSE({name}.ready);",
+                    f"EXPECT_TRUE({name}.ready);",
+                )
+
+            def accepts_non_mismatch_reason(
+                root: Path,
+                name: str = result_name,
+            ) -> None:
+                self.replace(
+                    root,
+                    test_path,
+                    (
+                        f"EXPECT_EQ({name}.reason, "
+                        "Reason::WriterMismatch);"
+                    ),
+                    f"EXPECT_EQ({name}.reason, Reason::None);",
+                )
+
+            mutations.extend(
+                (accepts_ready_result, accepts_non_mismatch_reason)
+            )
+
+        for mutation in mutations:
+            with self.subTest(mutation=mutation.__name__):
+                completed = self.run_checker(mutation)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(
+                    "bounded writer diagnostic",
+                    completed.stderr,
+                )
+
+    def test_pinned_replacement_and_terminal_replay_diagnostics_are_required(
+        self,
+    ) -> None:
+        mutations = (
+            (
+                "PinnedReplacementAndTerminalReplayPreserveEveryDiagnosticMarker",
+                (
+                    "DISABLED_"
+                    "PinnedReplacementAndTerminalReplayPreserveEveryDiagnosticMarker"
+                ),
+            ),
+            (
+                "expect_complete_bounded_diagnostic(replayed);",
+                "// replay detail is not checked",
+            ),
+            (
+                "EXPECT_EQ(replayed.detail, replacement.detail);",
+                "EXPECT_NE(replayed.detail, replacement.detail);",
+            ),
+        )
+        for old, new in mutations:
+            with self.subTest(mutation=old):
+                def mutation(
+                    root: Path,
+                    old_value: str = old,
+                    new_value: str = new,
+                ) -> None:
+                    self.replace(
+                        root,
+                        (
+                            "src/voice_nav_mission/test/"
+                            "writer_observation_test.cpp"
+                        ),
+                        old_value,
+                        new_value,
+                    )
+
+                completed = self.run_checker(mutation)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(
+                    "writer terminal diagnostic replay regression",
+                    completed.stderr,
+                )
+
+    def test_open_attempt_deadline_precedes_all_response_classification(
+        self,
+    ) -> None:
+        deadline_block = (
+            "        remaining = deadline - now()\n"
+            "        if remaining <= 0.0:\n"
+            "            raise OpenConvergenceTimeout("
+            "last_response, attempts)\n"
+        )
+        transition = (
+            "        attempts += 1\n"
+            + deadline_block
+            + "        if not _is_writer_discovery_pending("
+            "response, protocol):\n"
+            "            return response\n"
+            "        _validate_pending_snapshot("
+            "response, expected, protocol)"
+        )
+        mutations = (
+            (
+                transition,
+                (
+                    "        attempts += 1\n"
+                    "        if not _is_writer_discovery_pending("
+                    "response, protocol):\n"
+                    "            return response\n"
+                    "        _validate_pending_snapshot("
+                    "response, expected, protocol)"
+                ),
+            ),
+            (
+                transition,
+                (
+                    "        attempts += 1\n"
+                    "        if not _is_writer_discovery_pending("
+                    "response, protocol):\n"
+                    "            return response\n"
+                    + deadline_block
+                    + "        _validate_pending_snapshot("
+                    "response, expected, protocol)"
+                ),
+            ),
+        )
+        for old, new in mutations:
+            with self.subTest(mutation=new):
+                def mutation(
+                    root: Path,
+                    old_value: str = old,
+                    new_value: str = new,
+                ) -> None:
+                    self.replace(
+                        root,
+                        (
+                            "src/voice_nav_bringup/test/"
+                            "motion_gate_open_convergence.py"
+                        ),
+                        old_value,
+                        new_value,
+                    )
+
+                completed = self.run_checker(mutation)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(
+                    "immediate post-attempt deadline",
+                    completed.stderr,
+                )
 
     def test_core_target_is_static_and_never_installed_or_exported(self) -> None:
         mutations = (
@@ -1111,20 +2260,54 @@ class MotionGateContractTest(unittest.TestCase):
                     "RUN_SERIAL TRUE",
                 ),
                 (
+                    "      RUN_SERIAL TRUE\n  )",
+                    (
+                        "      RUN_SERIAL TRUE\n  )\n"
+                        "  set_tests_properties(\n"
+                        f"    {test_name}\n"
+                        "    PROPERTIES\n"
+                        "      DISABLED TRUE\n"
+                        "  )"
+                    ),
+                    "must remain enabled",
+                ),
+                (
+                    "${ament_cmake_ros_DIR}/run_test_isolated.py",
+                    "${ament_cmake_ros_DIR}/run_test.py",
+                    "isolated RUNNER",
+                ),
+                (
+                    (
+                        "ROS_DOMAIN_ID=unset:;"
+                        "DISABLE_ROS_ISOLATION=unset:"
+                    ),
+                    (
+                        "ROS_DOMAIN_ID=set:77;"
+                        "DISABLE_ROS_ISOLATION=unset:"
+                    ),
+                    "process-scoped Domain isolation reset",
+                ),
+                (
                     (
                         "add_launch_test(\n"
                         f"    {test_path}\n"
                         f"    TIMEOUT {timeout}\n"
+                        "    RUNNER "
+                        '"${ament_cmake_ros_DIR}/run_test_isolated.py"\n'
                         "  )"
                     ),
                     (
                         "add_launch_test(\n"
                         f"    {test_path}\n"
                         f"    TIMEOUT {timeout}\n"
+                        "    RUNNER "
+                        '"${ament_cmake_ros_DIR}/run_test_isolated.py"\n'
                         "  )\n"
                         "  add_launch_test(\n"
                         f"    {test_path}\n"
                         f"    TIMEOUT {timeout}\n"
+                        "    RUNNER "
+                        '"${ament_cmake_ros_DIR}/run_test_isolated.py"\n'
                         "  )"
                     ),
                     "exactly one add_launch_test",
@@ -1293,6 +2476,53 @@ class MotionGateContractTest(unittest.TestCase):
             "pure validation before graph provider",
             completed.stderr,
         )
+
+    def test_core_open_faults_and_remembers_contradictory_ready_binding(
+        self,
+    ) -> None:
+        contradictory_binding_block = (
+            "  if (binding.reason != Reason::None) {\n"
+            "    force_fault(\n"
+            "      Reason::InternalFailure,\n"
+            "      \"writer binding provider returned ready with a "
+            "non-NONE reason\");\n"
+            "    auto fault = result_from_snapshot(\n"
+            "      ResultCode::Faulted, reason_, detail_);\n"
+            "    remember(request, fault);\n"
+            "    return fault;\n"
+            "  }"
+        )
+        mutations = (
+            (
+                contradictory_binding_block,
+                "  // contradictory ready binding is ignored",
+            ),
+            (
+                "if (binding.reason != Reason::None)",
+                "if (binding.reason == Reason::None)",
+            ),
+        )
+        for old, new in mutations:
+            with self.subTest(mutation=new):
+                def mutation(
+                    root: Path,
+                    old_value: str = old,
+                    new_value: str = new,
+                ) -> None:
+                    self.replace(
+                        root,
+                        "src/voice_nav_mission/src/motion_gate_core.cpp",
+                        old_value,
+                        new_value,
+                    )
+
+                completed = self.run_checker(mutation)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(
+                    "binding.reason != Reason::None",
+                    completed.stderr,
+                )
 
     def test_open_rejection_path_cannot_touch_graph_before_core(self) -> None:
         def mutation(root: Path) -> None:

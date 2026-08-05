@@ -1,0 +1,117 @@
+name: Task
+description: Define one independently reversible implementation change.
+title: "[Task] "
+labels:
+  - type:task
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A Task belongs to one parent PRD, one fresh isolated worker context,
+        one branch, and one Draft PR. Keep the acceptance boundary small.
+
+  - type: textarea
+    id: issue_linkage
+    attributes:
+      label: Issue linkage
+      description: Link the parent PRD, prerequisite Issues, and any related Tasks.
+      placeholder: |
+        Parent PRD: #
+        Blocked by: None
+        Related Issues:
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Intended outcome
+      description: What observable behavior or repository capability should exist when this is done?
+      placeholder: A user or maintainer can...
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Why is this change useful now, and what current behavior motivates it?
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: In scope
+      description: List the concrete behavior, packages, interfaces, and documentation this Task may change.
+      placeholder: |
+        - ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals
+      description: State what deliberately remains out of scope.
+      placeholder: |
+        - ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Use independently verifiable outcomes, including important failure behavior.
+      placeholder: |
+        - [ ] AC-001 ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: rollback
+    attributes:
+      label: Rollback
+      description: Explain how this Task can be reverted independently.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: interface_impact
+    attributes:
+      label: Stable Interface impact
+      description: Does this change user-visible, ROS, configuration, safety, timing, or error contracts?
+      options:
+        - No Stable Interface change
+        - Backward-compatible Stable Interface change
+        - Breaking Stable Interface change
+    validations:
+      required: true
+
+  - type: textarea
+    id: risks
+    attributes:
+      label: Risks and mitigations
+      description: Cover safety, compatibility, data, privacy, dependency, and operational risks.
+    validations:
+      required: true
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Link prerequisite Issues, external constraints, approvals, or say None.
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification plan
+      description: Name exact focused commands, the final full gate, and bounded manual evidence.
+      placeholder: |
+        - Focused: `python3 ...`
+        - Final: `bash scripts/verify.sh`
+    validations:
+      required: true

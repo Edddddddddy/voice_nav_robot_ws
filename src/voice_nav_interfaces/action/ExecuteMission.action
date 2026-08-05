@@ -4,42 +4,45 @@
 # ============================================================
 # GOAL: 任务请求
 # ============================================================
-string source_instance_id
+string<=36 source_instance_id
 uint64 source_seq
-string session_id
-string turn_id
-MissionStep[] steps
+string<=36 runtime_instance_id
+uint64 admission_epoch
+MissionStep[<=3] steps
 
 ---
 # ============================================================
 # RESULT: 任务终态
 # ============================================================
 # 结果码常量
-uint16 SUCCEEDED = 0
-uint16 INVALID_PLAN = 10
-uint16 BUSY = 11
-uint16 MODE_MISMATCH = 12
-uint16 UNKNOWN_TARGET = 13
-uint16 DEPENDENCY_UNAVAILABLE = 20
-uint16 EXECUTION_FAILED = 21
-uint16 TIMEOUT = 22
-uint16 CANCELED = 30
-uint16 STOPPED = 31
-uint16 INTERNAL_ERROR = 99
+uint16 SUCCEEDED=0
+uint16 INVALID_PLAN=10
+uint16 BUSY=11
+uint16 MODE_MISMATCH=12
+uint16 UNKNOWN_TARGET=13
+uint16 STALE_REQUEST=14
+uint16 UNSUPPORTED_STEP=15
+uint16 DEPENDENCY_UNAVAILABLE=20
+uint16 EXECUTION_FAILED=21
+uint16 TIMEOUT=22
+uint16 CANCELED=30
+uint16 STOPPED=31
+uint16 SAFETY_FAULT=32
+uint16 INTERNAL_ERROR=99
 
 # 结果字段
 uint16 code
 int32 failed_step
-string detail
+string<=160 detail
 
 ---
 # ============================================================
 # FEEDBACK: 任务执行过程中的实时进度
 # ============================================================
 # 阶段常量
-uint8 VALIDATING = 1
-uint8 EXECUTING = 2
-uint8 SAFE_STOPPING = 3
+uint8 VALIDATING=1
+uint8 EXECUTING=2
+uint8 SAFE_STOPPING=3
 
 # 反馈字段
 uint8 phase

@@ -1,11 +1,10 @@
 # Quality policy
 
-VoiceNav Robot uses
-[REP-2004](https://reps.openrobotics.org/rep-2004/) as a checklist for
-versioning, change control, documentation, testing, dependencies, platform
-support, and security. It does not claim production or safety-certified
-quality: this is a pre-1.0 learning product with a path to a reproducible,
-reviewable simulation prototype.
+VoiceNav Robot uses [REP-2004](https://reps.openrobotics.org/rep-2004/) as a
+checklist for versioning, change control, documentation, testing, dependencies,
+platform support, and security. It does not claim production or safety-certified
+quality: this is a pre-1.0 simulation prototype with a path to reproducible,
+reviewable behavior.
 
 The strictest repository policy applies to all six ROS packages.
 
@@ -13,20 +12,22 @@ The strictest repository policy applies to all six ROS packages.
 
 - Project releases follow Semantic Versioning.
 - ROS package versions remain synchronized at release boundaries.
-- The stable Interface includes ROS names, types, fields, QoS, TF ownership,
+- The Stable Interface includes ROS names, types, fields, QoS, TF ownership,
   configuration schemas, units, ordering, errors, clocks, and cancellation.
 - Pre-1.0 compatibility may change, but a breaking change is called out in the
   changelog and updates every producer, consumer, contract test, and document
-  in one Work Item.
+  in one Issue.
 
 ## Change-control policy
 
 - No direct feature development on `main`.
-- Every change has a Work Item, short-lived branch, measurable acceptance,
-  test plan, documentation impact, and reviewed diff.
+- Every change has a decision-complete Issue, short-lived branch, measurable
+  acceptance, test plan, documentation impact, and reviewed diff.
 - Commits follow Conventional Commits.
-- The local `scripts/verify.sh` gate and the required hosted CI check must both
-  pass before merge; remote hosting alone is not CI evidence.
+- The local complete `scripts/verify.sh` gate runs exactly once on the final PR
+  HEAD, and the required hosted CI check must pass before merge; remote hosting
+  alone is not local verification evidence. The cadence and true-exit-status
+  rule are defined in the [change lifecycle](change-lifecycle.md#verification-cadence).
 - Published release tags are immutable and release history is not rewritten.
 - Remote writes, repository visibility changes, and branch-protection changes
   require explicit user authority.
@@ -36,16 +37,17 @@ The strictest repository policy applies to all six ROS packages.
 - `README.md` describes actual capability and setup rather than target claims.
 - [Product](../product/v1.0-product-spec.md) and
   [architecture](../architecture/overview.md) documents label target behavior.
-- Every stable Interface has field, invariant, ordering, timeout, cancellation,
+- Every Stable Interface has field, invariant, ordering, timeout, cancellation,
   and error documentation.
 - ADRs record only consequential trade-offs and are superseded, not rewritten.
-- [The product glossary](../product/glossary.md) is the canonical
-  project-specific language.
+- [The product glossary](../product/glossary.md) is the canonical project
+  language.
 - `CHANGELOG.md` records notable behavior and Interface changes.
-- Completed Work Items retain their evidence and are not silently changed back
-  to proposals.
-- Learning records count as evidence only after their commands and explanations
-  have been reviewed.
+- Issue comments preserve requirements, decisions, acceptance, dependencies,
+  and status. PR comments preserve results, final HEAD, test summaries,
+  acceptance mapping, interface impact, rollback, and residual risks. The
+  [testing strategy](testing-strategy.md#restricted-structural-checkers)
+  defines the approval gate for new structural checkers.
 
 ## Test policy
 
@@ -73,8 +75,8 @@ The strictest repository policy applies to all six ROS packages.
   exact SHA-256, license, expected size, and supported runtime.
 - Third-party licenses are reviewed before code, voices, or weights are
   redistributed.
-- A local external backup bundle is recovery evidence, not a runtime
-  dependency and not repository content.
+- An external backup bundle is recovery evidence, not a runtime dependency and
+  not repository content.
 
 ## Supported platform
 
@@ -98,7 +100,7 @@ remain bounded manual milestone checks.
 - DDS and model servers default to local-only access.
 - LLM output is untrusted and cannot publish motion.
 - Motion requires typed schema validation, an allowlist, configured limits,
-  monotonic command lease, and Motion Gate admission.
+  monotonic command lease, and MotionGate admission.
 - Operational Stop is an operational simulation control and must not be
   presented as a certified emergency stop.
 - SROS2 is deferred for local simulation and must be reconsidered before

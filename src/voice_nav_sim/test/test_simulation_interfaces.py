@@ -13,7 +13,9 @@
 # limitations under the License.
 
 from collections import deque
+import importlib.util
 import math
+from pathlib import Path
 import threading
 import time
 import unittest
@@ -86,6 +88,31 @@ TF_EXPECTATIONS = (
 )
 
 
+def load_gazebo_shutdown_support():
+    support_path = (
+        Path(get_package_share_directory('voice_nav_sim'))
+        / 'test_support'
+        / 'gazebo_shutdown.py'
+    )
+    specification = importlib.util.spec_from_file_location(
+        'voice_nav_simulation_interfaces_gazebo_shutdown',
+        support_path,
+    )
+    if specification is None or specification.loader is None:
+        raise RuntimeError('could not load Gazebo shutdown test support')
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
+gazebo_shutdown = load_gazebo_shutdown_support()
+SIMULATION_TEST_PARTITION = (
+    gazebo_shutdown.claim_unique_test_partition(
+        'l0008_sim_interfaces'
+    )
+)
+
+
 @pytest.mark.launch_test
 @launch_testing.markers.keep_alive
 def generate_test_description():
@@ -94,7 +121,10 @@ def generate_test_description():
         PythonLaunchDescriptionSource(
             f'{package_share}/launch/simulation.launch.py'
         ),
-        launch_arguments={'headless': 'true'}.items(),
+        launch_arguments={
+            'headless': 'true',
+            'shutdown_on_gazebo_exit': 'false',
+        }.items(),
     )
 
     audit_arguments = []
@@ -114,7 +144,7 @@ def generate_test_description():
     tf_ownership_auditor = Node(
         package='voice_nav_sim',
         executable='tf_ownership_auditor',
-        name='lesson_0008_tf_ownership_auditor',
+        name='tf_ownership_auditor',
         output='screen',
         arguments=audit_arguments,
     )
@@ -190,7 +220,14 @@ def endpoint_identity(endpoint):
 
 class SimulationInterfacesTest(unittest.TestCase):
 
-    def setUp(self):
+    def setUp(self, proc_info):
+        self.addCleanup(self.destroy_ros_fixture)
+        self.addCleanup(
+            gazebo_shutdown.structured_stop_gazebo,
+            proc_info,
+            expected_partition=SIMULATION_TEST_PARTITION,
+        )
+        self.addCleanup(self.publish_zero_for_cleanup)
         rclpy.init()
         self.node = rclpy.create_node(
             'voice_nav_simulation_interfaces_test',
@@ -239,21 +276,52 @@ class SimulationInterfacesTest(unittest.TestCase):
         )
         self.spin_thread.start()
 
-    def tearDown(self):
-        try:
-            if rclpy.ok() and hasattr(self, 'command_publisher'):
-                self.publish_command_for(0.0, 0.0, 0.25)
-        finally:
-            if hasattr(self, 'executor'):
-                self.executor.shutdown(timeout_sec=2.0)
-            if hasattr(self, 'spin_thread'):
-                self.spin_thread.join(timeout=2.0)
-            if hasattr(self, 'tf_listener'):
-                self.tf_listener.unregister()
-            if hasattr(self, 'node'):
-                self.node.destroy_node()
+    def publish_zero_for_cleanup(self):
+        if (
+            not rclpy.ok()
+            or getattr(self, 'node', None) is None
+            or getattr(self, 'command_publisher', None) is None
+        ):
+            return
+        self.publish_command_for(0.0, 0.0, 0.25)
+
+    def destroy_ros_fixture(self):
+        steps = []
+        executor = getattr(self, 'executor', None)
+        if executor is not None:
+            steps.append(
+                (
+                    'executor shutdown',
+                    lambda: executor.shutdown(timeout_sec=2.0),
+                )
+            )
+        spin_thread = getattr(self, 'spin_thread', None)
+        if spin_thread is not None:
+            steps.append(
+                (
+                    'spin thread join',
+                    lambda: gazebo_shutdown.join_started_thread(
+                        spin_thread,
+                        timeout_seconds=2.0,
+                    ),
+                )
+            )
+        tf_listener = getattr(self, 'tf_listener', None)
+        if tf_listener is not None:
+            steps.append(('TF listener unregister', tf_listener.unregister))
+        node = getattr(self, 'node', None)
+        if node is not None:
+            steps.append(('node destroy', node.destroy_node))
+
+        def shutdown_rclpy():
             if rclpy.ok():
                 rclpy.shutdown()
+
+        steps.append(('rclpy shutdown', shutdown_rclpy))
+        gazebo_shutdown.run_cleanup_steps(
+            'simulation interfaces ROS fixture destruction failed',
+            steps,
+        )
 
     def append_sample(self, samples, message):
         with self.samples_lock:
@@ -696,3 +764,10 @@ class SimulationInterfacesTest(unittest.TestCase):
             process=tf_ownership_auditor,
             allowable_exit_codes=[0],
         )
+
+
+@launch_testing.post_shutdown_test()
+class SimulationInterfacesShutdownTest(unittest.TestCase):
+
+    def test_all_launch_managed_processes_exit_cleanly(self, proc_info):
+        assertExitCodes(proc_info)

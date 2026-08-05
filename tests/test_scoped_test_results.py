@@ -27,6 +27,35 @@ def write_xunit(path: Path, *, tests: int, skipped: int = 0) -> None:
     )
 
 
+def write_launch_xunit(
+    path: Path,
+    cases: tuple[tuple[str, str], ...],
+    *,
+    skipped_case: tuple[str, str] | None = None,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    case_xml = []
+    for classname, name in cases:
+        skipped = (
+            "<skipped message=\"disabled\" />"
+            if (classname, name) == skipped_case
+            else ""
+        )
+        case_xml.append(
+            f'<testcase classname="{classname}" name="{name}">'
+            f"{skipped}</testcase>"
+        )
+    skipped_count = 1 if skipped_case is not None else 0
+    path.write_text(
+        (
+            f'<testsuite name="launch" tests="{len(cases)}" errors="0" '
+            f'failures="0" skipped="{skipped_count}">'
+            f'{"".join(case_xml)}</testsuite>\n'
+        ),
+        encoding="utf-8",
+    )
+
+
 def write_ctest(path: Path, *, status: str = "passed") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -105,13 +134,12 @@ class ScopedTestResultsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             build_base = Path(temporary_directory) / "build"
             write_xunit(
-                build_base / "voice_nav_mission" / "current.xml",
+                build_base / "voice_nav_audio" / "current.xml",
                 tests=3,
-                skipped=1,
             )
             write_xunit(
                 build_base
-                / "voice_nav_mission.stale-l0009"
+                / "voice_nav_audio.stale-l0009"
                 / "stale.xml",
                 tests=74,
                 skipped=4,
@@ -119,15 +147,340 @@ class ScopedTestResultsTest(unittest.TestCase):
 
             completed = self.run_reporter(
                 build_base,
-                "voice_nav_mission",
+                "voice_nav_audio",
             )
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertIn(
-                "Summary: 3 tests, 0 errors, 0 failures, 1 skipped",
+                "Summary: 3 tests, 0 errors, 0 failures, 0 skipped",
                 completed.stdout,
             )
             self.assertNotIn("74 tests", completed.stdout)
+
+    def test_report_rejects_unallowlisted_skipped_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            skipped_case = (
+                "voice_nav_audio.FunctionalTest",
+                "test_disabled",
+            )
+            write_launch_xunit(
+                build_base / "voice_nav_audio" / "functional.xunit.xml",
+                (skipped_case,),
+                skipped_case=skipped_case,
+            )
+
+            completed = self.run_reporter(
+                build_base,
+                "voice_nav_audio",
+            )
+
+            self.assertEqual(completed.returncode, 2, completed.stdout)
+            self.assertIn(
+                "skipped tests are not allowlisted",
+                completed.stderr,
+            )
+
+    def test_report_allows_official_cppcheck_skip(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            skipped_case = (
+                "voice_nav_audio.cppcheck",
+                "src/example.cpp",
+            )
+            write_launch_xunit(
+                build_base
+                / "voice_nav_audio"
+                / "test_results"
+                / "voice_nav_audio"
+                / "cppcheck.xunit.xml",
+                (skipped_case,),
+                skipped_case=skipped_case,
+            )
+
+            completed = self.run_reporter(
+                build_base,
+                "voice_nav_audio",
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("1 skipped", completed.stdout)
+
+    def test_report_requires_complete_critical_launch_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            result = (
+                build_base
+                / "voice_nav_bringup"
+                / "test_results"
+                / "voice_nav_bringup"
+                / "test_test_motion_gate_product.py.xunit.xml"
+            )
+            write_launch_xunit(
+                result,
+                (
+                    (
+                        "voice_nav_bringup.MotionGateProductShutdownTest",
+                        "test_all_launch_managed_processes_exit_cleanly",
+                    ),
+                ),
+            )
+
+            completed = self.run_reporter(
+                build_base,
+                "voice_nav_bringup",
+            )
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("critical launch evidence", completed.stderr)
+
+    def test_report_rejects_skipped_critical_launch_case(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            result = (
+                build_base
+                / "voice_nav_bringup"
+                / "test_results"
+                / "voice_nav_bringup"
+                / "test_test_motion_gate_product.py.xunit.xml"
+            )
+            active_case = (
+                "voice_nav_bringup.MotionGateProductTest",
+                "test_motion_gate_product_contract",
+            )
+            write_launch_xunit(
+                result,
+                (
+                    active_case,
+                    (
+                        "voice_nav_bringup.MotionGateProductShutdownTest",
+                        "test_all_launch_managed_processes_exit_cleanly",
+                    ),
+                ),
+                skipped_case=active_case,
+            )
+
+            completed = self.run_reporter(
+                build_base,
+                "voice_nav_bringup",
+            )
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("critical launch evidence", completed.stderr)
+
+    def test_report_accepts_complete_critical_launch_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            result = (
+                build_base
+                / "voice_nav_bringup"
+                / "test_results"
+                / "voice_nav_bringup"
+                / "test_test_motion_gate_product.py.xunit.xml"
+            )
+            write_launch_xunit(
+                result,
+                (
+                    (
+                        "voice_nav_bringup.MotionGateProductTest",
+                        "test_motion_gate_product_contract",
+                    ),
+                    (
+                        "voice_nav_bringup.MotionGateProductShutdownTest",
+                        "test_all_launch_managed_processes_exit_cleanly",
+                    ),
+                ),
+            )
+
+            completed = self.run_reporter(
+                build_base,
+                "voice_nav_bringup",
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("Summary: 2 tests", completed.stdout)
+
+    def test_report_requires_motion_gate_node_launch_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            result = (
+                build_base
+                / "voice_nav_mission"
+                / "test_results"
+                / "voice_nav_mission"
+                / "test_test_motion_gate_node.py.xunit.xml"
+            )
+            write_launch_xunit(
+                result,
+                (("voice_nav_mission.UnrelatedTest", "test_unrelated"),),
+            )
+
+            completed = self.run_reporter(
+                build_base,
+                "voice_nav_mission",
+            )
+
+            self.assertEqual(completed.returncode, 2, completed.stdout)
+            self.assertIn("critical launch evidence", completed.stderr)
+
+    def test_report_requires_tf_conflict_launch_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            results = (
+                build_base
+                / "voice_nav_sim"
+                / "test_results"
+                / "voice_nav_sim"
+            )
+            write_launch_xunit(
+                results / "test_test_simulation_control.py.xunit.xml",
+                (
+                    (
+                        "voice_nav_sim.LaunchStartupPolicyTest",
+                        "test_startup_handler_stops_after_failed_stage",
+                    ),
+                    (
+                        "voice_nav_sim.SimulationControlTest",
+                        "test_stamped_drive_odometry_tf_and_consumer_timeout",
+                    ),
+                    (
+                        "voice_nav_sim.SimulationControlShutdownTest",
+                        "test_all_launch_managed_processes_exit_cleanly",
+                    ),
+                ),
+            )
+            write_launch_xunit(
+                results / "test_test_simulation_interfaces.py.xunit.xml",
+                (
+                    (
+                        "voice_nav_sim.SimulationInterfacesTest",
+                        "test_perception_odom_tf_and_ownership_contract",
+                    ),
+                    (
+                        "voice_nav_sim.SimulationInterfacesShutdownTest",
+                        "test_all_launch_managed_processes_exit_cleanly",
+                    ),
+                ),
+            )
+
+            completed = self.run_reporter(build_base, "voice_nav_sim")
+
+            self.assertEqual(completed.returncode, 2, completed.stdout)
+            self.assertIn("critical launch evidence", completed.stderr)
+
+    def test_report_requires_simulation_startup_policy_inventory(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            build_base = Path(temporary_directory) / "build"
+            results = (
+                build_base
+                / "voice_nav_sim"
+                / "test_results"
+                / "voice_nav_sim"
+            )
+            write_launch_xunit(
+                results / "test_test_simulation_control.py.xunit.xml",
+                (
+                    (
+                        "voice_nav_sim.SimulationControlTest",
+                        "test_stamped_drive_odometry_tf_and_consumer_timeout",
+                    ),
+                    (
+                        "voice_nav_sim.SimulationControlShutdownTest",
+                        "test_all_launch_managed_processes_exit_cleanly",
+                    ),
+                ),
+            )
+            write_launch_xunit(
+                results / "test_test_simulation_interfaces.py.xunit.xml",
+                (
+                    (
+                        "voice_nav_sim.SimulationInterfacesTest",
+                        "test_perception_odom_tf_and_ownership_contract",
+                    ),
+                    (
+                        "voice_nav_sim.SimulationInterfacesShutdownTest",
+                        "test_all_launch_managed_processes_exit_cleanly",
+                    ),
+                ),
+            )
+            write_launch_xunit(
+                results / "test_test_tf_ownership_conflict.py.xunit.xml",
+                (
+                    (
+                        "voice_nav_sim.TfOwnershipConflictTest",
+                        (
+                            "test_normal_audit_rejects_and_sentinel_"
+                            "proves_the_conflict"
+                        ),
+                    ),
+                ),
+            )
+
+            completed = self.run_reporter(build_base, "voice_nav_sim")
+
+            self.assertEqual(completed.returncode, 2, completed.stdout)
+            self.assertIn("inventory is incomplete", completed.stderr)
+
+    def test_report_rejects_inconsistent_critical_launch_inventory(
+        self,
+    ) -> None:
+        critical_cases = (
+            '<testcase classname="voice_nav_bringup.MotionGateProductTest" '
+            'name="test_motion_gate_product_contract" />'
+            '<testcase classname="voice_nav_bringup.'
+            'MotionGateProductShutdownTest" '
+            'name="test_all_launch_managed_processes_exit_cleanly" />'
+        )
+        variants = {
+            "declared zero tests": (
+                '<testsuite name="launch" tests="0" errors="0" '
+                'failures="0" skipped="0">'
+                f"{critical_cases}</testsuite>"
+            ),
+            "required cases outside suite": (
+                '<testsuites tests="2" errors="0" failures="0">'
+                '<testsuite name="launch" tests="0" errors="0" '
+                'failures="0" skipped="0"></testsuite>'
+                f"{critical_cases}</testsuites>"
+            ),
+            "failed aggregate root": (
+                '<testsuites tests="2" errors="0" failures="1">'
+                '<testsuite name="launch" tests="2" errors="0" '
+                'failures="0" skipped="0">'
+                f"{critical_cases}</testsuite></testsuites>"
+            ),
+        }
+
+        for label, xml in variants.items():
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as temporary_directory:
+                    build_base = Path(temporary_directory) / "build"
+                    result = (
+                        build_base
+                        / "voice_nav_bringup"
+                        / "test_results"
+                        / "voice_nav_bringup"
+                        / "test_test_motion_gate_product.py.xunit.xml"
+                    )
+                    result.parent.mkdir(parents=True)
+                    result.write_text(xml, encoding="utf-8")
+
+                    completed = self.run_reporter(
+                        build_base,
+                        "voice_nav_bringup",
+                    )
+
+                    self.assertEqual(
+                        completed.returncode,
+                        2,
+                        completed.stdout,
+                    )
+                    self.assertIn(
+                        "critical launch evidence",
+                        completed.stderr,
+                    )
 
     def test_clear_removes_only_selected_package_results(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -624,6 +977,27 @@ class ScopedTestResultsTest(unittest.TestCase):
                         selected_package / "good.xunit.xml",
                         tests=1,
                     )
+                    if package_name == "voice_nav_mission":
+                        write_launch_xunit(
+                            selected_package
+                            / "test_results"
+                            / "voice_nav_mission"
+                            / "test_test_motion_gate_node.py.xunit.xml",
+                            (
+                                (
+                                    "voice_nav_mission.MotionGateNodeTest",
+                                    (
+                                        "test_steady_fail_closed_protocol_"
+                                        "without_clock"
+                                    ),
+                                ),
+                                (
+                                    "voice_nav_mission."
+                                    "MotionGateNodeShutdownTest",
+                                    "test_motion_gate_exits_cleanly",
+                                ),
+                            ),
+                        )
                     source_package = workspace / "src" / package_name
                     write_package_manifest(
                         source_package / "package.xml",
@@ -655,7 +1029,13 @@ class ScopedTestResultsTest(unittest.TestCase):
                         0,
                         completed.stderr,
                     )
-                    self.assertIn("Summary: 1 test", completed.stdout)
+                    expected_tests = (
+                        3 if package_name == "voice_nav_mission" else 1
+                    )
+                    self.assertIn(
+                        f"Summary: {expected_tests} test",
+                        completed.stdout,
+                    )
 
     def test_anchored_snapshot_rejects_source_replaced_by_symlink(self) -> None:
         from scripts.colcon_evidence import open_result_snapshot
@@ -844,7 +1224,7 @@ class ScopedTestResultsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             build_base = Path(temporary_directory) / "build"
             testing_directory = (
-                build_base / "voice_nav_mission" / "Testing"
+                build_base / "voice_nav_audio" / "Testing"
             )
             testing_directory.mkdir(parents=True)
             (testing_directory / "TAG").write_text(
@@ -857,7 +1237,7 @@ class ScopedTestResultsTest(unittest.TestCase):
 
             completed = self.run_reporter(
                 build_base,
-                "voice_nav_mission",
+                "voice_nav_audio",
             )
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -1162,9 +1542,62 @@ class ScopedTestResultsTest(unittest.TestCase):
     def test_verify_fails_closed_when_package_discovery_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             workspace = Path(temporary_directory) / "workspace"
+            workspace.mkdir(parents=True)
+            marker = workspace / "tracked-marker.txt"
+            marker.write_text("fixture\n", encoding="utf-8")
+            git_environment = os.environ.copy()
+            git_environment.pop("GIT_DIR", None)
+            git_environment.pop("GIT_WORK_TREE", None)
+            for arguments in (
+                ("init", "--quiet"),
+                ("add", "tracked-marker.txt"),
+            ):
+                git_command = subprocess.run(
+                    ["git", "-C", str(workspace), *arguments],
+                    env=git_environment,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(
+                    git_command.returncode,
+                    0,
+                    f"git {' '.join(arguments)} failed: "
+                    f"stdout={git_command.stdout!r} "
+                    f"stderr={git_command.stderr!r}",
+                )
+            git_commit = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(workspace),
+                    "-c",
+                    "user.name=VoiceNav fixture",
+                    "-c",
+                    "user.email=voice-nav-fixture@example.invalid",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "fixture",
+                ],
+                env=git_environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                git_commit.returncode,
+                0,
+                f"git commit failed: stdout={git_commit.stdout!r} "
+                f"stderr={git_commit.stderr!r}",
+            )
             scripts_directory = workspace / "scripts"
             scripts_directory.mkdir(parents=True)
             shutil.copyfile(VERIFY_SCRIPT, scripts_directory / "verify.sh")
+            shutil.copyfile(
+                REPOSITORY_ROOT / "scripts" / "prepare_git_context.sh",
+                scripts_directory / "prepare_git_context.sh",
+            )
             (scripts_directory / "check_clean_motion_gate_install.sh").write_text(
                 "#!/usr/bin/env bash\nexit 0\n",
                 encoding="utf-8",
@@ -1179,12 +1612,11 @@ class ScopedTestResultsTest(unittest.TestCase):
             bash_environment = workspace / "test-environment.bash"
             bash_environment.write_text(
                 """python3() { return 0; }
-git() { return 0; }
 rosdep() { return 0; }
 xacro() { return 0; }
 check_urdf() { return 0; }
 gz() { return 0; }
-realpath() { printf '%s\\n' "${1:-}"; }
+realpath() { printf '%s\\n' "${@: -1}"; }
 colcon() {
   case "${1:-}" in
     list)
@@ -1202,7 +1634,7 @@ colcon() {
   esac
   return 0
 }
-export -f python3 git rosdep xacro check_urdf gz realpath colcon
+export -f python3 rosdep xacro check_urdf gz realpath colcon
 """,
                 encoding="utf-8",
             )

@@ -1,8 +1,7 @@
 from collections import deque
 import importlib.util
 import math
-import re
-import subprocess
+from pathlib import Path
 import threading
 import time
 from types import SimpleNamespace
@@ -17,6 +16,7 @@ from launch.actions import IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 import launch_testing
 import launch_testing.actions
+from launch_testing.asserts import assertExitCodes
 import launch_testing.markers
 from nav_msgs.msg import Odometry
 import pytest
@@ -30,10 +30,54 @@ from tf2_msgs.msg import TFMessage
 COMMAND_TOPIC = '/diff_drive_controller/cmd_vel'
 LIMITED_COMMAND_TOPIC = '/diff_drive_controller/cmd_vel_out'
 ODOMETRY_TOPIC = '/odom'
+GAZEBO_POSE_TOPIC = '/world/voice_nav_test_world/pose/info'
 CONTROLLER_TIMEOUT_SECONDS = 0.35
 CONTROL_PERIOD_SECONDS = 0.01
 SIMULATION_STEP_EPSILON_SECONDS = 0.002
 CONTROLLER_STARTUP_SERVICE_RESPONSE_TIMEOUT_SECONDS = 15.0
+
+
+def load_gazebo_shutdown_support():
+    support_path = (
+        Path(get_package_share_directory('voice_nav_sim'))
+        / 'test_support'
+        / 'gazebo_shutdown.py'
+    )
+    specification = importlib.util.spec_from_file_location(
+        'voice_nav_simulation_control_gazebo_shutdown',
+        support_path,
+    )
+    if specification is None or specification.loader is None:
+        raise RuntimeError('could not load Gazebo shutdown test support')
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
+def load_gazebo_pose_support():
+    support_path = (
+        Path(get_package_share_directory('voice_nav_sim'))
+        / 'test_support'
+        / 'gazebo_pose.py'
+    )
+    specification = importlib.util.spec_from_file_location(
+        'voice_nav_simulation_control_gazebo_pose',
+        support_path,
+    )
+    if specification is None or specification.loader is None:
+        raise RuntimeError('could not load Gazebo pose test support')
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
+gazebo_shutdown = load_gazebo_shutdown_support()
+gazebo_pose_support = load_gazebo_pose_support()
+SIMULATION_TEST_PARTITION = (
+    gazebo_shutdown.claim_unique_test_partition(
+        'l0008_sim_control'
+    )
+)
 
 
 @pytest.mark.launch_test
@@ -44,7 +88,10 @@ def generate_test_description():
         PythonLaunchDescriptionSource(
             f'{package_share}/launch/simulation.launch.py'
         ),
-        launch_arguments={'headless': 'true'}.items(),
+        launch_arguments={
+            'headless': 'true',
+            'shutdown_on_gazebo_exit': 'false',
+        }.items(),
     )
     return LaunchDescription(
         [
@@ -116,7 +163,14 @@ class LaunchStartupPolicyTest(unittest.TestCase):
 
 
 class SimulationControlTest(unittest.TestCase):
-    def setUp(self):
+    def setUp(self, proc_info):
+        self.addCleanup(self.destroy_ros_fixture)
+        self.addCleanup(
+            gazebo_shutdown.structured_stop_gazebo,
+            proc_info,
+            expected_partition=SIMULATION_TEST_PARTITION,
+        )
+        self.addCleanup(self.publish_zero_for_cleanup)
         rclpy.init()
         self.node = rclpy.create_node(
             'voice_nav_simulation_control_test',
@@ -191,12 +245,49 @@ class SimulationControlTest(unittest.TestCase):
         )
         self.spin_thread.start()
 
-    def tearDown(self):
+    def publish_zero_for_cleanup(self):
+        if (
+            not rclpy.ok()
+            or getattr(self, 'node', None) is None
+            or getattr(self, 'command_publisher', None) is None
+        ):
+            return
         self.publish_for(0.0, 0.0, 0.15)
-        self.executor.shutdown(timeout_sec=2.0)
-        self.spin_thread.join(timeout=2.0)
-        self.node.destroy_node()
-        rclpy.shutdown()
+
+    def destroy_ros_fixture(self):
+        steps = []
+        executor = getattr(self, 'executor', None)
+        if executor is not None:
+            steps.append(
+                (
+                    'executor shutdown',
+                    lambda: executor.shutdown(timeout_sec=2.0),
+                )
+            )
+        spin_thread = getattr(self, 'spin_thread', None)
+        if spin_thread is not None:
+            steps.append(
+                (
+                    'spin thread join',
+                    lambda: gazebo_shutdown.join_started_thread(
+                        spin_thread,
+                        timeout_seconds=2.0,
+                    ),
+                )
+            )
+        node = getattr(self, 'node', None)
+        if node is not None:
+            steps.append(('node destroy', node.destroy_node))
+
+        def shutdown_rclpy():
+            if rclpy.ok():
+                rclpy.shutdown()
+
+        steps.append(('rclpy shutdown', shutdown_rclpy))
+        gazebo_shutdown.run_cleanup_steps(
+            'simulation control ROS fixture destruction failed',
+            steps,
+        )
 
     def append_sample(self, samples, message):
         with self.samples_lock:
@@ -239,38 +330,11 @@ class SimulationControlTest(unittest.TestCase):
         return self.node.get_clock().now().nanoseconds
 
     def gazebo_pose(self) -> tuple[float, float, float, float, float, float]:
-        completed = subprocess.run(
-            [
-                'gz',
-                'model',
-                '--model',
-                'voice_nav_robot',
-                '--pose',
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5.0,
+        return gazebo_pose_support.read_model_pose(
+            GAZEBO_POSE_TOPIC,
+            'voice_nav_robot',
+            expected_partition=SIMULATION_TEST_PARTITION,
         )
-        self.assertEqual(
-            completed.returncode,
-            0,
-            completed.stdout + completed.stderr,
-        )
-        match = re.search(
-            r'Pose \[ XYZ \(m\) \] \[ RPY \(rad\) \]:\s*'
-            r'\[([^\]]+)\]\s*\[([^\]]+)\]',
-            completed.stdout,
-        )
-        self.assertIsNotNone(
-            match,
-            f'cannot parse Gazebo model pose:\n{completed.stdout}',
-        )
-        position = tuple(float(value) for value in match.group(1).split())
-        rotation = tuple(float(value) for value in match.group(2).split())
-        self.assertEqual(len(position), 3)
-        self.assertEqual(len(rotation), 3)
-        return position + rotation
 
     def publish_for(
         self,
@@ -624,3 +688,10 @@ class SimulationControlTest(unittest.TestCase):
             'physical_stationarity='
             'linear_abs_lt_0.02,angular_abs_lt_0.02'
         )
+
+
+@launch_testing.post_shutdown_test()
+class SimulationControlShutdownTest(unittest.TestCase):
+
+    def test_all_launch_managed_processes_exit_cleanly(self, proc_info):
+        assertExitCodes(proc_info)

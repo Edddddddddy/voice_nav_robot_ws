@@ -171,8 +171,8 @@ build may not silently use a floating system Abseil or Ubuntu's old
 `webrtc-audio-processing` 0.3.1 package.
 
 The concrete compatible Abseil revision is selected and verified in the v0.6
-dependency Work Item from AudioProcessing 2.1's upstream build metadata; the
-v0.1 architecture document does not fabricate an unverified tag.
+dependency Issue from AudioProcessing 2.1's upstream build metadata; the v0.1
+architecture document does not fabricate an unverified tag.
 
 ## Locked local models
 

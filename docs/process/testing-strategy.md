@@ -1,6 +1,9 @@
 # Testing strategy
 
-Tests follow the deepest stable Interface. A behavior test should retain its value when the Implementation behind that Interface is refactored.
+Tests follow the deepest stable Interface and observable behavior. A behavior
+test should retain its value when the Implementation behind that Interface is
+refactored. Tests should exercise the highest stable public seam rather than
+private implementation details.
 
 ## Test layers
 
@@ -14,21 +17,84 @@ Tests follow the deepest stable Interface. A behavior test should retain its val
 | Model fixture | Verify locked local models and offline audio | KWS, ASR, TTS, LLM, AEC fixtures |
 | Manual release gate | Validate the supported WSL audio path | real single microphone, speaker, AEC, barge-in |
 
-## Developer and CI loops
+## Verification cadence
 
-During implementation:
+During implementation, run these focused repository checks as often as needed:
 
 ```bash
-bash scripts/verify.sh <changed-package>
+python3 -m unittest tests.test_repository_contract
+python3 scripts/check_repository.py --root .
 ```
 
-Before review or merge:
+Before review, after the final change and on the final PR HEAD, run the
+complete repository gate exactly once:
 
 ```bash
 bash scripts/verify.sh
 ```
 
-The full gate starts from declared dependencies, validates repository and robot-model contracts, builds all packages, runs all tests, and reports a zero-error `colcon test-result`.
+Consume and record that invocation's actual exit status. A later diagnostic,
+snapshot, cleanup, or successful shell command must not replace a failed gate
+status. Full logs remain outside Git; the PR records the command, true exit
+status, concise test summary, and any bounded manual evidence.
+
+The full gate starts from declared dependencies, validates repository and
+robot-model contracts, builds all packages, runs all tests, and reports a
+zero-error `colcon test-result`. Repository contracts run through
+`scripts/run_repository_tests.py`; discovery uses the real non-package
+`tests/` layout and any skipped contract makes the gate fail.
+
+Critical launch tests use Jazzy's official `run_test_isolated.py`. Their
+generated CTest contract clears inherited `ROS_DOMAIN_ID` and
+`DISABLE_ROS_ISOLATION`, retains `RUN_SERIAL`, and permits only the reviewed
+result-neutral properties. Source CMake is not final evidence: after configure,
+`scripts/check_generated_launch_tests.py` inspects
+`ctest --show-only=json-v1` for the exact runner, source target, environment,
+reviewed per-test timeout, resolved package build working directory, the single
+`launch_test` label, and result semantics. Required mutation tests replace
+`LABELS`, `TIMEOUT`, and `WORKING_DIRECTORY` independently and require every
+replacement to fail. The reporter then requires the matching critical xUnit
+testcase structure; a skip is accepted only for the exact package-local
+cppcheck artifact/class allowlist.
+Scaffolded Python lint skips are removed and made to pass rather than added to
+that allowlist.
+
+The complete gate is the terminal verification command whose exit status is
+consumed. Process snapshots and other diagnostics run as separate commands
+afterward; a trailing successful `ps`, `grep`, or cleanup command must never
+replace a failed CTest status.
+
+## Restricted structural checkers
+
+Existing safety, concurrency, test-result ownership, and Gazebo lifecycle
+checkers remain active. A new AST, source-shape, or full-file-fingerprint
+checker is admitted only when all three conditions hold:
+
+1. A real recurring failure is recorded in the parent Issue or Task Issue.
+2. The checker protects the narrowest stable public repository seam that can
+   express the failure; a global text ban is not a substitute.
+3. The parent Issue or Task Issue explicitly approves the checker before it is
+   implemented.
+
+The checker must test an observable repository contract and must not replace
+behavioral tests at a stable Interface. The change-volume and ten-commit stop
+rules are defined in the [change lifecycle](change-lifecycle.md#stop-and-re-scope).
+
+### Shared test-result ownership
+
+The workspace `build/**/test_results` tree has one writer at a time. A
+canonical `scripts/verify.sh` run owns an exclusive operational window from
+startup through its terminal status. During that window, reviewers and
+parallel agents may inspect source, Git metadata, and already copied evidence,
+but must not run `ctest`, `colcon test`, another verify process, or any helper
+that rewrites the shared result tree. Concurrent test work must use isolated
+build, install, and log bases or wait for the canonical gate to finish.
+
+The result reporter deliberately snapshots inode, size, mtime, and ctime and
+fails closed if a writer overlaps evidence collection. On that diagnostic,
+identify the writer and establish quiescence before a full retry; do not clear
+the named file or relax the identity check. See
+[PIT-0022](known-pitfalls.md#pit-0022-test-result-evidence-requires-one-shared-tree-writer).
 
 PR CI uses deterministic in-memory fakes as soon as their Module exists and
 adds bounded headless Gazebo tests with the v0.2 simulation milestones. At
@@ -88,10 +154,61 @@ The test suite also proves that a rejected plan starts no downstream Adapter and
 
 Every automated motion test uses configured limits, a steady-clock deadline, zero output in success and cleanup paths, odometry-based stationarity checks, and bounded process cleanup. `Ctrl+C`, publisher exit, Action Result, or a single zero publication is not proof of stopping.
 
-### Lesson 0009 normal-running Gate slice
+### Gazebo launch-test lifecycle
 
-VN-0010 / Lesson 0009 proves the independent Gate without claiming process
-death or pause recovery:
+Tests that own a Gazebo server use a lifecycle oracle separate from their
+product assertions. At module import, each test process overwrites inherited
+state with a scope/PID/128-bit-random non-empty `GZ_PARTITION`; CMake does not
+provide a reusable fixed partition. Cleanup first selects zero or inhibits
+MotionGate, sends `stop: true` to `/server_control` with the same environment
+snapshot that was validated, requires a positive `gz.msgs.Boolean`
+acknowledgement, and then waits for the launch-managed `gazebo` process itself
+to exit. An ACK is request acceptance, not process completion. A post-shutdown
+test finally applies an unfiltered `assertExitCodes(proc_info)` to every
+launch-managed process.
+
+The product launch still defaults to shutting down when Gazebo exits. Tests
+disable only that immediate event handler while their failure-safe cleanup
+performs the structured stop and process join. The cleanup ladder is must-run:
+zero/inhibit, structured stop, and ROS fixture destruction are independent
+LIFO `unittest` cleanups, so one exception cannot short-circuit the next.
+Cleanup phases that own multiple resources use an exhaustive aggregator and
+raise the collected errors only after every step was attempted. A typed
+`TimeoutExpired` from the isolated idempotent stop request is retried once in a
+fresh CLI process; all other CLI/ACK errors fail immediately, and two timeouts
+still fail. Static mutation tests reject fixed partitions, fixed sleeps,
+global process killing, shell execution, forced-exit allowlists, ACK-only
+cleanup, rebound or unreachable oracles, disabled critical test modules,
+wrong RPC environments, cleanup list mutation, and cleanup registration that
+can be skipped after an active assertion failure.
+
+Gazebo ground-truth movement evidence is separate from ROS odometry. A pure
+test-support module queries the exact isolated world's pose topic with a
+10-second deadline and one read-only retry. It accepts at most four adjacent
+complete JSON documents because `gz topic --num 1` can race with a high-rate
+publisher and emit a small burst; every document must contain one valid model
+pose, and the newest is used. Wrong partition, malformed/extra output,
+duplicate/missing model, zero/non-finite quaternion, and non-finite pose all
+fail. After a finite valid-norm check, all four quaternion components are
+normalized before the unit-quaternion RPY formulas run; a scaled-quaternion
+regression must produce the same RPY as its equivalent unit quaternion. Query
+failure remains an active-test failure, not a teardown diagnosis.
+
+This fixture contract proves deterministic test teardown. It does not prove
+the internal cause of a slow signal-only Gazebo shutdown, ordinary user
+`Ctrl+C` behavior, MotionGate crash-stop, controller deadman, or managed
+pause/resume semantics. See
+[PIT-0012](known-pitfalls.md#pit-0012-no-residual-gazebo-process-is-not-a-clean-gazebo-exit).
+
+The source/AST guards are cooperative correctness controls for ordinary
+reviewed changes. They do not claim to sandbox a malicious same-UID process or
+deliberate Python dynamic metaprogramming that rewrites files or imported
+objects at runtime.
+
+### Current normal-running Gate slice
+
+The current Gate slice proves normal independent operation without claiming
+process death or pause recovery:
 
 - Manual-clock Core tables cover the exact 250 ms authority and 150 ms
   candidate-freshness boundaries; a 20 ms wall output tick continuously
@@ -131,14 +248,14 @@ death or pause recovery:
   zero, and odometry stationarity after bounded motion and after each normal
   deadline expiry.
 
-Package-private IDL is an encapsulation boundary, not DDS security. Lesson 0009
-uses a test authority/candidate harness. It does not count an authority,
+Package-private IDL is an encapsulation boundary, not DDS security. The current
+tests use an authority/candidate harness. They do not count an authority,
 candidate, or MotionGate process kill, managed pause token, first-resume zero,
 or unmanaged-pause recovery as completed.
 
-### Lesson 0010 crash-stop and pause slice
+### Process-death and pause acceptance slice
 
-Lesson 0010 / VN-0011 supplies the process-death and Gazebo-time evidence:
+The process-death and Gazebo-time acceptance slice supplies evidence that:
 
 - killing the authority while valid-looking candidates continue still expires
   the independent Gate lease;
@@ -252,8 +369,15 @@ Acceptance uses the supported motherboard analog microphone input and speaker ou
 
 ## Evidence and current gaps
 
-Automated evidence is a command, exit status, concise test-result summary, and the relevant coverage or latency report. Manual evidence may add a screenshot, pose sample, TF graph, sanitized audio clip, or model manifest, but cannot replace an automatable assertion.
+Automated evidence is a command, its true exit status, a concise test-result
+summary, and the relevant coverage or latency report. Manual evidence may add
+a screenshot, pose sample, TF graph, sanitized audio clip, or model manifest,
+but cannot replace an automatable assertion.
 
-Evidence belongs in the Work Item or course record. Generated logs and private artifacts do not enter Git.
+The Issue owns requirements, decisions, acceptance, dependencies, and status.
+The PR owns results, final HEAD, acceptance mapping, test summaries, interface
+impact, rollback, and residual risks. Do not duplicate the Issue body, paste
+complete logs, or keep a per-commit evidence diary; generated logs and private
+artifacts do not enter Git.
 
-At the v0.1 foundation audit, the unified gate covered repository metadata, model expansion, URDF/SDF semantics, build, and package tests. It did not yet contain `gz_ros2_control`, LiDAR, MotionGate, Mission Runtime, SLAM, Nav2, Agent, or voice behavior tests. Each gap is closed by the release and lessons assigned in the approved roadmap.
+At the v0.1 foundation audit, the unified gate covered repository metadata, model expansion, URDF/SDF semantics, build, and package tests. It did not yet contain `gz_ros2_control`, LiDAR, MotionGate, Mission Runtime, SLAM, Nav2, Agent, or voice behavior tests. Each gap is closed by the capability milestones in the approved roadmap.

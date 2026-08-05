@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate versioned repository and course contracts."""
+"""Validate versioned repository contracts."""
 
 from __future__ import annotations
 
@@ -8,22 +8,19 @@ import ast
 import os
 import re
 import sys
-import tomllib
 import xml.etree.ElementTree as element_tree
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 
-LESSON_ID_PATTERN = re.compile(r"\d{4}\Z")
-SLUG_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
-LESSON_STATUSES = {"planned", "ready", "in_progress", "completed"}
-LEGACY_DOCUMENT_PATHS = (
+RETIRED_DOCUMENT_PATHS = (
+    "course",
+    "docs/work-items",
     "lessons",
     "learning-records",
     "reference",
     "assets/lesson.css",
     "MISSION.md",
-    "CONTEXT.md",
     "NOTES.md",
     "RESOURCES.md",
 )
@@ -89,103 +86,11 @@ class ContractError(ValueError):
     """A repository contract was not satisfied."""
 
 
-def validate_course_path(
-    root: Path,
-    lesson_id: str,
-    path_field: str,
-    configured_path: str,
-) -> None:
-    relative_path = Path(configured_path)
-    expected_directory = (root / "course" / f"{path_field}s").resolve()
-    if relative_path.is_absolute():
-        raise ContractError(
-            f"course lesson {lesson_id} {path_field} path must be relative"
-        )
-
-    referenced_path = (root / relative_path).resolve()
-    if not referenced_path.is_relative_to(expected_directory):
-        raise ContractError(
-            f"course lesson {lesson_id} {path_field} must stay under "
-            f"course/{path_field}s"
-        )
-    if referenced_path.suffix != ".md":
-        raise ContractError(
-            f"course lesson {lesson_id} {path_field} must be a Markdown file"
-        )
-    if not referenced_path.name.startswith(f"{lesson_id}-"):
-        raise ContractError(
-            f"course lesson {lesson_id} {path_field} filename must start "
-            f"with {lesson_id}-"
-        )
-    if not referenced_path.is_file():
-        raise ContractError(
-            f"course lesson {lesson_id} references missing "
-            f"{path_field}: {configured_path}"
-        )
-
-
-def load_course_catalog(root: Path) -> dict[str, object]:
-    catalog_path = root / "course" / "catalog.toml"
-    try:
-        with catalog_path.open("rb") as catalog_file:
-            catalog = tomllib.load(catalog_file)
-    except (OSError, tomllib.TOMLDecodeError) as error:
-        raise ContractError(f"cannot read {catalog_path}: {error}") from error
-
-    if catalog.get("schema_version") != 1:
-        raise ContractError("course catalog schema_version must be 1")
-
-    lessons = catalog.get("lessons")
-    if not isinstance(lessons, list) or not lessons:
-        raise ContractError("course catalog must contain at least one lesson")
-
-    lesson_ids: set[str] = set()
-    for lesson in lessons:
-        if not isinstance(lesson, dict):
-            raise ContractError("each course lesson must be a table")
-        for field in ("id", "slug", "status", "lesson", "record"):
-            if not isinstance(lesson.get(field), str) or not lesson[field]:
-                raise ContractError(f"course lesson field {field!r} is required")
-        lesson_id = lesson["id"]
-        if LESSON_ID_PATTERN.fullmatch(lesson_id) is None:
-            raise ContractError(
-                f"course lesson id must contain exactly four digits: {lesson_id}"
-            )
-        if lesson_id in lesson_ids:
-            raise ContractError(f"duplicate course lesson id: {lesson_id}")
-        lesson_ids.add(lesson_id)
-        if SLUG_PATTERN.fullmatch(lesson["slug"]) is None:
-            raise ContractError(
-                f"course lesson {lesson_id} has invalid slug: {lesson['slug']}"
-            )
-        if lesson["status"] not in LESSON_STATUSES:
-            raise ContractError(
-                f"course lesson {lesson_id} has invalid status: {lesson['status']}"
-            )
-        for path_field in ("lesson", "record"):
-            validate_course_path(
-                root,
-                lesson_id,
-                path_field,
-                lesson[path_field],
-            )
-
-    ordered_ids = [lesson["id"] for lesson in lessons]
-    expected_ids = [f"{index:04d}" for index in range(1, len(lessons) + 1)]
-    if ordered_ids != expected_ids:
-        raise ContractError(
-            "course lesson ids must be sorted and contiguous from 0001; "
-            f"found {', '.join(ordered_ids)}"
-        )
-
-    return catalog
-
-
 def validate_documentation_layout(root: Path) -> None:
-    for legacy_path in LEGACY_DOCUMENT_PATHS:
-        if (root / legacy_path).exists():
+    for retired_path in RETIRED_DOCUMENT_PATHS:
+        if (root / retired_path).exists():
             raise ContractError(
-                f"legacy documentation path remains: {legacy_path}"
+                f"retired documentation path remains: {retired_path}"
             )
 
 
@@ -405,7 +310,6 @@ def main() -> int:
     arguments = parse_arguments()
     try:
         root = arguments.root.resolve()
-        load_course_catalog(root)
         validate_documentation_layout(root)
         validate_text_hygiene(root)
         validate_markdown_links(root)

@@ -4,6 +4,14 @@ set -eo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 workspace_root="$(cd -- "${script_dir}/.." && pwd)"
+
+# A WSL process cannot consume the Windows absolute gitdir: pointer that a
+# Codex managed worktree may contain.  Establish the repository context before
+# the first Git subprocess and export it to every helper and child process.
+# shellcheck disable=SC1091
+source "${script_dir}/prepare_git_context.sh"
+voice_nav_prepare_git_context "${workspace_root}"
+
 ros_distro="jazzy"
 if [[ -n "${ROS_DISTRO:-}" && "${ROS_DISTRO}" != "${ros_distro}" ]]; then
   echo "VoiceNav Robot requires ROS_DISTRO=jazzy; found ${ROS_DISTRO}" >&2
@@ -26,10 +34,11 @@ cd "${workspace_root}"
 export XML_CATALOG_FILES="${workspace_root}/tools/schema/catalog.xml"
 export PYTHONDONTWRITEBYTECODE=1
 
-echo "[1/6] Checking repository and course contracts"
+echo "[1/6] Checking repository contracts"
 python3 scripts/check_repository.py
 python3 scripts/check_motion_gate_contract.py --root .
-python3 -m unittest discover -s tests -p "test_*.py" -v
+python3 scripts/check_gazebo_teardown_contract.py --root .
+python3 scripts/run_repository_tests.py
 
 tracked_generated="$(
   git ls-files -- "build/**" "install/**" "log/**"
@@ -141,6 +150,7 @@ set -u
 
 echo "[5/6] Testing"
 python3 scripts/check_colcon_build_boundary.py "${build_boundary_args[@]}"
+python3 scripts/check_generated_launch_tests.py "${test_result_args[@]}"
 python3 scripts/report_test_results.py "${test_result_args[@]}" --clear
 if (( ${#package_args[@]} > 0 )); then
   colcon test \

@@ -1,45 +1,38 @@
-## Work item
+## Issue 链接
 
 Closes #
 
-Repository record: `docs/work-items/...`
+## 结果
 
-## Outcome
+描述本 PR 交付的可观察行为或仓库能力，以及最终结果。
 
-Describe the observable behavior or learning result delivered by this change.
+## 验收映射
 
-## Scope
+将 Issue 的每个验收标准映射到修改文件和证据。
 
-- Included:
-- Deliberately excluded:
+- [ ] AC-001：
 
-## Verification
+## 最终测试摘要
 
-List exact commands and results. The full gate is required before merge.
+列出聚焦检查和最终完整门禁的精确命令、真实退出状态及简洁结果。完整
+`bash scripts/verify.sh` 仅在最终 PR HEAD 运行一次。
 
 ```text
-python3 -m unittest discover --start-directory tests --pattern 'test_*.py' --verbose
+python3 -m unittest tests.test_repository_contract
+python3 scripts/check_repository.py --root .
 bash scripts/verify.sh
 ```
 
-Additional bounded evidence:
+## 接口影响
 
-## Interface and architecture
+- [ ] 无 Stable Interface 或 ROS/runtime 接口变化。
+- [ ] Stable Interface 影响已在 Issue 和相关文档中说明，并有对应测试。
+- [ ] 需要时已链接 ADR。
 
-- [ ] ROS names, types, QoS, TF ownership, parameters, units, ordering, errors, and cancellation are unchanged or documented.
-- [ ] Dependency directions in `docs/architecture/overview.md` remain true.
-- [ ] LLM or speech output cannot bypass the strongly typed Mission and Motion Gate.
-- [ ] A qualifying architectural trade-off has an ADR, or no ADR is needed.
+## 回滚
 
-## Safety and cleanup
+说明最小安全 revert，以及需要保留的证据。
 
-- [ ] Motion is bounded and requests zero velocity in success and cleanup paths, or this change cannot command motion.
-- [ ] Cancel, timeout, stale-result, and failure behavior is tested where relevant.
-- [ ] Automated processes terminate and leave no Gazebo/ROS processes running.
+## 剩余风险
 
-## Documentation and repository hygiene
-
-- [ ] User-visible behavior and current status documentation are accurate.
-- [ ] `CHANGELOG.md`, lessons, and learning records are updated where applicable.
-- [ ] No build output, credentials, private audio/maps/bags, runtime evidence, or model weights are included.
-- [ ] I reviewed the complete diff and recorded verification evidence.
+列出剩余的安全、兼容性、数据、隐私、依赖和运维风险。

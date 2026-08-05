@@ -43,13 +43,15 @@ colcon --log-base "${resolved_root}/log" build \
 
 ctest --test-dir "${resolved_root}/build/voice_nav_mission" \
   --output-on-failure \
-  -R '^motion_gate_core_test$'
+  -R '^(motion_gate_core_test|writer_observation_test)$'
 
 leaked_core="$(
   find "${resolved_root}/install" \
     \( -type f -o -type l \) \
     \( \
       -name 'motion_gate_core.hpp' -o \
+      -name 'writer_observation.hpp' -o \
+      -name 'writer_observation.cpp' -o \
       -name 'libmotion_gate_core.a' -o \
       -name 'libmotion_gate_core.so' \
     \) \
@@ -88,4 +90,4 @@ if [[ -z "${node_path}" || ! -x "${node_path}" ]]; then
 fi
 
 printf '%s\n' \
-  'Clean MotionGate install audit passed: Core private, node installed.'
+  'Clean MotionGate install audit passed: internals private, node installed.'

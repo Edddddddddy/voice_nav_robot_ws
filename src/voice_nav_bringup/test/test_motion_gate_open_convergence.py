@@ -75,6 +75,7 @@ class MotionGateOpenConvergenceTest(unittest.TestCase):
             applied=0,
             rejected=2,
             writer_unavailable=10,
+            writer_metadata_pending=19,
             prepared=1,
         )
         cls.expected = cls.support.PreparedIdentity(
@@ -101,6 +102,18 @@ class MotionGateOpenConvergenceTest(unittest.TestCase):
             detail=detail,
         )
 
+    def metadata_pending(self, **changes):
+        response = FakeResponse(
+            code=self.protocol.rejected,
+            reason=self.protocol.writer_metadata_pending,
+            state=self.protocol.prepared,
+            detail=(
+                'candidate writer identity unresolved: count=1 '
+                'elapsed_ms=7'
+            ),
+        )
+        return replace(response, **changes)
+
     def converge(self, responses, request_ids, *, deadline=1.0):
         calls = []
         clock = FakeClock()
@@ -126,6 +139,20 @@ class MotionGateOpenConvergenceTest(unittest.TestCase):
         applied = self.terminal()
         result, calls, clock = self.converge(
             [self.pending(), applied],
+            ['request-1', 'request-2'],
+        )
+
+        self.assertIs(result, applied)
+        self.assertEqual([call[0] for call in calls], [
+            'request-1',
+            'request-2',
+        ])
+        self.assertEqual(clock.sleeps, [0.01])
+
+    def test_typed_metadata_pending_then_applied_is_retried(self):
+        applied = self.terminal()
+        result, calls, clock = self.converge(
+            [self.metadata_pending(), applied],
             ['request-1', 'request-2'],
         )
 
@@ -247,6 +274,32 @@ class MotionGateOpenConvergenceTest(unittest.TestCase):
         self.assertAlmostEqual(clock.sleeps[0], 0.01)
         self.assertAlmostEqual(clock.sleeps[1], 0.015)
         self.assertAlmostEqual(clock.value, 0.025)
+
+    def test_response_completed_after_deadline_is_not_accepted(self):
+        clock = FakeClock()
+        applied = self.terminal()
+        calls = []
+
+        def attempt(request_id, remaining):
+            calls.append((request_id, remaining))
+            clock.value = 1.001
+            return applied
+
+        with self.assertRaises(self.support.OpenConvergenceTimeout) as caught:
+            self.support.converge_open(
+                expected=self.expected,
+                protocol=self.protocol,
+                attempt=attempt,
+                new_request_id=lambda: 'request-1',
+                deadline=1.0,
+                now=clock.now,
+                sleep=clock.sleep,
+            )
+
+        self.assertEqual(calls, [('request-1', 1.0)])
+        self.assertIs(caught.exception.last_response, applied)
+        self.assertEqual(caught.exception.attempts, 1)
+        self.assertEqual(clock.sleeps, [])
 
 
 if __name__ == '__main__':

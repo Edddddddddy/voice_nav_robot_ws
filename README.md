@@ -1,136 +1,125 @@
 # VoiceNav Robot
 
-VoiceNav Robot 是一套从零手写的 ROS 2 纯仿真学习项目：让普通话语音经过
-本地 KWS、AEC、ASR、规则与 LLM，转换为受约束的强类型 Mission，再由安全
-运动链驱动 Gazebo 差速机器人完成建图与导航，最后使用本地 TTS 回复。
+VoiceNav Robot is a simulation-only ROS 2 system that turns local Mandarin
+voice input into a bounded, strongly typed Mission and executes it through a
+guarded Gazebo differential-drive chain. The approved target includes local
+KWS, AEC, ASR, deterministic rules, a local LLM, TTS, mapping, and navigation.
 
-运行基线固定为 WSL2 Ubuntu 24.04、ROS 2 Jazzy 和 Gazebo Harmonic。不包含
-真机、机械臂、相机、云服务或经过功能安全认证的急停系统。
+The supported baseline is Windows 11 with WSL2 Ubuntu 24.04, ROS 2 Jazzy, and
+Gazebo Harmonic. Real robots, manipulators, cameras, cloud services, and
+functional-safety emergency stops are outside the supported scope.
 
-## 当前状态
+## Current status
 
-Lesson 0001–0008 的 reference solution 已完成。Lesson 0008 已通过本地
-门禁、独立评审和 required CI，由
-[PR #9](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/9)
-rebase 合并，并发布不可变 `course/0008-solution` tag。Lesson 0009 /
-`VN-0010` 正在 [Issue #11](https://github.com/Edddddddddy/voice_nav_robot_ws/issues/11)
-上实现独立 MotionGate。当前 local-GREEN 分支已包含内部静态
-`MotionGateCore`、独立 `motion_gate_node`、per-lease writer binding、正常运行
-lease/freshness deadline 与唯一最终速度 owner；本地完整门禁与独立证据评审
-已通过，[PR #12](https://github.com/Edddddddddy/voice_nav_robot_ws/pull/12)
-已创建；required CI、rebase merge 和 solution tag 尚未闭环。当前已在本地
-验证的 `v0.2` 切片包括：
+The repository currently verifies a v0.2 simulation and MotionGate slice:
 
-- 六个职责明确的 ROS package；
-- 第一版 `MissionStep` 和 `ExecuteMission` 教学接口；
-- 手写差速机器人 Xacro、TF、碰撞、惯量和稳定落地；
-- `gz_ros2_control`、`diff_drive_controller` 与消费端 timeout；
-- 自包含测试 world、360° 2D LiDAR、`/clock`/`/scan` 单向 bridge；
-- controller 直接发布产品 `/odom`，以及按 edge、publisher GID 和完整
-  node FQN 验证的 TF 唯一所有权；
-- Work Item、质量门禁、变更记录和课程记录。
+- six ROS packages with explicit responsibility and dependency boundaries;
+- a hand-written differential-drive Xacro with collision, inertia, and stable
+  spawning;
+- `gz_ros2_control`, Jazzy `diff_drive_controller`, and a 0.35 s consumer
+  timeout;
+- a self-contained Gazebo world with one 360-degree 2D LiDAR on `laser_link`;
+- `/clock` and `/scan` as the only ROS/Gazebo bridge traffic;
+- direct product `/odom` from the controller and per-edge TF ownership checks;
+- an independent fail-closed MotionGate with a 250 ms Runtime authority lease,
+  150 ms candidate freshness deadline, writer binding, and sole final velocity
+  ownership.
 
-原生 Gazebo DiffDrive 仅保留为历史教学 checkpoint。Lesson 0009 的
-local-GREEN implementation 仍不能写成已经公开交付的产品能力；进程 kill、
-消费端 crash-stop 以及 Gazebo pause/resume 明确留给 Lesson 0010。当前
-controller timeout 不能被误称为已经验收的完整安全链。
+The configured controller timeout is a consumer-side deadman, not by itself
+evidence of process-death recovery or physical stationarity. The current
+MotionGate slice does not claim the complete Mission Runtime, smoother,
+Collision Monitor, process-kill, or managed-pause integration. See the
+[architecture overview](docs/architecture/overview.md) for the current/target
+boundary and the [v1.0 product specification](docs/product/v1.0-product-spec.md)
+for the approved acceptance flow.
 
-实现状态与目标设计必须区分阅读：
-
-- [课程目录](course/README.md) 说明已经完成的学习 checkpoint；
-- [v1.0 产品规范](docs/product/v1.0-product-spec.md) 定义最终验收；
-- [架构总览](docs/architecture/overview.md) 区分 current 与 target；
-- [发布策略](docs/process/release-policy.md) 给出逐版本交付边界。
-
-## 目标链路
+## Target control path
 
 ```text
-单麦克风 + 外放
-  → 本地 AEC / 唤醒词“小智” / VAD / ASR
-  → STOP 快路径或规则优先的 Agent + 本地 LLM fallback
-  → 强类型 Mission、整计划验证、单执行槽和 admission fencing
-  → Nav2 / 相对运动候选速度
-  → velocity smoother → collision monitor → MotionGate
-  → diff_drive_controller → Gazebo
-  → slam_toolbox 建图，或 AMCL + Nav2 导航
-  → 本地 TTS
+microphone + speakers
+  -> local AEC / wake word / VAD / ASR
+  -> STOP-first Agent + deterministic rules + local LLM fallback
+  -> validated Mission with admission fencing
+  -> Nav2 or relative-motion candidate velocity
+  -> velocity smoother -> collision monitor -> MotionGate
+  -> diff_drive_controller -> gz_ros2_control -> Gazebo
+  -> slam_toolbox in Mapping Mode, or AMCL + Nav2 in Navigation Mode
+  -> local TTS
 ```
 
-Mapping 与 Navigation 是两个独立启动模式，分别由 `slam_toolbox` 和 AMCL
-拥有 `map → odom`。它们不能同时运行。MotionGate 是唯一最终速度发布者；
-LLM、Agent、Nav2 和 Gazebo bridge 都不能绕过它。
+Mapping and Navigation are separately launched modes. `slam_toolbox` owns
+`map -> odom` in Mapping Mode and AMCL owns it in Navigation Mode; they never
+run as simultaneous owners. MotionGate is the only final velocity publisher,
+and the Agent, Nav2, and Gazebo bridge cannot bypass it.
 
-## 仓库结构
+## Repository structure
 
-| 路径 | 职责 |
+| Path | Responsibility |
 | --- | --- |
-| `src/voice_nav_interfaces` | 稳定的 ROS msg、srv、action |
-| `src/voice_nav_sim` | Xacro、Gazebo 与仿真适配 |
-| `src/voice_nav_mission` | Mission Core、运行时与 MotionGate |
-| `src/voice_nav_agent` | 中文规则、本地 LLM 适配与对话策略 |
-| `src/voice_nav_audio` | Audio I/O、AEC、KWS、VAD、ASR、TTS |
-| `src/voice_nav_bringup` | 模式化 launch、配置与组合根 |
-| `docs/product` | 产品范围、成功标准与术语 |
-| `docs/architecture` | 系统、Interface、运动安全、TF 与模式 |
-| `docs/process` | 质量、测试、变更和发布流程 |
-| `docs/adr` | 有后果的架构决策及 superseded 关系 |
-| `docs/work-items` | 版本化变更契约和验收证据 |
-| `course/lessons` | 可复现课程 |
-| `course/records` | 学习者提交与复盘 |
-| `course/reference` | ROS、Gazebo、SLAM、Nav2 与语音参考 |
+| `src/voice_nav_interfaces` | Stable ROS messages, services, and actions |
+| `src/voice_nav_sim` | Xacro, Gazebo, and simulation adapters |
+| `src/voice_nav_mission` | Mission Runtime, MotionGate, and adapters |
+| `src/voice_nav_agent` | Mandarin rules, local LLM adapter, and dialogue policy |
+| `src/voice_nav_audio` | Audio I/O, AEC, KWS, VAD, ASR, and TTS |
+| `src/voice_nav_bringup` | Mode launches, configuration, and composition |
+| `docs/product` | Product scope, acceptance, and terminology |
+| `docs/architecture` | System, Interface, safety, TF, and mode contracts |
+| `docs/process` | Quality, testing, change, release, and recurrence controls |
+| `docs/adr` | Consequential architecture decisions and supersession |
+| `docs/agents` | Issue/PR delivery protocol |
 
-六个 ROS package 是部署和依赖边界，不为目录整齐继续拆分浅包。运行时的
-深 Module 可以在同一 package 内拥有多个进程或私有 target。
+## Build and verification
 
-## 构建与验证
-
-在 WSL 中运行完整质量门禁：
+Run the focused repository checks during development:
 
 ```bash
-cd /mnt/c/Users/lcy/code/ros2/voice_nav_robot_ws
+python3 -m unittest tests.test_repository_contract
+python3 scripts/check_repository.py --root .
+```
+
+After the final change, run the complete quality gate exactly once on the
+final PR HEAD in the same managed worktree:
+
+```bash
 bash scripts/verify.sh
 ```
 
-只收窄主 build/test 到某个 package 及其依赖：
+The entry point resolves ordinary `.git` directories, relative worktree
+pointers, and Windows absolute `gitdir:` pointers automatically. Do not
+pre-set `GIT_DIR` or `GIT_WORK_TREE`, and do not point the command at another
+checkout.
 
-```bash
-bash scripts/verify.sh voice_nav_sim
-```
+Record the gate's true exit status before running any separate diagnostics. A
+later successful command must not overwrite a failed result. The complete
+cadence and evidence ownership are defined in the
+[change lifecycle](docs/process/change-lifecycle.md).
 
-package 参数不跳过仓库级静态门禁或 clean-prefix install 边界审计；因此
-Lesson 0009 起即使选择别的 package，审计仍会临时构建
-`voice_nav_mission`。完整门禁会检查仓库与课程契约、Markdown 本地链接、
-ROS package 版本一致性、声明依赖、Xacro/URDF/SDF 契约、构建以及全部测试。
-`build/`、`install/`、`log/`、模型权重、地图、录音和运行证据不得提交。
+Generated `build/`, `install/`, and `log/` trees, model weights, maps,
+recordings, and runtime evidence must not be committed. The supported
+MotionGate implementation is locked to `rmw_fastrtps_cpp`; the canonical
+launch selects it and the node rejects another RMW. This is an implementation
+support boundary, not a portability claim for every DDS implementation.
 
-Lesson 0009 的 Gate-local writer identity 当前严格锁定
-`rmw_fastrtps_cpp`。canonical product launch 会显式选择该 RMW；
-`motion_gate_node` 在其他 RMW 下拒绝启动。这是当前受支持实现约束，不是
-对任意 DDS 实现的可移植性承诺。
+## Development workflow
 
-## 开发与学习
-
-工程变更遵循：
+GitHub Issues are the canonical requirements, decision, acceptance, dependency,
+and status record. The delivery path is:
 
 ```text
-Work Item → GitHub Issue → branch
-→ tests-first implementation → docs / ADR / changelog
-→ local verify → PR → CI → rebase merge → tag / release
+GitHub Issue -> isolated branch -> tests-first implementation
+  -> documentation / ADR / changelog as needed -> local verification
+  -> Draft PR -> review -> CI -> rebase merge
 ```
 
-`main` 始终保存参考 solution。Lesson 0007 起，每课使用
-`course/NNNN-start` 与 `course/NNNN-solution` annotated tag；学习者从
-start tag 创建独立 `learn/NNNN` 分支或 worktree，完成后与 solution tag
-比较，不复制第二份源码。
+Read [Contributing](CONTRIBUTING.md), the [change lifecycle](docs/process/change-lifecycle.md),
+and the relevant product and architecture contracts before editing.
 
-开始修改前阅读 [贡献流程](CONTRIBUTING.md)、[变更生命周期](docs/process/change-lifecycle.md)
-和相应 [Work Item](docs/work-items/)。
+## Safety, license, and reporting
 
-## 安全、许可证与报告
+“Stop” means a high-priority operational stop in the simulation. It requests
+zero command and MotionGate inhibition; it does not prove physical stationarity
+and is not a certified emergency stop. See [SECURITY.md](SECURITY.md) for
+reporting and deployment boundaries.
 
-项目中的“停止”是仿真项目的高优先级 operational stop，不代表机器人已经
-物理停稳，也不宣称满足功能安全标准。安全边界与漏洞报告方式见
-[SECURITY.md](SECURITY.md)。
-
-项目使用 Apache License 2.0。第三方来源和限制记录在
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+The project is licensed under Apache License 2.0. Third-party sources and
+restrictions are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

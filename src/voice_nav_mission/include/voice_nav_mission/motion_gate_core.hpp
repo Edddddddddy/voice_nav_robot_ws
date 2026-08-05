@@ -76,6 +76,7 @@ enum class Reason : std::uint16_t
   ConfigurationInvalid = 16,
   PublishFailed = 17,
   InternalFailure = 18,
+  WriterMetadataPending = 19,
 };
 
 struct MotionGateConfig

@@ -511,6 +511,33 @@ TEST(MotionGateCore, OpenRejectsMissingOrZeroWriterBinding)
   EXPECT_EQ(gate.snapshot().state, State::Prepared);
 }
 
+TEST(MotionGateCore, OpenFaultsClosedWhenReadyBindingCarriesNonNoneReason)
+{
+  MotionGateCore gate(MotionGateConfig{}, kGateId);
+  ASSERT_EQ(prepare_with(gate, 1U, at(0ms)).code, ResultCode::Applied);
+  const auto request = lease_request(
+    Operation::Open, 2U, gate.snapshot());
+
+  const auto result = gate.open(
+    request, at(1ms),
+    []() {
+      return OpenBinding{
+      true,
+      Reason::WriterMetadataPending,
+      writer_gid(),
+      "contradictory ready binding"};
+    });
+
+  EXPECT_EQ(result.code, ResultCode::Faulted);
+  EXPECT_EQ(result.reason, Reason::InternalFailure);
+  EXPECT_EQ(result.state, State::Faulted);
+  EXPECT_TRUE(result.motion_inhibited);
+  EXPECT_TRUE(result.zero_selected);
+  EXPECT_FALSE(result.writer_bound);
+  EXPECT_TRUE(result.lease_id.empty());
+  EXPECT_TRUE(gate.selected_command().is_zero());
+}
+
 TEST(MotionGateCore, OpenProviderExceptionFaultsClosed)
 {
   MotionGateCore gate(MotionGateConfig{}, kGateId);
@@ -1144,6 +1171,48 @@ TEST(MotionGateCore, OpenPreservesWriterMismatchAndCachesItsRejection)
   EXPECT_EQ(duplicate.state, gate.snapshot().state);
   EXPECT_EQ(duplicate.control_seq, gate.snapshot().control_seq);
   EXPECT_EQ(provider_calls, 1U);
+}
+
+TEST(MotionGateCore, OpenPreservesTypedWriterMetadataPendingWithoutBinding)
+{
+  MotionGateCore gate(MotionGateConfig{}, kGateId);
+  ASSERT_EQ(prepare_with(gate, 150U, at(0ms)).code, ResultCode::Applied);
+  const auto writer = writer_gid();
+  const auto request =
+    lease_request(Operation::Open, 151U, gate.snapshot());
+  std::size_t provider_calls = 0U;
+  const auto pending_provider = [&provider_calls, writer]() {
+      ++provider_calls;
+      return OpenBinding{
+      false,
+      Reason::WriterMetadataPending,
+      writer,
+      "candidate writer identity is unresolved"};
+    };
+
+  const auto pending = gate.open(request, at(1ms), pending_provider);
+  ASSERT_EQ(pending.code, ResultCode::Rejected);
+  EXPECT_EQ(pending.reason, Reason::WriterMetadataPending);
+  EXPECT_EQ(pending.state, State::Prepared);
+  EXPECT_EQ(pending.control_seq, 1U);
+  EXPECT_FALSE(pending.writer_bound);
+  EXPECT_TRUE(std::all_of(
+      pending.bound_writer_gid.cbegin(),
+      pending.bound_writer_gid.cend(),
+      [](std::uint8_t value) {return value == 0U;}));
+  EXPECT_TRUE(pending.motion_inhibited);
+  EXPECT_TRUE(pending.zero_selected);
+  EXPECT_EQ(provider_calls, 1U);
+
+  const auto duplicate = gate.open(request, at(2ms), pending_provider);
+  EXPECT_EQ(duplicate.code, ResultCode::Duplicate);
+  EXPECT_EQ(duplicate.reason, Reason::WriterMetadataPending);
+  EXPECT_EQ(provider_calls, 1U);
+
+  const auto opened = open_with(gate, 152U, at(3ms), writer);
+  EXPECT_EQ(opened.code, ResultCode::Applied);
+  EXPECT_EQ(opened.state, State::Armed);
+  EXPECT_EQ(opened.bound_writer_gid, writer);
 }
 
 TEST(MotionGateCore, DuplicateAfterDeadlineCarriesCurrentSnapshot)

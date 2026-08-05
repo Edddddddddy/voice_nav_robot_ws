@@ -38,6 +38,7 @@ class ProtocolValues:
     applied: int
     rejected: int
     writer_unavailable: int
+    writer_metadata_pending: int
     prepared: int
 
 
@@ -59,10 +60,14 @@ class OpenConvergenceTimeout(TimeoutError):
 
 
 def _is_writer_discovery_pending(response, protocol: ProtocolValues) -> bool:
+    if response.code != protocol.rejected:
+        return False
     return (
-        response.code == protocol.rejected
-        and response.reason == protocol.writer_unavailable
-        and response.detail == PENDING_DETAIL
+        response.reason == protocol.writer_metadata_pending
+        or (
+            response.reason == protocol.writer_unavailable
+            and response.detail == PENDING_DETAIL
+        )
     )
 
 
@@ -147,6 +152,9 @@ def converge_open(
         response = attempt(request_id, remaining)
         last_response = response
         attempts += 1
+        remaining = deadline - now()
+        if remaining <= 0.0:
+            raise OpenConvergenceTimeout(last_response, attempts)
         if not _is_writer_discovery_pending(response, protocol):
             return response
 

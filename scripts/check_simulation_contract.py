@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate the Lesson 0008 world, LiDAR, bridge, and TF-owner contract."""
+"""Validate the simulation world, LiDAR, bridge, and TF-owner contract."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from pathlib import Path
 
 
 class SimulationContractError(ValueError):
-    """A simulation artifact violates the stable Lesson 0008 contract."""
+    """A simulation artifact violates the stable simulation contract."""
 
 
 @dataclass(frozen=True)
@@ -413,7 +413,7 @@ def validate_robot_description(path: Path) -> None:
     if len(sensor_bindings) != 1:
         raise SimulationContractError(
             "robot root must directly define exactly one Gazebo sensor "
-            "for Lesson 0008"
+            "for the simulation contract"
         )
 
     laser_gazebo_blocks = [
@@ -1171,7 +1171,7 @@ def validate_launch(path: Path) -> None:
         call for call in calls if call_name(call) == "Node"
     ]
 
-    # Keep the world check first: it is the intended Lesson 0007 -> 0008 RED.
+    # Keep the world check first: it is the foundational simulation contract.
     require_world_launch(calls, assignments)
     require_bridge_launch(launch_nodes, assignments)
     require_spawn_world(launch_nodes, assignments)

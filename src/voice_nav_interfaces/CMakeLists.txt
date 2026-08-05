@@ -15,11 +15,15 @@ find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MissionStep.msg"
+  "msg/MissionState.msg"
   "action/ExecuteMission.action"
+  "srv/StopMission.srv"
 )
 
 
 if(BUILD_TESTING)
+  find_package(ament_cmake_gtest REQUIRED)
+  find_package(ament_cmake_pytest REQUIRED)
   find_package(ament_lint_auto REQUIRED)
   # the following line skips the linter which checks for copyrights
   # comment the line when a copyright and license is added to all source files
@@ -29,6 +33,26 @@ if(BUILD_TESTING)
   # a copyright and license is added to all source files
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+
+  ament_add_pytest_test(
+    mission_interface_python_contract
+    test/mission_interface_python_contract.py
+  )
+
+  ament_add_gtest(
+    mission_interface_cpp_contract
+    test/mission_interface_cpp_contract.cpp
+  )
+  target_compile_features(mission_interface_cpp_contract PUBLIC cxx_std_17)
+  rosidl_get_typesupport_target(
+    mission_interface_typesupport_target
+    ${PROJECT_NAME}
+    rosidl_typesupport_cpp
+  )
+  target_link_libraries(
+    mission_interface_cpp_contract
+    "${mission_interface_typesupport_target}"
+  )
 endif()
 
 ament_export_dependencies(rosidl_default_runtime)

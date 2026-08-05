@@ -75,12 +75,38 @@ def load_open_convergence_support():
     return module
 
 
+def load_gazebo_shutdown_support():
+    support_path = (
+        Path(get_package_share_directory('voice_nav_sim'))
+        / 'test_support'
+        / 'gazebo_shutdown.py'
+    )
+    specification = importlib.util.spec_from_file_location(
+        'voice_nav_motion_gate_product_gazebo_shutdown',
+        support_path,
+    )
+    if specification is None or specification.loader is None:
+        raise RuntimeError('could not load Gazebo shutdown test support')
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
 open_convergence = load_open_convergence_support()
+gazebo_shutdown = load_gazebo_shutdown_support()
+PRODUCT_TEST_PARTITION = (
+    gazebo_shutdown.claim_unique_test_partition(
+        'l0009_motion_gate_product'
+    )
+)
 OPEN_PROTOCOL = open_convergence.ProtocolValues(
     applied=InternalMotionGateControl.Response.APPLIED,
     rejected=InternalMotionGateControl.Response.REJECTED,
     writer_unavailable=(
         InternalMotionGateControl.Response.WRITER_UNAVAILABLE
+    ),
+    writer_metadata_pending=(
+        InternalMotionGateControl.Response.WRITER_METADATA_PENDING
     ),
     prepared=InternalMotionGateState.PREPARED,
 )
@@ -94,7 +120,10 @@ def generate_test_description():
         PythonLaunchDescriptionSource(
             f'{package_share}/launch/product_sim.launch.py'
         ),
-        launch_arguments={'headless': 'true'}.items(),
+        launch_arguments={
+            'headless': 'true',
+            'shutdown_on_gazebo_exit': 'false',
+        }.items(),
     )
     return LaunchDescription(
         [
@@ -120,7 +149,14 @@ def is_zero(message: TwistStamped) -> bool:
 
 
 class MotionGateProductTest(unittest.TestCase):
-    def setUp(self):
+    def setUp(self, proc_info):
+        self.addCleanup(self.destroy_ros_fixture)
+        self.addCleanup(
+            gazebo_shutdown.structured_stop_gazebo,
+            proc_info,
+            expected_partition=PRODUCT_TEST_PARTITION,
+        )
+        self.addCleanup(self.inhibit_for_cleanup)
         rclpy.init()
         self.node = rclpy.create_node(
             'collision_monitor',
@@ -197,17 +233,52 @@ class MotionGateProductTest(unittest.TestCase):
         self.open_convergence_deadline = 0.0
         self.spin_thread.start()
 
-    def tearDown(self):
-        self.best_effort_inhibit()
-        for publisher in tuple(self.candidate_publishers):
-            try:
-                self.node.destroy_publisher(publisher)
-            except Exception:
-                pass
-        self.executor.shutdown(timeout_sec=2.0)
-        self.spin_thread.join(timeout=2.0)
-        self.node.destroy_node()
-        rclpy.shutdown()
+    def destroy_ros_fixture(self):
+        node = getattr(self, 'node', None)
+        steps = []
+        for index, publisher in enumerate(tuple(
+            getattr(self, 'candidate_publishers', ())
+        )):
+            if node is not None:
+                steps.append(
+                    (
+                        f'candidate publisher {index} destroy',
+                        lambda publisher=publisher: (
+                            node.destroy_publisher(publisher)
+                        ),
+                    )
+                )
+        executor = getattr(self, 'executor', None)
+        if executor is not None:
+            steps.append(
+                (
+                    'executor shutdown',
+                    lambda: executor.shutdown(timeout_sec=2.0),
+                )
+            )
+        spin_thread = getattr(self, 'spin_thread', None)
+        if spin_thread is not None:
+            steps.append(
+                (
+                    'spin thread join',
+                    lambda: gazebo_shutdown.join_started_thread(
+                        spin_thread,
+                        timeout_seconds=2.0,
+                    ),
+                )
+            )
+        if node is not None:
+            steps.append(('node destroy', node.destroy_node))
+
+        def shutdown_rclpy():
+            if rclpy.ok():
+                rclpy.shutdown()
+
+        steps.append(('rclpy shutdown', shutdown_rclpy))
+        gazebo_shutdown.run_cleanup_steps(
+            'MotionGate product ROS fixture destruction failed',
+            steps,
+        )
 
     def append_sample(self, samples, message):
         with self.samples_lock:
@@ -395,17 +466,16 @@ class MotionGateProductTest(unittest.TestCase):
         self.update_authority(response)
         return started, completed, response
 
-    def best_effort_inhibit(self):
+    def inhibit_for_cleanup(self):
+        control_client = getattr(self, 'control_client', None)
         if (
             not rclpy.ok()
-            or not self.control_client.service_is_ready()
-            or not self.current_lease_id
+            or control_client is None
+            or not control_client.service_is_ready()
+            or not getattr(self, 'current_lease_id', '')
         ):
             return
-        try:
-            self.inhibit()
-        except Exception:
-            pass
+        self.inhibit()
 
     def create_candidate_publisher(self, topic: str):
         qos = QoSProfile(

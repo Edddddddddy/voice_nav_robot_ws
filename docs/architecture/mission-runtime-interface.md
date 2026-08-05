@@ -1,6 +1,7 @@
 # Mission Runtime Interface
 
-**Status:** Approved v1.0 target; the v0.1 source IDL is still provisional.
+**Status:** Active pre-1.0 Mission V1 public Interface; Runtime behavior remains
+implemented by a later Task.
 
 Mission Runtime is a deep Module with two mutation operations and one read-only
 state projection:
@@ -66,6 +67,10 @@ uint32 supported_step_mask
 uint8 max_steps
 string<=64[<=32] named_place_ids
 ```
+
+When no Mission step is active, `active_step` is `UINT32_MAX` (`4294967295`).
+Runtime contract tests must preserve this sentinel rather than using a second
+out-of-band state field.
 
 QoS is `RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1)`. A late Agent receives the
 latest state before planning. `runtime_instance_id` changes on every
@@ -252,9 +257,9 @@ generic workflow DSL, or a Mission-level Behavior Tree.
 
 ## Current-to-target migration
 
-At v0.1 the source IDL is intentionally provisional: it still has session/turn
-fields, unbounded strings/steps, no Runtime fencing, no STOP Service, and no
-state snapshot. The v0.4 Work Item updates IDL, all producers/consumers,
-contract tests, documentation, and changelog together. After v1.0, a breaking
-DDS change creates V2 types/endpoints plus a temporary V1 Adapter; an
-`api_version` field cannot make incompatible DDS types compatible.
+The pre-1.0 migration is complete in `voice_nav_interfaces`: all four public
+types are bounded, runtime/source fencing is explicit, and generated C++/Python
+contract consumers verify the public surface. Runtime producers and consumers
+must adopt this Interface before the product claims Mission execution. After
+v1.0, a breaking DDS change creates V2 types/endpoints plus a temporary V1
+Adapter; an `api_version` field cannot make incompatible DDS types compatible.

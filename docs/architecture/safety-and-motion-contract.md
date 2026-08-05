@@ -265,13 +265,12 @@ The barrier is required between consecutive Mission steps too, even when both
 steps use the same producer. Limits, timeouts, and queue bounds come from
 trusted configuration and are verified with deliberately delayed old commands.
 
-Lesson 0009 has a local-GREEN implementation of the normal-running Core,
-private seam, Gate-local binding, barriers, final ownership, and deadline
-expiry with a test authority/candidate harness. Its complete local gate and
-independent evidence review pass; PR, required CI, merge, and solution tag
-remain open. It does not claim the complete Runtime/smoother/Collision Monitor
-integration. Process-kill crash-stop, consumer-deadman proof, and
-managed/unmanaged Gazebo pause behavior are reserved for Lesson 0010 / VN-0011.
+The current implementation delivers the normal-running Core, private seam,
+Gate-local binding, barriers, final ownership, and deadline expiry with an
+in-process test authority/candidate harness. It does not claim the complete
+Runtime/smoother/Collision Monitor integration. Process-kill crash-stop,
+consumer-deadman proof, and managed/unmanaged Gazebo pause behavior remain
+separate target acceptance slices.
 
 ### Gazebo managed safe-pause and resume
 
@@ -403,14 +402,20 @@ above. Every Goal receives exactly one terminal result.
 
 ## Verification obligations
 
-- Lesson 0009 acceptance has three executable layers: pure-Core manual-clock
-  GTest; a Fast-DDS-locked Node launch test with neither Gazebo nor `/clock`;
-  and a Fast-DDS-locked headless Gazebo product launch test. Repository-static
-  contract checks are a prerequisite, not a substitute for any layer.
-- The Node layer is isolated in ROS domain 91, localhost discovery, a 60-second
-  timeout, and serial execution. The product layer uses ROS domain 92,
-  localhost discovery, a unique Gazebo partition, a 180-second timeout, and
-  serial execution.
+- Current cumulative verification retains three executable layers: pure-Core
+  manual-clock GTest; a Fast-DDS-locked
+  Node launch test with neither Gazebo nor `/clock`; and a Fast-DDS-locked
+  headless Gazebo product launch test. Repository-static contract checks are a
+  prerequisite, not a substitute for any layer.
+- Historical fixed-domain evidence is not current acceptance evidence. Current
+  launch layers use the official
+  `run_test_isolated.py` runner, clear inherited `ROS_DOMAIN_ID` and
+  `DISABLE_ROS_ISOLATION`, and allocate a process-isolated ROS domain with
+  localhost discovery. This current rule is not retroactive evidence for the
+  old tag.
+- The Node layer has a 60-second timeout and serial execution; the product
+  layer additionally has
+  a unique Gazebo partition, a 180-second timeout, and serial execution.
 - Manual-clock tests prove lease, cancel-grace, timeout, and callback-fencing
   behavior without sleeping.
 - OPEN tests prove pure validation precedes graph access and that readers A/B/C
