@@ -997,8 +997,7 @@ def validate_core(header_path: Path, source_path: Path) -> None:
         prepare,
         (
             "State::Inhibited",
-            "request_id_cache_",
-            "cached->second.request_fingerprint",
+            "replay_or_collision(request)",
             "request.expected_control_seq",
             "control_seq_",
             "make_lease_id",
@@ -1108,7 +1107,7 @@ def validate_core(header_path: Path, source_path: Path) -> None:
     )
     require_source_tokens(
         inhibit,
-        ("retire_lease", "request_id_cache_"),
+        ("retire_lease", "replay_or_collision(request)"),
         "MotionGateCore::inhibit",
     )
     tick = function_body(
