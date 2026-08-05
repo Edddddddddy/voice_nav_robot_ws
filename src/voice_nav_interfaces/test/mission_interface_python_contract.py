@@ -11,13 +11,12 @@ def test_mission_step_exposes_bounded_v1_contract():
     assert MissionStep.ROTATE_ANGLE == 2
     assert MissionStep.NAVIGATE_TO == 3
     assert MissionStep.SAVE_MAP == 4
-    assert list(step.get_fields_and_field_types()) == [
-        'kind',
-        'distance_m',
-        'angle_rad',
-        'target_id',
+    assert list(step.get_fields_and_field_types().items()) == [
+        ('kind', 'uint8'),
+        ('distance_m', 'float'),
+        ('angle_rad', 'float'),
+        ('target_id', 'string<64>'),
     ]
-    assert step.get_fields_and_field_types()['target_id'] == 'string<64>'
 
 
 def test_execute_mission_exposes_bounded_fenced_contract():
@@ -43,30 +42,23 @@ def test_execute_mission_exposes_bounded_fenced_contract():
     assert ExecuteMission.Feedback.EXECUTING == 2
     assert ExecuteMission.Feedback.SAFE_STOPPING == 3
 
-    assert list(goal.get_fields_and_field_types()) == [
-        'source_instance_id',
-        'source_seq',
-        'runtime_instance_id',
-        'admission_epoch',
-        'steps',
+    assert list(goal.get_fields_and_field_types().items()) == [
+        ('source_instance_id', 'string<36>'),
+        ('source_seq', 'uint64'),
+        ('runtime_instance_id', 'string<36>'),
+        ('admission_epoch', 'uint64'),
+        ('steps', 'sequence<voice_nav_interfaces/MissionStep, 3>'),
     ]
-    assert goal.get_fields_and_field_types() == {
-        'source_instance_id': 'string<36>',
-        'source_seq': 'uint64',
-        'runtime_instance_id': 'string<36>',
-        'admission_epoch': 'uint64',
-        'steps': 'sequence<voice_nav_interfaces/MissionStep, 3>',
-    }
-    assert result.get_fields_and_field_types() == {
-        'code': 'uint16',
-        'failed_step': 'int32',
-        'detail': 'string<160>',
-    }
-    assert feedback.get_fields_and_field_types() == {
-        'phase': 'uint8',
-        'step_index': 'uint32',
-        'progress': 'float',
-    }
+    assert list(result.get_fields_and_field_types().items()) == [
+        ('code', 'uint16'),
+        ('failed_step', 'int32'),
+        ('detail', 'string<160>'),
+    ]
+    assert list(feedback.get_fields_and_field_types().items()) == [
+        ('phase', 'uint8'),
+        ('step_index', 'uint32'),
+        ('progress', 'float'),
+    ]
 
 
 def test_state_and_stop_expose_bounded_runtime_contract():
@@ -87,27 +79,27 @@ def test_state_and_stop_expose_bounded_runtime_contract():
     assert StopMission.Response.DUPLICATE == 1
     assert StopMission.Response.SAFETY_FAULT == 2
 
-    assert state.get_fields_and_field_types() == {
-        'runtime_instance_id': 'string<36>',
-        'admission_epoch': 'uint64',
-        'operating_mode': 'uint8',
-        'availability': 'uint8',
-        'gate_state': 'uint8',
-        'active_step': 'uint32',
-        'supported_step_mask': 'uint32',
-        'max_steps': 'uint8',
-        'named_place_ids': 'sequence<string<64>, 32>',
-    }
-    assert request.get_fields_and_field_types() == {
-        'request_id': 'string<36>',
-        'source_instance_id': 'string<36>',
-        'source_seq': 'uint64',
-        'reason': 'string<160>',
-    }
-    assert response.get_fields_and_field_types() == {
-        'code': 'uint16',
-        'runtime_instance_id': 'string<36>',
-        'admission_epoch': 'uint64',
-        'motion_inhibited': 'boolean',
-        'detail': 'string<160>',
-    }
+    assert list(state.get_fields_and_field_types().items()) == [
+        ('runtime_instance_id', 'string<36>'),
+        ('admission_epoch', 'uint64'),
+        ('operating_mode', 'uint8'),
+        ('availability', 'uint8'),
+        ('gate_state', 'uint8'),
+        ('active_step', 'uint32'),
+        ('supported_step_mask', 'uint32'),
+        ('max_steps', 'uint8'),
+        ('named_place_ids', 'sequence<string<64>, 32>'),
+    ]
+    assert list(request.get_fields_and_field_types().items()) == [
+        ('request_id', 'string<36>'),
+        ('source_instance_id', 'string<36>'),
+        ('source_seq', 'uint64'),
+        ('reason', 'string<160>'),
+    ]
+    assert list(response.get_fields_and_field_types().items()) == [
+        ('code', 'uint16'),
+        ('runtime_instance_id', 'string<36>'),
+        ('admission_epoch', 'uint64'),
+        ('motion_inhibited', 'boolean'),
+        ('detail', 'string<160>'),
+    ]
