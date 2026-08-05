@@ -9,4 +9,3 @@ mission_runtime_node:
     source_cache_size: 64
     stop_cache_size: 64
     max_steps: 3
-    named_place_ids: []
