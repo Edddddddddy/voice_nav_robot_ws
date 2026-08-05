@@ -1542,6 +1542,55 @@ class ScopedTestResultsTest(unittest.TestCase):
     def test_verify_fails_closed_when_package_discovery_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             workspace = Path(temporary_directory) / "workspace"
+            workspace.mkdir(parents=True)
+            marker = workspace / "tracked-marker.txt"
+            marker.write_text("fixture\n", encoding="utf-8")
+            git_environment = os.environ.copy()
+            git_environment.pop("GIT_DIR", None)
+            git_environment.pop("GIT_WORK_TREE", None)
+            for arguments in (
+                ("init", "--quiet"),
+                ("add", "tracked-marker.txt"),
+            ):
+                git_command = subprocess.run(
+                    ["git", "-C", str(workspace), *arguments],
+                    env=git_environment,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(
+                    git_command.returncode,
+                    0,
+                    f"git {' '.join(arguments)} failed: "
+                    f"stdout={git_command.stdout!r} "
+                    f"stderr={git_command.stderr!r}",
+                )
+            git_commit = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(workspace),
+                    "-c",
+                    "user.name=VoiceNav fixture",
+                    "-c",
+                    "user.email=voice-nav-fixture@example.invalid",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "fixture",
+                ],
+                env=git_environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(
+                git_commit.returncode,
+                0,
+                f"git commit failed: stdout={git_commit.stdout!r} "
+                f"stderr={git_commit.stderr!r}",
+            )
             scripts_directory = workspace / "scripts"
             scripts_directory.mkdir(parents=True)
             shutil.copyfile(VERIFY_SCRIPT, scripts_directory / "verify.sh")
@@ -1551,12 +1600,6 @@ class ScopedTestResultsTest(unittest.TestCase):
             )
             (scripts_directory / "check_clean_motion_gate_install.sh").write_text(
                 "#!/usr/bin/env bash\nexit 0\n",
-                encoding="utf-8",
-            )
-            git_directory = workspace / ".git"
-            git_directory.mkdir()
-            (git_directory / "HEAD").write_text(
-                "ref: refs/heads/main\n",
                 encoding="utf-8",
             )
             (workspace / "install").mkdir()
@@ -1569,7 +1612,6 @@ class ScopedTestResultsTest(unittest.TestCase):
             bash_environment = workspace / "test-environment.bash"
             bash_environment.write_text(
                 """python3() { return 0; }
-git() { return 0; }
 rosdep() { return 0; }
 xacro() { return 0; }
 check_urdf() { return 0; }
@@ -1592,7 +1634,7 @@ colcon() {
   esac
   return 0
 }
-export -f python3 git rosdep xacro check_urdf gz realpath colcon
+export -f python3 rosdep xacro check_urdf gz realpath colcon
 """,
                 encoding="utf-8",
             )
