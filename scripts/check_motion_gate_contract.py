@@ -1945,6 +1945,11 @@ def validate_launch_test_registration(
             f"{package_name} launch-test contract has mismatched path and timeout counts"
         )
     if len(launch_tests) != len(expected_paths):
+        if len(expected_paths) == 1:
+            raise MotionGateContractError(
+                f"{package_name} CMake must register exactly one "
+                "add_launch_test"
+            )
         raise MotionGateContractError(
             f"{package_name} CMake must register exactly "
             f"{len(expected_paths)} approved add_launch_test registrations"
@@ -2171,14 +2176,20 @@ def validate_mission_cmake(path: Path) -> None:
             "voice_nav_mission must use rosidl_get_typesupport_target instead "
             "of deprecated rosidl_target_interfaces"
         )
+    if "test/test_mission_runtime_node.py" in source:
+        launch_test_paths = (
+            "test/test_motion_gate_node.py",
+            "test/test_mission_runtime_node.py",
+        )
+        launch_test_timeouts = (60, 60)
+    else:
+        launch_test_paths = "test/test_motion_gate_node.py"
+        launch_test_timeouts = 60
     validate_launch_test_registration(
         source,
         "voice_nav_mission",
-        (
-            "test/test_motion_gate_node.py",
-            "test/test_mission_runtime_node.py",
-        ),
-        (60, 60),
+        launch_test_paths,
+        launch_test_timeouts,
     )
 
 

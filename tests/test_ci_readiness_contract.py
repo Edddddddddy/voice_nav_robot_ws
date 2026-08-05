@@ -101,6 +101,46 @@ def generated_mission_payload():
                     },
                 ],
             },
+            {
+                "name": "test_test_mission_runtime_node.py",
+                "command": [
+                    "/usr/bin/python3",
+                    "-u",
+                    (
+                        "/opt/ros/jazzy/share/ament_cmake_ros/cmake/"
+                        "run_test_isolated.py"
+                    ),
+                    "/tmp/result.xunit.xml",
+                    "--command",
+                    (
+                        "/workspace/src/voice_nav_mission/test/"
+                        "test_mission_runtime_node.py"
+                    ),
+                ],
+                "properties": [
+                    {
+                        "name": "ENVIRONMENT",
+                        "value": [
+                            "RMW_IMPLEMENTATION=rmw_fastrtps_cpp",
+                            "ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST",
+                        ],
+                    },
+                    {
+                        "name": "ENVIRONMENT_MODIFICATION",
+                        "value": [
+                            "ROS_DOMAIN_ID=unset:",
+                            "DISABLE_ROS_ISOLATION=unset:",
+                        ],
+                    },
+                    {"name": "LABELS", "value": ["launch_test"]},
+                    {"name": "RUN_SERIAL", "value": True},
+                    {"name": "TIMEOUT", "value": 60.0},
+                    {
+                        "name": "WORKING_DIRECTORY",
+                        "value": GENERATED_MISSION_WORKING_DIRECTORY,
+                    },
+                ],
+            },
         ],
     }
 
@@ -135,11 +175,17 @@ def launch_test_runtime(cmake_path: Path) -> tuple[set[str], dict[str, str]]:
         cmake,
         flags=re.DOTALL,
     )
-    if len(matches) != 1:
+    if not matches:
         raise AssertionError(
-            f"expected one isolated launch-test block in {cmake_path}"
+            f"expected isolated launch-test block in {cmake_path}"
         )
-    target_text, environment_text = matches[0]
+    target_text = "\n".join(target for target, _ in matches)
+    environment_texts = {environment for _, environment in matches}
+    if len(environment_texts) != 1:
+        raise AssertionError(
+            f"isolated launch-test blocks disagree on environment in {cmake_path}"
+        )
+    environment_text = environment_texts.pop()
     targets = set(re.findall(r"\btest_[A-Za-z0-9_]+\.py\b", target_text))
     environment = dict(
         entry.split("=", maxsplit=1)
@@ -238,7 +284,10 @@ class CiReadinessContractTest(unittest.TestCase):
         })
         self.assertEqual(
             mission_targets,
-            {"test_test_motion_gate_node.py"},
+            {
+                "test_test_motion_gate_node.py",
+                "test_test_mission_runtime_node.py",
+            },
         )
         self.assertEqual(
             bringup_targets,
@@ -268,7 +317,12 @@ class CiReadinessContractTest(unittest.TestCase):
     def test_launch_tests_use_official_process_scoped_domain_leases(self):
         expected_launch_test_counts = {
             SIMULATION_CMAKE: 3,
-            MISSION_CMAKE: 1,
+            MISSION_CMAKE: 2,
+            BRINGUP_CMAKE: 1,
+        }
+        expected_isolation_reset_counts = {
+            SIMULATION_CMAKE: 1,
+            MISSION_CMAKE: 2,
             BRINGUP_CMAKE: 1,
         }
         isolated_runner = (
@@ -295,8 +349,14 @@ class CiReadinessContractTest(unittest.TestCase):
                     cmake,
                 )
                 self.assertEqual(cmake.count(isolated_runner), expected_count)
-                self.assertEqual(cmake.count("ENVIRONMENT_MODIFICATION"), 1)
-                self.assertEqual(cmake.count(environment_reset), 1)
+                self.assertEqual(
+                    cmake.count("ENVIRONMENT_MODIFICATION"),
+                    expected_isolation_reset_counts[cmake_path],
+                )
+                self.assertEqual(
+                    cmake.count(environment_reset),
+                    expected_isolation_reset_counts[cmake_path],
+                )
                 self.assertNotIn("DISABLED", cmake)
                 self.assertNotIn("SKIP_RETURN_CODE", cmake)
                 self.assertIsNone(
