@@ -58,6 +58,20 @@ def generate_launch_description():
         output='screen',
         parameters=[gate_config],
     )
+    runtime_config = PathJoinSubstitution(
+        [
+            FindPackageShare('voice_nav_bringup'),
+            'config',
+            'mission_runtime.yaml',
+        ]
+    )
+    mission_runtime = Node(
+        package='voice_nav_mission',
+        executable='mission_runtime_node',
+        name='mission_runtime_node',
+        output='screen',
+        parameters=[runtime_config],
+    )
 
     return LaunchDescription(
         [
@@ -82,5 +96,6 @@ def generate_launch_description():
             ),
             simulation,
             motion_gate,
+            mission_runtime,
         ]
     )

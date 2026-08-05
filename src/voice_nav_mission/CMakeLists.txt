@@ -9,8 +9,10 @@ find_package(ament_cmake REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(rcl_interfaces REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rclcpp_action REQUIRED)
 find_package(rmw REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
+find_package(voice_nav_interfaces REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/InternalMotionGateState.msg"
@@ -26,6 +28,34 @@ target_include_directories(
   motion_gate_core
   PUBLIC
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+)
+
+add_library(
+  mission_runtime_core STATIC
+  src/mission_runtime_core.cpp
+)
+target_compile_features(mission_runtime_core PUBLIC cxx_std_17)
+target_include_directories(
+  mission_runtime_core
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+)
+
+add_executable(
+  mission_runtime_node
+  src/mission_runtime_node.cpp
+)
+target_compile_features(mission_runtime_node PUBLIC cxx_std_17)
+target_include_directories(
+  mission_runtime_node
+  PRIVATE include
+)
+ament_target_dependencies(
+  mission_runtime_node
+  rcl_interfaces
+  rclcpp
+  rclcpp_action
+  voice_nav_interfaces
 )
 
 add_executable(
@@ -56,6 +86,11 @@ target_link_libraries(
   motion_gate_core
   "${motion_gate_typesupport}"
 )
+target_link_libraries(
+  mission_runtime_node
+  mission_runtime_core
+  "${motion_gate_typesupport}"
+)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
@@ -73,6 +108,20 @@ if(BUILD_TESTING)
   target_link_libraries(
     motion_gate_core_test
     motion_gate_core
+  )
+
+  ament_add_gtest(
+    mission_runtime_core_test
+    test/mission_runtime_core_test.cpp
+  )
+  target_compile_features(mission_runtime_core_test PUBLIC cxx_std_17)
+  target_include_directories(
+    mission_runtime_core_test
+    PRIVATE include
+  )
+  target_link_libraries(
+    mission_runtime_core_test
+    mission_runtime_core
   )
 
   ament_add_gtest(
@@ -96,8 +145,20 @@ if(BUILD_TESTING)
     TIMEOUT 60
     RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
   )
+  add_launch_test(
+    test/test_mission_runtime_node.py
+    TIMEOUT 60
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
+  )
   set_tests_properties(
     test_test_motion_gate_node.py
+    PROPERTIES
+      ENVIRONMENT
+        "RMW_IMPLEMENTATION=rmw_fastrtps_cpp;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
+      RUN_SERIAL TRUE
+  )
+  set_tests_properties(
+    test_test_mission_runtime_node.py
     PROPERTIES
       ENVIRONMENT
         "RMW_IMPLEMENTATION=rmw_fastrtps_cpp;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
@@ -109,10 +170,16 @@ if(BUILD_TESTING)
       ENVIRONMENT_MODIFICATION
         "ROS_DOMAIN_ID=unset:;DISABLE_ROS_ISOLATION=unset:"
   )
+  set_tests_properties(
+    test_test_mission_runtime_node.py
+    PROPERTIES
+      ENVIRONMENT_MODIFICATION
+        "ROS_DOMAIN_ID=unset:;DISABLE_ROS_ISOLATION=unset:"
+  )
 endif()
 
 install(
-  TARGETS motion_gate_node
+  TARGETS motion_gate_node mission_runtime_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
