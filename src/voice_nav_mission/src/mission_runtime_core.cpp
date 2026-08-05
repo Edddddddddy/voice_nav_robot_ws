@@ -630,13 +630,13 @@ void RuntimeCore::set_availability_from_dependencies()
   gate_snapshot_ = authority_->snapshot();
   state_.gate_state = gate_snapshot_.endpoint_available ?
     gate_snapshot_.state : GateState::Faulted;
-  if (!gate_snapshot_.endpoint_available) {
-    state_.availability = RuntimeAvailability::Unavailable;
-  } else if (
+  const bool gate_requires_fault =
     gate_snapshot_.state == GateState::Faulted ||
     (gate_snapshot_.state != GateState::Armed &&
-    !zero_is_proven(gate_snapshot_)))
-  {
+    !zero_is_proven(gate_snapshot_));
+  if (!gate_snapshot_.endpoint_available) {
+    state_.availability = RuntimeAvailability::Unavailable;
+  } else if (gate_requires_fault) {
     state_.availability = RuntimeAvailability::Faulted;
   } else if (!gate_is_healthy(gate_snapshot_) || !relative_motion_->healthy()) {
     state_.availability = RuntimeAvailability::Unavailable;
