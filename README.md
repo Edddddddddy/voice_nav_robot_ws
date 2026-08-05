@@ -11,7 +11,8 @@ functional-safety emergency stops are outside the supported scope.
 
 ## Current status
 
-The repository currently verifies a v0.2 simulation and MotionGate slice:
+The repository currently verifies a v0.2 simulation, MotionGate, and Mission
+Runtime control-plane slice:
 
 - six ROS packages with explicit responsibility and dependency boundaries;
 - a hand-written differential-drive Xacro with collision, inertia, and stable
@@ -24,11 +25,15 @@ The repository currently verifies a v0.2 simulation and MotionGate slice:
 - an independent fail-closed MotionGate with a 250 ms Runtime authority lease,
   150 ms candidate freshness deadline, writer binding, and sole final velocity
   ownership.
+- a package-private Mission Runtime Core and ROS Adapter with bounded admission,
+  STOP fencing, typed state/feedback/results, and scripted behavior fakes;
+  the production RelativeMotion Adapter is intentionally unavailable until
+  #35, and physical motion is not implemented by this slice.
 
 The configured controller timeout is a consumer-side deadman, not by itself
-evidence of process-death recovery or physical stationarity. The current
-MotionGate slice does not claim the complete Mission Runtime, smoother,
-Collision Monitor, process-kill, or managed-pause integration. See the
+evidence of process-death recovery or physical stationarity. This slice does
+not claim the production RelativeMotion Adapter, smoother, Collision Monitor,
+process-kill, or managed-pause integration. See the
 [architecture overview](docs/architecture/overview.md) for the current/target
 boundary and the [v1.0 product specification](docs/product/v1.0-product-spec.md)
 for the approved acceptance flow.

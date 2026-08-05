@@ -945,6 +945,24 @@ TEST(MotionGateCore, InhibitCanRetirePreparedLease)
   EXPECT_TRUE(gate.selected_command().is_zero());
 }
 
+TEST(MotionGateCore, StaleInhibitCanConvergeWithTheSameRequestId)
+{
+  MotionGateCore gate(MotionGateConfig{}, kGateId);
+  ASSERT_EQ(prepare_with(gate, 1U, at(0ms)).code, ResultCode::Applied);
+  const auto current = gate.snapshot();
+  auto retry = lease_request(Operation::Inhibit, 2U, current);
+  retry.expected_control_seq = current.control_seq - 1U;
+
+  const auto stale = gate.inhibit(retry, at(1ms));
+  EXPECT_EQ(stale.code, ResultCode::Rejected);
+  EXPECT_EQ(stale.reason, Reason::StaleSequence);
+
+  retry.expected_control_seq = current.control_seq;
+  const auto converged = gate.inhibit(retry, at(2ms));
+  EXPECT_EQ(converged.code, ResultCode::Applied);
+  EXPECT_EQ(converged.state, State::Inhibited);
+}
+
 TEST(MotionGateCore, OldOpenReplayNeverResurrectsRetiredLease)
 {
   MotionGateCore gate(MotionGateConfig{}, kGateId);

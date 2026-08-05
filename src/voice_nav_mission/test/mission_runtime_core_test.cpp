@@ -16,6 +16,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -31,15 +32,17 @@ namespace
 
 constexpr char kRuntimeId[] = "0123456789abcdef0123456789abcdef";
 constexpr char kGateId[] = "fedcba9876543210fedcba9876543210";
+constexpr char kOtherGateId[] = "00112233445566778899aabbccddeeff";
 
 MissionGoal goal(
   std::uint64_t source_seq,
   std::vector<MissionStep> steps = {
-    MissionStep{
-      static_cast<std::uint8_t>(MissionStepKind::MoveDistance),
-      0.5F,
-      0.0F,
-      ""}})
+      MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::MoveDistance),
+        0.5F,
+        0.0F,
+        ""}
+    })
 {
   return MissionGoal{"source-a", source_seq, kRuntimeId, 1U, std::move(steps)};
 }
@@ -92,9 +95,9 @@ TEST(RuntimeCore, InvalidPlanIsRejectedBeforeDependenciesAndConsumesSequence)
   Fixture fixture;
   const auto invalid = fixture.core.admit(goal(
     1U,
-    {MissionStep{
-      static_cast<std::uint8_t>(MissionStepKind::MoveDistance),
-      std::numeric_limits<float>::quiet_NaN(), 0.0F, ""}}));
+        {MissionStep{
+            static_cast<std::uint8_t>(MissionStepKind::MoveDistance),
+            std::numeric_limits<float>::quiet_NaN(), 0.0F, ""}}));
   EXPECT_FALSE(invalid.accepted);
   EXPECT_EQ(invalid.result.code, MissionResultCode::InvalidPlan);
   EXPECT_EQ(fixture.authority->operations().size(), 0U);
@@ -122,7 +125,7 @@ TEST(RuntimeCore, FakeFSMIsOrderedBusyAndExactlyOnce)
     MissionStep{
       static_cast<std::uint8_t>(MissionStepKind::MoveDistance), 0.5F, 0.0F, ""},
     MissionStep{
-      static_cast<std::uint8_t>(MissionStepKind::RotateAngle), 1.0F, 0.0F, ""}};
+      static_cast<std::uint8_t>(MissionStepKind::RotateAngle), 0.0F, 1.0F, ""}};
   const auto admission = fixture.core.admit(goal(1U, steps));
   ASSERT_TRUE(admission.accepted);
   ASSERT_EQ(fixture.relative->started_steps().size(), 1U);
@@ -155,7 +158,7 @@ TEST(RuntimeCore, StopRotatesEpochAndDuplicateDoesNotRotateAgain)
   const auto admission = fixture.core.admit(goal(1U));
   ASSERT_TRUE(admission.accepted);
   const auto first = fixture.core.stop(StopRequest{
-    "stop-1", "stale-source-is-allowed", 99U, "operator stop"});
+        "stop-1", "stale-source-is-allowed", 99U, "operator stop"});
   EXPECT_EQ(first.code, 0U);
   EXPECT_EQ(first.admission_epoch, 2U);
   EXPECT_TRUE(first.motion_inhibited);
@@ -163,7 +166,7 @@ TEST(RuntimeCore, StopRotatesEpochAndDuplicateDoesNotRotateAgain)
   EXPECT_EQ(fixture.results.front().code, MissionResultCode::Stopped);
 
   const auto duplicate = fixture.core.stop(StopRequest{
-    "stop-1", "stale-source-is-allowed", 99U, "operator stop"});
+        "stop-1", "stale-source-is-allowed", 99U, "operator stop"});
   EXPECT_EQ(duplicate.code, 1U);
   EXPECT_EQ(duplicate.admission_epoch, 2U);
   EXPECT_TRUE(duplicate.motion_inhibited);
@@ -175,19 +178,274 @@ TEST(RuntimeCore, UnsupportedUnionIsDistinguishedFromInvalidUnion)
   Fixture fixture;
   const auto unsupported = fixture.core.admit(goal(
     1U,
-    {MissionStep{
-      static_cast<std::uint8_t>(MissionStepKind::NavigateTo), 0.0F, 0.0F,
-      "place-a"}}));
+        {MissionStep{
+            static_cast<std::uint8_t>(MissionStepKind::NavigateTo), 0.0F, 0.0F,
+            "place-a"}}));
   EXPECT_FALSE(unsupported.accepted);
   EXPECT_EQ(unsupported.result.code, MissionResultCode::UnsupportedStep);
 
   const auto invalid = fixture.core.admit(goal(
     2U,
-    {MissionStep{
-      static_cast<std::uint8_t>(MissionStepKind::NavigateTo), 0.1F, 0.0F,
-      "place-a"}}));
+        {MissionStep{
+            static_cast<std::uint8_t>(MissionStepKind::NavigateTo), 0.1F, 0.0F,
+            "place-a"}}));
   EXPECT_FALSE(invalid.accepted);
   EXPECT_EQ(invalid.result.code, MissionResultCode::InvalidPlan);
+}
+
+TEST(RuntimeCore, StartupConvergesLegacyPreparedGateToCurrentZeroProof)
+{
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
+  authority->set_snapshot(GateSnapshot{
+        kGateId, 7U, std::string(32U, 'l'), GateState::Prepared,
+        true, false, false, false});
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  RuntimeCore core(config(), clock, authority, relative);
+
+  core.observe_gate(authority->snapshot());
+
+  EXPECT_EQ(authority->snapshot().state, GateState::Inhibited);
+  EXPECT_TRUE(authority->snapshot().zero_published);
+  EXPECT_EQ(authority->inhibit_count(), 1U);
+  EXPECT_EQ(core.state().availability, RuntimeAvailability::Available);
+}
+
+TEST(RuntimeCore, ValidatesEveryStepBeforeAcquiringTheGate)
+{
+  Fixture fixture;
+  const auto invalid = fixture.core.admit(goal(
+    1U,
+      {
+        MissionStep{
+          static_cast<std::uint8_t>(MissionStepKind::MoveDistance),
+          0.5F, 0.0F, ""},
+        MissionStep{
+          static_cast<std::uint8_t>(MissionStepKind::RotateAngle),
+          0.5F, 0.0F, ""}}));
+  EXPECT_FALSE(invalid.accepted);
+  EXPECT_EQ(invalid.result.code, MissionResultCode::InvalidPlan);
+  EXPECT_EQ(fixture.authority->operations().size(), 0U);
+  EXPECT_EQ(fixture.relative->started_steps().size(), 0U);
+
+  const auto accepted = fixture.core.admit(goal(2U));
+  EXPECT_TRUE(accepted.accepted);
+}
+
+TEST(RuntimeCore, ChildFailureReportsTheStartedStepAndSkipsTheRest)
+{
+  Fixture fixture;
+  const auto admission = fixture.core.admit(goal(
+    1U,
+      {
+        MissionStep{
+          static_cast<std::uint8_t>(MissionStepKind::MoveDistance),
+          0.5F, 0.0F, ""},
+        MissionStep{
+          static_cast<std::uint8_t>(MissionStepKind::RotateAngle),
+          0.0F, 1.0F, ""},
+        MissionStep{
+          static_cast<std::uint8_t>(MissionStepKind::MoveDistance),
+          -0.5F, 0.0F, ""}}));
+  ASSERT_TRUE(admission.accepted);
+
+  fixture.relative->fail("step one failed");
+
+  ASSERT_EQ(fixture.results.size(), 1U);
+  EXPECT_EQ(fixture.results.front().code, MissionResultCode::ExecutionFailed);
+  EXPECT_EQ(fixture.results.front().failed_step, 0);
+  EXPECT_EQ(fixture.relative->started_steps().size(), 1U);
+}
+
+TEST(RuntimeCore, TerminalCancelUsesTheManualSteadyClockGraceDeadline)
+{
+  Fixture fixture;
+  ASSERT_TRUE(fixture.core.admit(goal(1U)).accepted);
+  fixture.clock->advance(std::chrono::milliseconds(30000));
+
+  fixture.core.on_tick();
+
+  ASSERT_EQ(fixture.results.size(), 1U);
+  EXPECT_EQ(fixture.results.front().code, MissionResultCode::Timeout);
+  EXPECT_EQ(fixture.results.front().failed_step, 0);
+  EXPECT_EQ(
+    fixture.relative->cancel_deadline(),
+    fixture.clock->now() + config().cancel_grace);
+}
+
+TEST(RuntimeCore, DependencyLossRotatesEpochOnlyOnceAndCancelsActiveMission)
+{
+  Fixture fixture;
+  ASSERT_TRUE(fixture.core.admit(goal(1U)).accepted);
+  fixture.relative->set_healthy(false);
+
+  fixture.core.observe_dependencies();
+  fixture.core.observe_dependencies();
+
+  ASSERT_EQ(fixture.results.size(), 1U);
+  EXPECT_EQ(fixture.results.front().code, MissionResultCode::SafetyFault);
+  EXPECT_EQ(fixture.core.state().admission_epoch, 2U);
+  EXPECT_EQ(fixture.relative->cancel_count(), 1U);
+}
+
+TEST(RuntimeCore, GateIdentityLossRotatesEpochOnlyOnceAndFailsClosed)
+{
+  Fixture fixture;
+  ASSERT_TRUE(fixture.core.admit(goal(1U)).accepted);
+  fixture.authority->set_snapshot(GateSnapshot{
+        kOtherGateId, 0U, "", GateState::Faulted, false,
+        true, true, false});
+  const auto lost_gate = fixture.authority->snapshot();
+
+  fixture.core.observe_gate(lost_gate);
+  fixture.core.observe_gate(lost_gate);
+
+  ASSERT_EQ(fixture.results.size(), 1U);
+  EXPECT_EQ(fixture.results.front().code, MissionResultCode::SafetyFault);
+  EXPECT_EQ(fixture.core.state().admission_epoch, 2U);
+  EXPECT_EQ(fixture.core.state().availability, RuntimeAvailability::Faulted);
+}
+
+TEST(RuntimeCore, ZeroProofFailureStillCancelsAndReturnsSafetyFault)
+{
+  Fixture fixture;
+  ASSERT_TRUE(fixture.core.admit(goal(1U)).accepted);
+  fixture.authority->set_next_failure("zero proof failed");
+
+  const auto response = fixture.core.stop(
+    StopRequest{"stop-zero-failure", "", 0U, "operator"});
+
+  EXPECT_EQ(response.code, 2U);
+  EXPECT_FALSE(response.motion_inhibited);
+  ASSERT_EQ(fixture.results.size(), 1U);
+  EXPECT_EQ(fixture.results.front().code, MissionResultCode::SafetyFault);
+  EXPECT_FALSE(fixture.core.has_active_mission());
+  EXPECT_EQ(fixture.relative->cancel_count(), 1U);
+}
+
+TEST(RuntimeCore, StopBarrierRunsBeforeChildCancel)
+{
+  Fixture fixture;
+  std::vector<std::string> trace;
+  fixture.authority->set_inhibit_observer([&trace]() {trace.push_back("inhibit");});
+  fixture.relative->set_cancel_observer([&trace]() {trace.push_back("cancel");});
+  ASSERT_TRUE(fixture.core.admit(goal(1U)).accepted);
+  trace.clear();
+
+  ASSERT_EQ(
+    fixture.core.stop(StopRequest{"stop-order", "", 0U, "operator"}).code,
+    0U);
+
+  ASSERT_FALSE(trace.empty());
+  const auto cancel = std::find(trace.begin(), trace.end(), "cancel");
+  ASSERT_NE(cancel, trace.end());
+  EXPECT_TRUE(std::all_of(trace.begin(), cancel, [](const std::string & event) {
+      return event == "inhibit";
+  }));
+}
+
+TEST(RuntimeCore, ChildStartExceptionIsPreExecutionFailure)
+{
+  Fixture fixture;
+  fixture.relative->set_start_failure("scripted start exception");
+
+  const auto admission = fixture.core.admit(goal(1U));
+
+  EXPECT_TRUE(admission.accepted);
+  ASSERT_EQ(fixture.results.size(), 1U);
+  EXPECT_EQ(fixture.results.front().code, MissionResultCode::InternalError);
+  EXPECT_EQ(fixture.results.front().failed_step, -1);
+}
+
+TEST(RuntimeCore, CancelAcknowledgementFailureIsSafetyFault)
+{
+  Fixture fixture;
+  ASSERT_TRUE(fixture.core.admit(goal(1U)).accepted);
+  fixture.relative->set_cancel_acknowledged(false);
+
+  fixture.core.cancel(1U);
+
+  ASSERT_EQ(fixture.results.size(), 1U);
+  EXPECT_EQ(fixture.results.front().code, MissionResultCode::SafetyFault);
+  EXPECT_EQ(fixture.results.front().failed_step, 0);
+  EXPECT_FALSE(fixture.core.has_active_mission());
+}
+
+TEST(RuntimeCore, RestartCreatesNewRuntimeIdentityAtEpochOne)
+{
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  auto restart_config = config();
+  restart_config.runtime_instance_id.clear();
+  restart_config.identifier_generator = {};
+  RuntimeCore first(restart_config, clock, authority, relative);
+  RuntimeCore second(restart_config, clock, authority, relative);
+
+  EXPECT_NE(first.state().runtime_instance_id, second.state().runtime_instance_id);
+  EXPECT_EQ(first.state().admission_epoch, 1U);
+  EXPECT_EQ(second.state().admission_epoch, 1U);
+}
+
+TEST(RuntimeCore, LateCallbackFromAnOldMissionCannotCompleteTheNewMission)
+{
+  Fixture fixture;
+  ASSERT_TRUE(fixture.core.admit(goal(1U)).accepted);
+  const auto old_token = fixture.relative->started_tokens().front();
+  fixture.relative->complete();
+  ASSERT_EQ(fixture.results.size(), 1U);
+  ASSERT_TRUE(fixture.core.admit(goal(2U)).accepted);
+  const auto new_token = fixture.relative->started_tokens().back();
+
+  fixture.relative->complete_token(old_token);
+  EXPECT_EQ(fixture.results.size(), 1U);
+  EXPECT_TRUE(fixture.core.has_active_mission());
+  fixture.relative->complete_token(new_token);
+  EXPECT_EQ(fixture.results.size(), 2U);
+  EXPECT_EQ(fixture.results.back().code, MissionResultCode::Succeeded);
+}
+
+TEST(RuntimeCore, StopFingerprintSeparatesDelimiterLikeFields)
+{
+  Fixture fixture;
+  const auto first = fixture.core.stop(
+    StopRequest{"stop-1", "a", 1U, "2|r"});
+  ASSERT_EQ(first.code, 0U);
+  const auto collision = fixture.core.stop(
+    StopRequest{"stop-1", "a|1", 2U, "r"});
+
+  EXPECT_EQ(collision.code, 2U);
+  EXPECT_TRUE(collision.motion_inhibited);
+  EXPECT_EQ(fixture.core.state().availability, RuntimeAvailability::Faulted);
+}
+
+TEST(RuntimeCore, FullStopCacheFailsClosedAndCleansTheActiveMission)
+{
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  auto small_config = config();
+  small_config.stop_cache_size = 1U;
+  std::vector<MissionResult> results;
+  RuntimeCore core(
+    small_config, clock, authority, relative, {}, {},
+    [&results](std::uint64_t, const MissionResult & result) {
+      results.push_back(result);
+    });
+  core.observe_gate(authority->snapshot());
+  ASSERT_EQ(core.stop(StopRequest{"stop-1", "", 0U, "first"}).code, 0U);
+  ASSERT_TRUE(core.admit(MissionGoal{
+        kRuntimeId, 1U, kRuntimeId, 2U,
+        {MissionStep{
+            static_cast<std::uint8_t>(MissionStepKind::MoveDistance),
+            0.5F, 0.0F, ""}}}).accepted);
+
+  const auto response = core.stop(StopRequest{"stop-2", "", 0U, "full"});
+
+  EXPECT_EQ(response.code, 2U);
+  ASSERT_EQ(results.size(), 1U);
+  EXPECT_EQ(results.front().code, MissionResultCode::SafetyFault);
+  EXPECT_FALSE(core.has_active_mission());
 }
 
 }  // namespace

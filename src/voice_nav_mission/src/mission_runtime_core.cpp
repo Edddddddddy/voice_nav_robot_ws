@@ -128,8 +128,11 @@ RuntimeCore::RuntimeCore(
     throw std::invalid_argument("runtime_instance_id is outside the IDL bound");
   }
   gate_snapshot_ = authority_->snapshot();
-  state_.gate_state = gate_snapshot_.state;
+  state_.gate_state = gate_snapshot_.endpoint_available ?
+    gate_snapshot_.state : GateState::Faulted;
   state_.availability = RuntimeAvailability::Unavailable;
+  last_relative_healthy_ = relative_motion_->healthy();
+  relative_health_initialized_ = true;
   publish_state();
 }
 
@@ -173,7 +176,9 @@ AdmissionResult RuntimeCore::admit(const MissionGoal & goal)
       "RelativeMotionPort is unavailable")};
   }
   gate_snapshot_ = authority_->snapshot();
-  if (gate_snapshot_.state == GateState::Faulted) {
+  if (gate_snapshot_.state == GateState::Faulted &&
+    gate_snapshot_.endpoint_available)
+  {
     return AdmissionResult{0U, false, reject(
       MissionResultCode::SafetyFault,
       "MotionGate is faulted")};
@@ -229,7 +234,10 @@ AdmissionResult RuntimeCore::admit(const MissionGoal & goal)
     0U,
     state_.admission_epoch,
     goal.steps,
-    clock_->now() + config_.mission_deadline};
+    clock_->now() + config_.mission_deadline,
+    {},
+    false,
+    false};
   last_feedback_progress_ = 0.0;
   state_.active_step = kNoActiveMissionStep;
   state_.availability = RuntimeAvailability::Busy;
@@ -274,6 +282,11 @@ StopResponse RuntimeCore::stop(const StopRequest & request)
     if (cached->second.fingerprint != fingerprint) {
       const bool zero = inhibit_and_prove_zero();
       state_.availability = RuntimeAvailability::Faulted;
+      if (active_.has_value()) {
+        select_terminal_and_stop(
+          MissionResultCode::SafetyFault,
+          "STOP request_id collision; Runtime is faulted");
+      }
       publish_state();
       return make_stop_response(
         2U, zero, "STOP request_id collision; Runtime is faulted");
@@ -295,6 +308,11 @@ StopResponse RuntimeCore::stop(const StopRequest & request)
   if (stop_cache_.size() >= config_.stop_cache_size) {
     const bool zero = inhibit_and_prove_zero();
     state_.availability = RuntimeAvailability::Faulted;
+    if (active_.has_value()) {
+      select_terminal_and_stop(
+        MissionResultCode::SafetyFault,
+        "STOP idempotency cache is full; no request was evicted");
+    }
     publish_state();
     return make_stop_response(
       2U, zero, "STOP idempotency cache is full; no request was evicted");
@@ -310,8 +328,9 @@ StopResponse RuntimeCore::stop(const StopRequest & request)
   const bool zero = inhibit_and_prove_zero();
   if (active_.has_value()) {
     select_terminal_and_stop(
-      MissionResultCode::Stopped,
-      "Mission stopped by Operational Stop");
+      zero ? MissionResultCode::Stopped : MissionResultCode::SafetyFault,
+      zero ? "Mission stopped by Operational Stop" :
+      "STOP could not prove MotionGate inhibit and zero");
   }
   if (!zero) {
     state_.availability = RuntimeAvailability::Faulted;
@@ -327,21 +346,37 @@ StopResponse RuntimeCore::stop(const StopRequest & request)
 void RuntimeCore::observe_gate(const GateSnapshot & snapshot)
 {
   const bool was_healthy = gate_is_healthy(gate_snapshot_);
-  const bool is_healthy = gate_is_healthy(snapshot);
   const bool identity_changed =
     gate_bound_ && !gate_snapshot_.gate_instance_id.empty() &&
     !snapshot.gate_instance_id.empty() &&
     gate_snapshot_.gate_instance_id != snapshot.gate_instance_id;
   gate_snapshot_ = snapshot;
-  state_.gate_state = snapshot.state;
+  state_.gate_state = snapshot.endpoint_available ?
+    snapshot.state : GateState::Faulted;
 
   if (!gate_bound_) {
+    if (
+      snapshot.endpoint_available && snapshot.state != GateState::Faulted &&
+      !zero_is_proven(snapshot))
+    {
+      (void)inhibit_and_prove_zero();
+      gate_snapshot_ = authority_->snapshot();
+      state_.gate_state = gate_snapshot_.endpoint_available ?
+        gate_snapshot_.state : GateState::Faulted;
+    }
+    const bool is_healthy = gate_is_healthy(gate_snapshot_);
     gate_bound_ = is_healthy;
     gate_fault_handled_ = !is_healthy;
+    if (!is_healthy && snapshot.endpoint_available) {
+      state_.availability = RuntimeAvailability::Faulted;
+      publish_state();
+      return;
+    }
     set_availability_from_dependencies();
     publish_state();
     return;
   }
+  const bool is_healthy = gate_is_healthy(gate_snapshot_);
   if (identity_changed || (!is_healthy && was_healthy)) {
     if (!gate_fault_handled_) {
       gate_fault_handled_ = true;
@@ -352,7 +387,7 @@ void RuntimeCore::observe_gate(const GateSnapshot & snapshot)
           "MotionGate health or identity changed during Mission");
       }
       state_.availability =
-        snapshot.state == GateState::Faulted ||
+        snapshot.state == GateState::Faulted || !snapshot.endpoint_available ||
         (snapshot.endpoint_available && !zero_is_proven(snapshot)) ?
         RuntimeAvailability::Faulted : RuntimeAvailability::Unavailable;
       publish_state();
@@ -367,8 +402,31 @@ void RuntimeCore::observe_gate(const GateSnapshot & snapshot)
   publish_state();
 }
 
+void RuntimeCore::observe_dependencies()
+{
+  const bool healthy = relative_motion_->healthy();
+  if (relative_health_initialized_ && last_relative_healthy_ && !healthy) {
+    (void)rotate_epoch();
+    if (active_.has_value()) {
+      select_terminal_and_stop(
+        MissionResultCode::SafetyFault,
+        "RelativeMotionPort became unhealthy during Mission");
+    } else {
+      state_.availability = RuntimeAvailability::Faulted;
+      publish_state();
+    }
+  }
+  last_relative_healthy_ = healthy;
+  relative_health_initialized_ = true;
+  if (!active_.has_value() && state_.availability != RuntimeAvailability::Faulted) {
+    set_availability_from_dependencies();
+    publish_state();
+  }
+}
+
 void RuntimeCore::on_tick()
 {
+  observe_dependencies();
   const auto now = clock_->now();
   relative_motion_->tick(now);
   if (!active_.has_value()) {
@@ -524,14 +582,14 @@ bool RuntimeCore::consume_source_sequence(
 bool RuntimeCore::gate_is_healthy(const GateSnapshot & snapshot) const
 {
   return snapshot.endpoint_available && !snapshot.gate_instance_id.empty() &&
-    snapshot.state != GateState::Faulted &&
-    (snapshot.state == GateState::Armed || zero_is_proven(snapshot));
+         snapshot.state != GateState::Faulted &&
+         (snapshot.state == GateState::Armed || zero_is_proven(snapshot));
 }
 
 bool RuntimeCore::zero_is_proven(const GateSnapshot & snapshot) const
 {
   return snapshot.endpoint_available && snapshot.motion_inhibited &&
-    snapshot.zero_selected && snapshot.zero_published;
+         snapshot.zero_selected && snapshot.zero_published;
 }
 
 AuthorityOperation RuntimeCore::make_operation(const std::string & lease_id) const
@@ -546,7 +604,7 @@ AuthorityOperation RuntimeCore::make_operation(const std::string & lease_id) con
 std::string RuntimeCore::new_identifier() const
 {
   return config_.identifier_generator ? config_.identifier_generator() :
-    make_random_identifier();
+         make_random_identifier();
 }
 
 bool RuntimeCore::rotate_epoch()
@@ -555,9 +613,6 @@ bool RuntimeCore::rotate_epoch()
     state_.availability = RuntimeAvailability::Faulted;
     publish_state();
     return false;
-  }
-  if (active_.has_value()) {
-    ++active_->generation;
   }
   publish_state();
   return true;
@@ -573,13 +628,15 @@ void RuntimeCore::set_availability_from_dependencies()
     return;
   }
   gate_snapshot_ = authority_->snapshot();
-  state_.gate_state = gate_snapshot_.state;
+  state_.gate_state = gate_snapshot_.endpoint_available ?
+    gate_snapshot_.state : GateState::Faulted;
   if (!gate_snapshot_.endpoint_available) {
     state_.availability = RuntimeAvailability::Unavailable;
   } else if (
     gate_snapshot_.state == GateState::Faulted ||
     (gate_snapshot_.state != GateState::Armed &&
-    !zero_is_proven(gate_snapshot_))) {
+    !zero_is_proven(gate_snapshot_)))
+  {
     state_.availability = RuntimeAvailability::Faulted;
   } else if (!gate_is_healthy(gate_snapshot_) || !relative_motion_->healthy()) {
     state_.availability = RuntimeAvailability::Unavailable;
@@ -630,6 +687,8 @@ void RuntimeCore::start_step()
     active_->admission_epoch,
     active_->generation,
     active_->step_generation};
+  active_->child_token = token;
+  active_->child_started = true;
   try {
     relative_motion_->start(
       token,
@@ -649,10 +708,16 @@ void RuntimeCore::start_step()
       publish_state();
     }
   } catch (const std::exception & error) {
+    if (active_.has_value() && active_->id == token.mission_id) {
+      active_->child_started = false;
+    }
     select_terminal_and_stop(
       MissionResultCode::InternalError,
       std::string{"child start threw: "} + error.what());
   } catch (...) {
+    if (active_.has_value() && active_->id == token.mission_id) {
+      active_->child_started = false;
+    }
     select_terminal_and_stop(
       MissionResultCode::InternalError,
       "child start threw an unknown exception");
@@ -711,32 +776,50 @@ void RuntimeCore::on_child_result(
 
 void RuntimeCore::select_terminal_and_stop(
   MissionResultCode code,
-  std::string detail)
+  std::string detail,
+  bool rotate_epoch)
 {
   if (!active_.has_value()) {
     return;
   }
-  publish_feedback(FeedbackPhase::SafeStopping, active_->step_index, 0.0);
-  const auto token = MotionToken{
-    active_->id,
-    active_->admission_epoch,
-    active_->generation,
-    active_->step_generation};
-  const bool zero = inhibit_and_prove_zero();
-  try {
-    relative_motion_->cancel(token);
-  } catch (...) {
-    // Cancellation is best effort after the Gate barrier; the old token is
-    // already invalidated by the terminal linearization point.
-  }
-  if (!zero) {
-    state_.availability = RuntimeAvailability::Faulted;
-    finish_active(reject(
-      MissionResultCode::SafetyFault,
-      "terminal barrier could not prove Gate inhibit and zero"));
+  if (active_->terminal_selected) {
     return;
   }
-  finish_active(reject(code, std::move(detail)));
+  const auto token = active_->child_token;
+  const auto child_started = active_->child_started;
+  active_->terminal_selected = true;
+  ++active_->generation;
+  if (rotate_epoch && !increment_epoch(state_.admission_epoch)) {
+    state_.availability = RuntimeAvailability::Faulted;
+    publish_state();
+    detail = "admission epoch exhausted while stopping Mission";
+    code = MissionResultCode::SafetyFault;
+  }
+  publish_feedback(FeedbackPhase::SafeStopping, active_->step_index, 0.0);
+  const bool zero = inhibit_and_prove_zero();
+  bool canceled = true;
+  try {
+    canceled = relative_motion_->cancel(
+      token, clock_->now() + config_.cancel_grace);
+  } catch (...) {
+    canceled = false;
+  }
+  if (!zero || !canceled) {
+    state_.availability = RuntimeAvailability::Faulted;
+    finish_active(MissionResult{
+        MissionResultCode::SafetyFault,
+        child_started ? static_cast<std::int32_t>(active_->step_index) : -1,
+        !zero ? "terminal barrier could not prove Gate inhibit and zero" :
+        "relative-motion cancel did not acknowledge before its deadline"});
+    return;
+  }
+  const auto failed_step =
+    child_started &&
+    (code == MissionResultCode::ExecutionFailed ||
+    code == MissionResultCode::Timeout ||
+    code == MissionResultCode::InternalError) ?
+    static_cast<std::int32_t>(active_->step_index) : -1;
+  finish_active(MissionResult{code, failed_step, bounded_detail(std::move(detail))});
 }
 
 void RuntimeCore::finish_active(const MissionResult & result)
@@ -759,7 +842,8 @@ bool RuntimeCore::inhibit_and_prove_zero()
   gate_snapshot_ = authority_->snapshot();
   const auto result = authority_->inhibit(make_operation());
   gate_snapshot_ = result.snapshot;
-  state_.gate_state = gate_snapshot_.state;
+  state_.gate_state = gate_snapshot_.endpoint_available ?
+    gate_snapshot_.state : GateState::Faulted;
   return result.applied && result.zero_proven && zero_is_proven(gate_snapshot_);
 }
 
@@ -778,8 +862,11 @@ StopResponse RuntimeCore::make_stop_response(
 
 std::string RuntimeCore::stop_fingerprint(const StopRequest & request)
 {
-  return request.source_instance_id + "|" +
-    std::to_string(request.source_seq) + "|" + request.reason;
+  const auto encode = [](const std::string & value) {
+      return std::to_string(value.size()) + ":" + value;
+    };
+  return encode(request.source_instance_id) +
+         encode(std::to_string(request.source_seq)) + encode(request.reason);
 }
 
 bool RuntimeCore::valid_bounded_id(
@@ -825,15 +912,19 @@ AuthorityResult ScriptedMotionAuthorityPort::renew(
   operations_.push_back(operation);
   if (!next_failure_.empty()) {
     const auto detail = std::exchange(next_failure_, {});
-    return AuthorityResult{false, false, snapshot_, {}, detail};
+    return AuthorityResult{false, false, false, snapshot_, {}, detail};
   }
-  return AuthorityResult{true, false, snapshot_, snapshot_.gate_instance_id, "renewed"};
+  return AuthorityResult{
+    true, false, false, snapshot_, snapshot_.gate_instance_id, "renewed"};
 }
 
 AuthorityResult ScriptedMotionAuthorityPort::inhibit(
   const AuthorityOperation & operation)
 {
   ++inhibit_count_;
+  if (inhibit_observer_) {
+    inhibit_observer_();
+  }
   return apply(operation, GateState::Inhibited, true);
 }
 
@@ -850,7 +941,7 @@ AuthorityResult ScriptedMotionAuthorityPort::apply(
   operations_.push_back(operation);
   if (!next_failure_.empty()) {
     const auto detail = std::exchange(next_failure_, {});
-    return AuthorityResult{false, false, snapshot_, {}, detail};
+    return AuthorityResult{false, false, false, snapshot_, {}, detail};
   }
   if (snapshot_.control_seq != std::numeric_limits<std::uint64_t>::max()) {
     ++snapshot_.control_seq;
@@ -873,6 +964,7 @@ AuthorityResult ScriptedMotionAuthorityPort::apply(
   return AuthorityResult{
     true,
     inhibited,
+    false,
     snapshot_,
     next_state == GateState::Armed ? lease : std::string{},
     "applied"};
@@ -884,15 +976,27 @@ void ScriptedRelativeMotionPort::start(
   FeedbackCallback feedback,
   ResultCallback result)
 {
+  if (!next_start_failure_.empty()) {
+    const auto detail = std::exchange(next_start_failure_, {});
+    throw std::runtime_error(detail);
+  }
   token_ = token;
   feedback_callback_ = std::move(feedback);
   result_callback_ = std::move(result);
+  children_.push_back(ChildCallbacks{
+      token, feedback_callback_, result_callback_});
   started_steps_.push_back(step);
 }
 
-void ScriptedRelativeMotionPort::cancel(const MotionToken &)
+bool ScriptedRelativeMotionPort::cancel(
+  const MotionToken &, SteadyClockPort::TimePoint deadline)
 {
   ++cancel_count_;
+  cancel_deadline_ = deadline;
+  if (cancel_observer_) {
+    cancel_observer_();
+  }
+  return cancel_acknowledged_;
 }
 
 void ScriptedRelativeMotionPort::feedback(double progress)
@@ -920,6 +1024,35 @@ void ScriptedRelativeMotionPort::timeout(std::string detail)
 {
   if (token_.has_value() && result_callback_) {
     result_callback_(*token_, ChildResult{ChildResultCode::Timeout, std::move(detail)});
+  }
+}
+
+void ScriptedRelativeMotionPort::complete_token(const MotionToken & token)
+{
+  for (const auto & child : children_) {
+    if (child.token.mission_id == token.mission_id &&
+      child.token.admission_epoch == token.admission_epoch &&
+      child.token.mission_generation == token.mission_generation &&
+      child.token.step_generation == token.step_generation && child.result)
+    {
+      child.result(child.token, ChildResult{ChildResultCode::Succeeded, "complete"});
+      return;
+    }
+  }
+}
+
+void ScriptedRelativeMotionPort::feedback_token(
+  const MotionToken & token, double progress)
+{
+  for (const auto & child : children_) {
+    if (child.token.mission_id == token.mission_id &&
+      child.token.admission_epoch == token.admission_epoch &&
+      child.token.mission_generation == token.mission_generation &&
+      child.token.step_generation == token.step_generation && child.feedback)
+    {
+      child.feedback(child.token, progress);
+      return;
+    }
   }
 }
 

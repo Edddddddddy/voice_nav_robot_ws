@@ -14,6 +14,8 @@
 
 #include "voice_nav_mission/mission_runtime_core.hpp"
 
+#include <rmw/qos_profiles.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -31,7 +33,6 @@
 #include <rclcpp/executors/multi_threaded_executor.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <rcl_interfaces/msg/parameter_descriptor.hpp>
-#include <rmw/qos_profiles.h>
 
 #include "voice_nav_interfaces/action/execute_mission.hpp"
 #include "voice_nav_interfaces/msg/mission_state.hpp"
@@ -89,8 +90,13 @@ public:
 
   RosMotionAuthorityPort(
     rclcpp::Node & node,
+    std::chrono::milliseconds control_response_deadline,
+    std::chrono::milliseconds stop_barrier,
     GateChangedCallback callback)
-  : node_(node), callback_(std::move(callback))
+  : node_(node),
+    control_response_deadline_(control_response_deadline),
+    stop_barrier_(stop_barrier),
+    callback_(std::move(callback))
   {
     client_callback_group_ = node_.create_callback_group(
       rclcpp::CallbackGroupType::Reentrant);
@@ -104,15 +110,18 @@ public:
       kGateStateTopic,
       qos,
       [this](const GateStateMessage::ConstSharedPtr message) {
+        const bool graph_available = graph_endpoint_available();
         snapshot_ = GateSnapshot{
           message->gate_instance_id,
           message->control_seq,
+          message->lease_id,
           gate_state_from_message(message->state),
-          true,
+          graph_available,
           message->motion_inhibited,
           message->zero_selected,
-          message->zero_publish_seq != 0U &&
+          graph_available && message->zero_publish_seq != 0U &&
           message->zero_publish_seq >= message->output_publish_seq};
+        state_sample_available_ = graph_available;
         if (callback_) {
           callback_(snapshot_);
         }
@@ -145,24 +154,66 @@ public:
   [[nodiscard]] AuthorityResult inhibit(
     const AuthorityOperation & operation) override
   {
-    if (snapshot_.endpoint_available &&
-      snapshot_.gate_instance_id == operation.gate_instance_id &&
-      snapshot_.state == GateState::Inhibited &&
-      snapshot_.motion_inhibited && snapshot_.zero_selected &&
-      snapshot_.zero_published)
-    {
-      return AuthorityResult{
-        true, true, snapshot_, {}, "Gate already inhibited with current zero proof"};
+    const auto deadline = std::chrono::steady_clock::now() + stop_barrier_;
+    while (true) {
+      refresh_endpoint();
+      auto current = operation;
+      if (snapshot_.endpoint_available) {
+        current.gate_instance_id = snapshot_.gate_instance_id;
+        current.expected_control_seq = snapshot_.control_seq;
+        current.lease_id = snapshot_.lease_id;
+      }
+      auto result = send(current, GateControl::Request::INHIBIT);
+      if (result.applied && result.zero_proven) {
+        return result;
+      }
+      if (!result.retryable || std::chrono::steady_clock::now() >= deadline) {
+        return result;
+      }
     }
-    return send(operation, GateControl::Request::INHIBIT);
+  }
+
+  void refresh_endpoint()
+  {
+    const bool available = graph_endpoint_available();
+    if (!available) {
+      if (snapshot_.endpoint_available || state_sample_available_) {
+        snapshot_.endpoint_available = false;
+        snapshot_.zero_published = false;
+        state_sample_available_ = false;
+        if (callback_) {
+          callback_(snapshot_);
+        }
+      }
+      return;
+    }
+    if (state_sample_available_ && !snapshot_.endpoint_available) {
+      snapshot_.endpoint_available = true;
+      if (callback_) {
+        callback_(snapshot_);
+      }
+    }
   }
 
 private:
+  [[nodiscard]] bool graph_endpoint_available() const
+  {
+    return client_->service_is_ready() &&
+           node_.count_publishers(kGateStateTopic) > 0U;
+  }
+
   [[nodiscard]] AuthorityResult send(
     const AuthorityOperation & operation,
     std::uint8_t operation_code)
   {
-    if (!client_->wait_for_service(std::chrono::milliseconds(1))) {
+    const auto deadline =
+      std::chrono::steady_clock::now() + control_response_deadline_;
+    const auto remaining = [&deadline]() {
+        const auto now = std::chrono::steady_clock::now();
+        return now >= deadline ? std::chrono::milliseconds(0) :
+               std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+      };
+    if (!client_->wait_for_service(remaining())) {
       return unavailable("MotionGate control service is unavailable");
     }
     auto request = std::make_shared<GateControl::Request>();
@@ -172,7 +223,7 @@ private:
     request->expected_control_seq = operation.expected_control_seq;
     request->lease_id = operation.lease_id;
     auto future = client_->async_send_request(request);
-    if (future.wait_for(std::chrono::milliseconds(250)) !=
+    if (future.wait_for(remaining()) !=
       std::future_status::ready)
     {
       return unavailable("MotionGate control response exceeded the steady deadline");
@@ -183,19 +234,25 @@ private:
       response->control_seq,
       response->lease_id,
       gate_state_from_message(response->state),
-      true,
+      graph_endpoint_available(),
       response->motion_inhibited,
       response->zero_selected,
-      response->zero_published};
+      response->zero_published && graph_endpoint_available()};
+    state_sample_available_ = snapshot_.endpoint_available;
     if (callback_) {
       callback_(snapshot_);
     }
     const bool applied = response->code == GateControl::Response::APPLIED;
     const bool zero = response->motion_inhibited && response->zero_selected &&
       response->zero_published;
+    const bool retryable =
+      response->reason == GateControl::Response::STALE_GATE ||
+      response->reason == GateControl::Response::STALE_SEQUENCE ||
+      response->reason == GateControl::Response::STALE_LEASE;
     return AuthorityResult{
       applied,
       zero,
+      retryable,
       snapshot_,
       response->lease_id,
       response->detail};
@@ -203,15 +260,18 @@ private:
 
   [[nodiscard]] AuthorityResult unavailable(std::string detail) const
   {
-    return AuthorityResult{false, false, snapshot_, {}, std::move(detail)};
+    return AuthorityResult{false, false, false, snapshot_, {}, std::move(detail)};
   }
 
   rclcpp::Node & node_;
+  std::chrono::milliseconds control_response_deadline_;
+  std::chrono::milliseconds stop_barrier_;
   GateChangedCallback callback_;
   rclcpp::CallbackGroup::SharedPtr client_callback_group_;
   rclcpp::Client<GateControl>::SharedPtr client_;
   rclcpp::Subscription<GateStateMessage>::SharedPtr subscription_;
   GateSnapshot snapshot_{};
+  bool state_sample_available_{false};
 };
 
 class UnavailableRelativeMotionPort final : public RelativeMotionPort
@@ -223,7 +283,8 @@ public:
   {
     throw std::logic_error("production relative motion adapter is unavailable");
   }
-  void cancel(const MotionToken &) override {}
+  [[nodiscard]] bool cancel(
+    const MotionToken &, SteadyClockPort::TimePoint) override {return true;}
   void tick(SteadyClockPort::TimePoint) override {}
 };
 
@@ -237,7 +298,7 @@ public:
     clock_(std::make_shared<RosSteadyClock>()),
     relative_motion_(std::make_shared<UnavailableRelativeMotionPort>())
   {
-    if (get_fully_qualified_name() != "/mission_runtime_node") {
+    if (std::string(get_fully_qualified_name()) != "/mission_runtime_node") {
       throw std::runtime_error("mission_runtime_node must run at /mission_runtime_node");
     }
     config_ = load_config();
@@ -246,7 +307,10 @@ public:
     state_publisher_ = create_publisher<MissionStateMessage>(kStateTopic, state_qos);
     authority_ = std::make_shared<RosMotionAuthorityPort>(
       *this,
+      config_.control_response_deadline,
+      config_.stop_barrier,
       [this](const GateSnapshot & snapshot) {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
         if (core_) {
           core_->observe_gate(snapshot);
         } else {
@@ -288,7 +352,11 @@ public:
         on_stop(*request, *response);
       });
     timer_ = create_wall_timer(
-      std::chrono::milliseconds(20), [this]() {core_->on_tick();});
+      std::chrono::milliseconds(20), [this]() {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        authority_->refresh_endpoint();
+        core_->on_tick();
+      });
     publish_state(core_->state());
   }
 
@@ -360,6 +428,7 @@ private:
   rclcpp_action::CancelResponse on_cancel(
     const std::shared_ptr<GoalHandle> & goal_handle)
   {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     for (const auto & entry : goals_) {
       if (entry.second == goal_handle) {
         core_->cancel(entry.first);
@@ -371,6 +440,7 @@ private:
 
   void on_accepted(const std::shared_ptr<GoalHandle> & goal_handle)
   {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     const auto goal_message = goal_handle->get_goal();
     MissionGoal goal;
     goal.source_instance_id = goal_message->source_instance_id;
@@ -380,7 +450,7 @@ private:
     goal.steps.reserve(goal_message->steps.size());
     for (const auto & step : goal_message->steps) {
       goal.steps.push_back(MissionStep{
-        step.kind, step.distance_m, step.angle_rad, step.target_id});
+          step.kind, step.distance_m, step.angle_rad, step.target_id});
     }
     const auto admission = core_->admit(goal);
     if (!admission.accepted) {
@@ -396,11 +466,12 @@ private:
     const StopMission::Request & request,
     StopMission::Response & response)
   {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     const auto stop = core_->stop(StopRequest{
-      request.request_id,
-      request.source_instance_id,
-      request.source_seq,
-      request.reason});
+        request.request_id,
+        request.source_instance_id,
+        request.source_seq,
+        request.reason});
     response.code = stop.code;
     response.runtime_instance_id = stop.runtime_instance_id;
     response.admission_epoch = stop.admission_epoch;
@@ -410,6 +481,7 @@ private:
 
   void finish_goal(std::uint64_t mission_id, const MissionResult & result)
   {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     const auto found = goals_.find(mission_id);
     if (found == goals_.end()) {
       return;
@@ -439,6 +511,7 @@ private:
     std::uint64_t mission_id,
     const MissionFeedback & feedback)
   {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     const auto found = goals_.find(mission_id);
     if (found == goals_.end()) {
       return;
@@ -467,7 +540,8 @@ private:
     message.active_step = state.active_step;
     message.supported_step_mask = state.supported_step_mask;
     message.max_steps = state.max_steps;
-    message.named_place_ids = state.named_place_ids;
+    message.named_place_ids.assign(
+      state.named_place_ids.begin(), state.named_place_ids.end());
     state_publisher_->publish(message);
   }
 
@@ -476,6 +550,7 @@ private:
   std::shared_ptr<RosMotionAuthorityPort> authority_;
   std::shared_ptr<UnavailableRelativeMotionPort> relative_motion_;
   std::unique_ptr<RuntimeCore> core_;
+  std::recursive_mutex mutex_;
   std::optional<GateSnapshot> pending_gate_snapshot_;
   rclcpp::Publisher<MissionStateMessage>::SharedPtr state_publisher_;
   rclcpp_action::Server<ExecuteMission>::SharedPtr action_server_;
