@@ -1,0 +1,14 @@
+string<=36 request_id
+string<=36 source_instance_id
+uint64 source_seq
+string<=160 reason
+---
+uint16 APPLIED=0
+uint16 DUPLICATE=1
+uint16 SAFETY_FAULT=2
+
+uint16 code
+string<=36 runtime_instance_id
+uint64 admission_epoch
+bool motion_inhibited
+string<=160 detail
