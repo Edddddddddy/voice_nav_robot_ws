@@ -17,6 +17,10 @@ EXPECTED_TESTS = {
             "source": "test_motion_gate_node.py",
             "timeout": 60.0,
         },
+        "test_test_mission_runtime_node.py": {
+            "source": "test_mission_runtime_node.py",
+            "timeout": 60.0,
+        },
     },
     "voice_nav_sim": {
         "test_test_simulation_control.py": {
