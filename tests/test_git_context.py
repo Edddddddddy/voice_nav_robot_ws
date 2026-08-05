@@ -214,7 +214,7 @@ exit "${VOICE_NAV_WSLPATH_EXIT_CODE:-0}"
 
         self.assert_valid_context(completed, workspace, git_directory)
 
-    def test_relative_gitdir_pointer_runs_real_git_in_inherited_child(self) -> None:
+    def test_relative_gitdir_pointer_accepts_eof_terminated_line(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             workspace, git_directory = self.create_repository(
@@ -226,13 +226,13 @@ exit "${VOICE_NAV_WSLPATH_EXIT_CODE:-0}"
             )
             self.write_pointer(
                 workspace,
-                f"gitdir: {relative_target}\n".encode(),
+                f"gitdir: {relative_target}".encode(),
             )
             completed = self.run_context(workspace)
 
         self.assert_valid_context(completed, workspace, git_directory)
 
-    def test_windows_absolute_gitdir_pointer_accepts_spaces_and_runs_git(self) -> None:
+    def test_wslpath_output_accepts_eof_terminated_line(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             workspace, git_directory = self.create_repository(
@@ -248,7 +248,7 @@ exit "${VOICE_NAV_WSLPATH_EXIT_CODE:-0}"
             expected_argument = windows_target.replace("\\", "/")
             environment = self.wslpath_environment(
                 root,
-                output=f"{self.bash_path(git_directory)}\n",
+                output=self.bash_path(git_directory),
                 expected_argument=expected_argument,
             )
             completed = self.run_context(

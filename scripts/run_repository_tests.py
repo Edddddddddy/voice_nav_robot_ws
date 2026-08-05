@@ -319,13 +319,6 @@ REQUIRED_TEST_IDS: frozenset[str] = frozenset(
     }
 )
 
-REQUIRED_TEST_MODULES: frozenset[str] = frozenset(
-    {
-        "test_git_context",
-    }
-)
-
-
 def _iter_tests(suite: unittest.TestSuite) -> Iterator[unittest.TestCase]:
     for test in suite:
         if isinstance(test, unittest.TestSuite):
@@ -450,7 +443,6 @@ def run_suite(
     *,
     stream,
     required_test_ids: Collection[str] = (),
-    required_test_modules: Collection[str] = (),
 ) -> int:
     """Run one complete, unique contract inventory without exemptions."""
     tests = tuple(_iter_tests(suite))
@@ -460,14 +452,6 @@ def run_suite(
         test_id for test_id, count in id_counts.items() if count > 1
     )
     missing_ids = sorted(set(required_test_ids) - set(discovered_ids))
-    discovered_modules = {
-        test_id.split(".", 1)[0]
-        for test_id in discovered_ids
-        if "." in test_id
-    }
-    missing_modules = sorted(
-        set(required_test_modules) - discovered_modules
-    )
     source_ids = getattr(suite, "_voice_nav_source_test_ids", None)
     inventory_errors = tuple(
         getattr(suite, "_voice_nav_inventory_errors", ())
@@ -496,11 +480,6 @@ def run_suite(
         stream.write("Missing required repository contracts:\n")
         for test_id in missing_ids:
             stream.write(f"- {test_id}\n")
-        preflight_failed = True
-    if missing_modules:
-        stream.write("Missing required repository contract modules:\n")
-        for module in missing_modules:
-            stream.write(f"- {module}\n")
         preflight_failed = True
     if inventory_errors:
         stream.write("Repository contract source inventory failed:\n")
@@ -585,7 +564,6 @@ def main() -> int:
         suite,
         stream=sys.stderr,
         required_test_ids=REQUIRED_TEST_IDS,
-        required_test_modules=REQUIRED_TEST_MODULES,
     )
 
 

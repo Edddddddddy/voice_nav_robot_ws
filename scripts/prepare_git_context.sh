@@ -35,6 +35,12 @@ voice_nav_read_single_line() {
     return 1
   fi
   if ! IFS= read -r VOICE_NAV_SINGLE_LINE <&"${file_descriptor}"; then
+    if [[ -z "${VOICE_NAV_SINGLE_LINE}" ]]; then
+      exec {file_descriptor}<&-
+      return 1
+    fi
+  fi
+  if [[ -z "${VOICE_NAV_SINGLE_LINE}" ]]; then
     exec {file_descriptor}<&-
     return 1
   fi
