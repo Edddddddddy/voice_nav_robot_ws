@@ -481,6 +481,12 @@ class MotionGateNodeTest(unittest.TestCase):
         )
 
         def assert_open_rejected_without_mutation(response, reason):
+            print(
+                'Gate writer observation: '
+                f'expected_reason={reason} actual_reason={response.reason} '
+                f'detail={response.detail!r}',
+                flush=True,
+            )
             self.assertEqual(
                 response.code,
                 InternalMotionGateControl.Response.REJECTED,
