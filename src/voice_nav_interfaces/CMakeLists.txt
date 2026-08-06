@@ -16,6 +16,7 @@ find_package(rosidl_default_generators REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MissionStep.msg"
   "msg/MissionState.msg"
+  "msg/VoiceTurn.msg"
   "action/ExecuteMission.action"
   "srv/StopMission.srv"
 )
@@ -25,6 +26,7 @@ if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_cmake_pytest REQUIRED)
   find_package(ament_lint_auto REQUIRED)
+  find_package(rosidl_typesupport_introspection_cpp REQUIRED)
   # the following line skips the linter which checks for copyrights
   # comment the line when a copyright and license is added to all source files
   set(ament_cmake_copyright_FOUND TRUE)
@@ -52,6 +54,26 @@ if(BUILD_TESTING)
   target_link_libraries(
     mission_interface_cpp_contract
     "${mission_interface_typesupport_target}"
+  )
+
+  ament_add_pytest_test(
+    voice_interface_python_contract
+    test/voice_interface_python_contract.py
+  )
+
+  ament_add_gtest(
+    voice_interface_cpp_contract
+    test/voice_interface_cpp_contract.cpp
+  )
+  target_compile_features(voice_interface_cpp_contract PUBLIC cxx_std_17)
+  rosidl_get_typesupport_target(
+    voice_interface_typesupport_target
+    ${PROJECT_NAME}
+    rosidl_typesupport_introspection_cpp
+  )
+  target_link_libraries(
+    voice_interface_cpp_contract
+    "${voice_interface_typesupport_target}"
   )
 endif()
 
