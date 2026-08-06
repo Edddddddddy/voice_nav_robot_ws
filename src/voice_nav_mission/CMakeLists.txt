@@ -6,7 +6,10 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(composition_interfaces REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(lifecycle_msgs REQUIRED)
+find_package(nav2_msgs REQUIRED)
 find_package(rcl_interfaces REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
@@ -17,6 +20,12 @@ find_package(voice_nav_interfaces REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/InternalMotionGateState.msg"
   "srv/InternalMotionGateControl.srv"
+)
+
+rosidl_get_typesupport_target(
+  motion_gate_typesupport
+  ${PROJECT_NAME}
+  rosidl_typesupport_cpp
 )
 
 add_library(
@@ -39,6 +48,32 @@ target_include_directories(
   mission_runtime_core
   PUBLIC
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+)
+
+add_library(
+  motion_conditioning_pipeline STATIC
+  src/motion_authority_ros_adapter.cpp
+  src/motion_conditioning_pipeline.cpp
+)
+target_compile_features(motion_conditioning_pipeline PUBLIC cxx_std_17)
+target_include_directories(
+  motion_conditioning_pipeline
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+)
+ament_target_dependencies(
+  motion_conditioning_pipeline
+  composition_interfaces
+  geometry_msgs
+  lifecycle_msgs
+  nav2_msgs
+  rcl_interfaces
+  rclcpp
+  rmw
+)
+target_link_libraries(
+  motion_conditioning_pipeline
+  "${motion_gate_typesupport}"
 )
 
 add_executable(
@@ -89,6 +124,7 @@ target_link_libraries(
 target_link_libraries(
   mission_runtime_node
   mission_runtime_core
+  motion_conditioning_pipeline
   "${motion_gate_typesupport}"
 )
 
@@ -97,6 +133,11 @@ if(BUILD_TESTING)
   find_package(ament_cmake_ros REQUIRED)
   find_package(ament_lint_auto REQUIRED)
   find_package(launch_testing_ament_cmake REQUIRED)
+  find_package(nav_msgs REQUIRED)
+  find_package(rclcpp_components REQUIRED)
+  find_package(rosgraph_msgs REQUIRED)
+  find_package(sensor_msgs REQUIRED)
+  find_package(tf2_msgs REQUIRED)
 
   ament_lint_auto_find_test_dependencies()
 
@@ -162,6 +203,63 @@ if(BUILD_TESTING)
   target_link_libraries(
     writer_observation_test
     motion_gate_core
+  )
+
+  ament_add_gtest(
+    motion_conditioning_pipeline_test
+    test/motion_conditioning_pipeline_test.cpp
+  )
+  target_compile_features(motion_conditioning_pipeline_test PUBLIC cxx_std_17)
+  target_include_directories(
+    motion_conditioning_pipeline_test
+    PRIVATE include
+  )
+  ament_target_dependencies(
+    motion_conditioning_pipeline_test
+    composition_interfaces
+    lifecycle_msgs
+    rclcpp
+  )
+  target_link_libraries(
+    motion_conditioning_pipeline_test
+    motion_conditioning_pipeline
+  )
+
+  ament_add_gtest(
+    motion_conditioning_pipeline_integration_test
+    test/motion_conditioning_pipeline_integration_test.cpp
+    src/writer_observation.cpp
+  )
+  target_compile_features(
+    motion_conditioning_pipeline_integration_test PUBLIC cxx_std_17)
+  target_include_directories(
+    motion_conditioning_pipeline_integration_test
+    PRIVATE include src
+  )
+  ament_target_dependencies(
+    motion_conditioning_pipeline_integration_test
+    composition_interfaces
+    geometry_msgs
+    lifecycle_msgs
+    nav_msgs
+    rclcpp
+    rclcpp_components
+    rosgraph_msgs
+    sensor_msgs
+    tf2_msgs
+  )
+  target_link_libraries(
+    motion_conditioning_pipeline_integration_test
+    motion_conditioning_pipeline
+    motion_gate_core
+    "${motion_gate_typesupport}"
+  )
+  set_tests_properties(
+    motion_conditioning_pipeline_integration_test
+    PROPERTIES
+      ENVIRONMENT
+        "RMW_IMPLEMENTATION=rmw_fastrtps_cpp;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
+      RUN_SERIAL TRUE
   )
 
   add_launch_test(
