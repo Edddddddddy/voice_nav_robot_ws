@@ -14,13 +14,10 @@
 
 #include "voice_nav_mission/mission_runtime_core.hpp"
 
-#include <rmw/qos_profiles.h>
-
 #include <algorithm>
 #include <cmath>
 #include <chrono>
 #include <cstdint>
-#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -39,10 +36,8 @@
 #include "voice_nav_interfaces/msg/mission_state.hpp"
 #include "voice_nav_interfaces/msg/mission_step.hpp"
 #include "voice_nav_interfaces/srv/stop_mission.hpp"
-#include "voice_nav_mission/mission_authority_convergence.hpp"
 #include "voice_nav_mission/mission_action_result_router.hpp"
-#include "voice_nav_mission/msg/internal_motion_gate_state.hpp"
-#include "voice_nav_mission/srv/internal_motion_gate_control.hpp"
+#include "voice_nav_mission/motion_authority_ros_adapter.hpp"
 
 namespace voice_nav_mission
 {
@@ -53,15 +48,11 @@ using ExecuteMission = voice_nav_interfaces::action::ExecuteMission;
 using StopMission = voice_nav_interfaces::srv::StopMission;
 using MissionStateMessage = voice_nav_interfaces::msg::MissionState;
 using MissionStepMessage = voice_nav_interfaces::msg::MissionStep;
-using GateStateMessage = voice_nav_mission::msg::InternalMotionGateState;
-using GateControl = voice_nav_mission::srv::InternalMotionGateControl;
 using GoalHandle = rclcpp_action::ServerGoalHandle<ExecuteMission>;
 
 constexpr char kExecuteAction[] = "/mission/execute";
 constexpr char kStopService[] = "/mission/stop";
 constexpr char kStateTopic[] = "/mission/state";
-constexpr char kGateControlService[] = "/motion_gate/internal/control";
-constexpr char kGateStateTopic[] = "/motion_gate/internal/state";
 constexpr std::int64_t kTrustedMissionDeadlineMs = 30000;
 constexpr std::int64_t kTrustedGateDiscoveryDeadlineMs = 2000;
 constexpr std::int64_t kTrustedControlResponseDeadlineMs = 100;
@@ -79,257 +70,6 @@ public:
   {
     return std::chrono::steady_clock::now();
   }
-};
-
-GateState gate_state_from_message(std::uint8_t state)
-{
-  switch (state) {
-    case GateStateMessage::INHIBITED:
-      return GateState::Inhibited;
-    case GateStateMessage::PREPARED:
-      return GateState::Prepared;
-    case GateStateMessage::ARMED:
-      return GateState::Armed;
-    default:
-      return GateState::Faulted;
-  }
-}
-
-class RosMotionAuthorityPort final : public MotionAuthorityPort
-{
-public:
-  using GateChangedCallback = std::function<void(const GateSnapshot &)>;
-
-  RosMotionAuthorityPort(
-    rclcpp::Node & node,
-    std::chrono::milliseconds control_response_deadline,
-    std::chrono::milliseconds stop_barrier,
-    GateChangedCallback callback)
-  : node_(node),
-    control_response_deadline_(control_response_deadline),
-    stop_barrier_(stop_barrier),
-    callback_(std::move(callback))
-  {
-    client_callback_group_ = node_.create_callback_group(
-      rclcpp::CallbackGroupType::Reentrant);
-    client_ = node_.create_client<GateControl>(
-      kGateControlService,
-      rmw_qos_profile_services_default,
-      client_callback_group_);
-    auto qos = rclcpp::QoS(rclcpp::KeepLast(1));
-    qos.reliable().transient_local();
-    subscription_ = node_.create_subscription<GateStateMessage>(
-      kGateStateTopic,
-      qos,
-      [this](const GateStateMessage::ConstSharedPtr message) {
-        const bool graph_available = graph_endpoint_available();
-        snapshot_ = GateSnapshot{
-          message->gate_instance_id,
-          message->control_seq,
-          message->lease_id,
-          gate_state_from_message(message->state),
-          graph_available,
-          message->motion_inhibited,
-          message->zero_selected,
-          graph_available && message->zero_publish_seq != 0U &&
-          message->zero_publish_seq >= message->output_publish_seq};
-        state_sample_available_ = graph_available;
-        if (callback_) {
-          callback_(snapshot_);
-        }
-      });
-    authority_adapter_ = std::make_unique<MissionAuthorityAdapter>(
-      stop_barrier_,
-      control_response_deadline_,
-      []() {return std::chrono::steady_clock::now();},
-      [this](
-        const AuthorityOperation & current,
-        AuthorityOperationKind kind,
-        std::chrono::steady_clock::time_point attempt_deadline,
-        std::chrono::steady_clock::time_point overall_deadline) {
-        return send_once(
-            current,
-            operation_code(kind),
-            attempt_deadline,
-            overall_deadline);
-        },
-      [this]() {refresh_endpoint();});
-  }
-
-  [[nodiscard]] GateSnapshot snapshot() const override
-  {
-    return snapshot_;
-  }
-
-  [[nodiscard]] AuthorityResult prepare(
-    const AuthorityOperation & operation) override
-  {
-    return authority_adapter_->prepare(operation);
-  }
-
-  [[nodiscard]] AuthorityResult open(
-    const AuthorityOperation & operation) override
-  {
-    return authority_adapter_->open(operation);
-  }
-
-  [[nodiscard]] AuthorityResult renew(
-    const AuthorityOperation & operation) override
-  {
-    return authority_adapter_->renew(operation);
-  }
-
-  [[nodiscard]] AuthorityResult inhibit(
-    const AuthorityOperation & operation) override
-  {
-    return authority_adapter_->inhibit(operation);
-  }
-
-  void refresh_endpoint()
-  {
-    const bool available = graph_endpoint_available();
-    if (!available) {
-      if (snapshot_.endpoint_available || state_sample_available_) {
-        snapshot_.endpoint_available = false;
-        snapshot_.zero_published = false;
-        state_sample_available_ = false;
-        if (callback_) {
-          callback_(snapshot_);
-        }
-      }
-      return;
-    }
-    if (state_sample_available_ && !snapshot_.endpoint_available) {
-      snapshot_.endpoint_available = true;
-      if (callback_) {
-        callback_(snapshot_);
-      }
-    }
-  }
-
-private:
-  [[nodiscard]] bool graph_endpoint_available() const
-  {
-    return client_->service_is_ready() &&
-           node_.count_publishers(kGateStateTopic) > 0U;
-  }
-
-  [[nodiscard]] static std::uint8_t operation_code(
-    AuthorityOperationKind kind)
-  {
-    switch (kind) {
-      case AuthorityOperationKind::Prepare:
-        return GateControl::Request::PREPARE;
-      case AuthorityOperationKind::Open:
-        return GateControl::Request::OPEN;
-      case AuthorityOperationKind::Renew:
-        return GateControl::Request::RENEW;
-      case AuthorityOperationKind::Inhibit:
-        return GateControl::Request::INHIBIT;
-    }
-    return GateControl::Request::PREPARE;
-  }
-
-  [[nodiscard]] AuthorityResult send_once(
-    const AuthorityOperation & operation,
-    std::uint8_t operation_code,
-    std::chrono::steady_clock::time_point rpc_deadline,
-    std::chrono::steady_clock::time_point overall_deadline)
-  {
-    const auto now = std::chrono::steady_clock::now();
-    if (now >= overall_deadline) {
-      return unavailable(
-        "MotionGate control operation reached its steady deadline", false);
-    }
-    if (now >= rpc_deadline) {
-      return unavailable(
-        "MotionGate control operation reached its single-operation deadline",
-        now < overall_deadline);
-    }
-    const auto remaining = [&rpc_deadline]() {
-        const auto now = std::chrono::steady_clock::now();
-        return now >= rpc_deadline ? std::chrono::milliseconds(0) :
-               std::chrono::duration_cast<std::chrono::milliseconds>(
-          rpc_deadline - now);
-      };
-    if (!client_->wait_for_service(remaining())) {
-      return unavailable(
-        "MotionGate control service is unavailable",
-        std::chrono::steady_clock::now() < overall_deadline);
-    }
-    if (std::chrono::steady_clock::now() >= overall_deadline) {
-      return unavailable(
-        "MotionGate control operation reached its steady deadline", false);
-    }
-    auto request = std::make_shared<GateControl::Request>();
-    request->operation = operation_code;
-    request->request_id = operation.request_id;
-    request->gate_instance_id = operation.gate_instance_id;
-    request->expected_control_seq = operation.expected_control_seq;
-    request->lease_id = operation.lease_id;
-    auto future = client_->async_send_request(request);
-    if (future.wait_for(remaining()) !=
-      std::future_status::ready)
-    {
-      return unavailable(
-        "MotionGate control response exceeded its single-operation deadline",
-        std::chrono::steady_clock::now() < overall_deadline);
-    }
-    if (std::chrono::steady_clock::now() >= overall_deadline) {
-      return unavailable(
-        "MotionGate control operation reached its steady deadline", false);
-    }
-    const auto response = future.get();
-    snapshot_ = GateSnapshot{
-      response->gate_instance_id,
-      response->control_seq,
-      response->lease_id,
-      gate_state_from_message(response->state),
-      graph_endpoint_available(),
-      response->motion_inhibited,
-      response->zero_selected,
-      response->zero_published && graph_endpoint_available()};
-    state_sample_available_ = snapshot_.endpoint_available;
-    if (callback_) {
-      callback_(snapshot_);
-    }
-    const bool applied =
-      response->code == GateControl::Response::APPLIED ||
-      response->code == GateControl::Response::DUPLICATE;
-    const bool zero = response->motion_inhibited && response->zero_selected &&
-      response->zero_published;
-    const bool retryable =
-      response->reason == GateControl::Response::STALE_GATE ||
-      response->reason == GateControl::Response::STALE_SEQUENCE ||
-      response->reason == GateControl::Response::STALE_LEASE;
-    auto result = AuthorityResult{
-      applied,
-      zero,
-      retryable,
-      snapshot_,
-      response->lease_id,
-      response->detail};
-    result.tuple_stale = retryable;
-    return result;
-  }
-
-  [[nodiscard]] AuthorityResult unavailable(
-    std::string detail, bool retryable) const
-  {
-    return AuthorityResult{
-      false, false, retryable, snapshot_, {}, std::move(detail)};
-  }
-
-  rclcpp::Node & node_;
-  std::chrono::milliseconds control_response_deadline_;
-  std::chrono::milliseconds stop_barrier_;
-  std::unique_ptr<MissionAuthorityAdapter> authority_adapter_;
-  GateChangedCallback callback_;
-  rclcpp::CallbackGroup::SharedPtr client_callback_group_;
-  rclcpp::Client<GateControl>::SharedPtr client_;
-  rclcpp::Subscription<GateStateMessage>::SharedPtr subscription_;
-  GateSnapshot snapshot_{};
-  bool state_sample_available_{false};
 };
 
 class UnavailableRelativeMotionPort final : public RelativeMotionPort

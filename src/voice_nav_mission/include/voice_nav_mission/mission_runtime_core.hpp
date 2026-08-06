@@ -159,6 +159,9 @@ struct GateSnapshot
   bool motion_inhibited{true};
   bool zero_selected{true};
   bool zero_published{false};
+  std::string candidate_topic;
+  bool authority_live{false};
+  bool writer_bound{false};
 };
 
 struct AuthorityOperation
