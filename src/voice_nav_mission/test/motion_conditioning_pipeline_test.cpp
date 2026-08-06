@@ -12,10 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "voice_nav_mission/motion_conditioning_pipeline.hpp"
-#include "voice_nav_mission/mission_authority_convergence.hpp"
-
 #include <gtest/gtest.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include <composition_interfaces/srv/load_node.hpp>
 #include <composition_interfaces/srv/unload_node.hpp>
@@ -25,16 +33,8 @@
 #include <lifecycle_msgs/srv/get_state.hpp>
 #include <nav2_msgs/msg/collision_monitor_state.hpp>
 
-#include <chrono>
-#include <algorithm>
-#include <cstdint>
-#include <memory>
-#include <mutex>
-#include <string>
-#include <thread>
-#include <unordered_map>
-#include <utility>
-#include <vector>
+#include "voice_nav_mission/mission_authority_convergence.hpp"
+#include "voice_nav_mission/motion_conditioning_pipeline.hpp"
 
 namespace voice_nav_mission
 {
@@ -241,35 +241,35 @@ private:
   {
     change_services_.push_back(node->create_service<ChangeState>(
       fqn + "/change_state",
-      [state](
-        const std::shared_ptr<ChangeState::Request> request,
-        std::shared_ptr<ChangeState::Response> response) {
-        switch (request->transition.id) {
-          case lifecycle_msgs::msg::Transition::TRANSITION_CONFIGURE:
-            *state = lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE;
-            response->success = true;
-            return;
-          case lifecycle_msgs::msg::Transition::TRANSITION_ACTIVATE:
-            *state = lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE;
-            response->success = true;
-            return;
-          case lifecycle_msgs::msg::Transition::TRANSITION_ACTIVE_SHUTDOWN:
-          case lifecycle_msgs::msg::Transition::TRANSITION_INACTIVE_SHUTDOWN:
-            *state = lifecycle_msgs::msg::State::PRIMARY_STATE_FINALIZED;
-            response->success = true;
-            return;
-          default:
-            response->success = false;
-            return;
-        }
+        [state](
+          const std::shared_ptr<ChangeState::Request> request,
+          std::shared_ptr<ChangeState::Response> response) {
+          switch (request->transition.id) {
+            case lifecycle_msgs::msg::Transition::TRANSITION_CONFIGURE:
+              *state = lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE;
+              response->success = true;
+              return;
+            case lifecycle_msgs::msg::Transition::TRANSITION_ACTIVATE:
+              *state = lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE;
+              response->success = true;
+              return;
+            case lifecycle_msgs::msg::Transition::TRANSITION_ACTIVE_SHUTDOWN:
+            case lifecycle_msgs::msg::Transition::TRANSITION_INACTIVE_SHUTDOWN:
+              *state = lifecycle_msgs::msg::State::PRIMARY_STATE_FINALIZED;
+              response->success = true;
+              return;
+            default:
+              response->success = false;
+              return;
+          }
       }));
     get_services_.push_back(node->create_service<GetState>(
       fqn + "/get_state",
-      [state](
-        const std::shared_ptr<GetState::Request>,
-        std::shared_ptr<GetState::Response> response) {
-        response->current_state.id = *state;
-        response->current_state.label = "fake";
+        [state](
+          const std::shared_ptr<GetState::Request>,
+          std::shared_ptr<GetState::Response> response) {
+          response->current_state.id = *state;
+          response->current_state.label = "fake";
       }));
   }
 
@@ -328,7 +328,7 @@ protected:
     executor->add_node(client);
     spinning = true;
     spin_thread = std::thread([this]() {
-      executor->spin();
+          executor->spin();
     });
   }
 

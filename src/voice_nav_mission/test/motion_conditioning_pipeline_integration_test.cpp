@@ -14,19 +14,6 @@
 
 #include <gtest/gtest.h>
 
-#define main motion_gate_embedded_main
-#include "../src/motion_gate_node.cpp"
-#undef main
-
-#include <rclcpp_components/component_manager.hpp>
-
-#include <geometry_msgs/msg/twist_stamped.hpp>
-#include <geometry_msgs/msg/transform_stamped.hpp>
-#include <nav_msgs/msg/odometry.hpp>
-#include <rosgraph_msgs/msg/clock.hpp>
-#include <sensor_msgs/msg/laser_scan.hpp>
-#include <tf2_msgs/msg/tf_message.hpp>
-
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -37,6 +24,19 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+#define main motion_gate_embedded_main
+#include "../src/motion_gate_node.cpp"  // NOLINT(build/include)
+#undef main
+
+#include <rclcpp_components/component_manager.hpp>
+
+#include <geometry_msgs/msg/twist_stamped.hpp>
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <rosgraph_msgs/msg/clock.hpp>
+#include <sensor_msgs/msg/laser_scan.hpp>
+#include <tf2_msgs/msg/tf_message.hpp>
 
 #include "voice_nav_mission/motion_authority_ros_adapter.hpp"
 #include "voice_nav_mission/motion_conditioning_pipeline.hpp"
@@ -61,14 +61,14 @@ public:
       raw_topic,
       rclcpp::QoS(rclcpp::KeepLast(1)).reliable().durability_volatile());
     timer_ = node_.create_wall_timer(50ms, [this]() {
-      if (!publisher_) {
-        return;
-      }
-      TwistStamped message;
-      message.header.stamp = node_.get_clock()->now();
-      message.header.frame_id = "base_footprint";
-      message.twist.linear.x = 0.12;
-      publisher_->publish(message);
+          if (!publisher_) {
+            return;
+          }
+          TwistStamped message;
+          message.header.stamp = node_.get_clock()->now();
+          message.header.frame_id = "base_footprint";
+          message.twist.linear.x = 0.12;
+          publisher_->publish(message);
     });
     ++start_count;
     return true;
@@ -117,28 +117,28 @@ public:
     tf_static_publisher_->publish(static_transforms);
 
     clock_timer_ = create_wall_timer(10ms, [this]() {
-      rosgraph_msgs::msg::Clock message;
-      message.clock = rclcpp::Clock(RCL_SYSTEM_TIME).now();
-      clock_publisher_->publish(message);
+          rosgraph_msgs::msg::Clock message;
+          message.clock = rclcpp::Clock(RCL_SYSTEM_TIME).now();
+          clock_publisher_->publish(message);
     });
     sensor_timer_ = create_wall_timer(50ms, [this]() {
-      const auto stamp = get_clock()->now();
-      sensor_msgs::msg::LaserScan scan;
-      scan.header.stamp = stamp;
-      scan.header.frame_id = "base_footprint";
-      scan.angle_min = -1.0F;
-      scan.angle_max = 1.0F;
-      scan.angle_increment = 1.0F;
-      scan.range_min = 0.05F;
-      scan.range_max = 10.0F;
-      scan.ranges = {10.0F, 10.0F, 10.0F};
-      scan_publisher_->publish(scan);
+          const auto stamp = get_clock()->now();
+          sensor_msgs::msg::LaserScan scan;
+          scan.header.stamp = stamp;
+          scan.header.frame_id = "base_footprint";
+          scan.angle_min = -1.0F;
+          scan.angle_max = 1.0F;
+          scan.angle_increment = 1.0F;
+          scan.range_min = 0.05F;
+          scan.range_max = 10.0F;
+          scan.ranges = {10.0F, 10.0F, 10.0F};
+          scan_publisher_->publish(scan);
 
-      nav_msgs::msg::Odometry odom;
-      odom.header.stamp = stamp;
-      odom.header.frame_id = "odom";
-      odom.child_frame_id = "base_footprint";
-      odom_publisher_->publish(odom);
+          nav_msgs::msg::Odometry odom;
+          odom.header.stamp = stamp;
+          odom.header.frame_id = "odom";
+          odom.child_frame_id = "base_footprint";
+          odom_publisher_->publish(odom);
     });
   }
 
@@ -162,7 +162,7 @@ public:
       rclcpp::SystemDefaultsQoS(),
       [this](const TwistStamped::ConstSharedPtr message) {
         if (std::abs(message->twist.linear.x) > 0.001 ||
-          std::abs(message->twist.angular.z) > 0.001)
+        std::abs(message->twist.angular.z) > 0.001)
         {
           ++nonzero_count;
         }
@@ -348,7 +348,6 @@ TEST(MotionConditioningPipelineIntegration, RealComponentsHandoverTwoLeases)
         return pipeline_node->get_publishers_info_by_topic(
           prepared_two.candidate_topic).empty();
       }, 2s));
-
 }
 
 }  // namespace

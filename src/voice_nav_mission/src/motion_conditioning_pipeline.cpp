@@ -14,13 +14,6 @@
 
 #include "voice_nav_mission/motion_conditioning_pipeline.hpp"
 
-#include <composition_interfaces/srv/load_node.hpp>
-#include <composition_interfaces/srv/unload_node.hpp>
-#include <lifecycle_msgs/msg/state.hpp>
-#include <lifecycle_msgs/msg/transition.hpp>
-#include <lifecycle_msgs/srv/change_state.hpp>
-#include <lifecycle_msgs/srv/get_state.hpp>
-#include <nav2_msgs/msg/collision_monitor_state.hpp>
 #include <rmw/qos_profiles.h>
 
 #include <algorithm>
@@ -39,6 +32,14 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+#include <composition_interfaces/srv/load_node.hpp>
+#include <composition_interfaces/srv/unload_node.hpp>
+#include <lifecycle_msgs/msg/state.hpp>
+#include <lifecycle_msgs/msg/transition.hpp>
+#include <lifecycle_msgs/srv/change_state.hpp>
+#include <lifecycle_msgs/srv/get_state.hpp>
+#include <nav2_msgs/msg/collision_monitor_state.hpp>
 
 #include "voice_nav_mission/motion_authority_ros_adapter.hpp"
 
@@ -305,7 +306,7 @@ public:
     if (state_ == MotionConditioningState::Stopped) {
       return remember(make_result(
           state_, MotionConditioningFailure::None, true, true, collision_stop_,
-          {}, {}, "conditioning pipeline already stopped"));
+                 {}, {}, "conditioning pipeline already stopped"));
     }
     if (producer_) {
       producer_->stop();
@@ -324,7 +325,7 @@ public:
     state_ = MotionConditioningState::Stopped;
     return remember(make_result(
         state_, MotionConditioningFailure::None, true, true, collision_stop_,
-        {}, {}, "conditioning generation stopped"));
+               {}, {}, "conditioning generation stopped"));
   }
 
   MotionConditioningResult fail(
@@ -562,9 +563,9 @@ private:
         kVelocitySmootherPlugin,
         "velocity_smoother",
         smoother_parameters,
-        {
-          "cmd_vel:=" + config_.raw_topic,
-          "cmd_vel_smoothed:=" + config_.smoothed_topic,
+      {
+        "cmd_vel:=" + config_.raw_topic,
+        "cmd_vel_smoothed:=" + config_.smoothed_topic,
         },
         smoother_component_))
     {
@@ -580,9 +581,9 @@ private:
       return false;
     }
     return component_state(kCollisionMonitorFqn) ==
-      lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE &&
-      component_state(kVelocitySmootherFqn) ==
-      lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE;
+           lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE &&
+           component_state(kVelocitySmootherFqn) ==
+           lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE;
   }
 
   [[nodiscard]] bool wait_for_writer_to_disappear(
@@ -613,8 +614,9 @@ private:
       success = change_state(
         kVelocitySmootherFqn,
         lifecycle_msgs::msg::Transition::TRANSITION_ACTIVE_SHUTDOWN) && success;
-    } else if (
-      smoother_state == lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE)
+    }
+    if (smoother_state ==
+      lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE)
     {
       success = change_state(
         kVelocitySmootherFqn,
@@ -625,8 +627,9 @@ private:
       success = change_state(
         kCollisionMonitorFqn,
         lifecycle_msgs::msg::Transition::TRANSITION_ACTIVE_SHUTDOWN) && success;
-    } else if (
-      collision_state == lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE)
+    }
+    if (collision_state ==
+      lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE)
     {
       success = change_state(
         kCollisionMonitorFqn,
