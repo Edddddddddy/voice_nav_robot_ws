@@ -405,6 +405,7 @@ TEST(WriterObservationSession, EmptySnapshotStaysUnavailableAfterPriorObservatio
   const auto missing = session.observe({}, 2ms);
   EXPECT_FALSE(missing.ready);
   EXPECT_EQ(missing.reason, Reason::WriterUnavailable);
+  EXPECT_NE(missing.detail.find("n=0"), std::string::npos);
 }
 
 }  // namespace

@@ -286,7 +286,8 @@ OpenBinding WriterObservationSession::observe(
       false,
       Reason::WriterUnavailable,
       {},
-      "candidate topic has no writer"};
+      "candidate topic has no writer; n=0 k=none id=none q=none "
+      "g=none ms=" + std::to_string(elapsed.count()) + " t=none"};
   }
   if (endpoints.size() != 1U) {
     if (pinned_writer_gid_) {
