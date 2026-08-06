@@ -268,7 +268,7 @@ OpenBinding WriterObservationSession::observe(
   const std::vector<WriterEndpointObservation> & endpoints,
   std::chrono::milliseconds elapsed)
 {
-  if (terminal_mismatch_) {
+  if (terminal_mismatch_ && !endpoints.empty()) {
     return mismatch(terminal_detail_);
   }
 
@@ -282,11 +282,6 @@ OpenBinding WriterObservationSession::observe(
     };
 
   if (endpoints.empty()) {
-    if (pinned_writer_gid_) {
-      return reject_mismatch(
-        "pinned candidate writer disappeared after " +
-        std::to_string(elapsed.count()) + "ms");
-    }
     return {
       false,
       Reason::WriterUnavailable,
