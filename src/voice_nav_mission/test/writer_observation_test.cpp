@@ -406,6 +406,15 @@ TEST(WriterObservationSession, EmptySnapshotStaysUnavailableAfterPriorObservatio
   EXPECT_FALSE(missing.ready);
   EXPECT_EQ(missing.reason, Reason::WriterUnavailable);
   EXPECT_NE(missing.detail.find("n=0"), std::string::npos);
+
+  ASSERT_EQ(
+    session.observe(
+      {endpoint(writer_gid(0x74U), "collision_monitor")}, 3ms).reason,
+    Reason::WriterMismatch);
+  const auto terminal_missing = session.observe({}, 4ms);
+  EXPECT_FALSE(terminal_missing.ready);
+  EXPECT_EQ(terminal_missing.reason, Reason::WriterUnavailable);
+  EXPECT_NE(terminal_missing.detail.find("n=0"), std::string::npos);
 }
 
 }  // namespace
