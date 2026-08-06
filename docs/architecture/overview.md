@@ -43,9 +43,10 @@ Verified by repository, static, and headless-Gazebo gates:
   observation window.
 
 SLAM, the physical Nav2 motion chain, Agent, and voice remain target claims.
-The Mission Runtime control plane is a current slice described below; its
-production RelativeMotion Adapter remains intentionally unavailable until
-Task #35. No `map → odom` owner exists yet. Controller timeout is configured
+The Mission Runtime control plane and the package-private conditioning module
+are current slices described below; the production RelativeMotion Adapter and
+physical MOVE/ROTATE execution remain intentionally unavailable until Task
+#64. No `map → odom` owner exists yet. Controller timeout is configured
 but is not presented as Gate-death or physical-stop completion; process-death
 acceptance remains a separate target slice.
 
@@ -92,6 +93,32 @@ current tests use an authority/candidate harness and do not claim Mission
 Runtime, smoother, Collision Monitor, process-kill crash-stop, or Gazebo
 pause/resume completion. Crash-stop and pause recovery are separate target
 acceptance slices.
+
+## Current Issue #35 conditioning module slice
+
+The Runtime-owned `MotionConditioningPipeline` is a package-private module in
+`voice_nav_mission`. Its production Adapter composes the pinned Nav2 1.3.12
+`nav2_collision_monitor::CollisionMonitor` and
+`nav2_velocity_smoother::VelocitySmoother` inside the
+`/motion_conditioning_container` component container, drives their lifecycle,
+and hands their candidate writer to MotionGate only after bounded graph,
+health, controller, clock, lease, and zero-proof checks. The trusted bringup
+record keeps MotionGate PREPARE bounded to `6000 ms`.
+
+The current internal slice fixes the component FQNs `/collision_monitor` and
+`/velocity_smoother`; raw and smoothed traffic uses
+`/voice_nav_internal/motion/raw` and
+`/voice_nav_internal/motion/smoothed`, Collision Monitor state uses
+`/voice_nav_internal/motion/collision_state`, and each MotionGate lease uses a
+Gate-generated topic below
+`/voice_nav_internal/motion_gate/candidate/lease_`. Candidate traffic is
+`BEST_EFFORT + VOLATILE + KEEP_LAST(1)`; the final controller publisher keeps
+`rclcpp::SystemDefaultsQoS()` and its writer/GID proof. These are private
+runtime seams and are not exported as public ROS IDL.
+
+Issue #35 does not execute product Mission MOVE/ROTATE odometry loops or
+Gazebo physical motion. Mission remains `DEPENDENCY_UNAVAILABLE` until Task
+#64 supplies the approved physical execution slice.
 
 ## Target v1.0 topology
 
@@ -184,10 +211,11 @@ identity/epoch fencing, STOP linearization, state/feedback/result projection,
 and fail-closed Gate coordination are implemented in this slice.
 
 The production `RelativeMotionPort` is an intentional unavailable Adapter
-until Task #35. Therefore this current slice validates and fences Missions but
-does not produce candidate velocities or perform physical MOVE/ROTATE motion.
-Task #35 may replace that private Adapter without changing the frozen public
-ROS IDL or the Mission endpoints.
+until Task #64. Issue #35 supplies the private conditioning and authority
+handover module, but this current slice still validates and fences Missions;
+it does not produce product candidate velocities or perform physical
+MOVE/ROTATE motion. Task #64 may add that private execution behavior without
+changing the frozen public ROS IDL or the Mission endpoints.
 
 ### Simulation Module
 

@@ -356,7 +356,6 @@ class MotionGateProductTest(unittest.TestCase):
         self.current_gate_instance_id = state.gate_instance_id
         self.current_control_seq = state.control_seq
         self.current_lease_id = ''
-        prepare_started_at = time.monotonic()
         request = self.make_request(
             InternalMotionGateControl.Request.PREPARE,
             'prepare',
@@ -380,12 +379,32 @@ class MotionGateProductTest(unittest.TestCase):
             )
         )
         self.update_authority(response)
-        self.open_convergence_deadline = (
-            prepare_started_at + OPEN_CONVERGENCE_BUDGET_SECONDS
-        )
         return response
 
+    def wait_for_candidate_writer_graph(self, topic: str):
+        def observed_writer():
+            endpoints = [
+                endpoint
+                for endpoint in self.node.get_publishers_info_by_topic(topic)
+                if (
+                    endpoint.node_name == 'collision_monitor'
+                    and endpoint.node_namespace == '/'
+                    and endpoint.topic_type == 'geometry_msgs/msg/TwistStamped'
+                    and any(endpoint.endpoint_gid)
+                )
+            ]
+            return endpoints[0] if len(endpoints) == 1 else None
+
+        return self.wait_until(
+            observed_writer,
+            OPEN_CONVERGENCE_BUDGET_SECONDS,
+            'candidate writer graph identity',
+        )
+
     def open_gate(self):
+        self.open_convergence_deadline = (
+            time.monotonic() + OPEN_CONVERGENCE_BUDGET_SECONDS
+        )
         expected = open_convergence.PreparedIdentity(
             gate_instance_id=self.current_gate_instance_id,
             control_seq=self.current_control_seq,
@@ -495,6 +514,7 @@ class MotionGateProductTest(unittest.TestCase):
             3.0,
             'one MotionGate candidate reader',
         )
+        self.wait_for_candidate_writer_graph(topic)
         return publisher
 
     def destroy_candidate_publisher(self, publisher, topic: str):
