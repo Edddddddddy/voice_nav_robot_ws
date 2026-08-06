@@ -1,0 +1,23 @@
+# Goal
+uint8 NORMAL=1
+uint8 URGENT=2
+
+string<=36 source_instance_id
+uint64 source_seq
+string<=36 session_id
+string<=36 turn_id
+uint8 priority
+string<=512 text
+bool allow_barge_in
+---
+# Result
+uint16 COMPLETED=0
+uint16 CANCELED=1
+uint16 BARGED_IN=2
+uint16 FAILED=10
+
+uint16 code
+string<=160 detail
+---
+# Feedback
+builtin_interfaces/Duration played
