@@ -14,12 +14,14 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <algorithm>
 #include <condition_variable>
 #include <chrono>
 #include <cstdint>
 #include <stdexcept>
 #include <future>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -57,6 +59,7 @@ using UnloadNode = composition_interfaces::srv::UnloadNode;
 using ChangeState = lifecycle_msgs::srv::ChangeState;
 using GetState = lifecycle_msgs::srv::GetState;
 using ListControllers = controller_manager_msgs::srv::ListControllers;
+using CollisionState = nav2_msgs::msg::CollisionMonitorState;
 
 class FakeAuthority final : public MotionAuthorityPort
 {
@@ -300,15 +303,16 @@ public:
   void stop() override
   {
     ++stop_count;
+    std::cerr << "FakeProducer stop " << stop_count << std::endl;
     if (throw_on_stop) {
       throw std::runtime_error("scripted producer stop failure");
     }
   }
 
-  void wait_for_start()
+  bool wait_for_start(std::chrono::milliseconds timeout = 1s)
   {
     std::unique_lock<std::mutex> lock(start_mutex);
-    start_cv.wait(lock, [this]() {return start_entered;});
+    return start_cv.wait_for(lock, timeout, [this]() {return start_entered;});
   }
 
   void release_blocked_start()
@@ -363,9 +367,8 @@ public:
           collision_candidate_ = collision_->create_generic_publisher(
             parameter_string(request, "cmd_vel_out_topic"),
             "geometry_msgs/msg/TwistStamped", rclcpp::QoS(1));
-          collision_events_ = collision_->create_generic_publisher(
-            parameter_string(request, "state_topic"),
-            "nav2_msgs/msg/CollisionMonitorState", rclcpp::QoS(1));
+          collision_events_ = collision_->create_publisher<CollisionState>(
+            parameter_string(request, "state_topic"), rclcpp::QoS(1));
         } else if (request->node_name == "velocity_smoother") {
           smoother_state_ = lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED;
         }
@@ -507,6 +510,21 @@ public:
   {
     std::lock_guard<std::mutex> lock(graph_mutex_);
     return unload_completed_;
+  }
+
+  rclcpp::Publisher<CollisionState>::SharedPtr collision_publisher() const
+  {
+    return collision_events_;
+  }
+
+  void publish_collision_stop()
+  {
+    CollisionState message;
+    message.action_type = CollisionState::STOP;
+    message.polygon_name = "stop_zone";
+    if (collision_events_) {
+      collision_events_->publish(message);
+    }
   }
 
   void set_wrong_fqn(bool value)
@@ -671,7 +689,7 @@ private:
   bool activation_entered_{false};
   bool activation_released_{false};
   rclcpp::GenericPublisher::SharedPtr collision_candidate_;
-  rclcpp::GenericPublisher::SharedPtr collision_events_;
+  rclcpp::Publisher<CollisionState>::SharedPtr collision_events_;
   rclcpp::GenericPublisher::SharedPtr scan_publisher_;
   rclcpp::GenericPublisher::SharedPtr odom_publisher_;
   rclcpp::Publisher<sensor_msgs::msg::LaserScan>::SharedPtr scan_message_publisher_;
@@ -844,10 +862,7 @@ TEST_F(MotionConditioningPipelineTest, CollisionStopIsReportedAndFailsClosed)
   std::this_thread::sleep_for(50ms);
   ASSERT_TRUE(pipeline.start().ok);
 
-  nav2_msgs::msg::CollisionMonitorState stop;
-  stop.action_type = nav2_msgs::msg::CollisionMonitorState::STOP;
-  stop.polygon_name = "stop_zone";
-  collision_state_publisher->publish(stop);
+  graph->publish_collision_stop();
 
   const auto deadline = std::chrono::steady_clock::now() + 1s;
   while (
@@ -897,18 +912,104 @@ TEST_F(MotionConditioningPipelineTest, StopAtActivationBarrierRejectsLateProduce
   std::thread start_thread([&]() {start_result = pipeline.start();});
   graph->wait_for_activation_entry();
 
-  const auto stopped = pipeline.stop();
-  EXPECT_TRUE(stopped.zero_proven);
+  std::optional<MotionConditioningResult> stopped;
+  std::atomic<bool> stop_completed{false};
+  std::thread stop_thread([&]() {
+      stopped = pipeline.stop();
+      stop_completed.store(true);
+    });
+  std::this_thread::sleep_for(20ms);
+  EXPECT_FALSE(stop_completed.load());
   graph->release_activation();
   start_thread.join();
+  stop_thread.join();
 
   ASSERT_TRUE(start_result.has_value());
+  ASSERT_TRUE(stopped.has_value());
   EXPECT_FALSE(start_result->ok);
   EXPECT_EQ(producer->start_count, 0U);
+  EXPECT_TRUE(stopped->zero_proven);
   EXPECT_EQ(pipeline.state(), MotionConditioningState::Stopped);
-  EXPECT_EQ(pipeline.last_result().state, stopped.state);
-  EXPECT_EQ(pipeline.last_result().failure, stopped.failure);
-  EXPECT_EQ(pipeline.last_result().zero_proven, stopped.zero_proven);
+  EXPECT_EQ(pipeline.last_result().state, stopped->state);
+  EXPECT_EQ(pipeline.last_result().failure, stopped->failure);
+  EXPECT_EQ(pipeline.last_result().zero_proven, stopped->zero_proven);
+}
+
+TEST_F(MotionConditioningPipelineTest, TeardownDrainsBlockedActivationBeforeCleanup)
+{
+  graph->enable_activation_barrier();
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+  ASSERT_TRUE(pipeline.prepare().ok);
+
+  std::optional<MotionConditioningResult> start_result;
+  std::thread start_thread([&]() {start_result = pipeline.start();});
+  graph->wait_for_activation_entry();
+
+  std::optional<MotionConditioningResult> stop_result;
+  std::atomic<bool> stop_completed{false};
+  std::thread stop_thread([&]() {
+      stop_result = pipeline.stop();
+      stop_completed.store(true);
+    });
+  std::this_thread::sleep_for(20ms);
+  EXPECT_FALSE(stop_completed.load());
+
+  graph->release_activation();
+  start_thread.join();
+  stop_thread.join();
+
+  ASSERT_TRUE(start_result.has_value());
+  ASSERT_TRUE(stop_result.has_value());
+  EXPECT_FALSE(start_result->ok);
+  EXPECT_TRUE(stop_result->zero_proven);
+  EXPECT_EQ(graph->unload_count(), 2U);
+  const auto calls = authority->calls();
+  EXPECT_EQ(
+    std::count(
+      calls.cbegin(), calls.cend(), AuthorityOperationKind::Inhibit), 1);
+}
+
+TEST_F(MotionConditioningPipelineTest, TeardownDrainsProducerStartBeforeCleanup)
+{
+  producer->block_start = true;
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+  ASSERT_TRUE(pipeline.prepare().ok);
+  std::this_thread::sleep_for(50ms);
+
+  std::optional<MotionConditioningResult> start_result;
+  std::thread start_thread([&]() {start_result = pipeline.start();});
+  if (!producer->wait_for_start()) {
+    producer->release_blocked_start();
+    start_thread.join();
+    if (start_result.has_value()) {
+      FAIL() << "conditioning start did not reach producer barrier: " <<
+        start_result->detail;
+    }
+    FAIL() << "conditioning start did not reach producer barrier";
+  }
+
+  std::optional<MotionConditioningResult> stop_result;
+  std::atomic<bool> stop_completed{false};
+  std::thread stop_thread([&]() {
+      stop_result = pipeline.stop();
+      stop_completed.store(true);
+    });
+  std::this_thread::sleep_for(20ms);
+  EXPECT_FALSE(stop_completed.load());
+
+  producer->release_blocked_start();
+  start_thread.join();
+  stop_thread.join();
+
+  ASSERT_TRUE(start_result.has_value());
+  ASSERT_TRUE(stop_result.has_value());
+  EXPECT_FALSE(start_result->ok);
+  EXPECT_TRUE(stop_result->zero_proven);
+  EXPECT_EQ(graph->unload_count(), 2U);
+  const auto calls = authority->calls();
+  EXPECT_EQ(
+    std::count(
+      calls.cbegin(), calls.cend(), AuthorityOperationKind::Inhibit), 1);
 }
 
 TEST_F(MotionConditioningPipelineTest, ProducerFalseFailsClosedAndCleansUp)
@@ -942,6 +1043,45 @@ TEST_F(MotionConditioningPipelineTest, ProducerThrowFailsClosedAndCleansUp)
   EXPECT_TRUE(result.zero_proven);
   EXPECT_GE(producer->stop_count, 1U);
   EXPECT_EQ(graph->loaded_count(), 0U);
+}
+
+TEST_F(MotionConditioningPipelineTest, CleanupFailureEscalatesExecutionFailureToSafetyFault)
+{
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+  ASSERT_TRUE(pipeline.prepare().ok);
+  std::this_thread::sleep_for(50ms);
+  ASSERT_TRUE(pipeline.start().ok);
+  graph->set_unload_delay(500ms);
+
+  const auto result = pipeline.fail(
+    MotionConditioningFailure::ExecutionFailed,
+    "collision execution failed while unload is blocked");
+
+  EXPECT_FALSE(result.ok);
+  EXPECT_EQ(result.state, MotionConditioningState::Failed);
+  EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
+  EXPECT_FALSE(result.detail.empty());
+  EXPECT_FALSE(graph->unload_requests().empty());
+  EXPECT_FALSE(pipeline.prepare().ok);
+}
+
+TEST_F(MotionConditioningPipelineTest, ZeroProofFailureEscalatesExecutionFailureToSafetyFault)
+{
+  authority->set_inhibit_zero_proof(false);
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+  ASSERT_TRUE(pipeline.prepare().ok);
+  std::this_thread::sleep_for(50ms);
+  ASSERT_TRUE(pipeline.start().ok);
+
+  const auto result = pipeline.fail(
+    MotionConditioningFailure::ExecutionFailed,
+    "collision execution failed while zero proof is unavailable");
+
+  EXPECT_FALSE(result.ok);
+  EXPECT_EQ(result.state, MotionConditioningState::Failed);
+  EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
+  EXPECT_FALSE(result.zero_proven);
+  EXPECT_FALSE(pipeline.prepare().ok);
 }
 
 TEST_F(MotionConditioningPipelineTest, ProducerStopFailureMakesStopSafetyFault)
@@ -1265,10 +1405,7 @@ TEST_F(MotionConditioningPipelineTest, TerminalRecordIgnoresLateFailureAndCollis
     MotionConditioningFailure::SafetyFault,
     "late failure must not replace STOP");
 
-  nav2_msgs::msg::CollisionMonitorState collision_stop;
-  collision_stop.action_type = nav2_msgs::msg::CollisionMonitorState::STOP;
-  collision_stop.polygon_name = "stop_zone";
-  collision_state_publisher->publish(collision_stop);
+  graph->publish_collision_stop();
   std::this_thread::sleep_for(50ms);
 
   const auto calls = authority->calls();
@@ -1281,6 +1418,41 @@ TEST_F(MotionConditioningPipelineTest, TerminalRecordIgnoresLateFailureAndCollis
     std::count(
       calls.cbegin(), calls.cend(),
       AuthorityOperationKind::Inhibit), 1);
+}
+
+TEST_F(MotionConditioningPipelineTest, LateOldCollisionCannotTerminateNextGeneration)
+{
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+  ASSERT_TRUE(pipeline.prepare().ok);
+  std::this_thread::sleep_for(50ms);
+  ASSERT_TRUE(pipeline.start().ok);
+  const auto old_collision_publisher = graph->collision_publisher();
+  ASSERT_TRUE(old_collision_publisher);
+
+  const auto stopped = pipeline.stop();
+  ASSERT_TRUE(stopped.ok);
+  ASSERT_TRUE(pipeline.prepare().ok);
+  std::this_thread::sleep_for(50ms);
+  const auto running = pipeline.start();
+  ASSERT_TRUE(running.ok);
+
+  CollisionState late_stop;
+  late_stop.action_type = CollisionState::STOP;
+  late_stop.polygon_name = "stop_zone";
+  old_collision_publisher->publish(late_stop);
+
+  const auto deadline = std::chrono::steady_clock::now() + 1s;
+  while (
+    pipeline.state() == MotionConditioningState::Running &&
+    std::chrono::steady_clock::now() < deadline)
+  {
+    std::this_thread::sleep_for(5ms);
+  }
+
+  EXPECT_EQ(pipeline.state(), MotionConditioningState::Running);
+  EXPECT_EQ(pipeline.last_result().state, running.state);
+  EXPECT_EQ(pipeline.last_result().failure, running.failure);
+  EXPECT_FALSE(pipeline.last_result().collision_stop);
 }
 
 TEST_F(MotionConditioningPipelineTest, StopWaitsForRenewFailureTeardownOwner)
@@ -1347,6 +1519,39 @@ TEST_F(MotionConditioningPipelineTest, ExternalFailureWaitsForActiveRenew)
       calls.cbegin(), calls.cend(),
       AuthorityOperationKind::Inhibit), 1);
   EXPECT_EQ(graph->unload_count(), 2U);
+}
+
+TEST_F(MotionConditioningPipelineTest, DestructorReusesTeardownTerminalResult)
+{
+  std::size_t unload_count = 0U;
+  std::size_t inhibit_count = 0U;
+  std::size_t producer_stop_count = 0U;
+  {
+    auto pipeline_config = config();
+    pipeline_config.renew_period = 1s;
+    MotionConditioningPipeline pipeline(
+      *client, authority, producer, pipeline_config);
+    ASSERT_TRUE(pipeline.prepare().ok);
+    std::this_thread::sleep_for(50ms);
+    const auto running = pipeline.start();
+    ASSERT_TRUE(running.ok);
+    const auto stopped = pipeline.stop();
+    ASSERT_TRUE(stopped.ok);
+    producer_stop_count = producer->stop_count;
+    unload_count = graph->unload_count();
+    const auto calls = authority->calls();
+    inhibit_count = static_cast<std::size_t>(std::count(
+        calls.cbegin(), calls.cend(), AuthorityOperationKind::Inhibit));
+  }
+
+  EXPECT_EQ(graph->unload_count(), unload_count);
+  const auto calls = authority->calls();
+  EXPECT_EQ(
+    static_cast<std::size_t>(std::count(
+      calls.cbegin(), calls.cend(), AuthorityOperationKind::Inhibit)),
+    inhibit_count);
+  EXPECT_EQ(producer->stop_count, producer_stop_count);
+  EXPECT_EQ(producer_stop_count, 1U);
 }
 
 TEST_F(MotionConditioningPipelineTest, RenewAuthorityLossFailsClosed)

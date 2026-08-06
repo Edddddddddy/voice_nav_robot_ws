@@ -750,6 +750,26 @@ public:
     return writer_observation_session_.observe(observations, elapsed);
   }
 
+  OpenBinding
+  wait_for_unique_writer_gid_on_topic(const std::string & topic)
+  {
+    const auto deadline =
+      writer_observation_started_at_ + node_config_.writer_graph_timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+      const auto observation = discover_unique_writer_gid_on_topic(topic);
+      if (observation.ready || observation.reason == Reason::WriterMismatch) {
+        return observation;
+      }
+      const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+        deadline - std::chrono::steady_clock::now());
+      if (remaining <= 0ms) {
+        break;
+      }
+      std::this_thread::sleep_for(std::min(5ms, remaining));
+    }
+    return discover_unique_writer_gid_on_topic(topic);
+  }
+
   std::optional<std::string> final_controller_health_error() const
   {
     return std::nullopt;
@@ -769,7 +789,7 @@ public:
             false, Reason::WriterUnavailable, {}, *error};
         }
         const auto first =
-          discover_unique_writer_gid_on_topic(candidate_topic_);
+          wait_for_unique_writer_gid_on_topic(candidate_topic_);
         if (!first.ready) {
           return first;
         }
@@ -778,7 +798,7 @@ public:
           create_candidate_subscription(
           candidate_topic_, request.lease_id, true);
         const auto second =
-          discover_unique_writer_gid_on_topic(candidate_topic_);
+          wait_for_unique_writer_gid_on_topic(candidate_topic_);
         if (second.writer_gid != first.writer_gid) {
           return OpenBinding{};
         }
@@ -793,7 +813,7 @@ public:
       create_candidate_subscription(
       candidate_topic_, request.lease_id, false);
     const auto third =
-      discover_unique_writer_gid_on_topic(candidate_topic_);
+      wait_for_unique_writer_gid_on_topic(candidate_topic_);
     (void)third;
     (void)expected_binding;
     response.code = response.APPLIED;
@@ -2443,6 +2463,43 @@ class MotionGateContractTest(unittest.TestCase):
             completed.stderr,
         )
 
+    def test_open_wait_helper_must_remain_bounded_and_observe_mismatch(self) -> None:
+        mutations = (
+            (
+                "while (std::chrono::steady_clock::now() < deadline)",
+                "while (true)",
+                "bounded writer graph wait helper",
+            ),
+            (
+                "observation.ready || observation.reason == Reason::WriterMismatch",
+                "observation.ready || observation.reason == Reason::None",
+                "WriterMismatch",
+            ),
+            (
+                "return discover_unique_writer_gid_on_topic(topic);",
+                "return OpenBinding{};",
+                "final observation",
+            ),
+        )
+        for old, new, diagnostic in mutations:
+            with self.subTest(mutation=diagnostic):
+                def mutation(
+                    root: Path,
+                    old_value: str = old,
+                    new_value: str = new,
+                ) -> None:
+                    self.replace(
+                        root,
+                        "src/voice_nav_mission/src/motion_gate_node.cpp",
+                        old_value,
+                        new_value,
+                    )
+
+                completed = self.run_checker(mutation)
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(diagnostic, completed.stderr)
+
     def test_core_open_validates_before_invoking_graph_provider(self) -> None:
         def mutation(root: Path) -> None:
             path = (
@@ -2536,7 +2593,7 @@ class MotionGateContractTest(unittest.TestCase):
                 (
                     "OpenBinding expected_binding;\n"
                     "    const auto unsafe_snapshot =\n"
-                    "      discover_unique_writer_gid_on_topic("
+                    "      wait_for_unique_writer_gid_on_topic("
                     "candidate_topic_);\n"
                     "    (void)unsafe_snapshot;\n"
                     "    const auto result = core_.open("
@@ -2563,7 +2620,7 @@ class MotionGateContractTest(unittest.TestCase):
             (
                 (
                     "const auto third =\n"
-                    "      discover_unique_writer_gid_on_topic("
+                    "      wait_for_unique_writer_gid_on_topic("
                     "candidate_topic_);"
                 ),
                 "const auto third = expected_binding;",

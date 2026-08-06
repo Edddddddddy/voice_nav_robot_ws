@@ -1712,6 +1712,51 @@ def validate_node(path: Path) -> None:
         "MotionGate Gate-local TopicEndpointInfo adapter",
     )
 
+    writer_wait = method_body(
+        source,
+        "MotionGateNode",
+        "wait_for_unique_writer_gid_on_topic",
+        "motion_gate_node",
+    )
+    require_source_tokens(
+        writer_wait,
+        (
+            "const auto deadline",
+            "writer_observation_started_at_ + node_config_.writer_graph_timeout",
+            "while (std::chrono::steady_clock::now() < deadline)",
+            "const auto observation = discover_unique_writer_gid_on_topic(topic)",
+            "observation.ready || observation.reason == Reason::WriterMismatch",
+            "const auto remaining",
+            "deadline - std::chrono::steady_clock::now()",
+            "if (remaining <= 0ms)",
+            "std::this_thread::sleep_for(std::min(5ms, remaining));",
+        ),
+        "MotionGate bounded writer graph wait helper",
+    )
+    if "return discover_unique_writer_gid_on_topic(topic);" not in writer_wait:
+        raise MotionGateContractError(
+            "MotionGate bounded writer graph wait helper must retain its "
+            "final observation"
+        )
+    if writer_wait.count("discover_unique_writer_gid_on_topic") != 2:
+        raise MotionGateContractError(
+            "MotionGate bounded writer graph wait helper must discover in "
+            "the loop and perform one final observation"
+        )
+    validate_order(
+        writer_wait,
+        (
+            "const auto deadline",
+            "while (std::chrono::steady_clock::now() < deadline)",
+            "discover_unique_writer_gid_on_topic(topic)",
+            "observation.ready || observation.reason == Reason::WriterMismatch",
+            "const auto remaining",
+            "std::this_thread::sleep_for(std::min(5ms, remaining));",
+            "return discover_unique_writer_gid_on_topic(topic);",
+        ),
+        "MotionGate bounded writer graph wait helper",
+    )
+
     open_reader = method_body(
         source,
         "MotionGateNode",
@@ -1732,7 +1777,7 @@ def validate_node(path: Path) -> None:
         provider,
         (
             "final_controller_health_error()",
-            "discover_unique_writer_gid_on_topic",
+            "wait_for_unique_writer_gid_on_topic",
         ),
         "MotionGate OPEN graph provider health-before-observation",
     )
@@ -1741,6 +1786,7 @@ def validate_node(path: Path) -> None:
         token
         for token in (
             "discover_unique_writer_gid_on_topic",
+            "wait_for_unique_writer_gid_on_topic",
             "create_candidate_subscription",
             "final_controller_health_error",
         )
@@ -1752,26 +1798,30 @@ def validate_node(path: Path) -> None:
             "DDS graph: "
             + ", ".join(forbidden_graph_before_core)
         )
-    if open_reader.count("discover_unique_writer_gid_on_topic") != 3:
+    if open_reader.count("wait_for_unique_writer_gid_on_topic") != 3:
         raise MotionGateContractError(
-            "MotionGate OPEN must take exactly three "
-            "discover_unique_writer_gid_on_topic snapshots"
+            "MotionGate OPEN must take exactly three bounded "
+            "wait_for_unique_writer_gid_on_topic observations"
+        )
+    if "discover_unique_writer_gid_on_topic" in open_reader:
+        raise MotionGateContractError(
+            "MotionGate OPEN must use the bounded writer graph wait helper"
         )
     validate_order(
         open_reader,
         (
             "core_.open(",
             "final_controller_health_error()",
-            "discover_unique_writer_gid_on_topic",
+            "wait_for_unique_writer_gid_on_topic",
             "candidate_subscription_.reset()",
             "create_candidate_subscription",
-            "discover_unique_writer_gid_on_topic",
+            "wait_for_unique_writer_gid_on_topic",
             "result.code != ResultCode::Applied",
             "candidate_subscription_.reset()",
             "create_candidate_subscription",
-            "discover_unique_writer_gid_on_topic",
+            "wait_for_unique_writer_gid_on_topic",
         ),
-        "MotionGate OPEN queue barrier with three snapshots",
+        "MotionGate OPEN queue barrier with three bounded observations",
     )
     reader_calls = parenthesized_call_bodies(
         open_reader,
