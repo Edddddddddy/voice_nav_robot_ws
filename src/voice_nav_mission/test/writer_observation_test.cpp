@@ -391,5 +391,21 @@ TEST(WriterObservationSession, MissingAndDuplicateWritersStayFailClosed)
   EXPECT_EQ(valid.writer_gid, first_gid);
 }
 
+TEST(WriterObservationSession, EmptySnapshotStaysUnavailableAfterPriorObservation)
+{
+  WriterObservationSession session({
+        "geometry_msgs/msg/TwistStamped",
+        "/collision_monitor"});
+  const auto gid = writer_gid(0x73U);
+
+  ASSERT_EQ(
+    session.observe({endpoint(gid, "")}, 1ms).reason,
+    Reason::WriterMetadataPending);
+
+  const auto missing = session.observe({}, 2ms);
+  EXPECT_FALSE(missing.ready);
+  EXPECT_EQ(missing.reason, Reason::WriterUnavailable);
+}
+
 }  // namespace
 }  // namespace voice_nav_mission
