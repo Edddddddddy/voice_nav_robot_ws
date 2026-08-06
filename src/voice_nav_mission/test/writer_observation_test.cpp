@@ -273,7 +273,7 @@ TEST(WriterObservationSession, DefinitivePolicyViolationsNeverEnterPending)
   assert_terminal_but_unpinned(std::move(wrong_type));
 
   auto wrong_qos = endpoint(writer_gid(0x64U), "collision_monitor");
-  wrong_qos.qos.reliability = RMW_QOS_POLICY_RELIABILITY_RELIABLE;
+  wrong_qos.qos.durability = RMW_QOS_POLICY_DURABILITY_TRANSIENT_LOCAL;
   assert_terminal_but_unpinned(std::move(wrong_qos));
 
   auto wrong_fqn = endpoint(writer_gid(0x65U), "unexpected_writer");

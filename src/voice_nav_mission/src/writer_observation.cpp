@@ -234,7 +234,9 @@ bool candidate_qos_is_compatible(const rmw_qos_profile_t & qos)
   return
     history_compatible &&
     depth_compatible &&
-    qos.reliability == RMW_QOS_POLICY_RELIABILITY_BEST_EFFORT &&
+    (
+    qos.reliability == RMW_QOS_POLICY_RELIABILITY_BEST_EFFORT ||
+    qos.reliability == RMW_QOS_POLICY_RELIABILITY_RELIABLE) &&
     qos.durability == RMW_QOS_POLICY_DURABILITY_VOLATILE;
 }
 

@@ -148,7 +148,7 @@ EXPECTED_GATE_PARAMETERS: dict[tuple[str, ...], object] = {
     ("motion_gate_node", "ros__parameters", "output_frequency_hz"): 50.0,
     ("motion_gate_node", "ros__parameters", "authority_lease_ms"): 250,
     ("motion_gate_node", "ros__parameters", "candidate_freshness_ms"): 150,
-    ("motion_gate_node", "ros__parameters", "prepare_timeout_ms"): 1000,
+    ("motion_gate_node", "ros__parameters", "prepare_timeout_ms"): 6000,
     ("motion_gate_node", "ros__parameters", "writer_graph_timeout_ms"): 1000,
     ("motion_gate_node", "ros__parameters", "candidate_qos_depth"): 1,
     (

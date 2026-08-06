@@ -58,6 +58,12 @@ def generate_launch_description():
         output='screen',
         parameters=[gate_config],
     )
+    motion_conditioning_container = Node(
+        package='rclcpp_components',
+        executable='component_container_mt',
+        name='motion_conditioning_container',
+        output='screen',
+    )
     runtime_config = PathJoinSubstitution(
         [
             FindPackageShare('voice_nav_bringup'),
@@ -95,6 +101,7 @@ def generate_launch_description():
                 choices=['true', 'false'],
             ),
             simulation,
+            motion_conditioning_container,
             motion_gate,
             mission_runtime,
         ]

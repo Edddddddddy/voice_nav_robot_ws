@@ -63,7 +63,7 @@ def generate_test_description():
                 'output_frequency_hz': 50.0,
                 'authority_lease_ms': 250,
                 'candidate_freshness_ms': 150,
-                'prepare_timeout_ms': 1000,
+                'prepare_timeout_ms': 6000,
                 'writer_graph_timeout_ms': 1000,
                 'candidate_qos_depth': 1,
                 'expected_candidate_writer_fqn': '/collision_monitor',
@@ -533,16 +533,16 @@ class MotionGateNodeTest(unittest.TestCase):
         wrong_fqn_node.destroy_publisher(wrong_fqn_publisher)
         self.wait_for_writer_graph(prepared.candidate_topic, 0)
 
-        reliable_qos = QoSProfile(
+        wrong_qos_profile = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
-            reliability=ReliabilityPolicy.RELIABLE,
-            durability=DurabilityPolicy.VOLATILE,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
         wrong_qos_publisher = self.writer.create_publisher(
             TwistStamped,
             prepared.candidate_topic,
-            reliable_qos,
+            wrong_qos_profile,
         )
         self.wait_for_writer_graph(prepared.candidate_topic, 1)
         wrong_qos = self.call(
