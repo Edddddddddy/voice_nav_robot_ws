@@ -10,6 +10,7 @@ find_package(ament_cmake REQUIRED)
 # uncomment the following section in order to fill in
 # further dependencies manually.
 # find_package(<dependency> REQUIRED)
+find_package(builtin_interfaces REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 
@@ -18,7 +19,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/MissionState.msg"
   "msg/VoiceTurn.msg"
   "action/ExecuteMission.action"
+  "action/Speak.action"
   "srv/StopMission.srv"
+  DEPENDENCIES builtin_interfaces
 )
 
 
