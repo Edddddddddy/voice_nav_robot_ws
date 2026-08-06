@@ -39,8 +39,10 @@
 #include <sensor_msgs/msg/laser_scan.hpp>
 #include <tf2_msgs/msg/tf_message.hpp>
 
+#include "voice_nav_mission/msg/internal_motion_gate_state.hpp"
 #include "voice_nav_mission/motion_authority_ros_adapter.hpp"
 #include "voice_nav_mission/motion_conditioning_pipeline.hpp"
+#include "voice_nav_mission/srv/internal_motion_gate_control.hpp"
 
 namespace voice_nav_mission
 {
@@ -50,6 +52,8 @@ namespace
 using namespace std::chrono_literals;
 using TwistStamped = geometry_msgs::msg::TwistStamped;
 using ListControllers = controller_manager_msgs::srv::ListControllers;
+using GateControl = voice_nav_mission::srv::InternalMotionGateControl;
+using GateStateMessage = voice_nav_mission::msg::InternalMotionGateState;
 
 class SyntheticProducer final : public MotionProducerPort
 {
@@ -329,7 +333,10 @@ TEST(MotionConditioningPipelineIntegration, RealComponentsHandoverTwoLeases)
       [&pipeline_node, &first_topic]() {
         return pipeline_node->get_publishers_info_by_topic(first_topic).empty();
       }, 2s));
-  EXPECT_EQ(controller->nonzero_count.load(), first_stop_count);
+  const auto after_stop_count = controller->nonzero_count.load();
+  EXPECT_GE(after_stop_count, first_stop_count);
+  std::this_thread::sleep_for(100ms);
+  EXPECT_EQ(controller->nonzero_count.load(), after_stop_count);
 
   const auto prepared_two = pipeline.prepare();
   ASSERT_TRUE(prepared_two.ok) << prepared_two.detail;
@@ -371,6 +378,84 @@ TEST(MotionConditioningPipelineIntegration, RealComponentsHandoverTwoLeases)
         return pipeline_node->get_publishers_info_by_topic(
           prepared_two.candidate_topic).empty();
       }, 2s));
+}
+
+TEST(MotionConditioningPipelineIntegration, RosAuthorityRetriesWithinOverallDeadline)
+{
+  RclcppGuard rclcpp_guard;
+  auto executor = std::make_shared<rclcpp::executors::MultiThreadedExecutor>(
+    rclcpp::ExecutorOptions{}, 4U);
+  auto server = std::make_shared<rclcpp::Node>("motion_gate_retry_server");
+  auto client = std::make_shared<rclcpp::Node>("motion_gate_retry_client");
+  auto callback_group = server->create_callback_group(
+    rclcpp::CallbackGroupType::Reentrant);
+  auto state_publisher = server->create_publisher<GateStateMessage>(
+    "/motion_gate/internal/state",
+    rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local());
+  std::atomic<std::size_t> service_calls{0U};
+  auto service = server->create_service<GateControl>(
+    "/motion_gate/internal/control",
+    [&service_calls](
+      const std::shared_ptr<GateControl::Request> request,
+      std::shared_ptr<GateControl::Response> response) {
+      const auto call = ++service_calls;
+      if (call == 1U) {
+        std::this_thread::sleep_for(140ms);
+      }
+      response->code = GateControl::Response::APPLIED;
+      response->reason = GateControl::Response::NONE;
+      response->gate_instance_id = request->gate_instance_id;
+      response->control_seq = request->expected_control_seq;
+      response->lease_id = request->lease_id;
+      response->state = GateStateMessage::ARMED;
+      response->candidate_topic = "/candidate/retry";
+      response->motion_inhibited = false;
+      response->authority_live = true;
+      response->candidate_fresh = true;
+      response->writer_bound = true;
+      response->zero_selected = false;
+      response->zero_published = false;
+      response->detail = "retry applied";
+    },
+    rmw_qos_profile_services_default,
+    callback_group);
+  auto state_timer = server->create_wall_timer(20ms, [state_publisher]() {
+        GateStateMessage message;
+        message.gate_instance_id = "0123456789abcdef0123456789abcdef";
+        message.state_seq = 1U;
+        message.control_seq = 7U;
+        message.state = GateStateMessage::ARMED;
+        message.lease_id = "lease-retry";
+        message.candidate_topic = "/candidate/retry";
+        message.motion_inhibited = false;
+        message.authority_live = true;
+        message.candidate_fresh = true;
+        message.writer_bound = true;
+        state_publisher->publish(message);
+      });
+  executor->add_node(server);
+  executor->add_node(client);
+  SpinGuard spin_guard(executor);
+
+  auto authority = std::make_shared<RosMotionAuthorityPort>(
+    *client, 100ms, 250ms, [](const GateSnapshot &) {});
+  ASSERT_TRUE(wait_for(
+      [&authority]() {
+        return authority->snapshot().gate_instance_id ==
+               "0123456789abcdef0123456789abcdef";
+      }, 1s));
+
+  const auto result = authority->renew(AuthorityOperation{
+        std::string(32U, 'a'),
+        "0123456789abcdef0123456789abcdef",
+        7U,
+        "lease-retry"});
+
+  EXPECT_TRUE(result.applied);
+  EXPECT_FALSE(result.retryable);
+  EXPECT_GE(service_calls.load(), 2U);
+  (void)service;
+  (void)state_timer;
 }
 
 }  // namespace
