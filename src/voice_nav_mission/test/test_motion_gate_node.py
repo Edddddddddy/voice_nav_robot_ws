@@ -607,6 +607,28 @@ class MotionGateNodeTest(unittest.TestCase):
         )
         self.wait_for_writer_graph(prepared.candidate_topic, 1)
 
+        # Check the multiple-writer classification while the prepared lease is
+        # still within its bounded deadline. Controller graph checks below are
+        # independent and may legitimately consume that full deadline.
+        second_writer_node = self.add_extra_node('second_candidate_writer')
+        second_writer_publisher = second_writer_node.create_publisher(
+            TwistStamped,
+            prepared.candidate_topic,
+            candidate_qos(),
+        )
+        self.wait_for_writer_graph(prepared.candidate_topic, 2)
+        ambiguous = self.call(
+            InternalMotionGateControl.Request.OPEN,
+            prepared,
+            lease_id=prepared.lease_id,
+        )
+        assert_open_rejected_without_mutation(
+            ambiguous,
+            InternalMotionGateControl.Response.WRITER_AMBIGUOUS,
+        )
+        second_writer_node.destroy_publisher(second_writer_publisher)
+        self.wait_for_writer_graph(prepared.candidate_topic, 1)
+
         # OPEN also requires the exact final controller endpoint and compatible
         # QoS; a valid candidate writer alone cannot arm the Gate.
         self.controller.destroy_subscription(self.final_subscription)
@@ -653,25 +675,6 @@ class MotionGateNodeTest(unittest.TestCase):
             QoSPresetProfiles.SYSTEM_DEFAULT.value,
         )
         self.wait_for_final_controller_graph(1)
-
-        second_writer_node = self.add_extra_node('second_candidate_writer')
-        second_writer_publisher = second_writer_node.create_publisher(
-            TwistStamped,
-            prepared.candidate_topic,
-            candidate_qos(),
-        )
-        self.wait_for_writer_graph(prepared.candidate_topic, 2)
-        ambiguous = self.call(
-            InternalMotionGateControl.Request.OPEN,
-            prepared,
-            lease_id=prepared.lease_id,
-        )
-        assert_open_rejected_without_mutation(
-            ambiguous,
-            InternalMotionGateControl.Response.WRITER_AMBIGUOUS,
-        )
-        second_writer_node.destroy_publisher(second_writer_publisher)
-        self.wait_for_writer_graph(prepared.candidate_topic, 1)
 
         # PREPARE owns a provisional discarding reader. Samples queued before
         # OPEN cannot leak through the destroyed/recreated queue.
