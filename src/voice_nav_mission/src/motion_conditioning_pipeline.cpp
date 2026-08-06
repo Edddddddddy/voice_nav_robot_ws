@@ -213,7 +213,7 @@ public:
         const auto stamp = static_cast<std::int64_t>(message->clock.sec) * 1000000000LL +
         static_cast<std::int64_t>(message->clock.nanosec);
         const auto receipt = std::chrono::steady_clock::now();
-        if (!clock_seen_ || stamp > last_clock_stamp_) {
+        if (clock_seen_ && stamp > last_clock_stamp_) {
           last_clock_progress_receipt_ = receipt;
         }
         clock_seen_ = true;
@@ -374,6 +374,12 @@ public:
         generation,
         MotionConditioningFailure::SafetyFault,
         "diff_drive_controller is not active before MotionGate OPEN");
+    }
+    if (!candidate_writer_is_visible(handover_deadline)) {
+      return abort_activation(
+        generation,
+        MotionConditioningFailure::SafetyFault,
+        "candidate writer was not visible before MotionGate OPEN");
     }
     try {
       gate_open = authority_->open(open_operation);
@@ -575,93 +581,45 @@ public:
 
   MotionConditioningResult stop()
   {
-    {
-      std::unique_lock<std::recursive_mutex> lock(mutex_);
-      if (failure_in_progress_.load()) {
-        lock.unlock();
-        wait_for_failure_completion();
-        return stop();
-      }
-      if (state_ == MotionConditioningState::Stopped) {
-        return remember(make_result(
-            state_, MotionConditioningFailure::None, true, true, collision_stop_,
-                   {}, {}, "conditioning pipeline already stopped"));
-      }
-      invalidate_activation_locked();
-      state_ = MotionConditioningState::Failed;
+    MotionConditioningResult existing;
+    if (!begin_teardown(existing, true)) {
+      return existing;
     }
-
-    disable_renew_callbacks();
-    wait_for_renew_callbacks();
-    const bool producer_stopped = safe_producer_stop();
-    bool zero_proven = false;
-    bool components_clean = false;
+    MotionConditioningResult result;
     try {
-      zero_proven = inhibit_gate();
-      components_clean = cleanup_components();
+      result = stop_owned();
     } catch (...) {
-      zero_proven = false;
-      components_clean = false;
-    }
-    if (!zero_proven || !components_clean) {
       std::lock_guard<std::recursive_mutex> lock(mutex_);
       state_ = MotionConditioningState::Failed;
-      return remember(make_result(
-          state_, MotionConditioningFailure::SafetyFault, false,
-          zero_proven && producer_stopped,
-           collision_stop_, lease_id_, candidate_topic_,
-           "conditioning stop could not prove zero and cleanup"));
+      result = remember(make_result(
+          state_, MotionConditioningFailure::SafetyFault, false, false,
+          collision_stop_, lease_id_, candidate_topic_,
+          "conditioning stop raised during teardown"));
     }
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    reset_generation();
-    state_ = MotionConditioningState::Stopped;
-    return remember(make_result(
-        state_, MotionConditioningFailure::None, true, true, collision_stop_,
-               {}, {}, "conditioning generation stopped"));
+    finish_teardown(result);
+    return result;
   }
 
   MotionConditioningResult fail(
     MotionConditioningFailure failure,
     std::string detail)
   {
-    bool wait_for_existing_failure = false;
-    {
-      std::lock_guard<std::recursive_mutex> lock(mutex_);
-      if (failure_in_progress_.load()) {
-        wait_for_existing_failure = true;
-      } else {
-        failure_in_progress_.store(true);
-        invalidate_activation_locked();
-      }
+    MotionConditioningResult existing;
+    if (!begin_teardown(existing, true)) {
+      return existing;
     }
-    if (wait_for_existing_failure) {
-      wait_for_failure_completion();
-      return last_result();
-    }
-    disable_renew_callbacks();
-    const bool producer_stopped = safe_producer_stop();
-    bool zero_proven = false;
-    bool components_clean = false;
+    MotionConditioningResult result;
     try {
-      zero_proven = inhibit_gate();
-      components_clean = cleanup_components();
+      result = fail_owned(failure, std::move(detail));
     } catch (...) {
-      zero_proven = false;
-      components_clean = false;
+      std::lock_guard<std::recursive_mutex> lock(mutex_);
+      state_ = MotionConditioningState::Failed;
+      result = remember(make_result(
+          state_, MotionConditioningFailure::SafetyFault, false, false,
+          collision_stop_, lease_id_, candidate_topic_,
+          "conditioning failure raised during teardown"));
     }
-    if (failure == MotionConditioningFailure::None) {
-      failure = MotionConditioningFailure::InternalError;
-    }
-    if (!components_clean) {
-      detail += "; component cleanup failed";
-    }
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    state_ = MotionConditioningState::Failed;
-    auto result = remember(make_result(
-        state_, failure, false, zero_proven && producer_stopped,
-        collision_stop_, lease_id_, candidate_topic_, std::move(detail)));
-    failure_in_progress_.store(false);
-    failure_cv_.notify_all();
+    finish_teardown(result);
     return result;
   }
 
@@ -712,25 +670,127 @@ private:
     MotionConditioningFailure failure,
     std::string detail)
   {
-    invalidate_activation_locked();
+    return fail(failure, std::move(detail));
+  }
+
+  [[nodiscard]] bool begin_teardown(
+    MotionConditioningResult & existing,
+    bool wait_for_existing)
+  {
+    std::unique_lock<std::mutex> lock(teardown_mutex_);
+    if (teardown_in_progress_.load()) {
+      if (!wait_for_existing) {
+        existing = teardown_result_;
+        return false;
+      }
+      teardown_cv_.wait(lock, [this]() {
+          return !teardown_in_progress_.load();
+        });
+      existing = teardown_result_;
+      return false;
+    }
+    teardown_in_progress_.store(true);
+    return true;
+  }
+
+  void fail_from_renew_callback(
+    MotionConditioningFailure failure,
+    std::string detail)
+  {
+    MotionConditioningResult existing;
+    if (!begin_teardown(existing, false)) {
+      return;
+    }
+    MotionConditioningResult result;
+    try {
+      result = fail_owned(failure, std::move(detail));
+    } catch (...) {
+      std::lock_guard<std::recursive_mutex> lock(mutex_);
+      state_ = MotionConditioningState::Failed;
+      result = remember(make_result(
+          state_, MotionConditioningFailure::SafetyFault, false, false,
+          collision_stop_, lease_id_, candidate_topic_,
+          "conditioning callback failure raised during teardown"));
+    }
+    finish_teardown(result);
+  }
+
+  void finish_teardown(const MotionConditioningResult & result)
+  {
+    {
+      std::lock_guard<std::mutex> lock(teardown_mutex_);
+      teardown_result_ = result;
+      teardown_in_progress_.store(false);
+    }
+    teardown_cv_.notify_all();
+  }
+
+  [[nodiscard]] MotionConditioningResult stop_owned()
+  {
+    {
+      std::lock_guard<std::recursive_mutex> lock(mutex_);
+      invalidate_activation_locked();
+      state_ = MotionConditioningState::Failed;
+    }
+
     disable_renew_callbacks();
-    (void)safe_producer_stop();
+    wait_for_renew_callbacks();
+    const bool producer_stopped = safe_producer_stop();
     bool zero_proven = false;
-    bool clean = false;
+    bool components_clean = false;
     try {
       zero_proven = inhibit_gate();
-      clean = cleanup_components();
+      components_clean = cleanup_components();
     } catch (...) {
       zero_proven = false;
-      clean = false;
+      components_clean = false;
     }
-    state_ = MotionConditioningState::Failed;
-    if (!clean) {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (!producer_stopped || !zero_proven || !components_clean) {
+      state_ = MotionConditioningState::Failed;
+      return remember(make_result(
+          state_, MotionConditioningFailure::SafetyFault, false,
+          zero_proven && producer_stopped,
+          collision_stop_, lease_id_, candidate_topic_,
+          "conditioning stop could not prove zero and cleanup"));
+    }
+    reset_generation();
+    state_ = MotionConditioningState::Stopped;
+    return remember(make_result(
+        state_, MotionConditioningFailure::None, true, true, collision_stop_,
+        {}, {}, "conditioning generation stopped"));
+  }
+
+  [[nodiscard]] MotionConditioningResult fail_owned(
+    MotionConditioningFailure failure,
+    std::string detail)
+  {
+    {
+      std::lock_guard<std::recursive_mutex> lock(mutex_);
+      invalidate_activation_locked();
+    }
+    disable_renew_callbacks();
+    const bool producer_stopped = safe_producer_stop();
+    bool zero_proven = false;
+    bool components_clean = false;
+    try {
+      zero_proven = inhibit_gate();
+      components_clean = cleanup_components();
+    } catch (...) {
+      zero_proven = false;
+      components_clean = false;
+    }
+    if (failure == MotionConditioningFailure::None) {
+      failure = MotionConditioningFailure::InternalError;
+    }
+    if (!components_clean) {
       detail += "; component cleanup failed";
     }
-    return make_result(
-      state_, failure, false, zero_proven, collision_stop_, lease_id_,
-      candidate_topic_, std::move(detail));
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    state_ = MotionConditioningState::Failed;
+    return remember(make_result(
+        state_, failure, false, zero_proven && producer_stopped,
+        collision_stop_, lease_id_, candidate_topic_, std::move(detail)));
   }
 
   void invalidate_activation_locked()
@@ -818,8 +878,8 @@ private:
 
   void wait_for_failure_completion()
   {
-    std::unique_lock<std::mutex> lock(failure_mutex_);
-    failure_cv_.wait(lock, [this]() {return !failure_in_progress_.load();});
+    std::unique_lock<std::mutex> lock(teardown_mutex_);
+    teardown_cv_.wait(lock, [this]() {return !teardown_in_progress_.load();});
   }
 
   [[nodiscard]] bool begin_renew_callback()
@@ -1204,21 +1264,25 @@ private:
   }
 
   [[nodiscard]] bool reconcile_residual_nodes(
-    std::chrono::steady_clock::time_point overall_deadline)
+    std::chrono::steady_clock::time_point unload_deadline,
+    std::chrono::steady_clock::time_point confirmation_deadline)
   {
     std::size_t consecutive_absent = 0U;
-    while (std::chrono::steady_clock::now() < overall_deadline) {
+    while (std::chrono::steady_clock::now() < confirmation_deadline) {
       for (auto iterator = residual_components_.begin();
         iterator != residual_components_.end(); )
       {
-        if (call_unload(iterator->unique_id, overall_deadline)) {
+        if (
+          std::chrono::steady_clock::now() < unload_deadline &&
+          call_unload(iterator->unique_id, unload_deadline))
+        {
           iterator = residual_components_.erase(iterator);
         } else {
           ++iterator;
         }
       }
       std::vector<Component> listed;
-      if (!list_nodes(listed, overall_deadline)) {
+      if (!list_nodes(listed, confirmation_deadline)) {
         return false;
       }
       bool target_present = false;
@@ -1227,7 +1291,9 @@ private:
           node.node_fqn == kVelocitySmootherFqn)
         {
           target_present = true;
-          (void)call_unload(node.unique_id, overall_deadline);
+          if (std::chrono::steady_clock::now() < unload_deadline) {
+            (void)call_unload(node.unique_id, unload_deadline);
+          }
         }
       }
       if (residual_components_.empty() && !target_present) {
@@ -1238,7 +1304,12 @@ private:
       } else {
         consecutive_absent = 0U;
       }
-      std::this_thread::sleep_for(10ms);
+      const auto remaining = confirmation_deadline -
+        std::chrono::steady_clock::now();
+      const auto sleep_duration = std::min(
+        10ms,
+        std::chrono::duration_cast<std::chrono::milliseconds>(remaining));
+      std::this_thread::sleep_for(sleep_duration);
     }
     return false;
   }
@@ -1250,18 +1321,14 @@ private:
     {
       return true;
     }
-    const auto cleanup_deadline = std::chrono::steady_clock::now() +
-      config_.component_rpc_timeout + config_.writer_graph_timeout;
     bool success = true;
-    const auto pending_deadline = std::min(
-      cleanup_deadline,
-      std::chrono::steady_clock::now() + config_.component_rpc_timeout);
+    const auto pending_deadline = std::chrono::steady_clock::now() +
+      config_.component_rpc_timeout;
     success = reconcile_pending_loads(pending_deadline) && success;
 
     std::vector<Component> listed;
-    const auto list_deadline = std::min(
-      cleanup_deadline,
-      std::chrono::steady_clock::now() + config_.component_rpc_timeout);
+    const auto list_deadline = std::chrono::steady_clock::now() +
+      config_.component_rpc_timeout;
     const bool listed_ok = list_nodes(listed, list_deadline);
     success = listed_ok && success;
 
@@ -1284,6 +1351,8 @@ private:
     for (const auto & component : residual_components_) {
       add_unique(component);
     }
+    const auto lifecycle_deadline = std::chrono::steady_clock::now() +
+      config_.component_rpc_timeout;
     if (listed_ok) {
       for (const auto & component : listed) {
         if (component.node_fqn == kCollisionMonitorFqn ||
@@ -1302,30 +1371,30 @@ private:
           continue;
         }
         const auto current_state = component_state(
-          component.node_fqn, cleanup_deadline);
+          component.node_fqn, lifecycle_deadline);
         if (current_state == lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) {
           success = change_state(
             component.node_fqn,
             lifecycle_msgs::msg::Transition::TRANSITION_ACTIVE_SHUTDOWN,
-            cleanup_deadline) && success;
+            lifecycle_deadline) && success;
         } else if (
-          current_state == lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE)
-        {
+          current_state == lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE) {
           success = change_state(
             component.node_fqn,
             lifecycle_msgs::msg::Transition::TRANSITION_INACTIVE_SHUTDOWN,
-            cleanup_deadline) && success;
+            lifecycle_deadline) && success;
         } else if (
           current_state != lifecycle_msgs::msg::State::PRIMARY_STATE_FINALIZED &&
-          current_state != lifecycle_msgs::msg::State::PRIMARY_STATE_UNKNOWN)
-        {
+          current_state != lifecycle_msgs::msg::State::PRIMARY_STATE_UNKNOWN) {
           success = false;
         }
       }
     }
 
+    const auto unload_deadline = std::chrono::steady_clock::now() +
+      config_.component_rpc_timeout;
     for (const auto & component : actual_components) {
-      if (!call_unload(component.unique_id, cleanup_deadline)) {
+      if (!call_unload(component.unique_id, unload_deadline)) {
         const auto found = std::find_if(
           residual_components_.cbegin(), residual_components_.cend(),
           [&component](const Component & existing) {
@@ -1352,7 +1421,10 @@ private:
       }
     }
 
-    success = reconcile_residual_nodes(cleanup_deadline) && success;
+    const auto confirmation_deadline = std::chrono::steady_clock::now() +
+      config_.writer_graph_timeout;
+    success = reconcile_residual_nodes(
+      unload_deadline, confirmation_deadline) && success;
     success = wait_for_writer_to_disappear(candidate_topic_) && success;
     if (success && pending_loads_.empty() && residual_components_.empty()) {
       components_loaded_ = false;
@@ -1369,10 +1441,10 @@ private:
 
   [[nodiscard]] bool inhibit_gate()
   {
-    if (lease_id_.empty()) {
-      return gate_snapshot_proves_zero(authority_->snapshot());
-    }
     try {
+      if (lease_id_.empty()) {
+        return gate_snapshot_proves_zero(authority_->snapshot());
+      }
       std::lock_guard<std::mutex> authority_lock(authority_call_mutex_);
       const auto operation = make_operation(lease_id_);
       const auto result = authority_->inhibit(operation);
@@ -1481,12 +1553,12 @@ private:
 
   void on_renew()
   {
+    std::uint64_t callback_generation = 0U;
     try {
       RenewCallbackGuard callback_guard(*this);
       if (!callback_guard.active_) {
         return;
       }
-      std::uint64_t activation_generation = 0U;
       std::string activation_lease;
       std::string activation_gate_instance;
       bool activation = false;
@@ -1495,7 +1567,7 @@ private:
       {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         activation = activation_in_progress_.load();
-        activation_generation = generation_;
+        callback_generation = generation_;
         activation_lease = lease_id_;
         const auto snapshot = authority_->snapshot();
         activation_gate_instance = snapshot.gate_instance_id;
@@ -1504,10 +1576,10 @@ private:
       }
       if (activation) {
         if (!renew_for_activation(
-            activation_generation, activation_lease, activation_gate_instance) &&
-          activation_generation_current(activation_generation))
+            callback_generation, activation_lease, activation_gate_instance) &&
+          activation_generation_current(callback_generation))
         {
-          (void)fail(
+          fail_from_renew_callback(
             MotionConditioningFailure::SafetyFault,
             activation_failure_detail());
         }
@@ -1516,14 +1588,14 @@ private:
       if (!running) {
         return;
       }
-      if (!running_generation_current(activation_generation)) {
+      if (!running_generation_current(callback_generation)) {
         return;
       }
       if (collision_stop) {
-        if (!running_generation_current(activation_generation)) {
+        if (!running_generation_current(callback_generation)) {
           return;
         }
-        (void)fail(
+        fail_from_renew_callback(
           MotionConditioningFailure::ExecutionFailed,
           "Collision Monitor reported STOP for stop_zone");
         return;
@@ -1531,22 +1603,22 @@ private:
       if (!runtime_graph_is_healthy(
           std::chrono::steady_clock::now() + config_.health_rpc_timeout))
       {
-        if (!running_generation_current(activation_generation)) {
+        if (!running_generation_current(callback_generation)) {
           return;
         }
-        (void)fail(
+        fail_from_renew_callback(
           MotionConditioningFailure::SafetyFault,
           "conditioning component or dependency graph is unhealthy");
         return;
       }
-      if (!running_generation_current(activation_generation)) {
+      if (!running_generation_current(callback_generation)) {
         return;
       }
       AuthorityResult result;
       AuthorityOperation renew_operation;
       {
         std::lock_guard<std::mutex> authority_lock(authority_call_mutex_);
-        if (!running_generation_current(activation_generation)) {
+        if (!running_generation_current(callback_generation)) {
           return;
         }
         renew_operation = make_operation(activation_lease);
@@ -1557,21 +1629,25 @@ private:
         result.snapshot.lease_id != activation_lease ||
         result.snapshot.motion_inhibited)
       {
-        if (!running_generation_current(activation_generation)) {
+        if (!running_generation_current(callback_generation)) {
           return;
         }
-        (void)fail(
+        fail_from_renew_callback(
           MotionConditioningFailure::SafetyFault,
           "MotionGate RENEW failed closed");
       }
     } catch (const std::exception & error) {
-      (void)fail(
-        MotionConditioningFailure::SafetyFault,
-        std::string{"MotionGate RENEW raised: "} + error.what());
+      if (running_generation_current(callback_generation)) {
+        fail_from_renew_callback(
+          MotionConditioningFailure::SafetyFault,
+          std::string{"MotionGate RENEW raised: "} + error.what());
+      }
     } catch (...) {
-      (void)fail(
-        MotionConditioningFailure::SafetyFault,
-        "MotionGate RENEW raised an unknown exception");
+      if (running_generation_current(callback_generation)) {
+        fail_from_renew_callback(
+          MotionConditioningFailure::SafetyFault,
+          "MotionGate RENEW raised an unknown exception");
+      }
     }
   }
 
@@ -1604,6 +1680,30 @@ private:
     } catch (...) {
       return false;
     }
+  }
+
+  [[nodiscard]] bool candidate_writer_is_visible(
+    std::chrono::steady_clock::time_point overall_deadline)
+  {
+    const auto graph_deadline = std::min(
+      overall_deadline,
+      std::chrono::steady_clock::now() + config_.writer_graph_timeout);
+    while (std::chrono::steady_clock::now() < graph_deadline) {
+      const auto publishers = node_.get_publishers_info_by_topic(candidate_topic_);
+      const auto writer = std::find_if(
+        publishers.cbegin(), publishers.cend(), [](const auto & endpoint) {
+          return static_cast<rmw_endpoint_type_t>(endpoint.endpoint_type()) ==
+                 RMW_ENDPOINT_PUBLISHER &&
+                 endpoint.topic_type() == "geometry_msgs/msg/TwistStamped" &&
+                 endpoint.node_name() == "collision_monitor" &&
+                 endpoint.node_namespace() == "/";
+        });
+      if (writer != publishers.cend()) {
+        return true;
+      }
+      std::this_thread::sleep_for(5ms);
+    }
+    return false;
   }
 
   [[nodiscard]] bool runtime_graph_is_healthy(
@@ -1668,9 +1768,10 @@ private:
   std::chrono::steady_clock::time_point prepare_open_deadline_{};
   std::atomic<bool> activation_in_progress_{false};
   std::atomic<bool> activation_failed_{false};
-  std::atomic<bool> failure_in_progress_{false};
-  std::mutex failure_mutex_;
-  std::condition_variable failure_cv_;
+  std::atomic<bool> teardown_in_progress_{false};
+  std::mutex teardown_mutex_;
+  std::condition_variable teardown_cv_;
+  MotionConditioningResult teardown_result_{};
   mutable std::mutex activation_mutex_;
   std::string activation_failure_detail_;
   std::mutex callback_mutex_;

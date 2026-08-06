@@ -8,6 +8,13 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Added the Issue #35 package-private Runtime-owned MotionConditioningPipeline
+  and its production Nav2 component composition/lifecycle Adapter for
+  `nav2_velocity_smoother` and `nav2_collision_monitor`, including bounded
+  Gate handover, per-lease candidate topics, writer/GID proof, cleanup, and
+  synthetic failure-injection seams. The trusted MotionGate PREPARE budget is
+  `6000 ms`; product Mission MOVE/ROTATE execution remains unavailable until
+  Task #64.
 - Added the reviewed VN-0010 implementation for an independent,
   fail-closed MotionGate: package-private bounded ROS types, an internal
   non-installed static `MotionGateCore`, the installed `motion_gate_node`,
