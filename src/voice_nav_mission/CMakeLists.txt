@@ -7,13 +7,17 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(composition_interfaces REQUIRED)
+find_package(controller_manager_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(lifecycle_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 find_package(nav2_msgs REQUIRED)
 find_package(rcl_interfaces REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(rmw REQUIRED)
+find_package(rosgraph_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(voice_nav_interfaces REQUIRED)
 
@@ -64,12 +68,16 @@ target_include_directories(
 ament_target_dependencies(
   motion_conditioning_pipeline
   composition_interfaces
+  controller_manager_msgs
   geometry_msgs
   lifecycle_msgs
+  nav_msgs
   nav2_msgs
   rcl_interfaces
   rclcpp
+  rosgraph_msgs
   rmw
+  sensor_msgs
 )
 target_link_libraries(
   motion_conditioning_pipeline
@@ -217,8 +225,12 @@ if(BUILD_TESTING)
   ament_target_dependencies(
     motion_conditioning_pipeline_test
     composition_interfaces
+    controller_manager_msgs
     lifecycle_msgs
+    nav_msgs
     rclcpp
+    rosgraph_msgs
+    sensor_msgs
   )
   target_link_libraries(
     motion_conditioning_pipeline_test
@@ -239,6 +251,7 @@ if(BUILD_TESTING)
   ament_target_dependencies(
     motion_conditioning_pipeline_integration_test
     composition_interfaces
+    controller_manager_msgs
     geometry_msgs
     lifecycle_msgs
     nav_msgs

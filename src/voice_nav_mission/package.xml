@@ -11,13 +11,17 @@
   <buildtool_depend>rosidl_default_generators</buildtool_depend>
 
   <depend>composition_interfaces</depend>
+  <depend>controller_manager_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>lifecycle_msgs</depend>
+  <depend>nav_msgs</depend>
   <depend>nav2_msgs</depend>
   <depend>rcl_interfaces</depend>
   <depend>rclcpp</depend>
   <depend>rclcpp_action</depend>
   <depend>rmw</depend>
+  <depend>rosgraph_msgs</depend>
+  <depend>sensor_msgs</depend>
   <depend>voice_nav_interfaces</depend>
 
   <exec_depend>rosidl_default_runtime</exec_depend>
