@@ -279,7 +279,7 @@ private:
       "candidate_freshness_ms", 150);
     const auto prepare_timeout_ms =
       declare_read_only_parameter<std::int64_t>(
-      "prepare_timeout_ms", 1000);
+      "prepare_timeout_ms", 6000);
     const auto writer_graph_timeout_ms =
       declare_read_only_parameter<std::int64_t>(
       "writer_graph_timeout_ms", 1000);

@@ -989,7 +989,7 @@ motion_gate_node:
     output_frequency_hz: 50.0
     authority_lease_ms: 250
     candidate_freshness_ms: 150
-    prepare_timeout_ms: 1000
+    prepare_timeout_ms: 6000
     writer_graph_timeout_ms: 1000
     candidate_qos_depth: 1
     expected_candidate_writer_fqn: /collision_monitor
