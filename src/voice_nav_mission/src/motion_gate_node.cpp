@@ -432,6 +432,26 @@ private:
     return writer_observation_session_.observe(observations, elapsed);
   }
 
+  OpenBinding wait_for_unique_writer_gid_on_topic(
+    const std::string & topic)
+  {
+    const auto deadline =
+      writer_observation_started_at_ + node_config_.writer_graph_timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+      const auto observation = discover_unique_writer_gid_on_topic(topic);
+      if (observation.ready || observation.reason == Reason::WriterMismatch) {
+        return observation;
+      }
+      const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+        deadline - std::chrono::steady_clock::now());
+      if (remaining <= 0ms) {
+        break;
+      }
+      std::this_thread::sleep_for(std::min(5ms, remaining));
+    }
+    return discover_unique_writer_gid_on_topic(topic);
+  }
+
   std::optional<std::string> final_controller_health_error() const
   {
     const auto endpoints =
@@ -498,7 +518,7 @@ private:
         }
 
         const auto first =
-        discover_unique_writer_gid_on_topic(
+        wait_for_unique_writer_gid_on_topic(
           core_.snapshot().candidate_topic);
         if (!first.ready) {
           return first;
@@ -514,7 +534,7 @@ private:
           true);
 
         const auto second =
-        discover_unique_writer_gid_on_topic(
+        wait_for_unique_writer_gid_on_topic(
           core_.snapshot().candidate_topic);
         if (!second.ready) {
           return second;
@@ -551,7 +571,7 @@ private:
         false);
 
       const auto third =
-        discover_unique_writer_gid_on_topic(armed.candidate_topic);
+        wait_for_unique_writer_gid_on_topic(armed.candidate_topic);
       const auto controller_error = final_controller_health_error();
       if (
         !expected_binding.ready ||

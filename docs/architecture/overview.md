@@ -111,8 +111,10 @@ The current internal slice fixes the component FQNs `/collision_monitor` and
 `/voice_nav_internal/motion/smoothed`, Collision Monitor state uses
 `/voice_nav_internal/motion/collision_state`, and each MotionGate lease uses a
 Gate-generated topic below
-`/voice_nav_internal/motion_gate/candidate/lease_`. Candidate traffic is
-`BEST_EFFORT + VOLATILE + KEEP_LAST(1)`; the final controller publisher keeps
+`/voice_nav_internal/motion_gate/candidate/lease_`. The Collision Monitor
+candidate writer is pinned as
+`RELIABLE + VOLATILE + KEEP_LAST(1)`; MotionGate's candidate reader is
+`BEST_EFFORT + VOLATILE + KEEP_LAST(1)`. The final controller publisher keeps
 `rclcpp::SystemDefaultsQoS()` and its writer/GID proof. These are private
 runtime seams and are not exported as public ROS IDL.
 
