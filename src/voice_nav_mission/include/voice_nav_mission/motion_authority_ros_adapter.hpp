@@ -19,6 +19,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <string>
 
 #include <rclcpp/rclcpp.hpp>
 
