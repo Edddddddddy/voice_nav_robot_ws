@@ -15,8 +15,11 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <condition_variable>
 #include <chrono>
 #include <cstdint>
+#include <stdexcept>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -87,6 +90,9 @@ public:
   {
     std::lock_guard<std::mutex> lock(mutex_);
     calls_.push_back(AuthorityOperationKind::Open);
+    if (throw_on_open_) {
+      throw std::runtime_error("scripted MotionGate OPEN failure");
+    }
     snapshot_.control_seq++;
     snapshot_.state = GateState::Armed;
     snapshot_.motion_inhibited = false;
@@ -101,6 +107,9 @@ public:
   {
     std::lock_guard<std::mutex> lock(mutex_);
     calls_.push_back(AuthorityOperationKind::Renew);
+    if (throw_on_renew_) {
+      throw std::runtime_error("scripted MotionGate RENEW failure");
+    }
     snapshot_.control_seq++;
     ++renew_count_;
     snapshot_.authority_live = authority_live_ &&
@@ -161,6 +170,18 @@ public:
     renew_failure_after_ = successful_renews;
   }
 
+  void set_throw_on_open(bool value)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    throw_on_open_ = value;
+  }
+
+  void set_throw_on_renew(bool value)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    throw_on_renew_ = value;
+  }
+
   std::vector<AuthorityOperationKind> calls() const
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -179,6 +200,8 @@ private:
   bool inhibit_zero_proof_{true};
   std::size_t renew_count_{0U};
   std::optional<std::size_t> renew_failure_after_;
+  bool throw_on_open_{false};
+  bool throw_on_renew_{false};
   std::vector<AuthorityOperationKind> calls_;
 };
 
@@ -189,15 +212,48 @@ public:
   {
     started_topics.push_back(raw_topic);
     ++start_count;
+    if (block_start) {
+      std::unique_lock<std::mutex> lock(start_mutex);
+      start_entered = true;
+      start_cv.notify_all();
+      start_cv.wait(lock, [this]() {return release_start;});
+    }
+    if (throw_on_start) {
+      throw std::runtime_error("scripted producer start failure");
+    }
     return allow_start;
   }
 
-  void stop() override {++stop_count;}
+  void stop() override
+  {
+    ++stop_count;
+  }
+
+  void wait_for_start()
+  {
+    std::unique_lock<std::mutex> lock(start_mutex);
+    start_cv.wait(lock, [this]() {return start_entered;});
+  }
+
+  void release_blocked_start()
+  {
+    std::lock_guard<std::mutex> lock(start_mutex);
+    release_start = true;
+    start_cv.notify_all();
+  }
 
   bool allow_start{true};
+  bool throw_on_start{false};
+  bool block_start{false};
   std::size_t start_count{0U};
   std::size_t stop_count{0U};
   std::vector<std::string> started_topics;
+
+private:
+  std::mutex start_mutex;
+  std::condition_variable start_cv;
+  bool start_entered{false};
+  bool release_start{false};
 };
 
 class FakeComponentGraph final
@@ -290,7 +346,11 @@ public:
     health_timer_ = sensors_->create_wall_timer(20ms, [this]() {
           rosgraph_msgs::msg::Clock clock;
           if (publish_clock_) {
-            clock.clock = rclcpp::Clock(RCL_SYSTEM_TIME).now();
+            {
+              std::lock_guard<std::mutex> lock(health_mutex_);
+              clock.clock = freeze_clock_ ?
+              frozen_clock_ : rclcpp::Clock(RCL_SYSTEM_TIME).now();
+            }
             clock_publisher_->publish(clock);
           }
           sensor_msgs::msg::LaserScan scan;
@@ -340,6 +400,48 @@ public:
     publish_clock_ = clock;
   }
 
+  void set_clock_frozen(bool value)
+  {
+    std::lock_guard<std::mutex> lock(health_mutex_);
+    freeze_clock_ = value;
+    if (value) {
+      frozen_clock_ = rclcpp::Clock(RCL_SYSTEM_TIME).now();
+    }
+  }
+
+  void enable_activation_barrier()
+  {
+    std::lock_guard<std::mutex> lock(activation_mutex_);
+    activation_barrier_ = true;
+    activation_entered_ = false;
+    activation_released_ = false;
+  }
+
+  void wait_for_activation_entry()
+  {
+    std::unique_lock<std::mutex> lock(activation_mutex_);
+    activation_cv_.wait(lock, [this]() {return activation_entered_;});
+  }
+
+  void release_activation()
+  {
+    std::lock_guard<std::mutex> lock(activation_mutex_);
+    activation_released_ = true;
+    activation_cv_.notify_all();
+  }
+
+  void remove_lifecycle_services(bool collision, bool smoother)
+  {
+    if (!collision) {
+      change_services_[0].reset();
+      get_services_[0].reset();
+    }
+    if (!smoother) {
+      change_services_[1].reset();
+      get_services_[1].reset();
+    }
+  }
+
   void set_controller_active(bool value)
   {
     controller_active_ = value;
@@ -367,7 +469,7 @@ private:
   {
     change_services_.push_back(node->create_service<ChangeState>(
       fqn + "/change_state",
-        [this, state](
+        [this, state, fqn](
           const std::shared_ptr<ChangeState::Request> request,
           std::shared_ptr<ChangeState::Response> response) {
           switch (request->transition.id) {
@@ -376,6 +478,15 @@ private:
               response->success = true;
               return;
             case lifecycle_msgs::msg::Transition::TRANSITION_ACTIVATE:
+              if (fqn == "/collision_monitor") {
+                std::unique_lock<std::mutex> lock(activation_mutex_);
+                if (activation_barrier_) {
+                  activation_entered_ = true;
+                  activation_cv_.notify_all();
+                  activation_cv_.wait(
+                    lock, [this]() {return activation_released_;});
+                }
+              }
               std::this_thread::sleep_for(activation_delay_);
               *state = lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE;
               response->success = true;
@@ -424,6 +535,14 @@ private:
   bool publish_odom_{true};
   bool publish_clock_{true};
   bool controller_active_{true};
+  bool freeze_clock_{false};
+  rclcpp::Time frozen_clock_;
+  std::mutex health_mutex_;
+  std::mutex activation_mutex_;
+  std::condition_variable activation_cv_;
+  bool activation_barrier_{false};
+  bool activation_entered_{false};
+  bool activation_released_{false};
   rclcpp::GenericPublisher::SharedPtr collision_candidate_;
   rclcpp::GenericPublisher::SharedPtr collision_events_;
   rclcpp::GenericPublisher::SharedPtr scan_publisher_;
@@ -625,6 +744,90 @@ TEST_F(MotionConditioningPipelineTest, LeaseLossDuringActivationNeverStartsProdu
       AuthorityOperationKind::Renew), 2);
 }
 
+TEST_F(MotionConditioningPipelineTest, StopAtActivationBarrierRejectsLateProducerStart)
+{
+  graph->enable_activation_barrier();
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+  ASSERT_TRUE(pipeline.prepare().ok);
+
+  std::optional<MotionConditioningResult> start_result;
+  std::thread start_thread([&]() {start_result = pipeline.start();});
+  graph->wait_for_activation_entry();
+
+  const auto stopped = pipeline.stop();
+  EXPECT_TRUE(stopped.zero_proven);
+  graph->release_activation();
+  start_thread.join();
+
+  ASSERT_TRUE(start_result.has_value());
+  EXPECT_FALSE(start_result->ok);
+  EXPECT_EQ(producer->start_count, 0U);
+  EXPECT_EQ(pipeline.state(), MotionConditioningState::Stopped);
+}
+
+TEST_F(MotionConditioningPipelineTest, ProducerFalseFailsClosedAndCleansUp)
+{
+  producer->allow_start = false;
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+  ASSERT_TRUE(pipeline.prepare().ok);
+
+  const auto result = pipeline.start();
+
+  EXPECT_FALSE(result.ok);
+  EXPECT_EQ(result.state, MotionConditioningState::Failed);
+  EXPECT_TRUE(result.zero_proven);
+  EXPECT_GE(producer->stop_count, 1U);
+  EXPECT_EQ(graph->loaded_count(), 0U);
+}
+
+TEST_F(MotionConditioningPipelineTest, ProducerThrowFailsClosedAndCleansUp)
+{
+  producer->throw_on_start = true;
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+
+  ASSERT_TRUE(pipeline.prepare().ok);
+  MotionConditioningResult result;
+  EXPECT_NO_THROW(result = pipeline.start());
+
+  EXPECT_FALSE(result.ok);
+  EXPECT_TRUE(
+    result.failure == MotionConditioningFailure::InternalError ||
+    result.failure == MotionConditioningFailure::SafetyFault);
+  EXPECT_TRUE(result.zero_proven);
+  EXPECT_GE(producer->stop_count, 1U);
+  EXPECT_EQ(graph->loaded_count(), 0U);
+}
+
+TEST_F(MotionConditioningPipelineTest, RenewThrowFailsClosedAndStopsActivation)
+{
+  authority->set_throw_on_renew(true);
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+
+  ASSERT_TRUE(pipeline.prepare().ok);
+  MotionConditioningResult result;
+  EXPECT_NO_THROW(result = pipeline.start());
+
+  EXPECT_FALSE(result.ok);
+  EXPECT_EQ(result.state, MotionConditioningState::Failed);
+  EXPECT_TRUE(result.zero_proven);
+  EXPECT_EQ(graph->loaded_count(), 0U);
+}
+
+TEST_F(MotionConditioningPipelineTest, OpenThrowFailsClosedAndCleansUp)
+{
+  authority->set_throw_on_open(true);
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+
+  ASSERT_TRUE(pipeline.prepare().ok);
+  MotionConditioningResult result;
+  EXPECT_NO_THROW(result = pipeline.start());
+
+  EXPECT_FALSE(result.ok);
+  EXPECT_EQ(result.failure, MotionConditioningFailure::InternalError);
+  EXPECT_TRUE(result.zero_proven);
+  EXPECT_EQ(graph->loaded_count(), 0U);
+}
+
 TEST_F(MotionConditioningPipelineTest, LateLoadResponseIsReconciledAndBlocksNextPrepare)
 {
   graph->set_load_delay(250ms);
@@ -655,12 +858,29 @@ TEST_F(MotionConditioningPipelineTest, LateLoadResponseIsReconciledAndBlocksNext
 TEST_F(MotionConditioningPipelineTest, FqnMismatchIsUnloadedBeforePrepareFails)
 {
   graph->set_wrong_fqn(true);
+  graph->remove_lifecycle_services(false, false);
   MotionConditioningPipeline pipeline(*client, authority, producer, config());
 
   const auto result = pipeline.prepare();
 
   EXPECT_FALSE(result.ok);
   EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
+  EXPECT_EQ(graph->loaded_count(), 0U);
+}
+
+TEST_F(MotionConditioningPipelineTest, AbsentLifecycleServicesDoNotHideActualUnload)
+{
+  graph->remove_lifecycle_services(false, false);
+  auto pipeline_config = config();
+  pipeline_config.component_rpc_timeout = 80ms;
+  pipeline_config.writer_graph_timeout = 120ms;
+  MotionConditioningPipeline pipeline(
+    *client, authority, producer, pipeline_config);
+
+  const auto result = pipeline.prepare();
+
+  EXPECT_FALSE(result.ok);
+  EXPECT_TRUE(result.zero_proven);
   EXPECT_EQ(graph->loaded_count(), 0U);
 }
 
@@ -682,6 +902,58 @@ TEST_F(MotionConditioningPipelineTest, SensorLivenessLossFailsClosed)
   EXPECT_EQ(pipeline.state(), MotionConditioningState::Failed);
   EXPECT_TRUE(pipeline.last_result().zero_proven);
   EXPECT_GE(producer->stop_count, 1U);
+}
+
+TEST_F(MotionConditioningPipelineTest, OdomLivenessLossFailsClosed)
+{
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+  ASSERT_TRUE(pipeline.prepare().ok);
+  std::this_thread::sleep_for(50ms);
+  ASSERT_TRUE(pipeline.start().ok);
+  graph->set_health_sources(true, false, true);
+
+  const auto deadline = std::chrono::steady_clock::now() + 1s;
+  while (
+    pipeline.state() != MotionConditioningState::Failed &&
+    std::chrono::steady_clock::now() < deadline)
+  {
+    std::this_thread::sleep_for(5ms);
+  }
+  EXPECT_EQ(pipeline.state(), MotionConditioningState::Failed);
+  EXPECT_TRUE(pipeline.last_result().zero_proven);
+}
+
+TEST_F(MotionConditioningPipelineTest, ClockLivenessLossFailsClosed)
+{
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+  ASSERT_TRUE(pipeline.prepare().ok);
+  std::this_thread::sleep_for(50ms);
+  ASSERT_TRUE(pipeline.start().ok);
+  graph->set_health_sources(true, true, false);
+
+  const auto deadline = std::chrono::steady_clock::now() + 1s;
+  while (
+    pipeline.state() != MotionConditioningState::Failed &&
+    std::chrono::steady_clock::now() < deadline)
+  {
+    std::this_thread::sleep_for(5ms);
+  }
+  EXPECT_EQ(pipeline.state(), MotionConditioningState::Failed);
+  EXPECT_TRUE(pipeline.last_result().zero_proven);
+}
+
+TEST_F(MotionConditioningPipelineTest, FrozenClockProgressCannotStartProducer)
+{
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+  ASSERT_TRUE(pipeline.prepare().ok);
+  graph->set_clock_frozen(true);
+  std::this_thread::sleep_for(250ms);
+
+  const auto result = pipeline.start();
+
+  EXPECT_FALSE(result.ok);
+  EXPECT_EQ(producer->start_count, 0U);
+  EXPECT_TRUE(result.zero_proven);
 }
 
 TEST_F(MotionConditioningPipelineTest, InactiveControllerFailsClosed)
