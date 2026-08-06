@@ -15,6 +15,7 @@
 #include "voice_nav_mission/motion_conditioning_pipeline.hpp"
 
 #include <rmw/qos_profiles.h>
+#include <rmw/types.h>
 
 #include <atomic>
 #include <algorithm>
@@ -68,6 +69,7 @@ using CollisionState = nav2_msgs::msg::CollisionMonitorState;
 using LaserScan = sensor_msgs::msg::LaserScan;
 using Odometry = nav_msgs::msg::Odometry;
 using Clock = rosgraph_msgs::msg::Clock;
+using WriterGid = std::array<std::uint8_t, RMW_GID_STORAGE_SIZE>;
 
 constexpr char kCollisionMonitorNode[] = "/collision_monitor";
 constexpr char kVelocitySmootherNode[] = "/velocity_smoother";
@@ -132,6 +134,34 @@ bool gate_snapshot_proves_zero(const GateSnapshot & snapshot)
          snapshot.zero_published;
 }
 
+WriterGid endpoint_writer_gid(const rclcpp::TopicEndpointInfo & endpoint)
+{
+  WriterGid gid{};
+  const auto & endpoint_gid = endpoint.endpoint_gid();
+  std::copy(endpoint_gid.cbegin(), endpoint_gid.cend(), gid.begin());
+  return gid;
+}
+
+WriterGid message_writer_gid(const rclcpp::MessageInfo & message_info)
+{
+  WriterGid gid{};
+  const auto & raw_gid = message_info.get_rmw_message_info().publisher_gid;
+  std::copy_n(raw_gid.data, RMW_GID_STORAGE_SIZE, gid.begin());
+  return gid;
+}
+
+bool gid_is_zero(const WriterGid & gid)
+{
+  return std::all_of(gid.cbegin(), gid.cend(), [](const auto byte) {
+             return byte == 0U;
+  });
+}
+
+bool same_gid(const WriterGid & left, const WriterGid & right)
+{
+  return left == right;
+}
+
 }  // namespace
 
 class MotionConditioningPipeline::Impl
@@ -146,6 +176,22 @@ public:
     {
       if (active_) {
         owner_.end_renew_callback();
+      }
+    }
+
+    Impl & owner_;
+    bool active_{false};
+  };
+
+  struct StartOperationGuard
+  {
+    StartOperationGuard(Impl & owner, const std::uint64_t generation)
+    : owner_(owner), active_(owner.begin_start_operation(generation)) {}
+
+    ~StartOperationGuard()
+    {
+      if (active_) {
+        owner_.end_start_operation();
       }
     }
 
@@ -228,13 +274,22 @@ public:
     collision_subscription_ = node_.create_subscription<CollisionState>(
       config_.collision_state_topic,
       rclcpp::QoS(rclcpp::KeepLast(10)).reliable().durability_volatile(),
-      [this](const CollisionState::ConstSharedPtr message) {
+      [this](
+        const CollisionState::ConstSharedPtr message,
+        const rclcpp::MessageInfo & message_info) {
         if (
           message->action_type == CollisionState::STOP &&
           message->polygon_name == "stop_zone")
         {
+          const auto publisher_gid = message_writer_gid(message_info);
           std::lock_guard<std::recursive_mutex> lock(mutex_);
-          if (state_ == MotionConditioningState::Running) {
+          if (
+            state_ == MotionConditioningState::Running &&
+            collision_writer_bound_ &&
+            collision_writer_generation_ == generation_ &&
+            same_gid(publisher_gid, collision_writer_gid_) &&
+            !collision_writer_gid_is_retired(publisher_gid))
+          {
             collision_stop_ = true;
           }
         }
@@ -272,8 +327,29 @@ public:
 
     {
       std::lock_guard<std::recursive_mutex> lock(mutex_);
-      reset_generation();
+      reset_generation(true);
       collision_stop_ = false;
+    }
+
+    bool current_zero_proven = false;
+    try {
+      std::lock_guard<std::mutex> authority_lock(authority_call_mutex_);
+      current_zero_proven = gate_snapshot_proves_zero(authority_->snapshot());
+    } catch (...) {
+      current_zero_proven = false;
+    }
+    if (!current_zero_proven) {
+      MotionConditioningResult result;
+      {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        state_ = MotionConditioningState::Failed;
+        result = remember(make_result(
+            state_, MotionConditioningFailure::SafetyFault, false, false,
+            collision_stop_, lease_id_, candidate_topic_,
+            "current MotionGate snapshot did not prove an inhibited zero"));
+      }
+      finish_teardown(result, TeardownIntent::Failure);
+      return result;
     }
 
     AuthorityResult gate_prepare;
@@ -395,6 +471,7 @@ public:
           lease_id_ == expected_lease && candidate_topic_ == expected_candidate &&
           std::chrono::steady_clock::now() < handover_deadline;
         if (activation_ready) {
+          generation_request_id_ = open_operation.request_id;
           activation_in_progress_.store(true);
           activation_failed_.store(false);
           std::lock_guard<std::mutex> activation_lock(activation_mutex_);
@@ -415,6 +492,13 @@ public:
         generation,
         MotionConditioningFailure::SafetyFault,
         "activation was cancelled before MotionGate OPEN");
+    }
+    StartOperationGuard start_operation(*this, generation);
+    if (!start_operation.active_) {
+      return abort_activation(
+        generation,
+        MotionConditioningFailure::SafetyFault,
+        "activation was cancelled before the start operation was fenced");
     }
     if (!activation_token_current(generation)) {
       return abort_activation(
@@ -639,6 +723,7 @@ public:
     }
     try {
       producer_->stop();
+      producer_stop_proven_.store(true);
     } catch (...) {
     }
     producer_lock.unlock();
@@ -784,6 +869,56 @@ private:
     return true;
   }
 
+  [[nodiscard]] bool begin_start_operation(std::uint64_t generation)
+  {
+    std::lock_guard<std::mutex> teardown_lock(teardown_mutex_);
+    if (teardown_in_progress_.load()) {
+      return false;
+    }
+    std::lock_guard<std::recursive_mutex> state_lock(mutex_);
+    if (!activation_generation_current_locked(generation)) {
+      return false;
+    }
+    ++active_start_operations_;
+    ++start_operation_threads_[std::this_thread::get_id()];
+    return true;
+  }
+
+  void end_start_operation()
+  {
+    std::lock_guard<std::mutex> teardown_lock(teardown_mutex_);
+    if (active_start_operations_ > 0U) {
+      --active_start_operations_;
+    }
+    const auto thread_id = std::this_thread::get_id();
+    const auto thread_iterator = start_operation_threads_.find(thread_id);
+    if (thread_iterator != start_operation_threads_.end()) {
+      if (thread_iterator->second > 1U) {
+        --thread_iterator->second;
+      } else {
+        start_operation_threads_.erase(thread_iterator);
+      }
+    }
+    if (active_start_operations_ == 0U) {
+      start_operation_cv_.notify_all();
+    }
+  }
+
+  [[nodiscard]] bool wait_for_start_operations()
+  {
+    std::unique_lock<std::mutex> teardown_lock(teardown_mutex_);
+    if (
+      active_start_operations_ > 0U &&
+      start_operation_threads_.find(std::this_thread::get_id()) !=
+      start_operation_threads_.cend())
+    {
+      return true;
+    }
+    const auto deadline = std::chrono::steady_clock::now() + config_.stop_barrier;
+    return start_operation_cv_.wait_until(
+      teardown_lock, deadline, [this]() {return active_start_operations_ == 0U;});
+  }
+
   [[nodiscard]] bool begin_prepare(
     MotionConditioningResult & existing,
     bool & cleanup_needed)
@@ -813,7 +948,10 @@ private:
         existing = terminal_record_->result;
         return false;
       }
-      cleanup_needed = !terminal_record_.has_value();
+      cleanup_needed =
+        components_loaded_ || !pending_loads_.empty() ||
+        !residual_components_.empty() || !lease_id_.empty() ||
+        activation_in_progress_.load();
       teardown_generation_ = generation_;
       invalidate_activation_locked();
       terminal_record_.reset();
@@ -840,13 +978,20 @@ private:
 
   void fail_from_renew_callback(
     std::uint64_t generation,
+    const std::string & lease_id,
+    const std::string & request_id,
     MotionConditioningFailure failure,
     std::string detail)
   {
-    if (!activation_generation_current(generation) &&
-      !running_generation_current(generation))
     {
-      return;
+      std::lock_guard<std::recursive_mutex> lock(mutex_);
+      if (generation_ != generation || lease_id_ != lease_id ||
+        (!request_id.empty() && generation_request_id_ != request_id) ||
+        (state_ != MotionConditioningState::Prepared &&
+        state_ != MotionConditioningState::Running))
+      {
+        return;
+      }
     }
     MotionConditioningResult existing;
     if (!begin_teardown(existing, false)) {
@@ -901,6 +1046,16 @@ private:
   {
     disable_renew_callbacks();
     wait_for_renew_callbacks();
+    if (!wait_for_start_operations()) {
+      cleanup_blocked_ = true;
+      (void)inhibit_gate();
+      std::lock_guard<std::recursive_mutex> lock(mutex_);
+      state_ = MotionConditioningState::Failed;
+      return remember(make_result(
+          state_, MotionConditioningFailure::SafetyFault, false, false,
+          collision_stop_, lease_id_, candidate_topic_,
+          "active start operation did not drain before teardown deadline"));
+    }
     const bool producer_stopped = safe_producer_stop();
     bool zero_proven = false;
     bool components_clean = false;
@@ -936,6 +1091,16 @@ private:
     if (wait_for_callbacks) {
       wait_for_renew_callbacks();
     }
+    if (!wait_for_start_operations()) {
+      cleanup_blocked_ = true;
+      (void)inhibit_gate();
+      std::lock_guard<std::recursive_mutex> lock(mutex_);
+      state_ = MotionConditioningState::Failed;
+      return remember(make_result(
+          state_, MotionConditioningFailure::SafetyFault, false, false,
+          collision_stop_, lease_id_, candidate_topic_,
+          "active start operation did not drain before failure teardown"));
+    }
     const bool producer_stopped = safe_producer_stop();
     bool zero_proven = false;
     bool components_clean = false;
@@ -949,8 +1114,17 @@ private:
     if (failure == MotionConditioningFailure::None) {
       failure = MotionConditioningFailure::InternalError;
     }
-    if (!components_clean) {
-      detail += "; component cleanup failed";
+    if (!producer_stopped || !zero_proven || !components_clean) {
+      failure = MotionConditioningFailure::SafetyFault;
+      if (!producer_stopped) {
+        detail += "; producer stop could not be proven";
+      }
+      if (!zero_proven) {
+        detail += "; Gate zero proof was unavailable";
+      }
+      if (!components_clean) {
+        detail += "; component cleanup could not be proven";
+      }
     }
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     state_ = MotionConditioningState::Failed;
@@ -1023,7 +1197,9 @@ private:
     std::string detail)
   {
     if (!activation_generation_current(generation)) {
-      wait_for_failure_completion();
+      if (!teardown_in_progress_.load()) {
+        wait_for_failure_completion();
+      }
       return stale_activation_result(generation);
     }
     return fail(failure, std::move(detail));
@@ -1049,8 +1225,12 @@ private:
       return true;
     }
     std::lock_guard<std::mutex> lock(producer_mutex_);
+    if (producer_stop_proven_.load()) {
+      return true;
+    }
     try {
       producer_->stop();
+      producer_stop_proven_.store(true);
       return true;
     } catch (...) {
       return false;
@@ -1360,10 +1540,65 @@ private:
     {
       return false;
     }
-    return component_state(kCollisionMonitorFqn, prepare_open_deadline_) ==
-           lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE &&
-           component_state(kVelocitySmootherFqn, prepare_open_deadline_) ==
-           lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE;
+    if (component_state(kCollisionMonitorFqn, prepare_open_deadline_) !=
+      lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE ||
+      component_state(kVelocitySmootherFqn, prepare_open_deadline_) !=
+      lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE)
+    {
+      return false;
+    }
+    return pin_collision_writer(prepare_open_deadline_);
+  }
+
+  [[nodiscard]] bool collision_writer_gid_is_retired(const WriterGid & gid) const
+  {
+    return std::any_of(
+      retired_collision_writer_gids_.cbegin(),
+      retired_collision_writer_gids_.cend(),
+      [&gid](const auto & retired_gid) {return same_gid(gid, retired_gid);});
+  }
+
+  [[nodiscard]] bool pin_collision_writer(
+    std::chrono::steady_clock::time_point overall_deadline)
+  {
+    const auto graph_deadline = std::min(
+      overall_deadline,
+      std::chrono::steady_clock::now() + config_.writer_graph_timeout);
+    while (std::chrono::steady_clock::now() < graph_deadline) {
+      const auto publishers = node_.get_publishers_info_by_topic(
+        config_.collision_state_topic);
+      const auto writer = std::find_if(
+        publishers.cbegin(), publishers.cend(), [this](const auto & endpoint) {
+          const auto gid = endpoint_writer_gid(endpoint);
+          return static_cast<rmw_endpoint_type_t>(endpoint.endpoint_type()) ==
+                 RMW_ENDPOINT_PUBLISHER &&
+                 endpoint.topic_type() == "nav2_msgs/msg/CollisionMonitorState" &&
+                 endpoint.node_name() == "collision_monitor" &&
+                 endpoint.node_namespace() == "/" &&
+                 !gid_is_zero(gid) &&
+                 !collision_writer_gid_is_retired(gid);
+        });
+      if (writer != publishers.cend()) {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        collision_writer_gid_ = endpoint_writer_gid(*writer);
+        collision_writer_generation_ = generation_;
+        collision_writer_bound_ = true;
+        return true;
+      }
+      std::this_thread::sleep_for(5ms);
+    }
+    return false;
+  }
+
+  [[nodiscard]] bool candidate_writer_is_exact(
+    const rclcpp::TopicEndpointInfo & endpoint) const
+  {
+    const auto gid = endpoint_writer_gid(endpoint);
+    return static_cast<rmw_endpoint_type_t>(endpoint.endpoint_type()) ==
+           RMW_ENDPOINT_PUBLISHER &&
+           endpoint.topic_type() == "geometry_msgs/msg/TwistStamped" &&
+           endpoint.node_name() == "collision_monitor" &&
+           endpoint.node_namespace() == "/" && !gid_is_zero(gid);
   }
 
   [[nodiscard]] bool wait_for_writer_to_disappear(
@@ -1421,13 +1656,16 @@ private:
   [[nodiscard]] bool reconcile_pending_loads(
     std::chrono::steady_clock::time_point overall_deadline)
   {
+    bool success = true;
     for (auto iterator = pending_loads_.begin();
       iterator != pending_loads_.end(); )
     {
-      if (iterator->future.wait_for(remaining_until(overall_deadline)) !=
-        std::future_status::ready)
+      if (std::chrono::steady_clock::now() >= overall_deadline ||
+        iterator->future.wait_for(0ms) != std::future_status::ready)
       {
-        return false;
+        success = false;
+        ++iterator;
+        continue;
       }
       try {
         const auto response = iterator->future.get();
@@ -1435,26 +1673,44 @@ private:
           residual_components_.push_back(Component{
               response->unique_id, response->full_node_name});
           components_loaded_ = true;
+          if (response->full_node_name != iterator->expected_fqn) {
+            cleanup_identity_fault_ = true;
+            success = false;
+          }
+        } else {
+          success = false;
         }
       } catch (...) {
-        return false;
+        success = false;
       }
       iterator = pending_loads_.erase(iterator);
     }
-    return true;
+    return success;
   }
 
   [[nodiscard]] bool reconcile_residual_nodes(
-    std::chrono::steady_clock::time_point confirmation_deadline)
+    std::chrono::steady_clock::time_point confirmation_deadline,
+    std::unordered_set<std::uint64_t> & unloaded_ids)
   {
     std::size_t consecutive_absent = 0U;
     while (std::chrono::steady_clock::now() < confirmation_deadline) {
+      (void)reconcile_pending_loads(confirmation_deadline);
+      std::unordered_set<std::uint64_t> attempted_ids;
       for (auto iterator = residual_components_.begin();
         iterator != residual_components_.end(); )
       {
+        if (unloaded_ids.find(iterator->unique_id) != unloaded_ids.cend()) {
+          iterator = residual_components_.erase(iterator);
+          continue;
+        }
+        if (!attempted_ids.insert(iterator->unique_id).second) {
+          iterator = residual_components_.erase(iterator);
+          continue;
+        }
         const auto unload_deadline = std::chrono::steady_clock::now() +
           config_.component_rpc_timeout;
         if (call_unload(iterator->unique_id, unload_deadline)) {
+          unloaded_ids.insert(iterator->unique_id);
           iterator = residual_components_.erase(iterator);
         } else {
           ++iterator;
@@ -1466,16 +1722,41 @@ private:
       }
       bool target_present = false;
       for (const auto & node : listed) {
-        if (node.node_fqn == kCollisionMonitorFqn ||
-          node.node_fqn == kVelocitySmootherFqn)
-        {
+        if (node.unique_id == 0U) {
           target_present = true;
-          const auto unload_deadline = std::chrono::steady_clock::now() +
-            config_.component_rpc_timeout;
-          (void)call_unload(node.unique_id, unload_deadline);
+          continue;
+        }
+        if (unloaded_ids.find(node.unique_id) != unloaded_ids.cend()) {
+          continue;
+        }
+        target_present = true;
+        const auto known_residual = std::find_if(
+          residual_components_.cbegin(), residual_components_.cend(),
+          [&node](const auto & component) {
+            return component.unique_id == node.unique_id;
+          });
+        if (known_residual == residual_components_.cend()) {
+          residual_components_.push_back(node);
+        }
+        if (!attempted_ids.insert(node.unique_id).second) {
+          continue;
+        }
+        const auto unload_deadline = std::chrono::steady_clock::now() +
+          config_.component_rpc_timeout;
+        if (call_unload(node.unique_id, unload_deadline)) {
+          unloaded_ids.insert(node.unique_id);
+          residual_components_.erase(
+            std::remove_if(
+              residual_components_.begin(), residual_components_.end(),
+              [&node](const auto & component) {
+                return component.unique_id == node.unique_id;
+              }),
+            residual_components_.end());
         }
       }
-      if (residual_components_.empty() && !target_present) {
+      if (pending_loads_.empty() && residual_components_.empty() &&
+        !target_present)
+      {
         ++consecutive_absent;
         if (consecutive_absent >= 2U) {
           return true;
@@ -1501,6 +1782,7 @@ private:
       return true;
     }
     bool success = true;
+    std::unordered_set<std::uint64_t> unloaded_ids;
     const auto pending_deadline = std::chrono::steady_clock::now() +
       config_.component_rpc_timeout;
     success = reconcile_pending_loads(pending_deadline) && success;
@@ -1530,15 +1812,9 @@ private:
     for (const auto & component : residual_components_) {
       add_unique(component);
     }
-    const auto lifecycle_deadline = std::chrono::steady_clock::now() +
-      config_.component_rpc_timeout;
     if (listed_ok) {
       for (const auto & component : listed) {
-        if (component.node_fqn == kCollisionMonitorFqn ||
-          component.node_fqn == kVelocitySmootherFqn)
-        {
-          add_unique(component);
-        }
+        add_unique(component);
       }
     }
 
@@ -1550,19 +1826,22 @@ private:
           continue;
         }
         const auto current_state = component_state(
-          component.node_fqn, lifecycle_deadline);
+          component.node_fqn,
+          std::chrono::steady_clock::now() + config_.component_rpc_timeout);
         if (current_state == lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) {
           success = change_state(
             component.node_fqn,
             lifecycle_msgs::msg::Transition::TRANSITION_ACTIVE_SHUTDOWN,
-            lifecycle_deadline) && success;
+            std::chrono::steady_clock::now() + config_.component_rpc_timeout) &&
+            success;
           continue;
         }
         if (current_state == lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE) {
           success = change_state(
             component.node_fqn,
             lifecycle_msgs::msg::Transition::TRANSITION_INACTIVE_SHUTDOWN,
-            lifecycle_deadline) && success;
+            std::chrono::steady_clock::now() + config_.component_rpc_timeout) &&
+            success;
           continue;
         }
         if (
@@ -1588,6 +1867,7 @@ private:
         }
         success = false;
       } else {
+        unloaded_ids.insert(component.unique_id);
         residual_components_.erase(
           std::remove_if(
             residual_components_.begin(), residual_components_.end(),
@@ -1607,7 +1887,8 @@ private:
     const auto confirmation_deadline = std::chrono::steady_clock::now() +
       config_.writer_graph_timeout;
     success = reconcile_residual_nodes(
-      confirmation_deadline) && success;
+      confirmation_deadline, unloaded_ids) && success;
+    success = !cleanup_identity_fault_ && success;
     success = wait_for_writer_to_disappear(candidate_topic_) && success;
     if (success && pending_loads_.empty() && residual_components_.empty()) {
       components_loaded_ = false;
@@ -1650,8 +1931,13 @@ private:
     if (cleanup_blocked_) {
       return false;
     }
-    const bool producer_stopped = safe_producer_stop();
     disable_renew_callbacks();
+    wait_for_renew_callbacks();
+    if (!wait_for_start_operations()) {
+      cleanup_blocked_ = true;
+      return false;
+    }
+    const bool producer_stopped = safe_producer_stop();
     const bool zero_proven = inhibit_gate();
     const bool clean = cleanup_components();
     if (!producer_stopped || !zero_proven || !clean) {
@@ -1666,16 +1952,27 @@ private:
     return true;
   }
 
-  void reset_generation()
+  void reset_generation(bool ready_for_new_generation = false)
   {
+    if (collision_writer_bound_ && !gid_is_zero(collision_writer_gid_)) {
+      retired_collision_writer_gids_.push_back(collision_writer_gid_);
+    }
+    collision_writer_bound_ = false;
+    collision_writer_generation_ = 0U;
+    collision_writer_gid_ = {};
     components_loaded_ = false;
     collision_component_ = {};
     smoother_component_ = {};
     pending_loads_.clear();
     residual_components_.clear();
+    cleanup_identity_fault_ = false;
     lease_id_.clear();
     candidate_topic_.clear();
+    generation_request_id_.clear();
     prepare_open_deadline_ = {};
+    if (ready_for_new_generation) {
+      producer_stop_proven_.store(false);
+    }
   }
 
   void set_activation_failure(std::string detail)
@@ -1737,12 +2034,13 @@ private:
   void on_renew()
   {
     std::uint64_t callback_generation = 0U;
+    std::string activation_lease;
+    std::string callback_request_id;
     try {
       RenewCallbackGuard callback_guard(*this);
       if (!callback_guard.active_) {
         return;
       }
-      std::string activation_lease;
       std::string activation_gate_instance;
       bool activation = false;
       bool collision_stop = false;
@@ -1752,6 +2050,7 @@ private:
         activation = activation_in_progress_.load();
         callback_generation = generation_;
         activation_lease = lease_id_;
+        callback_request_id = generation_request_id_;
         collision_stop = collision_stop_;
         running = state_ == MotionConditioningState::Running;
       }
@@ -1769,6 +2068,8 @@ private:
         } else if (running_generation_current(callback_generation)) {
           fail_from_renew_callback(
             callback_generation,
+            activation_lease,
+            callback_request_id,
             MotionConditioningFailure::SafetyFault,
             detail);
         }
@@ -1781,6 +2082,8 @@ private:
         } else if (running_generation_current(callback_generation)) {
           fail_from_renew_callback(
             callback_generation,
+            activation_lease,
+            callback_request_id,
             MotionConditioningFailure::SafetyFault,
             detail);
         }
@@ -1793,6 +2096,8 @@ private:
         {
           fail_from_renew_callback(
             callback_generation,
+            activation_lease,
+            callback_request_id,
             MotionConditioningFailure::SafetyFault,
             activation_failure_detail());
         }
@@ -1807,6 +2112,8 @@ private:
         }
         fail_from_renew_callback(
           callback_generation,
+          activation_lease,
+          callback_request_id,
           MotionConditioningFailure::ExecutionFailed,
           "Collision Monitor reported STOP for stop_zone");
         return;
@@ -1819,6 +2126,8 @@ private:
         }
         fail_from_renew_callback(
           callback_generation,
+          activation_lease,
+          callback_request_id,
           MotionConditioningFailure::SafetyFault,
           "conditioning component or dependency graph is unhealthy");
         return;
@@ -1846,6 +2155,8 @@ private:
         }
         fail_from_renew_callback(
           callback_generation,
+          activation_lease,
+          callback_request_id,
           MotionConditioningFailure::SafetyFault,
           "MotionGate RENEW failed closed");
       }
@@ -1853,6 +2164,8 @@ private:
       if (running_generation_current(callback_generation)) {
         fail_from_renew_callback(
           callback_generation,
+          activation_lease,
+          callback_request_id,
           MotionConditioningFailure::SafetyFault,
           std::string{"MotionGate RENEW raised: "} + error.what());
       }
@@ -1860,6 +2173,8 @@ private:
       if (running_generation_current(callback_generation)) {
         fail_from_renew_callback(
           callback_generation,
+          activation_lease,
+          callback_request_id,
           MotionConditioningFailure::SafetyFault,
           "MotionGate RENEW raised an unknown exception");
       }
@@ -1907,13 +2222,8 @@ private:
     while (std::chrono::steady_clock::now() < graph_deadline) {
       const auto publishers = node_.get_publishers_info_by_topic(candidate_topic);
       const auto writer = std::find_if(
-        publishers.cbegin(), publishers.cend(), [](const auto & endpoint) {
-          return static_cast<rmw_endpoint_type_t>(endpoint.endpoint_type()) ==
-                 RMW_ENDPOINT_PUBLISHER &&
-                 endpoint.topic_type() == "geometry_msgs/msg/TwistStamped" &&
-                 endpoint.node_name() == "collision_monitor" &&
-                 endpoint.node_namespace() == "/";
-        });
+        publishers.cbegin(), publishers.cend(),
+        [this](const auto & endpoint) {return candidate_writer_is_exact(endpoint);});
       if (writer != publishers.cend()) {
         return true;
       }
@@ -1966,9 +2276,8 @@ private:
       node_.get_publishers_info_by_topic(candidate_topic);
     const bool candidate_writer = std::any_of(
       candidate_publishers.cbegin(), candidate_publishers.cend(),
-      [](const rclcpp::TopicEndpointInfo & endpoint) {
-        return endpoint.node_name() == "collision_monitor" &&
-               endpoint.topic_type() == "geometry_msgs/msg/TwistStamped";
+      [this](const rclcpp::TopicEndpointInfo & endpoint) {
+        return candidate_writer_is_exact(endpoint);
       });
     return candidate_writer && controller_is_active(overall_deadline);
   }
@@ -1985,6 +2294,11 @@ private:
   bool collision_stop_{false};
   bool components_loaded_{false};
   bool cleanup_blocked_{false};
+  bool cleanup_identity_fault_{false};
+  bool collision_writer_bound_{false};
+  std::uint64_t collision_writer_generation_{0U};
+  WriterGid collision_writer_gid_{};
+  std::vector<WriterGid> retired_collision_writer_gids_;
   Component collision_component_;
   Component smoother_component_;
   std::vector<PendingLoad> pending_loads_;
@@ -1997,6 +2311,9 @@ private:
   std::atomic<bool> teardown_in_progress_{false};
   mutable std::mutex teardown_mutex_;
   std::condition_variable teardown_cv_;
+  std::condition_variable start_operation_cv_;
+  std::size_t active_start_operations_{0U};
+  std::unordered_map<std::thread::id, std::size_t> start_operation_threads_;
   MotionConditioningResult teardown_result_{};
   std::optional<TerminalRecord> terminal_record_;
   std::unordered_map<std::uint64_t, MotionConditioningResult> terminal_records_;
@@ -2026,7 +2343,9 @@ private:
   bool clock_seen_{false};
   std::uint64_t generation_counter_{0U};
   std::uint64_t generation_{0U};
+  std::string generation_request_id_;
   std::mutex producer_mutex_;
+  std::atomic<bool> producer_stop_proven_{false};
   std::atomic<bool> timer_enabled_{false};
   rclcpp::TimerBase::SharedPtr renew_timer_;
 };
