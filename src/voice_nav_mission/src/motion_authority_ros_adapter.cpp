@@ -204,7 +204,7 @@ AuthorityResult RosMotionAuthorityPort::send_once(
   if (now >= rpc_deadline) {
     return unavailable(
       "MotionGate control operation reached its single-operation deadline",
-      false);
+      now < overall_deadline);
   }
   const auto remaining = [&rpc_deadline]() {
       const auto current = std::chrono::steady_clock::now();

@@ -63,6 +63,8 @@ struct MotionConditioningConfig
   std::chrono::milliseconds writer_graph_timeout{1000};
   std::chrono::milliseconds prepare_open_deadline{4000};
   std::chrono::milliseconds renew_period{100};
+  std::chrono::milliseconds dependency_liveness_timeout{200};
+  std::chrono::milliseconds health_rpc_timeout{100};
   std::chrono::milliseconds control_response_deadline{100};
   std::chrono::milliseconds stop_barrier{250};
   std::string container_fqn{"/motion_conditioning_container"};
@@ -70,6 +72,9 @@ struct MotionConditioningConfig
   std::string smoothed_topic{"/voice_nav_internal/motion/smoothed"};
   std::string scan_topic{"/scan"};
   std::string odom_topic{"/odom"};
+  std::string clock_topic{"/clock"};
+  std::string controller_manager_service{"/controller_manager/list_controllers"};
+  std::string controller_name{"diff_drive_controller"};
   std::string collision_state_topic{
     "/voice_nav_internal/motion/collision_state"};
   std::function<std::string()> request_id_generator;
