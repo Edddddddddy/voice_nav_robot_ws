@@ -105,8 +105,13 @@ public:
 
   AuthorityResult renew(const AuthorityOperation &) override
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
     calls_.push_back(AuthorityOperationKind::Renew);
+    if (block_renew_) {
+      renew_entered_ = true;
+      renew_cv_.notify_all();
+      renew_cv_.wait(lock, [this]() {return release_renew_;});
+    }
     if (throw_on_renew_) {
       throw std::runtime_error("scripted MotionGate RENEW failure");
     }
@@ -187,6 +192,28 @@ public:
     throw_on_renew_ = value;
   }
 
+  void block_renew()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    block_renew_ = true;
+    renew_entered_ = false;
+    release_renew_ = false;
+  }
+
+  bool wait_for_renew(std::chrono::milliseconds timeout = 1s)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return renew_cv_.wait_for(
+      lock, timeout, [this]() {return renew_entered_;});
+  }
+
+  void release_blocked_renew()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    release_renew_ = true;
+    renew_cv_.notify_all();
+  }
+
   void set_initial_armed_snapshot()
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -240,10 +267,14 @@ private:
   std::optional<std::size_t> renew_failure_after_;
   bool throw_on_open_{false};
   bool throw_on_renew_{false};
+  bool block_renew_{false};
+  bool renew_entered_{false};
+  bool release_renew_{false};
   bool block_inhibit_{false};
   bool inhibit_entered_{false};
   bool release_inhibit_{false};
   std::condition_variable inhibit_cv_;
+  std::condition_variable renew_cv_;
   std::vector<AuthorityOperationKind> calls_;
 };
 
@@ -309,7 +340,9 @@ public:
   : container_(std::make_shared<rclcpp::Node>("motion_conditioning_container")),
     collision_(std::make_shared<rclcpp::Node>("collision_monitor")),
     smoother_(std::make_shared<rclcpp::Node>("velocity_smoother")),
-    sensors_(std::make_shared<rclcpp::Node>("conditioning_sensors"))
+    sensors_(std::make_shared<rclcpp::Node>("conditioning_sensors")),
+    unload_callback_group_(container_->create_callback_group(
+        rclcpp::CallbackGroupType::Reentrant))
   {
     load_service_ = container_->create_service<LoadNode>(
       "/motion_conditioning_container/_container/load_node",
@@ -353,9 +386,18 @@ public:
       [this](
         const std::shared_ptr<UnloadNode::Request> request,
         std::shared_ptr<UnloadNode::Response> response) {
-        std::this_thread::sleep_for(unload_delay_);
+        std::chrono::milliseconds delay;
         {
           std::lock_guard<std::mutex> lock(graph_mutex_);
+          unload_requests_.push_back(request->unique_id);
+          const auto delay_iterator = unload_delays_.find(request->unique_id);
+          delay = delay_iterator != unload_delays_.cend() ?
+          delay_iterator->second : unload_delay_;
+        }
+        std::this_thread::sleep_for(delay);
+        {
+          std::lock_guard<std::mutex> lock(graph_mutex_);
+          unload_completed_.push_back(request->unique_id);
           ++unload_count_;
           response->success = loaded_.erase(request->unique_id) == 1U;
         }
@@ -365,7 +407,7 @@ public:
           collision_state_ = lifecycle_msgs::msg::State::PRIMARY_STATE_UNKNOWN;
           smoother_state_ = lifecycle_msgs::msg::State::PRIMARY_STATE_UNKNOWN;
         }
-      });
+      }, rmw_qos_profile_services_default, unload_callback_group_);
     controller_service_ = container_->create_service<ListControllers>(
       "/controller_manager/list_controllers",
       [this](
@@ -445,6 +487,26 @@ public:
   void set_unload_delay(std::chrono::milliseconds delay)
   {
     unload_delay_ = delay;
+  }
+
+  void set_unload_delay_for(
+    std::uint64_t unique_id,
+    std::chrono::milliseconds delay)
+  {
+    std::lock_guard<std::mutex> lock(graph_mutex_);
+    unload_delays_[unique_id] = delay;
+  }
+
+  std::vector<std::uint64_t> unload_requests() const
+  {
+    std::lock_guard<std::mutex> lock(graph_mutex_);
+    return unload_requests_;
+  }
+
+  std::vector<std::uint64_t> unload_completed() const
+  {
+    std::lock_guard<std::mutex> lock(graph_mutex_);
+    return unload_completed_;
   }
 
   void set_wrong_fqn(bool value)
@@ -577,6 +639,7 @@ private:
   rclcpp::Service<LoadNode>::SharedPtr load_service_;
   rclcpp::Service<ListNodes>::SharedPtr list_nodes_service_;
   rclcpp::Service<UnloadNode>::SharedPtr unload_service_;
+  rclcpp::CallbackGroup::SharedPtr unload_callback_group_;
   rclcpp::Service<ListControllers>::SharedPtr controller_service_;
   std::vector<rclcpp::Service<ChangeState>::SharedPtr> change_services_;
   std::vector<rclcpp::Service<GetState>::SharedPtr> get_services_;
@@ -584,6 +647,9 @@ private:
   mutable std::mutex graph_mutex_;
   std::uint64_t next_id_{1U};
   std::size_t unload_count_{0U};
+  std::vector<std::uint64_t> unload_requests_;
+  std::vector<std::uint64_t> unload_completed_;
+  std::unordered_map<std::uint64_t, std::chrono::milliseconds> unload_delays_;
   std::uint8_t collision_state_{
     lifecycle_msgs::msg::State::PRIMARY_STATE_UNKNOWN};
   std::uint8_t smoother_state_{
@@ -840,6 +906,9 @@ TEST_F(MotionConditioningPipelineTest, StopAtActivationBarrierRejectsLateProduce
   EXPECT_FALSE(start_result->ok);
   EXPECT_EQ(producer->start_count, 0U);
   EXPECT_EQ(pipeline.state(), MotionConditioningState::Stopped);
+  EXPECT_EQ(pipeline.last_result().state, stopped.state);
+  EXPECT_EQ(pipeline.last_result().failure, stopped.failure);
+  EXPECT_EQ(pipeline.last_result().zero_proven, stopped.zero_proven);
 }
 
 TEST_F(MotionConditioningPipelineTest, ProducerFalseFailsClosedAndCleansUp)
@@ -998,6 +1067,38 @@ TEST_F(MotionConditioningPipelineTest, LifecycleTimeoutRetainsIndependentUnloadB
   EXPECT_EQ(graph->unload_count(), 2U);
 }
 
+TEST_F(MotionConditioningPipelineTest, EachUniqueIdGetsAnIndependentUnloadBudget)
+{
+  auto pipeline_config = config();
+  pipeline_config.component_rpc_timeout = 5ms;
+  pipeline_config.writer_graph_timeout = 150ms;
+  pipeline_config.prepare_open_deadline = 2s;
+  MotionConditioningPipeline pipeline(
+    *client, authority, producer, pipeline_config);
+
+  ASSERT_TRUE(pipeline.prepare().ok);
+  graph->set_unload_delay_for(1U, 500ms);
+
+  const auto result = pipeline.stop();
+  const auto unload_requests = graph->unload_requests();
+  const auto unload_completed = graph->unload_completed();
+
+  EXPECT_FALSE(result.ok);
+  EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
+  EXPECT_NE(
+    std::find(unload_requests.cbegin(), unload_requests.cend(), 1U),
+    unload_requests.cend());
+  EXPECT_NE(
+    std::find(unload_requests.cbegin(), unload_requests.cend(), 2U),
+    unload_requests.cend());
+  EXPECT_NE(
+    std::find(unload_completed.cbegin(), unload_completed.cend(), 2U),
+    unload_completed.cend());
+  EXPECT_EQ(
+    std::find(unload_completed.cbegin(), unload_completed.cend(), 1U),
+    unload_completed.cend());
+}
+
 TEST_F(MotionConditioningPipelineTest, SensorLivenessLossFailsClosed)
 {
   MotionConditioningPipeline pipeline(*client, authority, producer, config());
@@ -1150,6 +1251,38 @@ TEST_F(MotionConditioningPipelineTest, StopAndFailShareOneTeardownOwner)
   EXPECT_EQ(graph->unload_count(), 2U);
 }
 
+TEST_F(MotionConditioningPipelineTest, TerminalRecordIgnoresLateFailureAndCollision)
+{
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+  ASSERT_TRUE(pipeline.prepare().ok);
+  std::this_thread::sleep_for(50ms);
+  ASSERT_TRUE(pipeline.start().ok);
+
+  const auto stopped = pipeline.stop();
+  ASSERT_TRUE(stopped.ok);
+  const auto terminal = pipeline.last_result();
+  const auto fail_result = pipeline.fail(
+    MotionConditioningFailure::SafetyFault,
+    "late failure must not replace STOP");
+
+  nav2_msgs::msg::CollisionMonitorState collision_stop;
+  collision_stop.action_type = nav2_msgs::msg::CollisionMonitorState::STOP;
+  collision_stop.polygon_name = "stop_zone";
+  collision_state_publisher->publish(collision_stop);
+  std::this_thread::sleep_for(50ms);
+
+  const auto calls = authority->calls();
+  EXPECT_TRUE(fail_result.ok);
+  EXPECT_EQ(pipeline.last_result().state, terminal.state);
+  EXPECT_EQ(pipeline.last_result().failure, terminal.failure);
+  EXPECT_EQ(pipeline.last_result().collision_stop, terminal.collision_stop);
+  EXPECT_EQ(pipeline.last_result().zero_proven, terminal.zero_proven);
+  EXPECT_EQ(
+    std::count(
+      calls.cbegin(), calls.cend(),
+      AuthorityOperationKind::Inhibit), 1);
+}
+
 TEST_F(MotionConditioningPipelineTest, StopWaitsForRenewFailureTeardownOwner)
 {
   MotionConditioningPipeline pipeline(*client, authority, producer, config());
@@ -1173,6 +1306,41 @@ TEST_F(MotionConditioningPipelineTest, StopWaitsForRenewFailureTeardownOwner)
   ASSERT_TRUE(stop_result.has_value());
   EXPECT_EQ(stop_result->state, MotionConditioningState::Failed);
   EXPECT_EQ(stop_result->failure, MotionConditioningFailure::SafetyFault);
+  const auto calls = authority->calls();
+  EXPECT_EQ(
+    std::count(
+      calls.cbegin(), calls.cend(),
+      AuthorityOperationKind::Inhibit), 1);
+  EXPECT_EQ(graph->unload_count(), 2U);
+}
+
+TEST_F(MotionConditioningPipelineTest, ExternalFailureWaitsForActiveRenew)
+{
+  auto pipeline_config = config();
+  pipeline_config.renew_period = 20ms;
+  MotionConditioningPipeline pipeline(
+    *client, authority, producer, pipeline_config);
+  ASSERT_TRUE(pipeline.prepare().ok);
+  std::this_thread::sleep_for(50ms);
+  ASSERT_TRUE(pipeline.start().ok);
+
+  authority->block_renew();
+  ASSERT_TRUE(authority->wait_for_renew());
+
+  std::optional<MotionConditioningResult> failure_result;
+  std::thread failure_thread([&]() {
+      failure_result = pipeline.fail(
+        MotionConditioningFailure::SafetyFault,
+        "external dependency failure");
+    });
+  std::this_thread::sleep_for(20ms);
+  authority->release_blocked_renew();
+  failure_thread.join();
+
+  ASSERT_TRUE(failure_result.has_value());
+  EXPECT_FALSE(failure_result->ok);
+  EXPECT_EQ(failure_result->state, MotionConditioningState::Failed);
+  EXPECT_EQ(failure_result->failure, MotionConditioningFailure::SafetyFault);
   const auto calls = authority->calls();
   EXPECT_EQ(
     std::count(
