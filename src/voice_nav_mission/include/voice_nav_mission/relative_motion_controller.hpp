@@ -121,9 +121,6 @@ public:
     RelativeMotionStopIntent intent,
     TimePoint now);
   [[nodiscard]] RelativeMotionEvent confirm_gate_zero(TimePoint now);
-  [[nodiscard]] RelativeMotionEvent confirm_gate_zero(
-    TimePoint zero_proven_at,
-    TimePoint stationarity_started_at);
 
   [[nodiscard]] bool active() const noexcept;
   [[nodiscard]] bool stationarity_proven() const noexcept;

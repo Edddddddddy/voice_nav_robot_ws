@@ -116,6 +116,12 @@ RelativeMotionEvent RelativeMotionController::observe_odom(
       "odometry contains a non-finite pose or velocity");
   }
 
+  if (state_ == State::Stationarity && gate_zero_at_.has_value() &&
+    now < *gate_zero_at_)
+  {
+    return event(RelativeMotionEventKind::StationarityPending);
+  }
+
   odom_ = odom;
   if (!has_odom_) {
     start_x_m_ = odom.x_m;
@@ -174,18 +180,11 @@ RelativeMotionEvent RelativeMotionController::request_safe_stop(
 
 RelativeMotionEvent RelativeMotionController::confirm_gate_zero(const TimePoint now)
 {
-  return confirm_gate_zero(now, now);
-}
-
-RelativeMotionEvent RelativeMotionController::confirm_gate_zero(
-  const TimePoint zero_proven_at,
-  const TimePoint stationarity_started_at)
-{
   if (state_ != State::ZeroRequested && state_ != State::Running) {
     return event(RelativeMotionEventKind::None);
   }
   if (zero_requested_at_.has_value() &&
-    zero_proven_at - *zero_requested_at_ > policy_.zero_proof_deadline)
+    now - *zero_requested_at_ > policy_.zero_proof_deadline)
   {
     return fail(
       RelativeMotionFailure::SafetyFault,
@@ -194,11 +193,11 @@ RelativeMotionEvent RelativeMotionController::confirm_gate_zero(
   if (state_ == State::Running) {
     stop_intent_ = RelativeMotionStopIntent::Completion;
     state_ = State::ZeroRequested;
-    zero_requested_at_ = zero_proven_at;
+    zero_requested_at_ = now;
   }
-  gate_zero_at_ = stationarity_started_at;
+  gate_zero_at_ = now;
   state_ = State::Stationarity;
-  stationary_since_ = stationarity_started_at;
+  stationary_since_.reset();
   return event(RelativeMotionEventKind::StationarityPending);
 }
 
@@ -360,12 +359,17 @@ RelativeMotionEvent RelativeMotionController::evaluate_stationarity(const TimePo
   if (!gate_zero_at_.has_value()) {
     return event(RelativeMotionEventKind::ZeroRequested);
   }
-  if (now - *gate_zero_at_ > policy_.stationarity_deadline) {
+  if (now >= *gate_zero_at_ + policy_.stationarity_deadline) {
     return fail(
       RelativeMotionFailure::SafetyFault,
       "odometry did not prove stationarity before the safety deadline");
   }
   if (!has_odom_ || !last_odom_at_.has_value() ||
+    *last_odom_at_ < *gate_zero_at_)
+  {
+    return event(RelativeMotionEventKind::StationarityPending);
+  }
+  if (
     now - *last_odom_at_ > policy_.dependency_liveness_timeout)
   {
     return fail(
