@@ -376,6 +376,8 @@ public:
     collision_(std::make_shared<rclcpp::Node>("collision_monitor")),
     smoother_(std::make_shared<rclcpp::Node>("velocity_smoother")),
     sensors_(std::make_shared<rclcpp::Node>("conditioning_sensors")),
+    load_callback_group_(container_->create_callback_group(
+        rclcpp::CallbackGroupType::Reentrant)),
     unload_callback_group_(container_->create_callback_group(
         rclcpp::CallbackGroupType::Reentrant))
   {
@@ -403,7 +405,7 @@ public:
         } else if (request->node_name == "velocity_smoother") {
           smoother_state_ = lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED;
         }
-      });
+      }, rmw_qos_profile_services_default, load_callback_group_);
     list_nodes_service_ = container_->create_service<ListNodes>(
       "/motion_conditioning_container/_container/list_nodes",
       [this](
@@ -688,6 +690,7 @@ private:
   rclcpp::Service<LoadNode>::SharedPtr load_service_;
   rclcpp::Service<ListNodes>::SharedPtr list_nodes_service_;
   rclcpp::Service<UnloadNode>::SharedPtr unload_service_;
+  rclcpp::CallbackGroup::SharedPtr load_callback_group_;
   rclcpp::CallbackGroup::SharedPtr unload_callback_group_;
   rclcpp::Service<ListControllers>::SharedPtr controller_service_;
   std::vector<rclcpp::Service<ChangeState>::SharedPtr> change_services_;
@@ -1143,8 +1146,10 @@ TEST_F(MotionConditioningPipelineTest, CleanupFailureEscalatesExecutionFailureTo
   std::this_thread::sleep_for(50ms);
   ASSERT_TRUE(pipeline.start().ok);
   graph->set_unload_delay(500ms);
+  const auto token = pipeline.correlation_token();
 
   const auto result = pipeline.fail(
+    token,
     MotionConditioningFailure::ExecutionFailed,
     "collision execution failed while unload is blocked");
 
@@ -1163,8 +1168,10 @@ TEST_F(MotionConditioningPipelineTest, ZeroProofFailureEscalatesExecutionFailure
   ASSERT_TRUE(pipeline.prepare().ok);
   std::this_thread::sleep_for(50ms);
   ASSERT_TRUE(pipeline.start().ok);
+  const auto token = pipeline.correlation_token();
 
   const auto result = pipeline.fail(
+    token,
     MotionConditioningFailure::ExecutionFailed,
     "collision execution failed while zero proof is unavailable");
 
@@ -1223,6 +1230,33 @@ TEST_F(MotionConditioningPipelineTest, OpenThrowFailsClosedAndCleansUp)
   EXPECT_EQ(graph->loaded_count(), 0U);
 }
 
+TEST_F(MotionConditioningPipelineTest, StartAfterPrepareOpenDeadlineFailsClosed)
+{
+  auto pipeline_config = config();
+  pipeline_config.prepare_open_deadline = 500ms;
+  MotionConditioningPipeline pipeline(
+    *client, authority, producer, pipeline_config);
+
+  ASSERT_TRUE(pipeline.prepare().ok);
+  std::this_thread::sleep_for(550ms);
+
+  const auto calls_before = authority->calls();
+  const auto result = pipeline.start();
+
+  EXPECT_FALSE(result.ok);
+  EXPECT_EQ(result.state, MotionConditioningState::Failed);
+  EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
+  EXPECT_TRUE(result.zero_proven);
+  EXPECT_EQ(producer->start_count, 0U);
+  EXPECT_EQ(graph->loaded_count(), 0U);
+  const auto calls_after = authority->calls();
+  EXPECT_EQ(
+    std::count(
+      calls_after.cbegin(), calls_after.cend(), AuthorityOperationKind::Inhibit),
+    std::count(
+      calls_before.cbegin(), calls_before.cend(), AuthorityOperationKind::Inhibit) + 1);
+}
+
 TEST_F(MotionConditioningPipelineTest, LateLoadResponseIsReconciledAndBlocksNextPrepare)
 {
   graph->set_load_delay(250ms);
@@ -1250,6 +1284,25 @@ TEST_F(MotionConditioningPipelineTest, LateLoadResponseIsReconciledAndBlocksNext
       AuthorityOperationKind::Prepare));
   EXPECT_NE(first.detail.find("phase=pending_load"), std::string::npos);
   EXPECT_NE(first.detail.find("fqn=/collision_monitor"), std::string::npos);
+}
+
+TEST_F(MotionConditioningPipelineTest, LateLoadIsConsumedBeforeComponentCleanupDeadline)
+{
+  graph->set_load_delay(250ms);
+  auto pipeline_config = config();
+  pipeline_config.component_rpc_timeout = 600ms;
+  pipeline_config.writer_graph_timeout = 50ms;
+  pipeline_config.prepare_open_deadline = 100ms;
+  MotionConditioningPipeline pipeline(
+    *client, authority, producer, pipeline_config);
+
+  const auto result = pipeline.prepare();
+  EXPECT_FALSE(result.ok);
+  EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
+
+  std::this_thread::sleep_for(350ms);
+  EXPECT_EQ(graph->loaded_count(), 0U);
+  EXPECT_EQ(graph->unload_count(), 1U);
 }
 
 TEST_F(MotionConditioningPipelineTest, FqnMismatchIsUnloadedBeforePrepareFails)
@@ -1456,6 +1509,7 @@ TEST_F(MotionConditioningPipelineTest, StopAndFailShareOneTeardownOwner)
   ASSERT_TRUE(pipeline.prepare().ok);
   std::this_thread::sleep_for(50ms);
   ASSERT_TRUE(pipeline.start().ok);
+  const auto token = pipeline.correlation_token();
   authority->block_inhibit();
 
   std::optional<MotionConditioningResult> stop_result;
@@ -1469,6 +1523,7 @@ TEST_F(MotionConditioningPipelineTest, StopAndFailShareOneTeardownOwner)
   std::optional<MotionConditioningResult> fail_result;
   std::thread fail_thread([&]() {
       fail_result = pipeline.fail(
+        token,
         MotionConditioningFailure::SafetyFault,
         "dependency failed during STOP");
     });
@@ -1496,11 +1551,13 @@ TEST_F(MotionConditioningPipelineTest, TerminalRecordIgnoresLateFailureAndCollis
   ASSERT_TRUE(pipeline.prepare().ok);
   std::this_thread::sleep_for(50ms);
   ASSERT_TRUE(pipeline.start().ok);
+  const auto token = pipeline.correlation_token();
 
   const auto stopped = pipeline.stop();
   ASSERT_TRUE(stopped.ok);
   const auto terminal = pipeline.last_result();
   const auto fail_result = pipeline.fail(
+    token,
     MotionConditioningFailure::SafetyFault,
     "late failure must not replace STOP");
 
@@ -1588,6 +1645,73 @@ TEST_F(MotionConditioningPipelineTest, LateOldFailureTokenCannotTouchNextGenerat
   EXPECT_EQ(graph->loaded_count(), 2U);
 }
 
+TEST_F(
+  MotionConditioningPipelineTest,
+  LateTokenCannotClaimAfterStopAndNextGenerationBarrier)
+{
+  std::mutex barrier_mutex;
+  std::condition_variable barrier_cv;
+  bool barrier_entered = false;
+  bool barrier_released = false;
+  bool observed_old_token = false;
+  std::optional<MotionConditioningCorrelationToken> old_token;
+  auto pipeline_config = config();
+  pipeline_config.renew_period = 1s;
+  pipeline_config.before_token_claim =
+    [&](const MotionConditioningCorrelationToken & observed) {
+      std::unique_lock<std::mutex> lock(barrier_mutex);
+      observed_old_token = old_token.has_value() &&
+        observed.generation == old_token->generation &&
+        observed.lease_id == old_token->lease_id &&
+        observed.request_id == old_token->request_id;
+      barrier_entered = true;
+      barrier_cv.notify_all();
+      barrier_cv.wait(lock, [&]() {return barrier_released;});
+    };
+  MotionConditioningPipeline pipeline(
+    *client, authority, producer, pipeline_config);
+  ASSERT_TRUE(pipeline.prepare().ok);
+  std::this_thread::sleep_for(50ms);
+  ASSERT_TRUE(pipeline.start().ok);
+  old_token = pipeline.correlation_token();
+
+  std::optional<MotionConditioningResult> late_result;
+  std::thread late_failure([&]() {
+      late_result = pipeline.fail(
+        *old_token,
+        MotionConditioningFailure::SafetyFault,
+        "late failure crossed the generation barrier");
+    });
+  {
+    std::unique_lock<std::mutex> lock(barrier_mutex);
+    ASSERT_TRUE(barrier_cv.wait_for(
+      lock, 1s, [&]() {return barrier_entered;}));
+  }
+  ASSERT_TRUE(observed_old_token);
+
+  const auto stopped = pipeline.stop();
+  ASSERT_TRUE(stopped.ok);
+  ASSERT_TRUE(pipeline.prepare().ok);
+  std::this_thread::sleep_for(50ms);
+  const auto running = pipeline.start();
+  ASSERT_TRUE(running.ok);
+
+  {
+    std::lock_guard<std::mutex> lock(barrier_mutex);
+    barrier_released = true;
+  }
+  barrier_cv.notify_all();
+  late_failure.join();
+
+  ASSERT_TRUE(late_result.has_value());
+  EXPECT_TRUE(late_result->ok);
+  EXPECT_EQ(late_result->state, MotionConditioningState::Running);
+  EXPECT_EQ(pipeline.state(), MotionConditioningState::Running);
+  EXPECT_EQ(pipeline.last_result().state, running.state);
+  EXPECT_EQ(pipeline.last_result().failure, running.failure);
+  EXPECT_EQ(graph->loaded_count(), 2U);
+}
+
 TEST_F(MotionConditioningPipelineTest, StopWaitsForRenewFailureTeardownOwner)
 {
   MotionConditioningPipeline pipeline(*client, authority, producer, config());
@@ -1628,6 +1752,7 @@ TEST_F(MotionConditioningPipelineTest, ExternalFailureWaitsForActiveRenew)
   ASSERT_TRUE(pipeline.prepare().ok);
   std::this_thread::sleep_for(50ms);
   ASSERT_TRUE(pipeline.start().ok);
+  const auto token = pipeline.correlation_token();
 
   authority->block_renew();
   ASSERT_TRUE(authority->wait_for_renew());
@@ -1635,6 +1760,7 @@ TEST_F(MotionConditioningPipelineTest, ExternalFailureWaitsForActiveRenew)
   std::optional<MotionConditioningResult> failure_result;
   std::thread failure_thread([&]() {
       failure_result = pipeline.fail(
+        token,
         MotionConditioningFailure::SafetyFault,
         "external dependency failure");
     });
@@ -1729,6 +1855,43 @@ TEST_F(MotionConditioningPipelineTest, DestructorWaitsForActiveTeardownOwner)
     std::count(
       calls.cbegin(), calls.cend(), AuthorityOperationKind::Inhibit), 1);
   EXPECT_EQ(graph->unload_count(), 2U);
+}
+
+TEST_F(MotionConditioningPipelineTest, DestructorDrainsActiveStartBeyondStopBarrier)
+{
+  producer->block_start = true;
+  auto pipeline = std::make_unique<MotionConditioningPipeline>(
+    *client, authority, producer, config());
+  ASSERT_TRUE(pipeline->prepare().ok);
+  std::this_thread::sleep_for(50ms);
+
+  auto * raw_pipeline = pipeline.get();
+  std::optional<MotionConditioningResult> start_result;
+  std::thread start_thread([&]() {start_result = raw_pipeline->start();});
+  if (!producer->wait_for_start()) {
+    producer->release_blocked_start();
+    start_thread.join();
+    FAIL() << "conditioning start did not reach producer barrier";
+  }
+
+  auto owned_pipeline = std::move(pipeline);
+  std::atomic<bool> destructor_finished{false};
+  std::thread destructor_thread(
+    [owned = std::move(owned_pipeline), &destructor_finished]() mutable {
+      owned.reset();
+      destructor_finished.store(true);
+    });
+  std::this_thread::sleep_for(250ms);
+  EXPECT_FALSE(destructor_finished.load());
+
+  producer->release_blocked_start();
+  start_thread.join();
+  destructor_thread.join();
+
+  ASSERT_TRUE(start_result.has_value());
+  EXPECT_FALSE(start_result->ok);
+  EXPECT_TRUE(destructor_finished.load());
+  EXPECT_EQ(graph->loaded_count(), 0U);
 }
 
 TEST_F(MotionConditioningPipelineTest, RenewAuthorityLossFailsClosed)
