@@ -55,9 +55,21 @@ target_include_directories(
 )
 
 add_library(
+  relative_motion_controller STATIC
+  src/relative_motion_controller.cpp
+)
+target_compile_features(relative_motion_controller PUBLIC cxx_std_17)
+target_include_directories(
+  relative_motion_controller
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+)
+
+add_library(
   motion_conditioning_pipeline STATIC
   src/motion_authority_ros_adapter.cpp
   src/motion_conditioning_pipeline.cpp
+  src/motion_source_freshness.cpp
 )
 target_compile_features(motion_conditioning_pipeline PUBLIC cxx_std_17)
 target_include_directories(
@@ -82,6 +94,30 @@ ament_target_dependencies(
 target_link_libraries(
   motion_conditioning_pipeline
   "${motion_gate_typesupport}"
+)
+
+add_library(
+  relative_motion_ros_adapter STATIC
+  src/relative_motion_ros_adapter.cpp
+)
+target_compile_features(relative_motion_ros_adapter PUBLIC cxx_std_17)
+target_include_directories(
+  relative_motion_ros_adapter
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+)
+ament_target_dependencies(
+  relative_motion_ros_adapter
+  geometry_msgs
+  nav_msgs
+  rclcpp
+  rosgraph_msgs
+  sensor_msgs
+)
+target_link_libraries(
+  relative_motion_ros_adapter
+  motion_conditioning_pipeline
+  relative_motion_controller
 )
 
 add_executable(
@@ -132,7 +168,7 @@ target_link_libraries(
 target_link_libraries(
   mission_runtime_node
   mission_runtime_core
-  motion_conditioning_pipeline
+  relative_motion_ros_adapter
   "${motion_gate_typesupport}"
 )
 
@@ -171,6 +207,34 @@ if(BUILD_TESTING)
   target_link_libraries(
     mission_runtime_core_test
     mission_runtime_core
+  )
+
+  ament_add_gtest(
+    relative_motion_controller_test
+    test/relative_motion_controller_test.cpp
+  )
+  target_compile_features(relative_motion_controller_test PUBLIC cxx_std_17)
+  target_include_directories(
+    relative_motion_controller_test
+    PRIVATE include
+  )
+  target_link_libraries(
+    relative_motion_controller_test
+    relative_motion_controller
+  )
+
+  ament_add_gtest(
+    motion_source_freshness_test
+    test/motion_source_freshness_test.cpp
+  )
+  target_compile_features(motion_source_freshness_test PUBLIC cxx_std_17)
+  target_include_directories(
+    motion_source_freshness_test
+    PRIVATE include
+  )
+  target_link_libraries(
+    motion_source_freshness_test
+    motion_conditioning_pipeline
   )
 
   ament_add_gtest(

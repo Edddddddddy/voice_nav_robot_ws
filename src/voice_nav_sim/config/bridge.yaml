@@ -10,4 +10,6 @@
   ros_type_name: sensor_msgs/msg/LaserScan
   gz_type_name: gz.msgs.LaserScan
   direction: GZ_TO_ROS
+  subscriber_queue: 1
+  publisher_queue: 1
   qos_profile: SENSOR_DATA

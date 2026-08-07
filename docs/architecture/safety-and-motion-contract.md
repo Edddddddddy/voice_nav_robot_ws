@@ -373,17 +373,31 @@ above. Every Goal receives exactly one terminal result.
 
 ## Relative motion
 
+- `RelativeMotionController` is the deep ROS-free Module behind the production
+  `RelativeMotionPort`; its ROS Adapter observes odometry and source-health
+  signals without taking ownership of the final velocity writer.
 - MOVE projects odometry displacement onto the signed initial-heading axis.
 - ROTATE unwraps yaw before comparing signed angular displacement.
 - Both use trusted YAML for speed, acceleration, tolerance, stall thresholds,
   and a policy-computed deadline.
-- Both slow down near the target and publish zero before completing.
+- Both slow down near the target, publish zero before completing, and commit
+  exactly one first-terminal result.
+- Relative-motion samples are fenced by Runtime / admission / Mission / step
+  generations and the active Gate lease; late odometry, timer, or downstream
+  callbacks cannot publish a command or rewrite a terminal result.
 - Step deadlines, stall windows, lease expiry, and cancel grace use a steady
   clock. ROS time is used only to stamp simulation-time data, including the
   final `TwistStamped`, odometry, TF, and sensor messages; it never drives a
   deadline. MotionGate locks `use_sim_time=true` for the process lifetime. If
   that invariant or the active ROS clock is lost, it faults closed and emits
   only zero commands with a zero stamp.
+- Dependency steady liveness is 200 ms. In simulation, Collision Monitor's
+  raw ROS-time source-age limit is independently fixed at 300 ms; an old raw
+  measurement remains fail-closed even when callbacks continue arriving.
+  Original scan measurement stamps and frames are retained, Collision Monitor
+  consumes direct `/scan`, and the bridge / consumer use latest-only queues;
+  no relay restamps or masks sensor backlog. Headless raw-age and TF physical
+  acceptance is tracked by Issue #72.
 
 ## Failure behavior
 

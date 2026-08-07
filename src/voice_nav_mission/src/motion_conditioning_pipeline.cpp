@@ -52,6 +52,7 @@
 #include <sensor_msgs/msg/laser_scan.hpp>
 
 #include "voice_nav_mission/motion_authority_ros_adapter.hpp"
+#include "voice_nav_mission/motion_source_freshness.hpp"
 
 namespace voice_nav_mission
 {
@@ -70,6 +71,13 @@ using LaserScan = sensor_msgs::msg::LaserScan;
 using Odometry = nav_msgs::msg::Odometry;
 using Clock = rosgraph_msgs::msg::Clock;
 using WriterGid = std::array<std::uint8_t, RMW_GID_STORAGE_SIZE>;
+
+rclcpp::QoS latest_sensor_qos()
+{
+  auto qos = rclcpp::SensorDataQoS();
+  qos.keep_last(1);
+  return qos;
+}
 
 constexpr char kCollisionMonitorNode[] = "/collision_monitor";
 constexpr char kVelocitySmootherNode[] = "/velocity_smoother";
@@ -317,6 +325,10 @@ private:
     authority_(std::move(authority)),
     producer_(std::move(producer)),
     config_(std::move(config)),
+    scan_freshness_(config_.dependency_liveness_timeout),
+    odom_freshness_(config_.dependency_liveness_timeout),
+    clock_freshness_(config_.dependency_liveness_timeout),
+    clock_progress_freshness_(config_.dependency_liveness_timeout),
     request_id_generator_(config_.request_id_generator ?
       std::move(config_.request_id_generator) :
       std::function<std::string()>(random_identifier))
@@ -351,7 +363,7 @@ private:
         }
         {
           std::lock_guard<std::mutex> lock(health_mutex_);
-          last_scan_receipt_ = std::chrono::steady_clock::now();
+          scan_freshness_.observe(std::chrono::steady_clock::now());
         }
         if (config_.after_health_callback) {
           config_.after_health_callback();
@@ -363,7 +375,7 @@ private:
         }
         {
           std::lock_guard<std::mutex> lock(health_mutex_);
-          last_odom_receipt_ = std::chrono::steady_clock::now();
+          odom_freshness_.observe(std::chrono::steady_clock::now());
         }
         if (config_.after_health_callback) {
           config_.after_health_callback();
@@ -379,11 +391,11 @@ private:
             static_cast<std::int64_t>(message->clock.nanosec);
           const auto receipt = std::chrono::steady_clock::now();
           if (clock_seen_ && stamp > last_clock_stamp_) {
-            last_clock_progress_receipt_ = receipt;
+            clock_progress_freshness_.observe(receipt);
           }
           clock_seen_ = true;
           last_clock_stamp_ = stamp;
-          last_clock_receipt_ = receipt;
+          clock_freshness_.observe(receipt);
         }
         if (config_.after_health_callback) {
           config_.after_health_callback();
@@ -417,7 +429,7 @@ private:
     const auto weak_callback_state = std::weak_ptr<IngressCallbackState>(callback_state_);
     scan_subscription_ = node_.create_subscription<LaserScan>(
       config_.scan_topic,
-      rclcpp::SensorDataQoS(),
+      latest_sensor_qos(),
       [weak_callback_state](const LaserScan::ConstSharedPtr message) {
         auto state = weak_callback_state.lock();
         IngressCallbackGuard guard(state);
@@ -596,10 +608,11 @@ private:
     }
     set_teardown_generation(prepared_generation);
 
+    setup_failure_detail_.clear();
     if (!load_and_configure_components()) {
       const auto result = fail_owned(
         MotionConditioningFailure::SafetyFault,
-        "Nav2 component load/configure failed", true);
+        "Nav2 component load/configure failed: " + setup_failure_detail_, true);
       finish_teardown(result, TeardownIntent::Failure);
       return result;
     }
@@ -733,6 +746,83 @@ private:
         MotionConditioningFailure::SafetyFault,
         "candidate writer was not visible before MotionGate OPEN");
     }
+
+    // A production component activation can take longer than Gate's 150 ms
+    // candidate freshness window.  The adapter opts into a zero-only
+    // pre-OPEN phase: the Gate remains PREPARED and inhibited while the
+    // already-configured components and raw producer publish zero samples.
+    // The normal #35 path remains unchanged for deterministic producers.
+    bool producer_started = false;
+    std::unique_lock<std::mutex> producer_lock;
+    if (config_.preopen_zero_generation) {
+      const bool collision_activated = change_state(
+          kCollisionMonitorFqn,
+          lifecycle_msgs::msg::Transition::TRANSITION_ACTIVATE,
+          handover_deadline);
+      if (!collision_activated) {
+        return abort_activation(
+          generation,
+          MotionConditioningFailure::SafetyFault,
+          "Collision Monitor activation RPC failed before MotionGate OPEN");
+      }
+      if (!activation_token_current(generation)) {
+        return abort_activation(
+          generation,
+          MotionConditioningFailure::SafetyFault,
+          "activation generation changed after Collision Monitor activation");
+      }
+      if (std::chrono::steady_clock::now() >= handover_deadline) {
+        return abort_activation(
+          generation,
+          MotionConditioningFailure::SafetyFault,
+          "PREPARE to OPEN deadline expired after Collision Monitor activation");
+      }
+      const bool smoother_activated = change_state(
+          kVelocitySmootherFqn,
+          lifecycle_msgs::msg::Transition::TRANSITION_ACTIVATE,
+          handover_deadline);
+      if (!smoother_activated) {
+        return abort_activation(
+          generation,
+          MotionConditioningFailure::SafetyFault,
+          "Velocity Smoother activation RPC failed before MotionGate OPEN");
+      }
+      if (!activation_token_current(generation)) {
+        return abort_activation(
+          generation,
+          MotionConditioningFailure::SafetyFault,
+          "activation generation changed after Velocity Smoother activation");
+      }
+      if (std::chrono::steady_clock::now() >= handover_deadline) {
+        return abort_activation(
+          generation,
+          MotionConditioningFailure::SafetyFault,
+          "PREPARE to OPEN deadline expired after Velocity Smoother activation");
+      }
+      producer_lock = std::unique_lock<std::mutex>(producer_mutex_);
+      try {
+        producer_started = producer_ && producer_->start(config_.raw_topic);
+      } catch (const std::exception & error) {
+        producer_lock.unlock();
+        return abort_activation(
+          generation,
+          MotionConditioningFailure::InternalError,
+          std::string{"conditioning producer raised: "} + error.what());
+      } catch (...) {
+        producer_lock.unlock();
+        return abort_activation(
+          generation,
+          MotionConditioningFailure::InternalError,
+          "conditioning producer raised an unknown exception");
+      }
+      producer_lock.unlock();
+      if (!producer_started) {
+        return abort_activation(
+          generation,
+          MotionConditioningFailure::InternalError,
+          "conditioning producer could not start");
+      }
+    }
     try {
       std::lock_guard<std::mutex> authority_lock(authority_call_mutex_);
       gate_open = authority_->open(open_operation);
@@ -816,34 +906,37 @@ private:
         MotionConditioningFailure::SafetyFault,
         activation_failure_detail());
     }
-    if (!change_state(
-        kCollisionMonitorFqn,
-        lifecycle_msgs::msg::Transition::TRANSITION_ACTIVATE,
-        handover_deadline) ||
-      !activation_token_current(generation) ||
-      std::chrono::steady_clock::now() >= handover_deadline)
-    {
-      return abort_activation(
-        generation,
-        MotionConditioningFailure::SafetyFault,
-        "Nav2 component activation failed");
+    if (!config_.preopen_zero_generation) {
+      if (!change_state(
+          kCollisionMonitorFqn,
+          lifecycle_msgs::msg::Transition::TRANSITION_ACTIVATE,
+          handover_deadline) ||
+        !activation_token_current(generation) ||
+        std::chrono::steady_clock::now() >= handover_deadline)
+      {
+        return abort_activation(
+          generation,
+          MotionConditioningFailure::SafetyFault,
+          "Nav2 component activation failed");
+      }
+      if (!change_state(
+          kVelocitySmootherFqn,
+          lifecycle_msgs::msg::Transition::TRANSITION_ACTIVATE,
+          handover_deadline) ||
+        !activation_token_current(generation) ||
+        std::chrono::steady_clock::now() >= handover_deadline)
+      {
+        return abort_activation(
+          generation,
+          MotionConditioningFailure::SafetyFault,
+          "Nav2 component activation failed");
+      }
     }
-    if (!change_state(
-        kVelocitySmootherFqn,
-        lifecycle_msgs::msg::Transition::TRANSITION_ACTIVATE,
-        handover_deadline) ||
-      !activation_token_current(generation) ||
-      std::chrono::steady_clock::now() >= handover_deadline)
-    {
-      return abort_activation(
-        generation,
-        MotionConditioningFailure::SafetyFault,
-        "Nav2 component activation failed");
-    }
-    if (!renew_for_activation(generation, expected_lease, open_operation.gate_instance_id) ||
-      !runtime_graph_is_healthy(handover_deadline, expected_candidate) ||
-      !activation_token_current(generation))
-    {
+    const auto second_renew_ok = renew_for_activation(
+      generation, expected_lease, open_operation.gate_instance_id);
+    const auto graph_healthy = second_renew_ok &&
+      runtime_graph_is_healthy(handover_deadline, expected_candidate);
+    if (!graph_healthy || !activation_token_current(generation)) {
       return abort_activation(
         generation,
         MotionConditioningFailure::SafetyFault,
@@ -857,7 +950,7 @@ private:
         "PREPARE to OPEN deadline expired during activation");
     }
 
-    std::unique_lock<std::mutex> producer_lock(producer_mutex_);
+    producer_lock = std::unique_lock<std::mutex>(producer_mutex_);
     if (!runtime_graph_is_healthy(handover_deadline, expected_candidate)) {
       producer_lock.unlock();
       return abort_activation(
@@ -905,28 +998,29 @@ private:
         "activation fence failed before producer start");
     }
 
-    bool producer_started = false;
-    try {
-      producer_started = producer_ && producer_->start(config_.raw_topic);
-    } catch (const std::exception & error) {
-      producer_lock.unlock();
-      return abort_activation(
-        generation,
-        MotionConditioningFailure::InternalError,
-        std::string{"conditioning producer raised: "} + error.what());
-    } catch (...) {
-      producer_lock.unlock();
-      return abort_activation(
-        generation,
-        MotionConditioningFailure::InternalError,
-        "conditioning producer raised an unknown exception");
-    }
     if (!producer_started) {
-      producer_lock.unlock();
-      return abort_activation(
-        generation,
-        MotionConditioningFailure::InternalError,
-        "conditioning producer could not start");
+      try {
+        producer_started = producer_ && producer_->start(config_.raw_topic);
+      } catch (const std::exception & error) {
+        producer_lock.unlock();
+        return abort_activation(
+          generation,
+          MotionConditioningFailure::InternalError,
+          std::string{"conditioning producer raised: "} + error.what());
+      } catch (...) {
+        producer_lock.unlock();
+        return abort_activation(
+          generation,
+          MotionConditioningFailure::InternalError,
+          "conditioning producer raised an unknown exception");
+      }
+      if (!producer_started) {
+        producer_lock.unlock();
+        return abort_activation(
+          generation,
+          MotionConditioningFailure::InternalError,
+          "conditioning producer could not start");
+      }
     }
     MotionConditioningResult result;
     bool activation_committed = false;
@@ -1402,13 +1496,19 @@ private:
     disable_renew_callbacks();
     wait_for_renew_callbacks();
     bool zero_proven = false;
+    std::chrono::steady_clock::time_point zero_proven_at{};
     if (destroying_.load()) {
       zero_proven = inhibit_gate();
+      if (zero_proven) {
+        zero_proven_at = std::chrono::steady_clock::now();
+      }
       drain_start_operations();
     }
     if (!destroying_.load() && !wait_for_start_operations()) {
       cleanup_blocked_ = true;
-      (void)inhibit_gate();
+      if (inhibit_gate()) {
+        zero_proven_at = std::chrono::steady_clock::now();
+      }
       std::lock_guard<std::recursive_mutex> lock(mutex_);
       state_ = MotionConditioningState::Failed;
       return remember(make_result(
@@ -1421,6 +1521,9 @@ private:
     try {
       if (!destroying_.load()) {
         zero_proven = inhibit_gate();
+        if (zero_proven) {
+          zero_proven_at = std::chrono::steady_clock::now();
+        }
       }
       components_clean = cleanup_components();
     } catch (...) {
@@ -1433,18 +1536,22 @@ private:
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!producer_stopped || !zero_proven || !components_clean) {
       state_ = MotionConditioningState::Failed;
-      return remember(make_result(
+      auto result = make_result(
           state_, MotionConditioningFailure::SafetyFault, false,
           zero_proven && producer_stopped,
           collision_stop_, lease_id_, candidate_topic_,
           with_cleanup_failure(
-            "conditioning stop could not prove zero and cleanup")));
+            "conditioning stop could not prove zero and cleanup"));
+      result.zero_proven_at = zero_proven_at;
+      return remember(std::move(result));
     }
     reset_generation();
     state_ = MotionConditioningState::Stopped;
-    return remember(make_result(
+    auto result = make_result(
         state_, MotionConditioningFailure::None, true, true, collision_stop_,
-               {}, {}, "conditioning generation stopped"));
+      {}, {}, "conditioning generation stopped");
+    result.zero_proven_at = zero_proven_at;
+    return remember(std::move(result));
   }
 
   void finalize_destruction_cleanup()
@@ -1855,6 +1962,10 @@ private:
       if (!client->wait_for_service(remaining_until(rpc_deadline)) ||
         std::chrono::steady_clock::now() >= rpc_deadline)
       {
+        RCLCPP_ERROR(
+          node_.get_logger(),
+          "conditioning lifecycle transition service unavailable: node=%s transition=%u",
+          node_fqn.c_str(), static_cast<unsigned int>(transition_id));
         return false;
       }
       auto request = std::make_shared<ChangeState::Request>();
@@ -1863,12 +1974,22 @@ private:
       if (future.wait_for(remaining_until(rpc_deadline)) !=
         std::future_status::ready)
       {
+        RCLCPP_ERROR(
+          node_.get_logger(),
+          "conditioning lifecycle transition response timed out: node=%s transition=%u",
+          node_fqn.c_str(), static_cast<unsigned int>(transition_id));
         return false;
       }
       if (std::chrono::steady_clock::now() >= rpc_deadline) {
         return false;
       }
       const auto response = future.get();
+      if (!response || !response->success) {
+        RCLCPP_ERROR(
+          node_.get_logger(),
+          "conditioning lifecycle transition rejected: node=%s transition=%u",
+          node_fqn.c_str(), static_cast<unsigned int>(transition_id));
+      }
       return response && response->success;
     } catch (...) {
       return false;
@@ -1927,7 +2048,9 @@ private:
         parameter("cmd_vel_out_topic", candidate_topic_),
         parameter("state_topic", config_.collision_state_topic),
         parameter("transform_tolerance", 0.10),
-        parameter("source_timeout", 0.20),
+        parameter(
+          "source_timeout",
+          std::chrono::duration<double>(config_.collision_source_timeout).count()),
         parameter("stop_pub_timeout", 0.50),
         parameter("polygons", std::vector<std::string>{"stop_zone"}),
         parameter("stop_zone.type", std::string{"circle"}),
@@ -1938,7 +2061,7 @@ private:
         parameter("stop_zone.enabled", true),
         parameter("observation_sources", std::vector<std::string>{"scan"}),
         parameter("scan.type", std::string{"scan"}),
-        parameter("scan.topic", std::string{"/scan"}),
+        parameter("scan.topic", config_.scan_topic),
         parameter("scan.enabled", true),
       });
     if (!call_load(
@@ -1950,6 +2073,7 @@ private:
         collision_component_,
         prepare_open_deadline_))
     {
+      setup_failure_detail_ = "Collision Monitor load RPC failed";
       return false;
     }
     components_loaded_ = true;
@@ -1982,6 +2106,7 @@ private:
         smoother_component_,
         prepare_open_deadline_))
     {
+      setup_failure_detail_ = "Velocity Smoother load RPC failed";
       return false;
     }
     if (!change_state(
@@ -1993,6 +2118,7 @@ private:
         lifecycle_msgs::msg::Transition::TRANSITION_CONFIGURE,
         prepare_open_deadline_))
     {
+      setup_failure_detail_ = "component configure RPC failed";
       return false;
     }
     if (component_state(kCollisionMonitorFqn, prepare_open_deadline_) !=
@@ -2000,9 +2126,14 @@ private:
       component_state(kVelocitySmootherFqn, prepare_open_deadline_) !=
       lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE)
     {
+      setup_failure_detail_ = "component did not reach inactive state after configure";
       return false;
     }
-    return pin_collision_writer(prepare_open_deadline_);
+    if (!pin_collision_writer(prepare_open_deadline_)) {
+      setup_failure_detail_ = "collision state writer was not visible";
+      return false;
+    }
+    return true;
   }
 
   [[nodiscard]] bool collision_writer_gid_is_retired(const WriterGid & gid) const
@@ -2319,29 +2450,41 @@ private:
           component.node_fqn,
           std::chrono::steady_clock::now() + config_.component_rpc_timeout);
         if (current_state == lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) {
-          const bool shutdown_ok = change_state(
+          const bool deactivate_ok = change_state(
             component.node_fqn,
-            lifecycle_msgs::msg::Transition::TRANSITION_ACTIVE_SHUTDOWN,
+            lifecycle_msgs::msg::Transition::TRANSITION_DEACTIVATE,
             std::chrono::steady_clock::now() + config_.component_rpc_timeout);
-          if (!shutdown_ok) {
+          if (!deactivate_ok) {
             record_cleanup_failure(
-              "lifecycle_shutdown", component.node_fqn, component.unique_id,
-              "active lifecycle shutdown failed");
+              "lifecycle_deactivate", component.node_fqn, component.unique_id,
+              "active lifecycle deactivate failed");
           }
-          success = shutdown_ok && success;
+          success = deactivate_ok && success;
+          if (deactivate_ok) {
+            const bool cleanup_ok = change_state(
+              component.node_fqn,
+              lifecycle_msgs::msg::Transition::TRANSITION_CLEANUP,
+              std::chrono::steady_clock::now() + config_.component_rpc_timeout);
+            if (!cleanup_ok) {
+              record_cleanup_failure(
+                "lifecycle_cleanup", component.node_fqn, component.unique_id,
+                "inactive lifecycle cleanup failed after deactivate");
+            }
+            success = cleanup_ok && success;
+          }
           continue;
         }
         if (current_state == lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE) {
-          const bool shutdown_ok = change_state(
+          const bool cleanup_ok = change_state(
             component.node_fqn,
-            lifecycle_msgs::msg::Transition::TRANSITION_INACTIVE_SHUTDOWN,
+            lifecycle_msgs::msg::Transition::TRANSITION_CLEANUP,
             std::chrono::steady_clock::now() + config_.component_rpc_timeout);
-          if (!shutdown_ok) {
+          if (!cleanup_ok) {
             record_cleanup_failure(
-              "lifecycle_shutdown", component.node_fqn, component.unique_id,
-              "inactive lifecycle shutdown failed");
+              "lifecycle_cleanup", component.node_fqn, component.unique_id,
+              "inactive lifecycle cleanup failed");
           }
-          success = shutdown_ok && success;
+          success = cleanup_ok && success;
           continue;
         }
         if (
@@ -2515,7 +2658,8 @@ private:
       return false;
     }
     try {
-      if (!controller_is_active(prepare_open_deadline_)) {
+      const auto controller_active = controller_is_active(prepare_open_deadline_);
+      if (!controller_active) {
         set_activation_failure(
           "diff_drive_controller is not active during activation");
         return false;
@@ -2574,6 +2718,13 @@ private:
       if (!activation && !running) {
         return;
       }
+      // The synchronous activation transaction owns the bounded Gate
+      // handover.  A renew callback must not race it with a second control
+      // sequence; the first running callback starts once the generation is
+      // committed.
+      if (activation) {
+        return;
+      }
       try {
         std::lock_guard<std::mutex> authority_lock(authority_call_mutex_);
         activation_gate_instance = authority_->snapshot().gate_instance_id;
@@ -2629,7 +2780,8 @@ private:
         return;
       }
       if (!runtime_graph_is_healthy(
-          std::chrono::steady_clock::now() + config_.health_rpc_timeout))
+          std::chrono::steady_clock::now() + config_.health_rpc_timeout,
+          {}, false))
       {
         if (!running_generation_current(callback_token.generation)) {
           return;
@@ -2736,7 +2888,8 @@ private:
 
   [[nodiscard]] bool runtime_graph_is_healthy(
     std::chrono::steady_clock::time_point overall_deadline,
-    const std::string & expected_candidate = {})
+    const std::string & expected_candidate = {},
+    bool check_component_states = true)
   {
     bool components_loaded = false;
     std::string candidate_topic = expected_candidate;
@@ -2747,11 +2900,20 @@ private:
         candidate_topic = candidate_topic_;
       }
     }
-    if (!components_loaded ||
-      component_state(kCollisionMonitorFqn, overall_deadline) !=
+    if (!components_loaded) {
+      return false;
+    }
+    // OPEN performs the full lifecycle graph check.  During the running
+    // renew path, the 100 ms health budget must also leave time for the
+    // authority RPC; the candidate writer, dependency freshness, and
+    // controller state below are the bounded live indicators.  A second
+    // sequential lifecycle-state RPC here could consume the whole lease
+    // renewal window before Gate RENEW is sent.
+    if (check_component_states &&
+      (component_state(kCollisionMonitorFqn, overall_deadline) !=
       lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE ||
       component_state(kVelocitySmootherFqn, overall_deadline) !=
-      lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE)
+      lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE))
     {
       return false;
     }
@@ -2764,12 +2926,9 @@ private:
     {
       std::lock_guard<std::mutex> lock(health_mutex_);
       const auto now = std::chrono::steady_clock::now();
-      const auto max_age = config_.dependency_liveness_timeout;
-      if (!clock_seen_ ||
-        now - last_scan_receipt_ > max_age ||
-        now - last_odom_receipt_ > max_age ||
-        now - last_clock_receipt_ > max_age ||
-        now - last_clock_progress_receipt_ > max_age)
+      if (!clock_seen_ || !scan_freshness_.fresh_at(now) ||
+        !odom_freshness_.fresh_at(now) || !clock_freshness_.fresh_at(now) ||
+        !clock_progress_freshness_.fresh_at(now))
       {
         return false;
       }
@@ -2788,6 +2947,10 @@ private:
   std::shared_ptr<MotionAuthorityPort> authority_;
   std::shared_ptr<MotionProducerPort> producer_;
   MotionConditioningConfig config_;
+  SteadySourceFreshness scan_freshness_;
+  SteadySourceFreshness odom_freshness_;
+  SteadySourceFreshness clock_freshness_;
+  SteadySourceFreshness clock_progress_freshness_;
   std::function<std::string()> request_id_generator_;
   mutable std::recursive_mutex mutex_;
   std::mutex authority_call_mutex_;
@@ -2799,6 +2962,7 @@ private:
   bool cleanup_blocked_{false};
   bool cleanup_identity_fault_{false};
   std::optional<CleanupFailureContext> cleanup_failure_;
+  std::string setup_failure_detail_;
   bool collision_writer_bound_{false};
   std::uint64_t collision_writer_generation_{0U};
   WriterGid collision_writer_gid_{};
@@ -2843,10 +3007,6 @@ private:
   rclcpp::Subscription<Odometry>::SharedPtr odom_subscription_;
   rclcpp::Subscription<Clock>::SharedPtr clock_subscription_;
   std::mutex health_mutex_;
-  std::chrono::steady_clock::time_point last_scan_receipt_{};
-  std::chrono::steady_clock::time_point last_odom_receipt_{};
-  std::chrono::steady_clock::time_point last_clock_receipt_{};
-  std::chrono::steady_clock::time_point last_clock_progress_receipt_{};
   std::int64_t last_clock_stamp_{0};
   bool clock_seen_{false};
   std::uint64_t generation_counter_{0U};

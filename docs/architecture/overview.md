@@ -42,13 +42,14 @@ Verified by repository, static, and headless-Gazebo gates:
   publisher GID, and fully qualified owner are exercised over a bounded
   observation window.
 
-SLAM, the physical Nav2 motion chain, Agent, and voice remain target claims.
-The Mission Runtime control plane and the package-private conditioning module
-are current slices described below; the production RelativeMotion Adapter and
-physical MOVE/ROTATE execution remain intentionally unavailable until Task
-#64. No `map → odom` owner exists yet. Controller timeout is configured
-but is not presented as Gate-death or physical-stop completion; process-death
-acceptance remains a separate target slice.
+SLAM, the full physical Nav2 motion chain, Agent, and voice remain target
+claims. The Mission Runtime control plane, production RelativeMotion Adapter,
+and package-private conditioning module are current slices described below.
+Relative-motion control is delivered as an odometry-closed-loop MOVE/ROTATE
+Module; headless physical raw-stamp-age and TF acceptance is a separate
+follow-up in Issue #72. No `map → odom` owner exists yet. Controller timeout is
+configured but is not presented as Gate-death or physical-stop completion;
+process-death acceptance remains a separate target slice.
 
 ## Current independent MotionGate slice
 
@@ -212,12 +213,15 @@ with package-private Core, MotionGate Adapter, and scripted seams. Admission,
 identity/epoch fencing, STOP linearization, state/feedback/result projection,
 and fail-closed Gate coordination are implemented in this slice.
 
-The production `RelativeMotionPort` is an intentional unavailable Adapter
-until Task #64. Issue #35 supplies the private conditioning and authority
-handover module, but this current slice still validates and fences Missions;
-it does not produce product candidate velocities or perform physical
-MOVE/ROTATE motion. Task #64 may add that private execution behavior without
-changing the frozen public ROS IDL or the Mission endpoints.
+The production `RelativeMotionPort` is backed by a deep ROS-free
+`RelativeMotionController` and a ROS Adapter. MOVE projects odometry onto the
+signed initial-heading axis; ROTATE compares unwrapped yaw. Both enforce
+steady-clock deadlines, progress and stall policy, source freshness, lease /
+generation fencing, and zero/stationarity before a terminal result. The
+Adapter reuses Issue #35's private conditioning and authority handover Module
+and does not add a conditioned-scan relay, writer handover, or public ROS IDL.
+This Task proves the pure-control and ROS-integration layers; headless physical
+raw-stamp-age and TF acceptance is tracked independently by Issue #72.
 
 ### Simulation Module
 

@@ -778,6 +778,14 @@ private:
               *state = lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE;
               response->success = true;
               return;
+            case lifecycle_msgs::msg::Transition::TRANSITION_DEACTIVATE:
+              *state = lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE;
+              response->success = true;
+              return;
+            case lifecycle_msgs::msg::Transition::TRANSITION_CLEANUP:
+              *state = lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED;
+              response->success = true;
+              return;
             case lifecycle_msgs::msg::Transition::TRANSITION_ACTIVE_SHUTDOWN:
             case lifecycle_msgs::msg::Transition::TRANSITION_INACTIVE_SHUTDOWN:
               *state = lifecycle_msgs::msg::State::PRIMARY_STATE_FINALIZED;
