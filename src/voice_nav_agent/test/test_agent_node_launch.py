@@ -430,7 +430,10 @@ class AgentNodeLaunchTest(unittest.TestCase):
         )
 
     def test_installed_agent_restarts_state_epoch_through_public_ros_behavior(self):
-        """Prove A, no-state B, and one-shot B replay through installed ROS ports."""
+        """Prove installed A-to-B GID rebuild and one-shot B live delivery.
+
+        Prove subsequent B-token Missions.
+        """
         assert self.turn_matched.wait(10.0)
         assert self.state_matched.wait(10.0)
         assert self.state_current_match_events['A'].wait(10.0)
