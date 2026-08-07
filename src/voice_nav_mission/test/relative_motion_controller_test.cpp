@@ -190,10 +190,53 @@ TEST(RelativeMotionController, ZeroProofThenStationarityRequiresFreshStableOdom)
     controller.observe_odom(odom(0.46, 0.0, 0.0, 0.0, 0.0), t0 + 250ms).kind,
     RelativeMotionEventKind::StationarityPending);
   const auto complete = controller.observe_odom(
-    odom(0.46, 0.0, 0.0, 0.0, 0.0), t0 + 320ms);
+    odom(0.46, 0.0, 0.0, 0.0, 0.0), t0 + 450ms);
   EXPECT_EQ(complete.kind, RelativeMotionEventKind::Completed);
   EXPECT_TRUE(complete.stationarity_proven);
   EXPECT_TRUE(controller.stationarity_proven());
+}
+
+TEST(RelativeMotionController, StationarityIgnoresOdomReceivedBeforeZeroProof)
+{
+  RelativeMotionController controller;
+  const auto t0 = SteadyClockPort::TimePoint{};
+
+  controller.start(kToken, move(0.5F), t0);
+  controller.observe_odom(odom(0.0, 0.0, 0.0), t0);
+  ASSERT_EQ(
+    controller.observe_odom(odom(0.46, 0.0, 0.0), t0 + 100ms).kind,
+    RelativeMotionEventKind::ZeroRequested);
+  ASSERT_EQ(
+    controller.confirm_gate_zero(t0 + 110ms).kind,
+    RelativeMotionEventKind::StationarityPending);
+
+  EXPECT_EQ(
+    controller.observe_odom(odom(0.46, 0.0, 0.0), t0 + 105ms).kind,
+    RelativeMotionEventKind::StationarityPending);
+  EXPECT_EQ(
+    controller.tick(t0 + 310ms).kind,
+    RelativeMotionEventKind::StationarityPending);
+  EXPECT_EQ(
+    controller.observe_odom(odom(0.46, 0.0, 0.0), t0 + 310ms).kind,
+    RelativeMotionEventKind::StationarityPending);
+  EXPECT_EQ(
+    controller.tick(t0 + 510ms).kind,
+    RelativeMotionEventKind::Completed);
+}
+
+TEST(RelativeMotionController, StationarityDeadlineIsAbsoluteAtZeroProof)
+{
+  RelativeMotionController controller;
+  const auto t0 = SteadyClockPort::TimePoint{};
+
+  controller.start(kToken, move(0.5F), t0);
+  controller.observe_odom(odom(0.0, 0.0, 0.0), t0);
+  controller.observe_odom(odom(0.46, 0.0, 0.0), t0 + 100ms);
+  controller.confirm_gate_zero(t0 + 110ms);
+
+  const auto failed = controller.tick(t0 + 1310ms);
+  EXPECT_EQ(failed.kind, RelativeMotionEventKind::Failed);
+  EXPECT_EQ(failed.failure, RelativeMotionFailure::SafetyFault);
 }
 
 TEST(RelativeMotionController, NonStationaryOdomFailsTheSafetyDeadline)
