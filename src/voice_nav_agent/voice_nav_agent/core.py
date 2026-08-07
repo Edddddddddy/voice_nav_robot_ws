@@ -715,16 +715,25 @@ class AgentCore:
             )
         if parsed.kind == 'missing':
             pending = parsed.pending
-            if pending is not None:
-                pending = _PendingIntent(
-                    session_id=envelope.session_id,
-                    parameter=pending.parameter,
-                    operation=pending.operation,
-                    sign=pending.sign,
-                    prefix_steps=pending.prefix_steps,
-                    suffix_steps=pending.suffix_steps,
+            if pending is None:
+                return ReplyDecision(
+                    'invalid_clarification', _reply_text('invalid_clarification')
                 )
-            if pending is None or not self._store_pending(pending):
+            sibling_rejection = self._validate_pending_siblings(pending, token)
+            if sibling_rejection is not None:
+                return ReplyDecision(
+                    sibling_rejection.reason,
+                    _reply_text(sibling_rejection.reason),
+                )
+            pending = _PendingIntent(
+                session_id=envelope.session_id,
+                parameter=pending.parameter,
+                operation=pending.operation,
+                sign=pending.sign,
+                prefix_steps=pending.prefix_steps,
+                suffix_steps=pending.suffix_steps,
+            )
+            if not self._store_pending(pending):
                 return ReplyDecision(
                     'clarification_capacity_exhausted',
                     _reply_text('clarification_capacity_exhausted'),
@@ -745,6 +754,21 @@ class AgentCore:
             )
         assert validation.mission is not None
         return MissionDecision(validation.mission)
+
+    def _validate_pending_siblings(
+        self, pending: _PendingIntent, token: PlanningToken
+    ) -> Optional[ValidationRejection]:
+        sibling_steps = pending.prefix_steps + pending.suffix_steps
+        if not sibling_steps:
+            return None
+        validation_steps = sibling_steps + (sibling_steps[0],)
+        validation = self._validator.validate(
+            MissionProposal(validation_steps, token), token
+        )
+        if validation.accepted:
+            return None
+        assert validation.rejection is not None
+        return validation.rejection
 
     def _read_envelope(self, turn: object) -> Optional[_Envelope]:
         try:
