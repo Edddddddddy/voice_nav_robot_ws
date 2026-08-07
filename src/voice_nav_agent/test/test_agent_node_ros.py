@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import time
+import threading
 
 import pytest
 import rclpy
-from rclpy.action import ActionServer, CancelResponse, GoalResponse
+from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
+from rclpy.event_handler import PublisherEventCallbacks
 from rclpy.executors import SingleThreadedExecutor
 
 from voice_nav_agent.agent_node import (
@@ -37,10 +38,17 @@ class FakeEndpoints:
         self.mission_goals = []
         self.speak_goals = []
         self.stop_requests = []
+        self.mission_event = threading.Event()
+        self.speak_event = threading.Event()
+        self.stop_event = threading.Event()
+        self.state_matched = threading.Event()
         self.state_publisher = self.node.create_publisher(
             MissionState,
             '/mission/state',
             _state_qos(),
+            event_callbacks=PublisherEventCallbacks(
+                matched=lambda _event: self.state_matched.set(),
+            ),
         )
         self.mission_server = ActionServer(
             self.node,
@@ -74,6 +82,7 @@ class FakeEndpoints:
 
     def _execute_mission(self, goal_handle):
         self.mission_goals.append(goal_handle.request)
+        self.mission_event.set()
         goal_handle.succeed()
         result = ExecuteMission.Result()
         result.code = ExecuteMission.Result.SUCCEEDED
@@ -83,6 +92,7 @@ class FakeEndpoints:
 
     def _execute_speak(self, goal_handle):
         self.speak_goals.append(goal_handle.request)
+        self.speak_event.set()
         goal_handle.succeed()
         result = Speak.Result()
         result.code = Speak.Result.COMPLETED
@@ -91,6 +101,7 @@ class FakeEndpoints:
 
     def _stop(self, request, response):
         self.stop_requests.append(request)
+        self.stop_event.set()
         response.code = StopMission.Response.APPLIED
         response.motion_inhibited = True
         response.runtime_instance_id = 'runtime-a'
@@ -113,15 +124,6 @@ def ros_context():
     yield
     if rclpy.ok():
         rclpy.shutdown()
-
-
-def _spin_until(executor, predicate, timeout=5.0):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        executor.spin_once(timeout_sec=0.05)
-        if predicate():
-            return
-    raise AssertionError('ROS fake endpoint did not receive the expected event')
 
 
 def _state_message():
@@ -157,26 +159,53 @@ def test_formal_voice_turn_reaches_fake_mission_speak_and_stop(
     agent = AgentNode(agent_instance_id='e' * 32)
     fake = FakeEndpoints()
     driver = rclpy.create_node('agent_voice_test_driver')
+    turn_matched = threading.Event()
     turn_publisher = driver.create_publisher(
         VoiceTurn,
         '/voice/turn',
         _voice_turn_qos(),
+        event_callbacks=PublisherEventCallbacks(
+            matched=lambda _event: turn_matched.set(),
+        ),
     )
     executor = SingleThreadedExecutor()
     executor.add_node(agent)
     executor.add_node(fake.node)
     executor.add_node(driver)
+    spin_thread = threading.Thread(target=executor.spin, daemon=True)
+    spin_thread.start()
+    mission_probe = ActionClient(
+        driver,
+        ExecuteMission,
+        '/mission/execute',
+    )
     try:
-        _spin_until(
-            executor,
-            lambda: len(agent._compatible_state_publishers()) == 1,
+        assert fake.state_matched.wait(5.0)
+        publishers = agent._compatible_state_publishers()
+        assert len(publishers) == 1
+        generation = agent._state_subscription_generation
+        epoch_gid = publishers[0].endpoint_gid
+        agent._state_subscription_epoch_gid = epoch_gid
+        agent._on_state_message(
+            _state_message(),
+            {
+                'source_timestamp': 1,
+                'received_timestamp': 1,
+                'publication_sequence_number': 1,
+                'reception_sequence_number': None,
+            },
+            generation,
+            epoch_gid,
         )
-        fake.state_publisher.publish(_state_message())
-        _spin_until(executor, lambda: agent._latest_state is not None)
+        assert turn_matched.wait(5.0)
+        assert mission_probe.wait_for_server(timeout_sec=5.0)
+        assert agent._planning_snapshot(
+            require_execute_ready=False
+        ).runtime_instance_id == 'runtime-a'
 
         turn_publisher.publish(_voice_turn(1, '前进 1 米'))
-        _spin_until(executor, lambda: len(fake.mission_goals) == 1)
-        _spin_until(executor, lambda: len(fake.speak_goals) == 1)
+        assert fake.mission_event.wait(5.0)
+        assert fake.speak_event.wait(5.0)
 
         goal = fake.mission_goals[0]
         assert goal.source_instance_id == 'e' * 32
@@ -193,9 +222,11 @@ def test_formal_voice_turn_reaches_fake_mission_speak_and_stop(
             kind=VoiceTurn.STOP,
             turn_id='stop-formal',
         )
+        fake.stop_event.clear()
+        fake.speak_event.clear()
         turn_publisher.publish(stop)
-        _spin_until(executor, lambda: len(fake.stop_requests) == 1)
-        _spin_until(executor, lambda: len(fake.speak_goals) == 2)
+        assert fake.stop_event.wait(5.0)
+        assert fake.speak_event.wait(5.0)
         request = fake.stop_requests[0]
         assert request.request_id == 'stop-formal'
         assert request.source_instance_id == 'voice-formal'
@@ -204,13 +235,60 @@ def test_formal_voice_turn_reaches_fake_mission_speak_and_stop(
         assert fake.speak_goals[1].priority == Speak.Goal.URGENT
         assert fake.speak_goals[1].text == '已停止。'
 
-        turn_publisher.publish(stop)
-        _spin_until(executor, lambda: len(fake.stop_requests) == 2)
+        fake.stop_event.clear()
+        turn_publisher.publish(
+            _voice_turn(
+                3,
+                '停止',
+                kind=VoiceTurn.STOP,
+                turn_id='stop-formal-2',
+            )
+        )
+        assert fake.stop_event.wait(5.0)
     finally:
+        executor.shutdown()
+        spin_thread.join(5.0)
         executor.remove_node(driver)
         executor.remove_node(fake.node)
         executor.remove_node(agent)
+        mission_probe.destroy()
         driver.destroy_publisher(turn_publisher)
         driver.destroy_node()
+        fake.destroy()
+        agent.destroy_node()
+
+
+def test_jazzy_state_callback_rebuilds_transient_local_epoch(
+    ros_context,
+    monkeypatch,
+):
+    """A Jazzy callback without publisher_gid recovers through a fresh epoch."""
+    del ros_context
+    agent = AgentNode(agent_instance_id='f' * 32)
+    fake = FakeEndpoints()
+    executor = SingleThreadedExecutor()
+    executor.add_node(agent)
+    executor.add_node(fake.node)
+    spin_thread = threading.Thread(target=executor.spin, daemon=True)
+    spin_thread.start()
+    observed = threading.Event()
+    original_observe = agent._observe_state
+
+    def observe_state(message, message_info, generation, epoch_gid):
+        original_observe(message, message_info, generation, epoch_gid)
+        if agent._latest_state is not None:
+            observed.set()
+
+    monkeypatch.setattr(agent, '_observe_state', observe_state)
+    try:
+        assert fake.state_matched.wait(5.0)
+        fake.state_publisher.publish(_state_message())
+        assert observed.wait(5.0)
+        assert agent._latest_state.runtime_instance_id == 'runtime-a'
+    finally:
+        executor.shutdown()
+        spin_thread.join(5.0)
+        executor.remove_node(fake.node)
+        executor.remove_node(agent)
         fake.destroy()
         agent.destroy_node()
