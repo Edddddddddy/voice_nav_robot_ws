@@ -210,6 +210,38 @@ if(BUILD_TESTING)
   )
 
   ament_add_gtest(
+    runtime_event_queue_test
+    test/runtime_event_queue_test.cpp
+  )
+  target_compile_features(runtime_event_queue_test PUBLIC cxx_std_17)
+  target_include_directories(
+    runtime_event_queue_test
+    PRIVATE include
+  )
+
+  ament_add_gtest(
+    relative_motion_ros_adapter_test
+    test/relative_motion_ros_adapter_test.cpp
+  )
+  target_compile_features(relative_motion_ros_adapter_test PUBLIC cxx_std_17)
+  target_include_directories(
+    relative_motion_ros_adapter_test
+    PRIVATE include
+  )
+  ament_target_dependencies(
+    relative_motion_ros_adapter_test
+    geometry_msgs
+    nav_msgs
+    rclcpp
+    rosgraph_msgs
+    sensor_msgs
+  )
+  target_link_libraries(
+    relative_motion_ros_adapter_test
+    relative_motion_ros_adapter
+  )
+
+  ament_add_gtest(
     relative_motion_controller_test
     test/relative_motion_controller_test.cpp
   )
