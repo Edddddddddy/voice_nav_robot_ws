@@ -747,82 +747,8 @@ private:
         "candidate writer was not visible before MotionGate OPEN");
     }
 
-    // A production component activation can take longer than Gate's 150 ms
-    // candidate freshness window.  The adapter opts into a zero-only
-    // pre-OPEN phase: the Gate remains PREPARED and inhibited while the
-    // already-configured components and raw producer publish zero samples.
-    // The normal #35 path remains unchanged for deterministic producers.
     bool producer_started = false;
     std::unique_lock<std::mutex> producer_lock;
-    if (config_.preopen_zero_generation) {
-      const bool collision_activated = change_state(
-          kCollisionMonitorFqn,
-          lifecycle_msgs::msg::Transition::TRANSITION_ACTIVATE,
-          handover_deadline);
-      if (!collision_activated) {
-        return abort_activation(
-          generation,
-          MotionConditioningFailure::SafetyFault,
-          "Collision Monitor activation RPC failed before MotionGate OPEN");
-      }
-      if (!activation_token_current(generation)) {
-        return abort_activation(
-          generation,
-          MotionConditioningFailure::SafetyFault,
-          "activation generation changed after Collision Monitor activation");
-      }
-      if (std::chrono::steady_clock::now() >= handover_deadline) {
-        return abort_activation(
-          generation,
-          MotionConditioningFailure::SafetyFault,
-          "PREPARE to OPEN deadline expired after Collision Monitor activation");
-      }
-      const bool smoother_activated = change_state(
-          kVelocitySmootherFqn,
-          lifecycle_msgs::msg::Transition::TRANSITION_ACTIVATE,
-          handover_deadline);
-      if (!smoother_activated) {
-        return abort_activation(
-          generation,
-          MotionConditioningFailure::SafetyFault,
-          "Velocity Smoother activation RPC failed before MotionGate OPEN");
-      }
-      if (!activation_token_current(generation)) {
-        return abort_activation(
-          generation,
-          MotionConditioningFailure::SafetyFault,
-          "activation generation changed after Velocity Smoother activation");
-      }
-      if (std::chrono::steady_clock::now() >= handover_deadline) {
-        return abort_activation(
-          generation,
-          MotionConditioningFailure::SafetyFault,
-          "PREPARE to OPEN deadline expired after Velocity Smoother activation");
-      }
-      producer_lock = std::unique_lock<std::mutex>(producer_mutex_);
-      try {
-        producer_started = producer_ && producer_->start(config_.raw_topic);
-      } catch (const std::exception & error) {
-        producer_lock.unlock();
-        return abort_activation(
-          generation,
-          MotionConditioningFailure::InternalError,
-          std::string{"conditioning producer raised: "} + error.what());
-      } catch (...) {
-        producer_lock.unlock();
-        return abort_activation(
-          generation,
-          MotionConditioningFailure::InternalError,
-          "conditioning producer raised an unknown exception");
-      }
-      producer_lock.unlock();
-      if (!producer_started) {
-        return abort_activation(
-          generation,
-          MotionConditioningFailure::InternalError,
-          "conditioning producer could not start");
-      }
-    }
     try {
       std::lock_guard<std::mutex> authority_lock(authority_call_mutex_);
       gate_open = authority_->open(open_operation);
@@ -906,31 +832,29 @@ private:
         MotionConditioningFailure::SafetyFault,
         activation_failure_detail());
     }
-    if (!config_.preopen_zero_generation) {
-      if (!change_state(
-          kCollisionMonitorFqn,
-          lifecycle_msgs::msg::Transition::TRANSITION_ACTIVATE,
-          handover_deadline) ||
-        !activation_token_current(generation) ||
-        std::chrono::steady_clock::now() >= handover_deadline)
-      {
-        return abort_activation(
-          generation,
-          MotionConditioningFailure::SafetyFault,
-          "Nav2 component activation failed");
-      }
-      if (!change_state(
-          kVelocitySmootherFqn,
-          lifecycle_msgs::msg::Transition::TRANSITION_ACTIVATE,
-          handover_deadline) ||
-        !activation_token_current(generation) ||
-        std::chrono::steady_clock::now() >= handover_deadline)
-      {
-        return abort_activation(
-          generation,
-          MotionConditioningFailure::SafetyFault,
-          "Nav2 component activation failed");
-      }
+    if (!change_state(
+        kCollisionMonitorFqn,
+        lifecycle_msgs::msg::Transition::TRANSITION_ACTIVATE,
+        handover_deadline) ||
+      !activation_token_current(generation) ||
+      std::chrono::steady_clock::now() >= handover_deadline)
+    {
+      return abort_activation(
+        generation,
+        MotionConditioningFailure::SafetyFault,
+        "Collision Monitor activation failed after MotionGate OPEN");
+    }
+    if (!change_state(
+        kVelocitySmootherFqn,
+        lifecycle_msgs::msg::Transition::TRANSITION_ACTIVATE,
+        handover_deadline) ||
+      !activation_token_current(generation) ||
+      std::chrono::steady_clock::now() >= handover_deadline)
+    {
+      return abort_activation(
+        generation,
+        MotionConditioningFailure::SafetyFault,
+        "Velocity Smoother activation failed after MotionGate OPEN");
     }
     const auto second_renew_ok = renew_for_activation(
       generation, expected_lease, open_operation.gate_instance_id);
@@ -1494,32 +1418,40 @@ private:
   [[nodiscard]] MotionConditioningResult stop_owned()
   {
     disable_renew_callbacks();
-    wait_for_renew_callbacks();
     bool zero_proven = false;
     std::chrono::steady_clock::time_point zero_proven_at{};
+    // Invalidation in begin_teardown() is the cancellation fence.  Prove
+    // Gate zero before waiting for callbacks or an in-flight component RPC so
+    // a concurrent STOP/Cancel cannot leave the producer commanded while a
+    // 2s/4s start operation drains.
+    zero_proven = inhibit_gate();
+    if (zero_proven) {
+      zero_proven_at = std::chrono::steady_clock::now();
+    }
+    wait_for_renew_callbacks();
     if (destroying_.load()) {
-      zero_proven = inhibit_gate();
-      if (zero_proven) {
-        zero_proven_at = std::chrono::steady_clock::now();
-      }
       drain_start_operations();
     }
     if (!destroying_.load() && !wait_for_start_operations()) {
       cleanup_blocked_ = true;
-      if (inhibit_gate()) {
+      if (!zero_proven && inhibit_gate()) {
+        zero_proven = true;
         zero_proven_at = std::chrono::steady_clock::now();
       }
       std::lock_guard<std::recursive_mutex> lock(mutex_);
       state_ = MotionConditioningState::Failed;
-      return remember(make_result(
+      auto result = make_result(
           state_, MotionConditioningFailure::SafetyFault, false, false,
           collision_stop_, lease_id_, candidate_topic_,
-          "active start operation did not drain before teardown deadline"));
+          "active start operation did not drain before teardown deadline");
+      result.zero_proven = zero_proven;
+      result.zero_proven_at = zero_proven_at;
+      return remember(std::move(result));
     }
     const bool producer_stopped = safe_producer_stop();
     bool components_clean = false;
     try {
-      if (!destroying_.load()) {
+      if (!destroying_.load() && !zero_proven) {
         zero_proven = inhibit_gate();
         if (zero_proven) {
           zero_proven_at = std::chrono::steady_clock::now();

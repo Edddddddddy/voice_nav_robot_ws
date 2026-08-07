@@ -15,6 +15,7 @@
 #include "voice_nav_mission/relative_motion_ros_adapter.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
@@ -24,6 +25,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 
 #include <geometry_msgs/msg/twist_stamped.hpp>
@@ -263,16 +265,22 @@ public:
       rclcpp::ClockQoS(),
       [this](const Clock::ConstSharedPtr message) {on_clock(message);},
       options);
+    transaction_thread_ = std::thread([this]() {transaction_loop();});
   }
 
   ~Impl()
   {
-    try {
-      if (conditioning_) {
-        (void)conditioning_->stop();
-      }
-    } catch (...) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      shutting_down_ = true;
+      cancel_requested_.store(true);
+      transaction_stop_ = true;
     }
+    transaction_condition_.notify_all();
+    if (transaction_thread_.joinable()) {
+      transaction_thread_.join();
+    }
+    join_emergency_thread();
     clock_subscription_.reset();
     scan_subscription_.reset();
     odom_subscription_.reset();
@@ -303,10 +311,11 @@ public:
     FeedbackCallback feedback,
     ResultCallback result)
   {
+    join_emergency_thread();
     ResultCallback rejected_result;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (active_) {
+      if (active_ || transaction_kind_ != TransactionKind::Idle) {
         rejected_result = std::move(result);
       } else {
         active_ = true;
@@ -319,7 +328,12 @@ public:
         conditioning_token_ = {};
         command_ = {};
         zero_proven_ = false;
+        teardown_complete_ = false;
+        teardown_safe_ = false;
         stationarity_waiting_ = false;
+        pending_teardown_.reset();
+        cancel_requested_.store(false);
+        transaction_kind_ = TransactionKind::Start;
       }
     }
     if (rejected_result) {
@@ -330,99 +344,89 @@ public:
       return;
     }
 
-    MotionConditioningResult prepared;
-    try {
-      prepared = conditioning_->prepare();
-    } catch (...) {
-      finish_start_failure(
-        token,
-        MotionConditioningResult{
-          false, MotionConditioningState::Failed,
-          MotionConditioningFailure::InternalError, false, false, {}, {},
-          "conditioning PREPARE raised"});
-      return;
-    }
-    if (!prepared.ok || prepared.state != MotionConditioningState::Prepared) {
-      finish_start_failure(token, prepared);
-      return;
-    }
-
-    MotionConditioningResult started;
-    try {
-      started = conditioning_->start();
-    } catch (...) {
-      finish_start_failure(
-        token,
-        MotionConditioningResult{
-          false, MotionConditioningState::Failed,
-          MotionConditioningFailure::InternalError, false, false, {}, {},
-          "conditioning OPEN raised"});
-      return;
-    }
-    if (!started.ok || started.state != MotionConditioningState::Running) {
-      finish_start_failure(token, started);
-      return;
-    }
-
-    const auto conditioning_token = conditioning_->correlation_token();
-    DeliveryPlan plan;
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (!active_ || !same_token(active_token_, token)) {
-        return;
-      }
-      conditioning_token_ = conditioning_token;
-      const auto now = std::chrono::steady_clock::now();
-      auto event = controller_.start(token, step, now);
-      if (latest_odom_.has_value() && odom_seen_ &&
-        now - last_odom_at_ <= policy_.dependency_liveness_timeout)
-      {
-        event = controller_.observe_odom(*latest_odom_, now);
-      }
-      starting_ = false;
-      command_ = event.command;
-      plan_from_event_locked(event, now, plan);
-      condition_variable_.notify_all();
-    }
-    dispatch(plan);
+    transaction_condition_.notify_one();
   }
 
   [[nodiscard]] bool cancel(const MotionToken & token, const TimePoint deadline)
   {
-    TeardownRequest request;
-    bool execute = false;
+    std::optional<TeardownRequest> emergency_request;
     {
-      std::unique_lock<std::mutex> lock(mutex_);
+      std::lock_guard<std::mutex> lock(mutex_);
       if (!active_) {
-        lock.unlock();
-        return stop_without_active_mission();
-      }
-      if (!same_token(active_token_, token)) {
+        if (transaction_kind_ == TransactionKind::Idle &&
+          !emergency_stop_in_progress_)
+        {
+          zero_proven_ = false;
+          teardown_complete_ = false;
+          teardown_safe_ = false;
+          cancel_requested_.store(true);
+          pending_teardown_ = TeardownRequest{
+            TeardownKind::Cancel,
+            ChildResultCode::Failed,
+            MotionConditioningFailure::None,
+            "relative-motion cleanup requested",
+            token,
+            deadline,
+            false};
+          transaction_kind_ = TransactionKind::Teardown;
+        }
+      } else if (!same_token(active_token_, token)) {
         return true;
+      } else {
+        cancel_requested_.store(true);
+        if (!teardown_started_) {
+          const auto now = std::chrono::steady_clock::now();
+          if (!starting_) {
+            const auto event = controller_.request_safe_stop(
+              RelativeMotionStopIntent::Cancel, now);
+            command_ = event.command;
+          } else {
+            command_ = {};
+          }
+          teardown_started_ = true;
+          teardown_complete_ = false;
+          teardown_safe_ = false;
+          pending_teardown_ = TeardownRequest{
+            TeardownKind::Cancel,
+            ChildResultCode::Failed,
+            MotionConditioningFailure::None,
+            "relative-motion cancellation requested",
+            active_token_,
+            deadline,
+            false};
+          if (starting_ && !emergency_stop_in_progress_) {
+            emergency_request = *pending_teardown_;
+            pending_teardown_.reset();
+            emergency_stop_in_progress_ = true;
+          }
+        } else if (pending_teardown_.has_value()) {
+          pending_teardown_->kind = TeardownKind::Cancel;
+          pending_teardown_->child_code = ChildResultCode::Failed;
+          pending_teardown_->conditioning_failure = MotionConditioningFailure::None;
+          pending_teardown_->detail = "relative-motion cancellation requested";
+          pending_teardown_->deadline = deadline;
+          pending_teardown_->deliver_result = false;
+        }
+        if (transaction_kind_ != TransactionKind::Start) {
+          transaction_kind_ = TransactionKind::Teardown;
+        }
+        if (starting_ && !emergency_stop_in_progress_ &&
+          pending_teardown_.has_value())
+        {
+          emergency_request = *pending_teardown_;
+          pending_teardown_.reset();
+          emergency_stop_in_progress_ = true;
+        }
       }
-      if (teardown_started_) {
-        condition_variable_.wait_until(lock, deadline, [this]() {return !active_;});
-        return !active_ && zero_proven_;
-      }
-      const auto now = std::chrono::steady_clock::now();
-      const auto event = controller_.request_safe_stop(
-        RelativeMotionStopIntent::Cancel, now);
-      command_ = event.command;
-      teardown_started_ = true;
-      request = TeardownRequest{
-        TeardownKind::Cancel,
-        ChildResultCode::Failed,
-        MotionConditioningFailure::None,
-        "relative-motion cancellation requested",
-        active_token_,
-        deadline};
-      execute = true;
-      condition_variable_.notify_all();
     }
-    if (!execute) {
-      return false;
+    if (emergency_request.has_value()) {
+      launch_emergency_teardown(std::move(*emergency_request));
     }
-    return run_teardown(request, false);
+    transaction_condition_.notify_one();
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_variable_.wait_until(
+      lock, deadline, [this]() {return !active_ && teardown_complete_;}) &&
+           teardown_safe_;
   }
 
   void tick(const TimePoint now)
@@ -461,10 +465,11 @@ public:
         TeardownKind::Failure,
         child_code_for_conditioning(conditioning_result.failure),
         conditioning_result.failure,
-        conditioning_result.detail.empty() ?
-        "Motion conditioning failed" : conditioning_result.detail,
-        active_token_,
-        now_again + policy_.stationarity_deadline};
+          conditioning_result.detail.empty() ?
+          "Motion conditioning failed" : conditioning_result.detail,
+          active_token_,
+          now_again + policy_.stationarity_deadline,
+          true};
       condition_variable_.notify_all();
     }
     dispatch(failure_plan);
@@ -484,6 +489,13 @@ private:
     Cancel = 2,
   };
 
+  enum class TransactionKind : std::uint8_t
+  {
+    Idle = 0,
+    Start = 1,
+    Teardown = 2,
+  };
+
   struct TeardownRequest
   {
     TeardownKind kind{TeardownKind::Failure};
@@ -493,6 +505,7 @@ private:
     std::string detail;
     MotionToken token{};
     TimePoint deadline{};
+    bool deliver_result{true};
   };
 
   struct DeliveryPlan
@@ -508,6 +521,217 @@ private:
   {
     std::lock_guard<std::mutex> lock(mutex_);
     return command_;
+  }
+
+  void join_emergency_thread()
+  {
+    std::thread thread;
+    {
+      std::lock_guard<std::mutex> lock(emergency_thread_mutex_);
+      if (emergency_teardown_thread_.joinable()) {
+        thread = std::move(emergency_teardown_thread_);
+      }
+    }
+    if (thread.joinable()) {
+      thread.join();
+    }
+  }
+
+  void launch_emergency_teardown(TeardownRequest request)
+  {
+    const auto fallback_request = request;
+    try {
+      std::lock_guard<std::mutex> lock(emergency_thread_mutex_);
+      if (emergency_teardown_thread_.joinable()) {
+        throw std::logic_error("previous emergency teardown thread was not joined");
+      }
+      emergency_teardown_thread_ = std::thread(
+        [this, request = std::move(request)]() mutable {
+          try {
+            (void)run_teardown(request);
+          } catch (...) {
+            fail_transaction("emergency relative-motion teardown raised");
+          }
+          {
+            std::lock_guard<std::mutex> lock(mutex_);
+            emergency_stop_in_progress_ = false;
+            condition_variable_.notify_all();
+          }
+        });
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      emergency_stop_in_progress_ = false;
+      // Preserve the request if thread creation itself fails.  The fallback
+      // remains on the serial transaction worker and still fails closed.
+      pending_teardown_ = fallback_request;
+      transaction_kind_ = TransactionKind::Teardown;
+      transaction_condition_.notify_one();
+    }
+  }
+
+  void transaction_loop()
+  {
+    for (;;) {
+      TransactionKind kind = TransactionKind::Idle;
+      std::optional<TeardownRequest> teardown;
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        transaction_condition_.wait(lock, [this]() {
+            return transaction_stop_ || transaction_kind_ != TransactionKind::Idle;
+          });
+        if (transaction_stop_) {
+          return;
+        }
+        kind = transaction_kind_;
+        transaction_kind_ = TransactionKind::Idle;
+        if (kind == TransactionKind::Teardown) {
+          teardown = std::move(pending_teardown_);
+          pending_teardown_.reset();
+        }
+      }
+
+      try {
+        if (kind == TransactionKind::Start) {
+          run_start_transaction();
+        } else if (kind == TransactionKind::Teardown && teardown.has_value()) {
+          (void)run_teardown(*teardown);
+        }
+      } catch (const std::exception & error) {
+        fail_transaction(
+          std::string{"relative-motion transaction raised: "} + error.what());
+      } catch (...) {
+        fail_transaction("relative-motion transaction raised an unknown exception");
+      }
+    }
+  }
+
+  void fail_transaction(std::string detail)
+  {
+    TeardownRequest request;
+    bool schedule = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (shutting_down_) {
+        return;
+      }
+      if (active_ && !teardown_started_) {
+        cancel_requested_.store(true);
+        teardown_started_ = true;
+        command_ = {};
+        request = TeardownRequest{
+          TeardownKind::Failure,
+          ChildResultCode::SafetyFault,
+          MotionConditioningFailure::SafetyFault,
+          std::move(detail),
+          active_token_,
+          std::chrono::steady_clock::now() + policy_.stationarity_deadline,
+          true};
+        pending_teardown_ = request;
+        transaction_kind_ = TransactionKind::Teardown;
+        schedule = true;
+      } else if (!active_ && transaction_kind_ == TransactionKind::Idle) {
+        zero_proven_ = false;
+        teardown_complete_ = false;
+        teardown_safe_ = false;
+        cancel_requested_.store(true);
+        request = TeardownRequest{
+          TeardownKind::Failure,
+          ChildResultCode::SafetyFault,
+          MotionConditioningFailure::SafetyFault,
+          std::move(detail),
+          {},
+          std::chrono::steady_clock::now() + policy_.stationarity_deadline,
+          false};
+        pending_teardown_ = request;
+        transaction_kind_ = TransactionKind::Teardown;
+        schedule = true;
+      }
+    }
+    if (schedule) {
+      transaction_condition_.notify_one();
+    }
+  }
+
+  [[nodiscard]] bool start_is_current(const MotionToken & token) const
+  {
+    return active_ && starting_ && same_token(active_token_, token) &&
+           !cancel_requested_.load() && !shutting_down_;
+  }
+
+  void run_start_transaction()
+  {
+    MotionToken token;
+    MissionStep step;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!active_ || !starting_ || cancel_requested_.load() || shutting_down_) {
+        return;
+      }
+      token = active_token_;
+      step = active_step_;
+    }
+
+    MotionConditioningResult prepared;
+    try {
+      prepared = conditioning_->prepare();
+    } catch (...) {
+      prepared = MotionConditioningResult{
+        false, MotionConditioningState::Failed,
+        MotionConditioningFailure::InternalError, false, false, {}, {},
+        "conditioning PREPARE raised"};
+    }
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!start_is_current(token)) {
+        return;
+      }
+    }
+    if (!prepared.ok || prepared.state != MotionConditioningState::Prepared) {
+      finish_start_failure(token, prepared);
+      return;
+    }
+
+    MotionConditioningResult started;
+    try {
+      started = conditioning_->start();
+    } catch (...) {
+      started = MotionConditioningResult{
+        false, MotionConditioningState::Failed,
+        MotionConditioningFailure::InternalError, false, false, {}, {},
+        "conditioning OPEN raised"};
+    }
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!start_is_current(token)) {
+        return;
+      }
+    }
+    if (!started.ok || started.state != MotionConditioningState::Running) {
+      finish_start_failure(token, started);
+      return;
+    }
+
+    const auto conditioning_token = conditioning_->correlation_token();
+    DeliveryPlan plan;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!start_is_current(token)) {
+        return;
+      }
+      conditioning_token_ = conditioning_token;
+      const auto now = std::chrono::steady_clock::now();
+      auto event = controller_.start(token, step, now);
+      if (latest_odom_.has_value() && odom_seen_ &&
+        now - last_odom_at_ <= policy_.dependency_liveness_timeout)
+      {
+        event = controller_.observe_odom(*latest_odom_, last_odom_at_);
+      }
+      starting_ = false;
+      command_ = event.command;
+      plan_from_event_locked(event, now, plan);
+      condition_variable_.notify_all();
+    }
+    dispatch(plan);
   }
 
   [[nodiscard]] bool dependencies_fresh_locked(const TimePoint now) const
@@ -630,10 +854,20 @@ private:
   void dispatch(const DeliveryPlan & plan)
   {
     if (plan.feedback && plan.feedback_callback) {
-      plan.feedback_callback(plan.feedback_token, plan.progress);
+      try {
+        plan.feedback_callback(plan.feedback_token, plan.progress);
+      } catch (...) {
+        fail_transaction("relative-motion feedback delivery raised");
+      }
     }
     if (plan.teardown.has_value()) {
-      (void)run_teardown(*plan.teardown, true);
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (pending_teardown_.has_value() && teardown_started_) {
+        return;
+      }
+      pending_teardown_ = *plan.teardown;
+      transaction_kind_ = TransactionKind::Teardown;
+      transaction_condition_.notify_one();
     }
   }
 
@@ -650,7 +884,9 @@ private:
     ResultCallback result_callback;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (!active_ || !same_token(active_token_, token)) {
+      if (!active_ || !same_token(active_token_, token) ||
+        cancel_requested_.load() || shutting_down_)
+      {
         return;
       }
       active_ = false;
@@ -658,6 +894,9 @@ private:
       teardown_started_ = false;
       command_ = {};
       zero_proven_ = conditioning_result.zero_proven;
+      teardown_complete_ = true;
+      teardown_safe_ = conditioning_result.zero_proven &&
+        conditioning_result.failure != MotionConditioningFailure::SafetyFault;
       result_callback = std::move(result_callback_);
       condition_variable_.notify_all();
     }
@@ -668,17 +907,22 @@ private:
         static_cast<unsigned int>(conditioning_result.failure),
         conditioning_result.zero_proven ? 1 : 0,
         conditioning_result.detail.c_str());
-      result_callback(
-        token,
-        ChildResult{
-          code,
-          conditioning_result.detail.empty() ?
-          "conditioning generation could not start" : conditioning_result.detail});
+      try {
+        result_callback(
+          token,
+          ChildResult{
+            code,
+            conditioning_result.detail.empty() ?
+            "conditioning generation could not start" : conditioning_result.detail});
+      } catch (...) {
+        fail_transaction("relative-motion start result delivery raised");
+      }
     }
   }
 
   [[nodiscard]] bool wait_for_stationarity(
     const MotionToken & token,
+    const TimePoint zero_proven_at,
     const TimePoint deadline)
   {
     std::unique_lock<std::mutex> lock(mutex_);
@@ -687,13 +931,10 @@ private:
       if (now >= deadline) {
         return false;
       }
-      if (last_odom_at_ == TimePoint{} ||
+      if (last_odom_at_ == TimePoint{} || last_odom_at_ < zero_proven_at ||
         now - last_odom_at_ > policy_.dependency_liveness_timeout)
       {
-        const auto freshness_deadline = std::min(
-          deadline,
-          now + policy_.dependency_liveness_timeout);
-        condition_variable_.wait_until(lock, freshness_deadline);
+        condition_variable_.wait_until(lock, deadline);
         continue;
       }
       const auto event = controller_.tick(now);
@@ -710,25 +951,8 @@ private:
     return false;
   }
 
-  [[nodiscard]] bool stop_without_active_mission()
-  {
-    MotionConditioningResult result;
-    try {
-      result = conditioning_->stop();
-    } catch (...) {
-      return false;
-    }
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      zero_proven_ = result.zero_proven;
-      condition_variable_.notify_all();
-    }
-    return result.zero_proven && result.failure != MotionConditioningFailure::SafetyFault;
-  }
-
   [[nodiscard]] bool run_teardown(
-    const TeardownRequest & request,
-    const bool deliver_result)
+    const TeardownRequest & request)
   {
     MotionConditioningResult conditioning_result;
     try {
@@ -749,67 +973,89 @@ private:
         "conditioning teardown raised"};
     }
 
-    const bool zero = conditioning_result.zero_proven;
+    const auto zero_proven_at = conditioning_result.zero_proven_at;
+    const bool zero = conditioning_result.zero_proven &&
+      zero_proven_at != TimePoint{};
     bool stationary = false;
-    if (zero) {
+    bool mission_active = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      mission_active = active_ && same_token(active_token_, request.token) &&
+        controller_.active();
+    }
+    stationary = !mission_active;
+    if (zero && mission_active) {
       RelativeMotionEvent confirmation;
-      const auto zero_proven_at = conditioning_result.zero_proven_at == TimePoint{} ?
-      std::chrono::steady_clock::now() : conditioning_result.zero_proven_at;
-      const auto stationarity_started_at = std::chrono::steady_clock::now();
       {
         std::lock_guard<std::mutex> lock(mutex_);
         stationarity_waiting_ = true;
-        confirmation = controller_.confirm_gate_zero(
-          zero_proven_at, stationarity_started_at);
+        confirmation = controller_.confirm_gate_zero(zero_proven_at);
         if (
           confirmation.kind != RelativeMotionEventKind::Failed &&
           latest_odom_.has_value() && last_odom_at_ != TimePoint{} &&
-          stationarity_started_at - last_odom_at_ <=
+          last_odom_at_ >= zero_proven_at &&
+          std::chrono::steady_clock::now() - last_odom_at_ <=
           policy_.dependency_liveness_timeout)
         {
           confirmation = controller_.observe_odom(
-            *latest_odom_, stationarity_started_at);
+            *latest_odom_, last_odom_at_);
         }
         command_ = {};
         condition_variable_.notify_all();
       }
       if (confirmation.kind != RelativeMotionEventKind::Failed) {
-        const auto stationarity_deadline = std::max(
-          request.deadline,
-          stationarity_started_at + policy_.stationarity_deadline);
+        const auto stationarity_deadline =
+          zero_proven_at + policy_.stationarity_deadline;
         stationary = wait_for_stationarity(
-          request.token, stationarity_deadline);
+          request.token, zero_proven_at, stationarity_deadline);
       }
     }
 
     ChildResultCode final_code = request.child_code;
-    if (!zero || !stationary ||
+    if (!zero || (mission_active && !stationary) ||
       conditioning_result.failure == MotionConditioningFailure::SafetyFault)
     {
       final_code = ChildResultCode::SafetyFault;
     }
-    const auto final_detail = !stationary ?
+    const auto final_detail = !zero ?
+      std::string{"Gate zero proof did not include a valid steady timestamp"} :
+      ((mission_active && !stationary) ?
       std::string{"odometry did not prove stationarity after Gate zero"} :
-    (conditioning_result.detail.empty() ? request.detail : conditioning_result.detail);
+      (conditioning_result.detail.empty() ? request.detail : conditioning_result.detail));
 
     ResultCallback result_callback;
+    bool shutting_down = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       stationarity_waiting_ = false;
-      if (active_ && same_token(active_token_, request.token)) {
+      if (!active_ || same_token(active_token_, request.token)) {
         active_ = false;
         starting_ = false;
         teardown_started_ = false;
         command_ = {};
         zero_proven_ = zero;
-        result_callback = std::move(result_callback_);
+        teardown_complete_ = true;
+        teardown_safe_ = zero && stationary &&
+          conditioning_result.failure != MotionConditioningFailure::SafetyFault;
+        if (mission_active) {
+          result_callback = std::move(result_callback_);
+        } else {
+          result_callback_ = {};
+        }
+        shutting_down = shutting_down_;
         condition_variable_.notify_all();
       }
     }
-    if (deliver_result && result_callback) {
-      result_callback(request.token, ChildResult{final_code, final_detail});
+    if (request.deliver_result && result_callback && !shutting_down) {
+      try {
+        result_callback(request.token, ChildResult{final_code, final_detail});
+      } catch (...) {
+        RCLCPP_ERROR(
+          node_.get_logger(),
+          "Relative motion teardown result delivery raised");
+      }
     }
-    const bool safe = zero && stationary &&
+    const bool safe = zero && (!mission_active || stationary) &&
       conditioning_result.failure != MotionConditioningFailure::SafetyFault;
     if (!safe) {
       RCLCPP_ERROR(
@@ -838,10 +1084,22 @@ private:
 
   mutable std::mutex mutex_;
   std::condition_variable condition_variable_;
+  std::condition_variable transaction_condition_;
+  std::mutex emergency_thread_mutex_;
+  std::thread transaction_thread_;
+  std::thread emergency_teardown_thread_;
+  TransactionKind transaction_kind_{TransactionKind::Idle};
+  std::optional<TeardownRequest> pending_teardown_;
+  bool transaction_stop_{false};
+  bool shutting_down_{false};
+  bool emergency_stop_in_progress_{false};
+  std::atomic<bool> cancel_requested_{false};
   bool active_{false};
   bool starting_{false};
   bool teardown_started_{false};
   bool stationarity_waiting_{false};
+  bool teardown_complete_{true};
+  bool teardown_safe_{true};
   MotionToken active_token_{};
   MissionStep active_step_{};
   MotionConditioningCorrelationToken conditioning_token_{};
