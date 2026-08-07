@@ -395,9 +395,16 @@ above. Every Goal receives exactly one terminal result.
   raw ROS-time source-age limit is independently fixed at 300 ms; an old raw
   measurement remains fail-closed even when callbacks continue arriving.
   Original scan measurement stamps and frames are retained, Collision Monitor
-  consumes direct `/scan`, and the bridge / consumer use latest-only queues;
-  no relay restamps or masks sensor backlog. Headless raw-age and TF physical
-  acceptance is tracked by Issue #72.
+  consumes direct `/scan`, and the consumer uses `SENSOR_DATA` with
+  `KEEP_LAST(1)`; no conditioned-scan relay restamps or masks sensor backlog.
+  Headless raw-age and TF physical acceptance is tracked by Issue #72.
+- Runtime child callbacks are serialized through a Node-owned typed queue with
+  reserved control capacity and generation-tagged events. STOP/Cancel fences
+  the generation first, starts asynchronous teardown, and uses a serialized
+  state snapshot if the ROS service cannot enqueue or await its response.
+- Stationarity is measured only from odometry received at or after the actual
+  steady-clock Gate `zero_proven_at`; its deadline is absolute at
+  `zero_proven_at + 1200 ms`, with no cleanup-time extension.
 
 ## Failure behavior
 
@@ -419,11 +426,13 @@ above. Every Goal receives exactly one terminal result.
 
 ## Verification obligations
 
-- Current cumulative verification retains three executable layers: pure-Core
-  manual-clock GTest; a Fast-DDS-locked
-  Node launch test with neither Gazebo nor `/clock`; and a Fast-DDS-locked
-  headless Gazebo product launch test. Repository-static contract checks are a
-  prerequisite, not a substitute for any layer.
+- Current cumulative verification retains the pure-Core manual-clock GTest, the
+  deterministic conditioning/ROS-integration checks, a Fast-DDS-locked Node
+  launch test with neither Gazebo nor `/clock`, and the existing MotionGate /
+  perception headless product layer. Issue #64 does not claim a headless
+  physical RelativeMotion acceptance; raw-age and TF evidence belongs to
+  Issue #72. Repository-static contract checks are a prerequisite, not a
+  substitute for any layer.
 - Historical fixed-domain evidence is not current acceptance evidence. Current
   launch layers use the official
   `run_test_isolated.py` runner, clear inherited `ROS_DOMAIN_ID` and
@@ -457,5 +466,8 @@ above. Every Goal receives exactly one terminal result.
 - Unmanaged-pause tests prove that a missing or mismatched safe-pause token
   refuses in-place resume and selects the full-restart recovery path.
 - Odometry tests distinguish command-zero latency from physical stationarity.
+- RelativeMotion tests cover signed projection, yaw unwrap across `+/-pi`,
+  bounded command limits, progress monotonicity, stall/deadline edges, and
+  zero-proof stationarity fencing with a manual steady clock.
 - No test exits while either Gate or controller can retain an authorized
   non-zero command.

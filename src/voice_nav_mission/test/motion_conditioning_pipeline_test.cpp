@@ -1105,6 +1105,7 @@ TEST_F(MotionConditioningPipelineTest, StopAtActivationBarrierRejectsLateProduce
   graph->enable_activation_barrier();
   MotionConditioningPipeline pipeline(*client, authority, producer, config());
   ASSERT_TRUE(pipeline.prepare().ok);
+  authority->block_inhibit();
 
   std::optional<MotionConditioningResult> start_result;
   std::thread start_thread([&]() {start_result = pipeline.start();});
@@ -1116,8 +1117,10 @@ TEST_F(MotionConditioningPipelineTest, StopAtActivationBarrierRejectsLateProduce
       stopped = pipeline.stop();
       stop_completed.store(true);
     });
-  std::this_thread::sleep_for(20ms);
+  const auto inhibit_seen = authority->wait_for_inhibit();
+  EXPECT_TRUE(inhibit_seen);
   EXPECT_FALSE(stop_completed.load());
+  authority->release_blocked_inhibit();
   graph->release_activation();
   start_thread.join();
   stop_thread.join();

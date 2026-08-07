@@ -465,11 +465,11 @@ public:
         TeardownKind::Failure,
         child_code_for_conditioning(conditioning_result.failure),
         conditioning_result.failure,
-          conditioning_result.detail.empty() ?
-          "Motion conditioning failed" : conditioning_result.detail,
-          active_token_,
-          now_again + policy_.stationarity_deadline,
-          true};
+        conditioning_result.detail.empty() ?
+        "Motion conditioning failed" : conditioning_result.detail,
+        active_token_,
+        now_again + policy_.stationarity_deadline,
+        true};
       condition_variable_.notify_all();
     }
     dispatch(failure_plan);
@@ -571,7 +571,7 @@ private:
 
   void transaction_loop()
   {
-    for (;;) {
+    for (;; ) {
       TransactionKind kind = TransactionKind::Idle;
       std::optional<TeardownRequest> teardown;
       {
@@ -931,8 +931,8 @@ private:
       if (now >= deadline) {
         return false;
       }
-      if (last_odom_at_ == TimePoint{} || last_odom_at_ < zero_proven_at ||
-        now - last_odom_at_ > policy_.dependency_liveness_timeout)
+      if (last_odom_at_ == TimePoint{} || last_odom_at_<zero_proven_at ||
+        now - last_odom_at_> policy_.dependency_liveness_timeout)
       {
         condition_variable_.wait_until(lock, deadline);
         continue;
@@ -1019,9 +1019,9 @@ private:
     }
     const auto final_detail = !zero ?
       std::string{"Gate zero proof did not include a valid steady timestamp"} :
-      ((mission_active && !stationary) ?
-      std::string{"odometry did not prove stationarity after Gate zero"} :
-      (conditioning_result.detail.empty() ? request.detail : conditioning_result.detail));
+    ((mission_active && !stationary) ?
+    std::string{"odometry did not prove stationarity after Gate zero"} :
+    (conditioning_result.detail.empty() ? request.detail : conditioning_result.detail));
 
     ResultCallback result_callback;
     bool shutting_down = false;

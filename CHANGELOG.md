@@ -19,6 +19,15 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and generation-fencing tests, and Runtime integration without changing the
   public ROS IDL. The implementation reuses Issue #35 conditioning and keeps
   final velocity publication owned by MotionGate.
+- Added asynchronous RelativeMotion start/teardown fencing, Node-owned typed
+  Runtime event serialization with STOP/Cancel control priority, and a
+  serialized state snapshot for service deadline responses. STOP/Cancel proves
+  Gate inhibit/zero before waiting for an in-flight #35 start operation.
+- Added absolute stationarity evidence anchored at the steady-clock
+  `zero_proven_at`, with the exact `zero_proven_at + 1200 ms` deadline and no
+  cleanup-time extension. The #35 conditioning handover is restored to its
+  `2000 ms` component RPC / `4000 ms` PREPARE-to-OPEN policy and
+  `OPEN -> Collision Monitor -> Velocity Smoother -> producer` order.
 - Added the reviewed VN-0010 implementation for an independent,
   fail-closed MotionGate: package-private bounded ROS types, an internal
   non-installed static `MotionGateCore`, the installed `motion_gate_node`,
@@ -46,7 +55,7 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 
 - Changed simulation motion-source handling to preserve raw scan stamps and
-  frames, use direct `/scan` with latest-only bridge / consumer queues, and
+  frames, use direct `/scan` with a latest-only `SENSOR_DATA` consumer, and
   keep 200 ms steady dependency liveness separate from the 300 ms raw
   ROS-time Collision Monitor source-age limit. Headless raw-age / TF physical
   acceptance is intentionally not claimed here and is tracked by Issue #72.

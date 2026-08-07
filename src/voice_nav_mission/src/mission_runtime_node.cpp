@@ -264,7 +264,7 @@ public:
       [this](const GateSnapshot & snapshot) {
         try {
           (void)enqueue_event(RuntimeEvent{
-              0U, GateSnapshotEvent{snapshot}});
+            0U, GateSnapshotEvent{snapshot}});
         } catch (...) {
           event_queue_.request_fault();
         }
@@ -293,7 +293,7 @@ public:
       [this](const MotionToken & token, const double progress) {
         try {
           return enqueue_event(RuntimeEvent{
-              token.mission_generation, ChildFeedbackEvent{token, progress}});
+            token.mission_generation, ChildFeedbackEvent{token, progress}});
         } catch (...) {
           event_queue_.request_fault();
           return false;
@@ -302,7 +302,7 @@ public:
       [this](const MotionToken & token, const ChildResult & result) {
         try {
           return enqueue_event(RuntimeEvent{
-              token.mission_generation, ChildResultEvent{token, result}});
+            token.mission_generation, ChildResultEvent{token, result}});
         } catch (...) {
           event_queue_.request_fault();
           return false;
