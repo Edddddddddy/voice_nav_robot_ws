@@ -694,13 +694,16 @@ class AgentCore:
             answer = self._answer_pending(plain_text, pending, snapshot)
             if answer.kind == 'complete':
                 parsed = _ParseResult('complete', steps=answer.steps)
+            elif answer.kind == 'invalid':
+                parsed = answer
             elif answer.kind == 'clarify':
                 pending = answer.pending
-                if not self._store_pending(pending):
-                    return ReplyDecision(
-                        'clarification_capacity_exhausted',
-                        _reply_text('clarification_capacity_exhausted'),
-                    )
+                pending_rejection = self._commit_pending(
+                    pending, envelope, token
+                )
+                if pending_rejection is not None:
+                    return pending_rejection
+                assert pending is not None
                 return self._clarification(
                     envelope, local_generation, pending.parameter
                 )
@@ -719,25 +722,11 @@ class AgentCore:
                 return ReplyDecision(
                     'invalid_clarification', _reply_text('invalid_clarification')
                 )
-            sibling_rejection = self._validate_pending_siblings(pending, token)
-            if sibling_rejection is not None:
-                return ReplyDecision(
-                    sibling_rejection.reason,
-                    _reply_text(sibling_rejection.reason),
-                )
-            pending = _PendingIntent(
-                session_id=envelope.session_id,
-                parameter=pending.parameter,
-                operation=pending.operation,
-                sign=pending.sign,
-                prefix_steps=pending.prefix_steps,
-                suffix_steps=pending.suffix_steps,
+            pending_rejection = self._commit_pending(
+                pending, envelope, token
             )
-            if not self._store_pending(pending):
-                return ReplyDecision(
-                    'clarification_capacity_exhausted',
-                    _reply_text('clarification_capacity_exhausted'),
-                )
+            if pending_rejection is not None:
+                return pending_rejection
             return self._clarification(envelope, local_generation, pending.parameter)
         if parsed.kind == 'invalid':
             return ReplyDecision(parsed.reason, _reply_text(parsed.reason))
@@ -769,6 +758,44 @@ class AgentCore:
             return None
         assert validation.rejection is not None
         return validation.rejection
+
+    def _commit_pending(
+        self,
+        pending: Optional[_PendingIntent],
+        envelope: _Envelope,
+        token: PlanningToken,
+    ) -> Optional[ReplyDecision]:
+        """Validate and atomically replace one session's pending intent."""
+        session_id = envelope.session_id
+        self._pending.pop(session_id, None)
+        if pending is None:
+            return ReplyDecision(
+                'invalid_clarification', _reply_text('invalid_clarification')
+            )
+
+        sibling_rejection = self._validate_pending_siblings(pending, token)
+        if sibling_rejection is not None:
+            return ReplyDecision(
+                sibling_rejection.reason,
+                _reply_text(sibling_rejection.reason),
+            )
+
+        if len(self._pending) >= self._policy.clarification_capacity:
+            return ReplyDecision(
+                'clarification_capacity_exhausted',
+                _reply_text('clarification_capacity_exhausted'),
+            )
+
+        self._pending[session_id] = _PendingIntent(
+            session_id=session_id,
+            parameter=pending.parameter,
+            operation=pending.operation,
+            sign=pending.sign,
+            prefix_steps=pending.prefix_steps,
+            suffix_steps=pending.suffix_steps,
+            created_at=self._now(),
+        )
+        return None
 
     def _read_envelope(self, turn: object) -> Optional[_Envelope]:
         try:
@@ -1108,10 +1135,14 @@ class AgentCore:
             match = re.fullmatch(r'(\S+)\s*米', text)
             if match:
                 value = _parse_number(match.group(1))
+                if value is None:
+                    return _ParseResult('invalid', reason='invalid_number')
         elif pending.parameter == 'missing_angle':
             match = re.fullmatch(r'(\S+)\s*度', text)
             if match:
                 value = _parse_number(match.group(1))
+                if value is None:
+                    return _ParseResult('invalid', reason='invalid_number')
         elif pending.parameter in ('missing_place', 'missing_map'):
             target = text
             if ' ' in target:
@@ -1125,20 +1156,24 @@ class AgentCore:
         elif pending.parameter == 'missing_angle' and value is not None:
             angle_rad = _angle_from_degrees(pending.sign, value)
             if angle_rad is None:
-                return self._repeat_clarification(pending)
+                return _ParseResult('invalid', reason='angle_out_of_range')
             step = MissionStep(
                 MissionStep.ROTATE_ANGLE,
                 angle_rad=angle_rad,
             )
         elif pending.parameter == 'missing_place' and target is not None:
+            if not target:
+                return self._repeat_clarification(pending)
             if not _valid_logical_id(target):
-                return self._repeat_clarification(pending)
+                return _ParseResult('invalid', reason='invalid_place_id')
             if target not in state.named_place_ids:
-                return self._repeat_clarification(pending)
+                return _ParseResult('invalid', reason='unknown_place')
             return self._pending_target_result(pending, target, False)
         elif pending.parameter == 'missing_map' and target is not None:
-            if not _valid_logical_id(target):
+            if not target:
                 return self._repeat_clarification(pending)
+            if not _valid_logical_id(target):
+                return _ParseResult('invalid', reason='invalid_map_id')
             return self._pending_target_result(pending, target, True)
         else:
             return self._repeat_clarification(pending)
@@ -1174,27 +1209,6 @@ class AgentCore:
                 suffix_steps=pending.suffix_steps,
             ),
         )
-
-    def _store_pending(self, pending: Optional[_PendingIntent]) -> bool:
-        if pending is None:
-            return False
-        now = self._now()
-        session_id = pending.session_id
-        if (
-            session_id not in self._pending
-            and len(self._pending) >= self._policy.clarification_capacity
-        ):
-            return False
-        self._pending[session_id] = _PendingIntent(
-            session_id=session_id,
-            parameter=pending.parameter,
-            operation=pending.operation,
-            sign=pending.sign,
-            prefix_steps=pending.prefix_steps,
-            suffix_steps=pending.suffix_steps,
-            created_at=now,
-        )
-        return True
 
     def _clarification(
         self, envelope: _Envelope, local_generation: int, parameter: str
@@ -1506,6 +1520,7 @@ def _reply_text(reason: str) -> str:
         'invalid_map_id': 'Map ID 无效。',
         'distance_out_of_range': '移动距离超出安全范围。',
         'angle_out_of_range': '旋转角度超出安全范围。',
+        'invalid_number': '数值无效。',
         'invalid_union': 'Mission step 参数组合无效。',
         'too_many_steps': '一次最多只能执行三步。',
         'multiple_missing_parameters': '一次只能补充一个任务参数。',

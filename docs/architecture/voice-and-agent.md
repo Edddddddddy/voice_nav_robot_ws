@@ -34,7 +34,11 @@ clause 后再分类，只有单独 unknown 表达进入 LLM-needed，unknown 与
 planning token 和 SemanticValidator 校验全部完整 sibling steps；失败直接
 REPLY，不保留该 Turn 的 pending。旋转角度以 Runtime 冻结的 float32 `6.283185F` 作为 wire
 上限；中文 `±360°` 显式映射为相应 binary32 值，外部 proposal 的 wire 表示
-超过该上限时拒绝。
+超过该上限时拒绝。pending 的创建和覆盖统一经过 Core 内部私有 commit seam；
+它在当前不可变 token 下复核全部完整 sibling 后才写回。澄清答案若单位或结构
+仍不完整可以再次 CLARIFY；已完整但 range、wire range、数值或 Place/Map ID
+非法则直接 REPLY 并结束 pending，后续裸回答不得续接。复核使用当前 snapshot，
+因此 capability、Named Place、`max_steps` 或 mode 的变化会在再次澄清前确定性拒绝。
 
 ## Public ROS surface
 
