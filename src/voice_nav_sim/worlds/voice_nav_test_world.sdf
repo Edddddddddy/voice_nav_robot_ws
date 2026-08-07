@@ -10,14 +10,6 @@
       <render_engine>ogre2</render_engine>
     </plugin>
 
-    <!-- Bound headless pacing so the original 10 Hz sensor stamp stays
-         within the fixed Collision Monitor source-age contract during
-         component generation changes. -->
-    <physics name="default_physics" type="ode">
-      <max_step_size>0.001</max_step_size>
-      <real_time_update_rate>500</real_time_update_rate>
-    </physics>
-
     <gravity>0 0 -9.8</gravity>
 
     <light name="sun" type="directional">
