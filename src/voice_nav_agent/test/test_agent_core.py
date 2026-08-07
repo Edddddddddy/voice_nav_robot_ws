@@ -12,7 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from dataclasses import replace
 import math
+import struct
 import time
 
 import pytest
@@ -82,6 +84,10 @@ def make_core(clock=None, **policy_changes):
     )
 
 
+def _binary32(value):
+    return struct.unpack('<f', struct.pack('<f', value))[0]
+
+
 def test_rule_mission_normalizes_text_and_captures_immutable_snapshot():
     clock = ManualClock()
     core = make_core(clock=clock)
@@ -111,6 +117,8 @@ def test_rule_mission_normalizes_text_and_captures_immutable_snapshot():
     ('text', 'kind', 'distance', 'angle'),
     [
         ('后退半米', MissionStep.MOVE_DISTANCE, -0.5, 0.0),
+        ('前进一米', MissionStep.MOVE_DISTANCE, 1.0, 0.0),
+        ('前进一点五米', MissionStep.MOVE_DISTANCE, 1.5, 0.0),
         ('左转90度', MissionStep.ROTATE_ANGLE, 0.0, math.pi / 2),
         ('右转 5 度', MissionStep.ROTATE_ANGLE, 0.0, -math.radians(5)),
     ],
@@ -145,11 +153,46 @@ def test_rule_mission_preserves_one_to_three_step_order_and_place_id():
 
 
 @pytest.mark.parametrize(
+    'text',
+    [
+        '前进 1 米 然后 左转 90 度',
+        '前进 1 米，然后左转 90 度',
+        '前进 1 米；左转 90 度',
+        '前进 1 米,左转 90 度',
+        '前进 1 米;左转 90 度',
+    ],
+)
+def test_clause_separators_are_trimmed_and_equivalent(text):
+    core = make_core()
+
+    decision = core.handle_turn(make_turn(text), make_state())
+
+    assert decision.kind is DecisionKind.MISSION
+    assert [step.kind for step in decision.steps] == [
+        MissionStep.MOVE_DISTANCE,
+        MissionStep.ROTATE_ANGLE,
+    ]
+
+
+@pytest.mark.parametrize(
+    'text',
+    [
+        '前进 1 米；',
+        '前进 1 米；；左转 90 度',
+    ],
+)
+def test_empty_clause_fails_closed_after_separator_split(text):
+    decision = make_core().handle_turn(make_turn(text), make_state())
+
+    assert decision.kind is DecisionKind.REPLY
+    assert decision.reason == 'empty_clause'
+
+
+@pytest.mark.parametrize(
     ('text', 'reason'),
     [
         ('前进 1 米然后左转 90 度再去 lobby然后保存地图为 map_a', 'too_many_steps'),
         ('前进', 'missing_distance'),
-        ('左转 90', 'invalid_angle_unit'),
         ('前进 3 米', 'distance_out_of_range'),
         ('去 unknown', 'unknown_place'),
         ('保存地图为 ../map', 'invalid_map_id'),
@@ -161,6 +204,24 @@ def test_invalid_or_incomplete_closed_rules_never_make_a_mission(text, reason):
     decision = core.handle_turn(make_turn(text), make_state())
 
     assert decision.kind in (DecisionKind.CLARIFY, DecisionKind.REPLY)
+    assert decision.reason == reason
+
+
+@pytest.mark.parametrize(
+    ('text', 'reason'),
+    [
+        ('前进米', 'missing_distance'),
+        ('前进 1', 'missing_distance'),
+        ('左转度', 'missing_angle'),
+        ('左转 90', 'missing_angle'),
+        ('保存地图', 'missing_map'),
+        ('保存地图为', 'missing_map'),
+    ],
+)
+def test_single_missing_parameter_enters_clarification(text, reason):
+    decision = make_core().handle_turn(make_turn(text), make_state())
+
+    assert decision.kind is DecisionKind.CLARIFY
     assert decision.reason == reason
 
 
@@ -245,6 +306,34 @@ def test_clarification_answers_are_typed_and_bad_answers_restart_the_question():
     assert good_answer.steps[0].target_id == 'lobby'
 
 
+def test_clarification_is_session_scoped_and_stop_clears_pending_state():
+    core = make_core()
+
+    clarify = core.handle_turn(
+        make_turn('前进', session_id='session-a'), make_state()
+    )
+    other_session = core.handle_turn(
+        make_turn('1 米', sequence=2, session_id='session-b'), make_state()
+    )
+    stop = core.handle_turn(
+        make_turn(
+            '停止',
+            sequence=3,
+            turn_id='stop-turn',
+            kind=VoiceTurn.STOP,
+        ),
+        runtime_snapshot_or_none=None,
+    )
+    after_stop = core.handle_turn(
+        make_turn('1 米', sequence=4, session_id='session-a'), make_state()
+    )
+
+    assert clarify.kind is DecisionKind.CLARIFY
+    assert other_session.kind is DecisionKind.LLM_NEEDED
+    assert stop.kind is DecisionKind.STOP
+    assert after_stop.kind is DecisionKind.LLM_NEEDED
+
+
 def test_clarification_capacity_is_bounded_and_expired_entries_are_reclaimed():
     clock = ManualClock()
     core = make_core(clock=clock, clarification_capacity=1)
@@ -316,10 +405,38 @@ def test_retired_voice_instance_set_fails_closed_without_silent_eviction():
         ),
         make_state(),
     )
+    any_new_command = core.handle_turn(
+        make_turn(
+            '前进 1 米',
+            sequence=1,
+            voice_instance_id='voice-66',
+            turn_id='turn-66',
+        ),
+        make_state(),
+    )
+    stop = core.handle_turn(
+        make_turn(
+            '停止',
+            sequence=3,
+            voice_instance_id='voice-66',
+            turn_id='stop-after-capacity',
+            kind=VoiceTurn.STOP,
+        ),
+        runtime_snapshot_or_none=None,
+    )
 
     assert capacity.kind is DecisionKind.REPLY
     assert capacity.reason == 'voice_instance_capacity_exhausted'
-    assert old.kind is DecisionKind.IGNORE
+    assert old.kind is DecisionKind.REPLY
+    assert old.reason == 'voice_instance_capacity_exhausted'
+    assert any_new_command.kind is DecisionKind.REPLY
+    assert any_new_command.reason == 'voice_instance_capacity_exhausted'
+    assert stop.kind is DecisionKind.STOP
+
+    fresh = make_core().handle_turn(
+        make_turn('前进 1 米'), make_state()
+    )
+    assert fresh.kind is DecisionKind.MISSION
 
 
 def test_unknown_well_formed_expression_becomes_llm_needed_with_same_token():
@@ -486,11 +603,16 @@ def test_bad_envelope_is_ignored_and_stop_phrase_wins_over_motion():
     stop = core.handle_turn(
         make_turn('紧急停止然后前进 2 米', sequence=2), make_state()
     )
+    punctuation_stop = core.handle_turn(
+        make_turn('前进 1 米；紧急停止', sequence=3), make_state()
+    )
 
     assert bad.kind is DecisionKind.IGNORE
     assert bad.reason == 'invalid_envelope'
     assert stop.kind is DecisionKind.STOP
     assert stop.reason == 'voice_stop'
+    assert punctuation_stop.kind is DecisionKind.STOP
+    assert punctuation_stop.reason == 'voice_stop'
 
 
 def test_runtime_snapshot_is_required_and_malformed_union_is_rejected_by_validator():
@@ -512,6 +634,98 @@ def test_runtime_snapshot_is_required_and_malformed_union_is_rejected_by_validat
 
     assert not result.accepted
     assert result.rejection.reason == 'invalid_union'
+
+
+def test_validator_requires_original_planning_context_and_rejects_mismatch():
+    core = make_core()
+    decision = core.handle_turn(make_turn('前进 1 米'), make_state())
+    token = decision.mission.token
+    proposal = MissionProposal(
+        token=token,
+        steps=(MissionStep(MissionStep.MOVE_DISTANCE, distance_m=1.0),),
+    )
+    validator = SemanticValidator()
+
+    with pytest.raises(TypeError):
+        validator.validate(proposal)
+
+    changed_token = replace(token, admission_epoch=token.admission_epoch + 1)
+    mismatch = validator.validate(
+        MissionProposal(proposal.steps, changed_token), token
+    )
+
+    assert not mismatch.accepted
+    assert mismatch.rejection.reason == 'planning_context_mismatch'
+
+
+def test_angle_uses_the_runtime_binary32_wire_boundary_for_exact_360_degrees():
+    core = make_core()
+    wire_max = _binary32(6.283185)
+
+    left = core.handle_turn(make_turn('左转 360 度'), make_state())
+    right = core.handle_turn(
+        make_turn('右转 360 度', sequence=2), make_state()
+    )
+
+    assert AgentPolicy().rotate_angle_max_rad == wire_max
+    assert left.kind is DecisionKind.MISSION
+    assert right.kind is DecisionKind.MISSION
+    assert left.steps[0].angle_rad == wire_max
+    assert right.steps[0].angle_rad == -wire_max
+
+
+def test_validator_rejects_angle_above_runtime_binary32_wire_limit():
+    core = make_core()
+    token = core.handle_turn(
+        make_turn('前进 1 米'), make_state()
+    ).mission.token
+    wire_max = _binary32(6.283185)
+    over_wire = math.nextafter(math.tau, -math.inf)
+    proposal = MissionProposal(
+        token=token,
+        steps=(MissionStep(MissionStep.ROTATE_ANGLE, angle_rad=over_wire),),
+    )
+
+    assert over_wire < math.tau
+    assert _binary32(over_wire) > wire_max
+    result = core.validator.validate(proposal, token)
+
+    assert not result.accepted
+    assert result.rejection.reason == 'angle_out_of_range'
+
+
+@pytest.mark.parametrize('value', [10**400, math.nan, math.inf, -math.inf])
+def test_validator_structurally_rejects_non_finite_or_overflowing_numbers(value):
+    core = make_core()
+    token = core.handle_turn(
+        make_turn('前进 1 米'), make_state()
+    ).mission.token
+    proposal = MissionProposal(
+        token=token,
+        steps=(MissionStep(MissionStep.MOVE_DISTANCE, distance_m=value),),
+    )
+
+    result = core.validator.validate(proposal, token)
+
+    assert not result.accepted
+    assert result.rejection.reason == 'non_finite_step'
+
+
+@pytest.mark.parametrize('value', [math.nan, math.inf, -math.inf])
+def test_validator_rejects_non_finite_angle_values(value):
+    core = make_core()
+    token = core.handle_turn(
+        make_turn('前进 1 米'), make_state()
+    ).mission.token
+    proposal = MissionProposal(
+        token=token,
+        steps=(MissionStep(MissionStep.ROTATE_ANGLE, angle_rad=value),),
+    )
+
+    result = core.validator.validate(proposal, token)
+
+    assert not result.accepted
+    assert result.rejection.reason == 'non_finite_step'
 
 
 def test_warm_rule_decision_p95_stays_within_fifty_milliseconds():

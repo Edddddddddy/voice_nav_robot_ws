@@ -22,6 +22,15 @@ Named Place 快照；不会在规划过程中刷新。STOP 遵循 D-046-003B：r
 等于 `turn_id`，source instance/sequence 直接复用 Voice Turn 的
 `voice_instance_id`/`voice_seq`，reason 固定为 `voice_stop`。
 
+`SemanticValidator.validate()` 必须同时接收 proposal 与产生它的原始不可变
+planning token；缺少或不匹配该 context 的 proposal 不能进入 Mission。Voice
+fencing 的 retired-instance 容量耗尽后锁存为 fail-closed，直到建立新的 Core/
+Voice 生命周期；锁存期间 COMMAND 一律拒绝，STOP 仍走 D-046-003B 快路径。
+Core 将 `，`、`,`、`；`、`;` 与 `然后`、`再` 统一为 clause separator，分割后
+对每个 clause trim，空 clause 或超过三步拒绝。旋转角度以 Runtime 冻结的
+float32 `6.283185F` 作为 wire 上限；中文 `±360°` 显式映射为相应 binary32
+值，外部 proposal 的 wire 表示超过该上限时拒绝。
+
 ## Public ROS surface
 
 Voice exposes only:

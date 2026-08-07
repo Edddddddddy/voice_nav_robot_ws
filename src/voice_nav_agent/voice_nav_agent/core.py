@@ -21,6 +21,7 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum, IntEnum
 import math
 import re
+import struct
 import time
 from typing import Callable, ClassVar, Mapping, Optional, Union
 import unicodedata
@@ -30,6 +31,9 @@ MAX_UINT64 = (1 << 64) - 1
 MAX_UINT32 = (1 << 32) - 1
 MAX_RETIRED_VOICE_INSTANCES = 64
 PLACE_ID_PATTERN = re.compile(r'^[a-z][a-z0-9_-]{0,31}$')
+_RUNTIME_ROTATE_ANGLE_MAX_RAD = struct.unpack(
+    '<f', struct.pack('<f', 6.283185)
+)[0]
 
 
 class DecisionKind(str, Enum):
@@ -138,7 +142,7 @@ class AgentPolicy:
     move_distance_min_m: float = 0.05
     move_distance_max_m: float = 2.0
     rotate_angle_min_rad: float = 0.05
-    rotate_angle_max_rad: float = math.tau
+    rotate_angle_max_rad: float = _RUNTIME_ROTATE_ANGLE_MAX_RAD
     clarification_timeout_s: float = 15.0
     clarification_capacity: int = 64
 
@@ -270,18 +274,19 @@ class SemanticValidator:
     def validate(
         self,
         proposal: MissionProposal,
-        immutable_planning_context: Optional[PlanningToken] = None,
+        immutable_planning_context: PlanningToken,
     ) -> ValidationResult:
         """Return a validated Mission or a structured semantic rejection."""
         if not isinstance(proposal, MissionProposal):
             return self._reject('invalid_proposal', 'proposal_type')
         if not isinstance(proposal.token, PlanningToken):
             return self._reject('invalid_planning_token', 'token_type')
-        if immutable_planning_context is not None:
-            if proposal.token != immutable_planning_context:
-                return self._reject(
-                    'planning_context_mismatch', 'token_is_not_current_context'
-                )
+        if not isinstance(immutable_planning_context, PlanningToken):
+            return self._reject('invalid_planning_context', 'context_type')
+        if proposal.token != immutable_planning_context:
+            return self._reject(
+                'planning_context_mismatch', 'token_is_not_current_context'
+            )
 
         token_reason = self._validate_token(proposal.token)
         if token_reason is not None:
@@ -376,7 +381,7 @@ class SemanticValidator:
         elif step.kind == MissionStep.ROTATE_ANGLE:
             if step.distance_m != 0.0 or step.target_id != '':
                 return 'invalid_union'
-            if not _within_signed_range(
+            if not _within_angle_wire_range(
                 step.angle_rad,
                 self._policy.rotate_angle_min_rad,
                 self._policy.rotate_angle_max_rad,
@@ -601,6 +606,7 @@ class AgentCore:
         self._current_voice_instance: Optional[str] = None
         self._last_voice_seq = -1
         self._retired_voice_instances: set[str] = set()
+        self._voice_fencing_latched = False
         self._pending: dict[str, _PendingIntent] = {}
 
     @property
@@ -766,6 +772,11 @@ class AgentCore:
         return envelope
 
     def _fence_command(self, envelope: _Envelope) -> Optional[Decision]:
+        if self._voice_fencing_latched:
+            return ReplyDecision(
+                'voice_instance_capacity_exhausted',
+                _reply_text('voice_instance_capacity_exhausted'),
+            )
         instance = envelope.voice_instance_id
         if self._current_voice_instance is None:
             self._current_voice_instance = instance
@@ -779,6 +790,7 @@ class AgentCore:
         if instance in self._retired_voice_instances:
             return IgnoreDecision('retired_voice_instance')
         if len(self._retired_voice_instances) >= MAX_RETIRED_VOICE_INSTANCES:
+            self._voice_fencing_latched = True
             return ReplyDecision(
                 'voice_instance_capacity_exhausted',
                 _reply_text('voice_instance_capacity_exhausted'),
@@ -788,9 +800,15 @@ class AgentCore:
         self._last_voice_seq = envelope.voice_seq
         self._pending.clear()
         self._rotate_generation()
+        if len(self._retired_voice_instances) >= MAX_RETIRED_VOICE_INSTANCES:
+            self._voice_fencing_latched = True
         return None
 
     def _observe_stop_voice(self, envelope: _Envelope) -> None:
+        if self._voice_fencing_latched:
+            self._pending.clear()
+            self._rotate_generation()
+            return
         instance = envelope.voice_instance_id
         if self._current_voice_instance is None:
             self._current_voice_instance = instance
@@ -802,6 +820,8 @@ class AgentCore:
                 self._retired_voice_instances.add(self._current_voice_instance)
                 self._current_voice_instance = instance
                 self._last_voice_seq = envelope.voice_seq
+                if len(self._retired_voice_instances) >= MAX_RETIRED_VOICE_INSTANCES:
+                    self._voice_fencing_latched = True
         self._pending.clear()
         self._rotate_generation()
 
@@ -823,7 +843,7 @@ class AgentCore:
             return _ParseResult('invalid', reason='empty_command')
         if text == '取消任务':
             return _ParseResult('cancel')
-        clauses = re.split(r'(?:然后|再)', text)
+        clauses = [clause.strip() for clause in _split_clauses(text)]
         if len(clauses) > 3:
             return _ParseResult('invalid', reason='too_many_steps')
         if any(not clause for clause in clauses):
@@ -900,8 +920,18 @@ class AgentCore:
                 ),
             )
         if any(clause.startswith(prefix) for prefix in ('前进', '向前走', '后退')):
-            if clause in ('前进', '向前走', '后退'):
-                sign = -1 if clause == '后退' else 1
+            prefix = next(
+                prefix
+                for prefix in ('前进', '向前走', '后退')
+                if clause.startswith(prefix)
+            )
+            remainder = clause[len(prefix):].strip()
+            if (
+                not remainder
+                or remainder == '米'
+                or _parse_number(remainder) is not None
+            ):
+                sign = -1 if prefix == '后退' else 1
                 return _ClauseResult(
                     'missing',
                     pending=_PendingIntent(
@@ -919,16 +949,25 @@ class AgentCore:
             if value is None:
                 return _ClauseResult('invalid', reason='invalid_number')
             sign = -1 if rotation.group(1) == '右转' else 1
+            angle_rad = _angle_from_degrees(sign, value)
+            if angle_rad is None:
+                return _ClauseResult('invalid', reason='angle_out_of_range')
             return _ClauseResult(
                 'step',
                 step=MissionStep(
                     MissionStep.ROTATE_ANGLE,
-                    angle_rad=sign * math.radians(value),
+                    angle_rad=angle_rad,
                 ),
             )
         if clause.startswith('左转') or clause.startswith('右转'):
-            if clause in ('左转', '右转'):
-                sign = -1 if clause == '右转' else 1
+            prefix = '右转' if clause.startswith('右转') else '左转'
+            remainder = clause[len(prefix):].strip()
+            if (
+                not remainder
+                or remainder == '度'
+                or _parse_number(remainder) is not None
+            ):
+                sign = -1 if prefix == '右转' else 1
                 return _ClauseResult(
                     'missing',
                     pending=_PendingIntent(
@@ -980,6 +1019,15 @@ class AgentCore:
                 'step', step=MissionStep(MissionStep.SAVE_MAP, target_id=target)
             )
         if clause.startswith('保存地图'):
+            if clause == '保存地图':
+                return _ClauseResult(
+                    'missing',
+                    pending=_PendingIntent(
+                        session_id='',
+                        parameter='missing_map',
+                        operation='map',
+                    ),
+                )
             return _ClauseResult('invalid', reason='invalid_map_id')
         return _ClauseResult('unknown')
 
@@ -1010,9 +1058,12 @@ class AgentCore:
                 distance_m=pending.sign * value,
             )
         elif pending.parameter == 'missing_angle' and value is not None:
+            angle_rad = _angle_from_degrees(pending.sign, value)
+            if angle_rad is None:
+                return self._repeat_clarification(pending)
             step = MissionStep(
                 MissionStep.ROTATE_ANGLE,
-                angle_rad=pending.sign * math.radians(value),
+                angle_rad=angle_rad,
             )
         elif pending.parameter == 'missing_place' and target is not None:
             if not _valid_logical_id(target):
@@ -1131,11 +1182,12 @@ def _uint64(value: object) -> bool:
 
 
 def _finite(value: object) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(float(value))
-    )
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, TypeError, ValueError):
+        return False
 
 
 def _valid_logical_id(value: object) -> bool:
@@ -1143,7 +1195,39 @@ def _valid_logical_id(value: object) -> bool:
 
 
 def _within_signed_range(value: float, minimum: float, maximum: float) -> bool:
-    return _finite(value) and minimum <= abs(float(value)) <= maximum and value != 0.0
+    if not _finite(value):
+        return False
+    numeric = float(value)
+    return minimum <= abs(numeric) <= maximum and numeric != 0.0
+
+
+def _within_angle_wire_range(
+    value: object, minimum: float, configured_maximum: float
+) -> bool:
+    wire_value = _binary32(value)
+    wire_minimum = _binary32(minimum)
+    wire_configured_maximum = _binary32(configured_maximum)
+    if (
+        wire_value is None
+        or wire_minimum is None
+        or wire_configured_maximum is None
+        or not math.isfinite(wire_value)
+        or not math.isfinite(wire_minimum)
+        or not math.isfinite(wire_configured_maximum)
+    ):
+        return False
+    wire_maximum = min(_RUNTIME_ROTATE_ANGLE_MAX_RAD, wire_configured_maximum)
+    return (
+        wire_minimum <= abs(wire_value) <= wire_maximum
+        and wire_value != 0.0
+    )
+
+
+def _binary32(value: object) -> Optional[float]:
+    try:
+        return struct.unpack('<f', struct.pack('<f', float(value)))[0]
+    except (OverflowError, TypeError, ValueError, struct.error):
+        return None
 
 
 def _normalize(text: str) -> str:
@@ -1151,23 +1235,32 @@ def _normalize(text: str) -> str:
     normalized = normalized.translate(
         str.maketrans({chr(code): chr(code + 32) for code in range(65, 91)})
     )
-    for punctuation in '，,。；;！!?、':
+    normalized = re.sub(r'[，,；;]\s*(?:然后|再)?', ' 然后 ', normalized)
+    for punctuation in '。！!?、':
         normalized = normalized.replace(punctuation, ' ')
     return ' '.join(normalized.split())
 
 
 def _strip_invocation(text: str) -> str:
-    result = text
-    if result.startswith('小智'):
-        result = result[2:].lstrip()
-    if result.startswith('请'):
-        result = result[1:].lstrip()
-    return result
+    result = text.strip()
+    while True:
+        if result.startswith('小智'):
+            result = result[2:].lstrip()
+        elif result.startswith('请'):
+            result = result[1:].lstrip()
+        else:
+            return result
+        while result.startswith('然后') or result.startswith('再'):
+            result = result[2 if result.startswith('然后') else 1:].lstrip()
+
+
+def _split_clauses(text: str) -> list[str]:
+    return re.split(r'(?:然后|再)', text)
 
 
 def _contains_stop_clause(text: str) -> bool:
-    for clause in re.split(r'(?:然后|再)', text):
-        if clause.replace(' ', '') in {'停止', '小智停止', '紧急停止'}:
+    for clause in _split_clauses(text):
+        if _strip_invocation(clause).replace(' ', '') in {'停止', '紧急停止'}:
             return True
     return False
 
@@ -1196,6 +1289,14 @@ def _parse_number(token: str) -> Optional[float]:
     except (InvalidOperation, OverflowError, ValueError):
         return None
     return value if math.isfinite(value) else None
+
+
+def _angle_from_degrees(sign: int, value: float) -> Optional[float]:
+    if not _finite(value) or value < 0.0 or value > 360.0:
+        return None
+    if value == 360.0:
+        return sign * _RUNTIME_ROTATE_ANGLE_MAX_RAD
+    return _binary32(sign * math.radians(value))
 
 
 def _parse_chinese_integer(token: str) -> int:
