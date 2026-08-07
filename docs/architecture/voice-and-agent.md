@@ -30,7 +30,9 @@ Core 在 STOP 扫描前保留 `，,；;。！!?、` 与 `然后`、`再` 的 cla
 单个句末 `。！!?` 可结束最后一个非空 clause，重复或内部空 clause 拒绝。称呼
 和批准请求词最多消费一个批准边界，不会吞掉后续重复 separator。完整收集
 clause 后再分类，只有单独 unknown 表达进入 LLM-needed，unknown 与规则或缺参
-混合时确定性拒绝。旋转角度以 Runtime 冻结的 float32 `6.283185F` 作为 wire
+混合时确定性拒绝。含缺参 clause 的 Turn 在创建澄清 pending 前，先用同一
+planning token 和 SemanticValidator 校验全部完整 sibling steps；失败直接
+REPLY，不保留该 Turn 的 pending。旋转角度以 Runtime 冻结的 float32 `6.283185F` 作为 wire
 上限；中文 `±360°` 显式映射为相应 binary32 值，外部 proposal 的 wire 表示
 超过该上限时拒绝。
 

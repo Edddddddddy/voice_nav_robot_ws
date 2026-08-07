@@ -299,6 +299,72 @@ def test_out_of_range_missing_unit_value_is_rejected_before_clarification(
     assert answer_after_rejection.kind is DecisionKind.LLM_NEEDED
 
 
+@pytest.mark.parametrize(
+    ('text', 'reason', 'state_changes', 'answer'),
+    [
+        ('前进 3 米然后左转', 'distance_out_of_range', {}, '90 度'),
+        ('左转然后前进 3 米', 'distance_out_of_range', {}, '90 度'),
+        ('左转 1 度然后前进', 'angle_out_of_range', {}, '1 米'),
+        (
+            '保存地图为 map_a 然后前进',
+            'mode_mismatch',
+            {'operating_mode': OperatingMode.NAVIGATION},
+            '1 米',
+        ),
+        (
+            '左转 90 度然后前进',
+            'unsupported_step',
+            {'supported_step_mask': 0b0001},
+            '1 米',
+        ),
+        ('去 unknown 然后前进', 'unknown_place', {}, '1 米'),
+    ],
+)
+def test_invalid_complete_sibling_rejects_before_pending_is_stored(
+    text, reason, state_changes, answer
+):
+    core = make_core()
+
+    first = core.handle_turn(make_turn(text), make_state(**state_changes))
+    after_failure = core.handle_turn(
+        make_turn(answer, sequence=2), make_state(**state_changes)
+    )
+
+    assert first.kind is DecisionKind.REPLY
+    assert first.reason == reason
+    assert after_failure.kind is DecisionKind.LLM_NEEDED
+
+
+@pytest.mark.parametrize(
+    ('text', 'answer', 'expected_kinds'),
+    [
+        (
+            '前进 1 米然后左转',
+            '90 度',
+            [MissionStep.MOVE_DISTANCE, MissionStep.ROTATE_ANGLE],
+        ),
+        (
+            '左转然后前进 1 米',
+            '90 度',
+            [MissionStep.ROTATE_ANGLE, MissionStep.MOVE_DISTANCE],
+        ),
+    ],
+)
+def test_valid_complete_sibling_and_single_missing_parameter_keep_order(
+    text, answer, expected_kinds
+):
+    core = make_core()
+
+    clarify = core.handle_turn(make_turn(text), make_state())
+    mission = core.handle_turn(
+        make_turn(answer, sequence=2), make_state()
+    )
+
+    assert clarify.kind is DecisionKind.CLARIFY
+    assert mission.kind is DecisionKind.MISSION
+    assert [step.kind for step in mission.steps] == expected_kinds
+
+
 def test_mode_and_capability_rejections_are_structured_replies():
     core = make_core()
 
