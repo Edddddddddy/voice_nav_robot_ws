@@ -20,7 +20,6 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
-#include <deque>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -45,6 +44,7 @@
 #include "voice_nav_mission/mission_action_result_router.hpp"
 #include "voice_nav_mission/motion_authority_ros_adapter.hpp"
 #include "voice_nav_mission/relative_motion_ros_adapter.hpp"
+#include "voice_nav_mission/runtime_event_queue.hpp"
 
 namespace voice_nav_mission
 {
@@ -140,97 +140,16 @@ struct RuntimeEvent
   RuntimeEventPayload payload;
 };
 
-// The queue is owned by MissionRuntimeNode.  Producers never call RuntimeCore;
-// they only enqueue a typed event carrying the child generation.  A reserved
-// overflow bit is the fail-closed path when the bounded queue cannot accept
-// another event.
-class RuntimeEventQueue final
+using RuntimeEventQueueType = RuntimeEventQueue<RuntimeEvent>;
+
+[[nodiscard]] RuntimeEventQueueType::Lane runtime_event_lane(
+  const RuntimeEvent & event) noexcept
 {
-public:
-  static constexpr std::size_t kCapacity = 128U;
-  static constexpr std::size_t kControlReserve = 8U;
-
-  [[nodiscard]] bool push(RuntimeEvent event) noexcept
-  {
-    try {
-      std::lock_guard<std::mutex> lock(mutex_);
-      if (closed_ || overflow_fault_) {
-        return false;
-      }
-      const bool control = std::holds_alternative<CancelEvent>(event.payload) ||
-        std::holds_alternative<StopEvent>(event.payload) ||
-        std::holds_alternative<QueueFaultEvent>(event.payload);
-      const auto total_size = events_.size() + control_events_.size();
-      if (total_size >= kCapacity ||
-        (!control && events_.size() >= kCapacity - kControlReserve))
-      {
-        overflow_fault_ = true;
-        condition_.notify_one();
-        return false;
-      }
-      if (control) {
-        control_events_.push_back(std::move(event));
-      } else {
-        events_.push_back(std::move(event));
-      }
-      condition_.notify_one();
-      return true;
-    } catch (...) {
-      overflow_fault_.store(true);
-      condition_.notify_one();
-      return false;
-    }
-  }
-
-  [[nodiscard]] bool wait_pop(RuntimeEvent & event)
-  {
-    std::unique_lock<std::mutex> lock(mutex_);
-    condition_.wait(lock, [this]() {
-        return closed_ || overflow_fault_.load() ||
-               !control_events_.empty() || !events_.empty();
-      });
-    if (overflow_fault_.exchange(false)) {
-      event = RuntimeEvent{0U, QueueFaultEvent{"Runtime event queue overflow"}};
-      return true;
-    }
-    if (!control_events_.empty()) {
-      event = std::move(control_events_.front());
-      control_events_.pop_front();
-      return true;
-    }
-    if (events_.empty()) {
-      return false;
-    }
-    event = std::move(events_.front());
-    events_.pop_front();
-    return true;
-  }
-
-  void close() noexcept
-  {
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      closed_ = true;
-      control_events_.clear();
-      events_.clear();
-    }
-    condition_.notify_all();
-  }
-
-  void request_fault() noexcept
-  {
-    overflow_fault_.store(true);
-    condition_.notify_one();
-  }
-
-private:
-  std::mutex mutex_;
-  std::condition_variable condition_;
-  std::deque<RuntimeEvent> control_events_;
-  std::deque<RuntimeEvent> events_;
-  std::atomic<bool> overflow_fault_{false};
-  bool closed_{false};
-};
+  return std::holds_alternative<CancelEvent>(event.payload) ||
+         std::holds_alternative<StopEvent>(event.payload) ||
+         std::holds_alternative<QueueFaultEvent>(event.payload) ?
+         RuntimeEventQueueType::Lane::Control : RuntimeEventQueueType::Lane::Normal;
+}
 
 class RosSteadyClock final : public SteadyClockPort
 {
@@ -248,7 +167,10 @@ class MissionRuntimeNode final : public rclcpp::Node
 public:
   explicit MissionRuntimeNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions())
   : Node("mission_runtime_node", options),
-    clock_(std::make_shared<RosSteadyClock>())
+    clock_(std::make_shared<RosSteadyClock>()),
+    event_queue_([]() {
+        return RuntimeEvent{0U, QueueFaultEvent{"Runtime event queue overflow"}};
+      })
   {
     if (std::string(get_fully_qualified_name()) != "/mission_runtime_node") {
       throw std::runtime_error("mission_runtime_node must run at /mission_runtime_node");
@@ -262,12 +184,7 @@ public:
       config_.control_response_deadline,
       config_.stop_barrier,
       [this](const GateSnapshot & snapshot) {
-        try {
-          (void)enqueue_event(RuntimeEvent{
-            0U, GateSnapshotEvent{snapshot}});
-        } catch (...) {
-          event_queue_.request_fault();
-        }
+        (void)enqueue_event(RuntimeEvent{0U, GateSnapshotEvent{snapshot}});
       });
     const auto initial_gate_snapshot = authority_->snapshot();
     RelativeMotionPolicy motion_policy;
@@ -291,22 +208,12 @@ public:
         action_adapter_.finish(mission_id, result);
       },
       [this](const MotionToken & token, const double progress) {
-        try {
-          return enqueue_event(RuntimeEvent{
-            token.mission_generation, ChildFeedbackEvent{token, progress}});
-        } catch (...) {
-          event_queue_.request_fault();
-          return false;
-        }
+        return enqueue_event(RuntimeEvent{
+          token.mission_generation, ChildFeedbackEvent{token, progress}});
       },
       [this](const MotionToken & token, const ChildResult & result) {
-        try {
-          return enqueue_event(RuntimeEvent{
-            token.mission_generation, ChildResultEvent{token, result}});
-        } catch (...) {
-          event_queue_.request_fault();
-          return false;
-        }
+        return enqueue_event(RuntimeEvent{
+          token.mission_generation, ChildResultEvent{token, result}});
       });
     runtime_worker_ = std::thread([this]() {run_runtime_events();});
     (void)enqueue_event(RuntimeEvent{
@@ -341,10 +248,20 @@ public:
 
   ~MissionRuntimeNode() override
   {
+    ingress_stopped_.store(true);
+    timer_.reset();
+    stop_service_.reset();
+    action_server_.reset();
+    if (relative_motion_) {
+      relative_motion_->shutdown();
+    }
     event_queue_.close();
     if (runtime_worker_.joinable()) {
       runtime_worker_.join();
     }
+    core_.reset();
+    relative_motion_.reset();
+    authority_.reset();
   }
 
 private:
@@ -485,7 +402,25 @@ private:
 
   [[nodiscard]] bool enqueue_event(RuntimeEvent event) noexcept
   {
-    return event_queue_.push(std::move(event));
+    if (ingress_stopped_.load()) {
+      return false;
+    }
+    const auto lane = runtime_event_lane(event);
+    const auto result = event_queue_.push(
+      std::move(event), lane) ==
+      RuntimeEventQueueType::PushResult::Accepted;
+    if (!result) {
+      request_independent_emergency();
+    }
+    return result;
+  }
+
+  void request_independent_emergency() noexcept
+  {
+    if (ingress_stopped_.load() || !relative_motion_) {
+      return;
+    }
+    relative_motion_->request_emergency_stop();
   }
 
   void run_runtime_events()
@@ -497,11 +432,13 @@ private:
           [this](auto & typed_event) {process_event(typed_event);},
           event.payload);
       } catch (const std::exception & error) {
+        request_independent_emergency();
         if (core_) {
           core_->fail_closed(
             std::string{"Runtime event worker raised: "} + error.what());
         }
       } catch (...) {
+        request_independent_emergency();
         if (core_) {
           core_->fail_closed("Runtime event worker raised an unknown exception");
         }
@@ -553,11 +490,13 @@ private:
     try {
       response = core_->stop(event.request);
     } catch (const std::exception & error) {
+      request_independent_emergency();
       response = StopResponse{
         2U, {}, 0U, false,
         std::string{"STOP worker raised: "} + error.what()};
       core_->fail_closed(response.detail);
     } catch (...) {
+      request_independent_emergency();
       response = StopResponse{
         2U, {}, 0U, false, "STOP worker raised an unknown exception"};
       core_->fail_closed(response.detail);
@@ -594,6 +533,7 @@ private:
 
   void process_event(QueueFaultEvent & event)
   {
+    request_independent_emergency();
     core_->fail_closed(event.detail);
   }
 
@@ -621,11 +561,21 @@ private:
             request.reason},
           waiter}});
     if (!accepted) {
+      const auto emergency_deadline = std::chrono::steady_clock::now() +
+        config_.stationarity_deadline + config_.stop_barrier;
+      bool zero_proven = false;
+      if (relative_motion_) {
+        try {
+          zero_proven = relative_motion_->emergency_stop(emergency_deadline);
+        } catch (...) {
+          zero_proven = false;
+        }
+      }
       const auto state = state_snapshot();
       response.code = 2U;
       response.runtime_instance_id = state.runtime_instance_id;
       response.admission_epoch = state.admission_epoch;
-      response.motion_inhibited = false;
+      response.motion_inhibited = zero_proven;
       response.detail = "Runtime event queue could not accept STOP";
       return;
     }
@@ -635,11 +585,12 @@ private:
     if (!waiter->condition.wait_until(
         lock, wait_deadline, [waiter]() {return waiter->completed;}))
     {
+      request_independent_emergency();
       const auto state = state_snapshot();
       response.code = 2U;
       response.runtime_instance_id = state.runtime_instance_id;
       response.admission_epoch = state.admission_epoch;
-      response.motion_inhibited = false;
+      response.motion_inhibited = relative_motion_ && relative_motion_->zero_proven();
       response.detail = "STOP response deadline expired before zero proof";
       return;
     }
@@ -734,12 +685,13 @@ private:
   std::shared_ptr<RosMotionAuthorityPort> authority_;
   std::shared_ptr<RelativeMotionRosAdapter> relative_motion_;
   std::unique_ptr<RuntimeCore> core_;
-  RuntimeEventQueue event_queue_;
+  RuntimeEventQueueType event_queue_;
   std::thread runtime_worker_;
   std::recursive_mutex mutex_;
   std::unordered_set<const GoalHandle *> pending_goal_cancels_;
   RuntimeState cached_state_{};
   bool cached_state_valid_{false};
+  std::atomic<bool> ingress_stopped_{false};
   rclcpp::Publisher<MissionStateMessage>::SharedPtr state_publisher_;
   rclcpp_action::Server<ExecuteMission>::SharedPtr action_server_;
   rclcpp::Service<StopMission>::SharedPtr stop_service_;

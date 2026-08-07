@@ -270,10 +270,32 @@ public:
 
   ~Impl()
   {
+    shutdown();
+  }
+
+  void shutdown() noexcept
+  {
+    bool already_shutdown = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      shutting_down_ = true;
-      cancel_requested_.store(true);
+      already_shutdown = shutdown_complete_;
+      if (!already_shutdown) {
+        shutting_down_ = true;
+      }
+    }
+    if (already_shutdown) {
+      return;
+    }
+
+    request_emergency_stop();
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      condition_variable_.wait(lock, [this]() {
+          return !active_ && teardown_complete_ &&
+                 transaction_kind_ == TransactionKind::Idle &&
+                 !transaction_in_progress_ &&
+                 !emergency_stop_in_progress_;
+        });
       transaction_stop_ = true;
     }
     transaction_condition_.notify_all();
@@ -286,6 +308,10 @@ public:
     odom_subscription_.reset();
     conditioning_.reset();
     producer_.reset();
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      shutdown_complete_ = true;
+    }
   }
 
   [[nodiscard]] bool healthy() const
@@ -315,7 +341,7 @@ public:
     ResultCallback rejected_result;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (active_ || transaction_kind_ != TransactionKind::Idle) {
+      if (shutting_down_ || active_ || transaction_kind_ != TransactionKind::Idle) {
         rejected_result = std::move(result);
       } else {
         active_ = true;
@@ -353,6 +379,12 @@ public:
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!active_) {
+        if (transaction_kind_ == TransactionKind::Idle &&
+          !emergency_stop_in_progress_ && teardown_complete_ &&
+          teardown_safe_ && zero_proven_)
+        {
+          return true;
+        }
         if (transaction_kind_ == TransactionKind::Idle &&
           !emergency_stop_in_progress_)
         {
@@ -427,6 +459,31 @@ public:
     return condition_variable_.wait_until(
       lock, deadline, [this]() {return !active_ && teardown_complete_;}) &&
            teardown_safe_;
+  }
+
+  void request_emergency_stop() noexcept
+  {
+    MotionToken token;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      token = active_token_;
+    }
+    try {
+      (void)cancel(token, std::chrono::steady_clock::now());
+    } catch (...) {
+      // The caller that owns the independent path remains fail-closed even
+      // when a best-effort transaction request cannot be materialized.
+    }
+  }
+
+  [[nodiscard]] bool emergency_stop(const TimePoint deadline)
+  {
+    MotionToken token;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      token = active_token_;
+    }
+    return cancel(token, deadline);
   }
 
   void tick(const TimePoint now)
@@ -584,6 +641,7 @@ private:
         }
         kind = transaction_kind_;
         transaction_kind_ = TransactionKind::Idle;
+        transaction_in_progress_ = true;
         if (kind == TransactionKind::Teardown) {
           teardown = std::move(pending_teardown_);
           pending_teardown_.reset();
@@ -601,6 +659,11 @@ private:
           std::string{"relative-motion transaction raised: "} + error.what());
       } catch (...) {
         fail_transaction("relative-motion transaction raised an unknown exception");
+      }
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        transaction_in_progress_ = false;
+        condition_variable_.notify_all();
       }
     }
   }
@@ -875,8 +938,10 @@ private:
     const MotionToken & token,
     const MotionConditioningResult & conditioning_result)
   {
+    const bool zero_proven = conditioning_result.zero_proven &&
+      conditioning_result.zero_proven_at != TimePoint{};
     auto code = child_code_for_conditioning(conditioning_result.failure);
-    if (!conditioning_result.zero_proven ||
+    if (!zero_proven ||
       conditioning_result.failure == MotionConditioningFailure::SafetyFault)
     {
       code = ChildResultCode::SafetyFault;
@@ -893,9 +958,9 @@ private:
       starting_ = false;
       teardown_started_ = false;
       command_ = {};
-      zero_proven_ = conditioning_result.zero_proven;
+      zero_proven_ = zero_proven;
       teardown_complete_ = true;
-      teardown_safe_ = conditioning_result.zero_proven &&
+      teardown_safe_ = zero_proven &&
         conditioning_result.failure != MotionConditioningFailure::SafetyFault;
       result_callback = std::move(result_callback_);
       condition_variable_.notify_all();
@@ -905,7 +970,7 @@ private:
         node_.get_logger(),
         "Relative motion start failed: conditioning_failure=%u zero=%d detail=%s",
         static_cast<unsigned int>(conditioning_result.failure),
-        conditioning_result.zero_proven ? 1 : 0,
+        zero_proven ? 1 : 0,
         conditioning_result.detail.c_str());
       try {
         result_callback(
@@ -1091,7 +1156,9 @@ private:
   TransactionKind transaction_kind_{TransactionKind::Idle};
   std::optional<TeardownRequest> pending_teardown_;
   bool transaction_stop_{false};
+  bool transaction_in_progress_{false};
   bool shutting_down_{false};
+  bool shutdown_complete_{false};
   bool emergency_stop_in_progress_{false};
   std::atomic<bool> cancel_requested_{false};
   bool active_{false};
@@ -1152,6 +1219,26 @@ bool RelativeMotionRosAdapter::cancel(
   const SteadyClockPort::TimePoint deadline)
 {
   return impl_->cancel(token, deadline);
+}
+
+void RelativeMotionRosAdapter::request_emergency_stop() noexcept
+{
+  if (impl_) {
+    impl_->request_emergency_stop();
+  }
+}
+
+bool RelativeMotionRosAdapter::emergency_stop(
+  const SteadyClockPort::TimePoint deadline)
+{
+  return impl_ && impl_->emergency_stop(deadline);
+}
+
+void RelativeMotionRosAdapter::shutdown() noexcept
+{
+  if (impl_) {
+    impl_->shutdown();
+  }
 }
 
 void RelativeMotionRosAdapter::tick(const SteadyClockPort::TimePoint now)

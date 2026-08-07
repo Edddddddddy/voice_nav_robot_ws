@@ -52,6 +52,13 @@ public:
   [[nodiscard]] bool cancel(
     const MotionToken & token,
     SteadyClockPort::TimePoint deadline) override;
+  // Independent fail-closed path used when the Runtime event queue or worker
+  // cannot accept/serialize a control event.  It never calls RuntimeCore.
+  void request_emergency_stop() noexcept;
+  [[nodiscard]] bool emergency_stop(SteadyClockPort::TimePoint deadline);
+  // Explicitly drains all adapter transactions before its owned resources are
+  // released by the Mission Runtime Node.
+  void shutdown() noexcept;
   void tick(SteadyClockPort::TimePoint now) override;
   [[nodiscard]] bool owns_authority_lifecycle() const noexcept override;
   [[nodiscard]] bool zero_proven() const noexcept override;
