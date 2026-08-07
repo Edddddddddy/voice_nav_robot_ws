@@ -35,3 +35,5 @@ used in requirements, delivery decisions, and review evidence.
 - **Context** — the bounded set of requirements, decisions, interfaces, and
   evidence needed to act on one Task without relying on hidden conversation
   history.
+- **Clarification（澄清）** — 为一个缺失或歧义语义参数发出的有界追问；它会过期，
+  不是 Mission，也不是聊天记忆。

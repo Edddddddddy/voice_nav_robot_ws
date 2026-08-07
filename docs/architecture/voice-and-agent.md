@@ -7,6 +7,21 @@ VAD, ASR, TTS, playback, and barge-in. `agent_node` owns deterministic command
 rules, clarification, constrained local-LLM fallback, and Mission submission.
 Neither process has final motion authority.
 
+## Issue #46 Agent Core boundary
+
+`voice_nav_agent` 的 Core 是无 ROS I/O、无 HTTP、可注入 steady clock 的纯
+Python Module。它的行为 seam 是一次 `handle_turn(VoiceTurn,
+MissionState-or-none)` 和一个共享的 `SemanticValidator`；Normalizer、封闭
+规则解析、澄清表与 Voice sequence fencing 都留在 Core 内部。Core 输出封闭的
+`MISSION`、`CANCEL`、`STOP`、`CLARIFY`、`REPLY`、`LLM_NEEDED` 或 `IGNORE`
+Decision，未来 LLM proposal 与规则 proposal 必须经过同一 Validator。
+
+非 STOP 的 Mission/LLM planning token 在 turn 开始时固定 Agent source
+identity、Voice turn identity、generation 与 Runtime ID/epoch/mode/capability/
+Named Place 快照；不会在规划过程中刷新。STOP 遵循 D-046-003B：request ID
+等于 `turn_id`，source instance/sequence 直接复用 Voice Turn 的
+`voice_instance_id`/`voice_seq`，reason 固定为 `voice_stop`。
+
 ## Public ROS surface
 
 Voice exposes only:
