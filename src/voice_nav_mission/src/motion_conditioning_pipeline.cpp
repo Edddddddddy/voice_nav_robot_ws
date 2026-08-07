@@ -1188,7 +1188,7 @@ private:
       }
       teardown_cv_.wait(teardown_lock, [this]() {
           return !teardown_in_progress_.load();
-        });
+      });
       existing = teardown_result_;
       return false;
     }
@@ -1417,17 +1417,17 @@ private:
 
   [[nodiscard]] MotionConditioningResult stop_owned()
   {
-    disable_renew_callbacks();
     bool zero_proven = false;
     std::chrono::steady_clock::time_point zero_proven_at{};
     // Invalidation in begin_teardown() is the cancellation fence.  Prove
-    // Gate zero before waiting for callbacks or an in-flight component RPC so
-    // a concurrent STOP/Cancel cannot leave the producer commanded while a
-    // 2s/4s start operation drains.
-    zero_proven = inhibit_gate();
+    // Gate zero before disabling/waiting for callbacks or an in-flight
+    // component RPC so a concurrent STOP/Cancel cannot leave the producer
+    // commanded while a 2s/4s start operation drains.
+    zero_proven = inhibit_gate(true);
     if (zero_proven) {
       zero_proven_at = std::chrono::steady_clock::now();
     }
+    disable_renew_callbacks();
     wait_for_renew_callbacks();
     if (destroying_.load()) {
       drain_start_operations();
@@ -2491,14 +2491,30 @@ private:
     return success;
   }
 
-  [[nodiscard]] bool inhibit_gate()
+  [[nodiscard]] bool inhibit_gate(const bool emergency = false)
   {
     try {
-      if (lease_id_.empty()) {
+      std::string lease_id;
+      {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        lease_id = lease_id_;
+      }
+      if (lease_id.empty()) {
         return gate_snapshot_proves_zero(authority_->snapshot());
       }
-      std::lock_guard<std::mutex> authority_lock(authority_call_mutex_);
-      const auto operation = make_operation(lease_id_);
+      std::unique_lock<std::mutex> authority_lock(
+        authority_call_mutex_, std::defer_lock);
+      if (!emergency) {
+        authority_lock.lock();
+      } else {
+        // A concurrent OPEN/RENEW may be inside the normal conditioning
+        // serialization mutex.  The #35 MotionGate control service is itself
+        // request-sequence linearized; emergency INHIBIT must be allowed to
+        // race that bounded call so STOP/Cancel can fence the generation and
+        // prove zero without waiting for the RPC to return.
+        (void)authority_lock.try_lock();
+      }
+      const auto operation = make_operation(lease_id);
       const auto result = authority_->inhibit(operation);
       if (!result.applied &&
         result.snapshot.gate_instance_id == operation.gate_instance_id &&

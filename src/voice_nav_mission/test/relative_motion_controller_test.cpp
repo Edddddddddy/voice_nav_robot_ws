@@ -109,6 +109,35 @@ TEST(RelativeMotionController, NegativeMoveUsesTheFirstOdomAsItsReference)
   EXPECT_DOUBLE_EQ(moving.command.linear_x_mps, -0.25);
 }
 
+TEST(RelativeMotionController, CommandLimitsHoldAtMaximumAndMinimum)
+{
+  const auto t0 = SteadyClockPort::TimePoint{};
+
+  RelativeMotionController maximum_move;
+  maximum_move.start(kToken, move(2.0F), t0);
+  const auto max_move = maximum_move.observe_odom(odom(0.0, 0.0, 0.0), t0);
+  EXPECT_DOUBLE_EQ(max_move.command.linear_x_mps, 0.25);
+
+  RelativeMotionPolicy low_move_policy;
+  low_move_policy.move_tolerance_m = 0.01;
+  RelativeMotionController minimum_move(low_move_policy);
+  minimum_move.start(kToken, move(0.02F), t0);
+  const auto min_move = minimum_move.observe_odom(odom(0.0, 0.0, 0.0), t0);
+  EXPECT_DOUBLE_EQ(min_move.command.linear_x_mps, 0.05);
+
+  RelativeMotionController maximum_rotate;
+  maximum_rotate.start(kToken, rotate(6.283185F), t0);
+  const auto max_rotate = maximum_rotate.observe_odom(odom(0.0, 0.0, 0.0), t0);
+  EXPECT_DOUBLE_EQ(max_rotate.command.angular_z_rps, 0.80);
+
+  RelativeMotionPolicy low_rotate_policy;
+  low_rotate_policy.rotate_tolerance_rad = 0.01;
+  RelativeMotionController minimum_rotate(low_rotate_policy);
+  minimum_rotate.start(kToken, rotate(0.02F), t0);
+  const auto min_rotate = minimum_rotate.observe_odom(odom(0.0, 0.0, 0.0), t0);
+  EXPECT_DOUBLE_EQ(min_rotate.command.angular_z_rps, 0.10);
+}
+
 TEST(RelativeMotionController, RotateUnwrapsAcrossPiWithoutChangingDirection)
 {
   RelativeMotionController controller;
@@ -125,6 +154,37 @@ TEST(RelativeMotionController, RotateUnwrapsAcrossPiWithoutChangingDirection)
   const auto arrived = controller.observe_odom(odom(0.0, 0.0, -2.683), t0 + 300ms);
   EXPECT_EQ(arrived.kind, RelativeMotionEventKind::ZeroRequested);
   EXPECT_DOUBLE_EQ(arrived.command.angular_z_rps, 0.0);
+}
+
+TEST(RelativeMotionController, NegativeRotateUnwrapsAcrossPiWithoutReversing)
+{
+  RelativeMotionController controller;
+  const auto t0 = SteadyClockPort::TimePoint{};
+
+  controller.start(kToken, rotate(-0.50F), t0);
+  controller.observe_odom(odom(0.0, 0.0, -3.10), t0);
+  const auto crossed = controller.observe_odom(
+    odom(0.0, 0.0, 3.08), t0 + 100ms);
+
+  EXPECT_EQ(crossed.kind, RelativeMotionEventKind::Running);
+  EXPECT_LT(crossed.command.angular_z_rps, 0.0);
+  EXPECT_NEAR(crossed.progress, 0.206, 0.01);
+}
+
+TEST(RelativeMotionController, ProgressIsMonotonicWhenTheRobotBacktracks)
+{
+  RelativeMotionController controller;
+  const auto t0 = SteadyClockPort::TimePoint{};
+
+  controller.start(kToken, move(0.50F), t0);
+  controller.observe_odom(odom(0.0, 0.0, 0.0), t0);
+  const auto forward = controller.observe_odom(
+    odom(0.30, 0.0, 0.0), t0 + 100ms);
+  const auto backward = controller.observe_odom(
+    odom(0.10, 0.0, 0.0), t0 + 200ms);
+
+  EXPECT_NEAR(forward.progress, 0.60, 1e-12);
+  EXPECT_DOUBLE_EQ(backward.progress, forward.progress);
 }
 
 TEST(RelativeMotionController, StallUsesHistoricalBestErrorAndIsBounded)

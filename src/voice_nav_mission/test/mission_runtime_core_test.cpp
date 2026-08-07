@@ -156,6 +156,53 @@ TEST(RuntimeCore, FakeFSMIsOrderedBusyAndExactlyOnce)
   EXPECT_EQ(fixture.results.size(), 1U);
 }
 
+TEST(RuntimeCore, ChildCallbacksCanBeQueuedAndAppliedByTheRuntimeWorker)
+{
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  std::vector<MissionFeedback> feedback;
+  std::vector<MissionResult> results;
+  std::vector<std::pair<MotionToken, double>> queued_feedback;
+  std::vector<std::pair<MotionToken, ChildResult>> queued_results;
+  RuntimeCore core(
+    config(), clock, authority, relative,
+    {},
+    [&feedback](std::uint64_t, const MissionFeedback & item) {
+      feedback.push_back(item);
+    },
+    [&results](std::uint64_t, const MissionResult & item) {
+      results.push_back(item);
+    },
+    [&queued_feedback](const MotionToken & token, const double progress) {
+      queued_feedback.emplace_back(token, progress);
+      return true;
+    },
+    [&queued_results](const MotionToken & token, const ChildResult & result) {
+      queued_results.emplace_back(token, result);
+      return true;
+    });
+  core.observe_gate(authority->snapshot());
+
+  ASSERT_TRUE(core.admit(goal(1U)).accepted);
+  const auto token = relative->started_tokens().front();
+  relative->feedback(0.5);
+  ASSERT_EQ(queued_feedback.size(), 1U);
+  EXPECT_TRUE(core.has_active_mission());
+  core.on_child_feedback(queued_feedback.front().first, queued_feedback.front().second);
+  EXPECT_FALSE(feedback.empty());
+
+  relative->complete();
+  ASSERT_EQ(queued_results.size(), 1U);
+  EXPECT_TRUE(core.has_active_mission());
+  core.on_child_result(queued_results.front().first, queued_results.front().second);
+
+  ASSERT_EQ(results.size(), 1U);
+  EXPECT_EQ(results.front().code, MissionResultCode::Succeeded);
+  EXPECT_EQ(queued_results.front().first.mission_id, token.mission_id);
+  EXPECT_FALSE(core.has_active_mission());
+}
+
 TEST(RuntimeCore, ThreeStepFeedbackUsesExactMissionBoundaries)
 {
   Fixture fixture;

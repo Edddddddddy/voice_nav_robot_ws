@@ -1,9 +1,10 @@
 # Mission Runtime Interface
 
 **Status:** Active pre-1.0 Mission V1 public Interface; Issue #34 implements the
-Mission Runtime control plane behind this stable public Interface. The
-production RelativeMotion Adapter intentionally remains unavailable until #64;
-the physical motion chain is a later Task.
+Mission Runtime control plane behind this stable public Interface. Issue #64
+adds the production odometry-closed-loop RelativeMotion Adapter for pure-control
+and ROS-integration acceptance. Headless physical raw-stamp-age and TF
+acceptance is intentionally tracked by Issue #72.
 
 Mission Runtime is a deep Module with two mutation operations and one read-only
 state projection:
@@ -260,12 +261,22 @@ the frozen values below; they are not additions to the public ROS IDL.
 | `max_steps` | `3` |
 | `move_distance_min_m` / `move_distance_max_m` | `0.05` / `2.0` |
 | `rotate_angle_min_rad` / `rotate_angle_max_rad` | `0.05` / `6.283185` |
+| `stationarity_deadline_ms` | `1200` |
 
 The MOVE and ROTATE union validators consume the same policy values rather
 than maintaining a second range definition. Gate discovery uses the bounded
 steady-clock window while continuing event-driven observation; a missed
 startup window leaves Runtime `UNAVAILABLE` and fail-closed until a healthy
 Gate snapshot is observed.
+
+The production RelativeMotion Adapter keeps the public Core non-blocking: a
+start transaction and teardown run on bounded worker paths, while STOP/Cancel
+first fences the generation and starts the #35 Gate inhibit/zero path without
+holding the Node mutex. Runtime callbacks enter a Node-owned typed queue with
+control-event priority; a cached serialized state snapshot is used for service
+timeout responses. The #35 conditioning Module retains its `2000 ms` component
+RPC bound, `4000 ms` PREPARE-to-OPEN handover deadline, and
+`OPEN -> Collision Monitor -> Velocity Smoother -> producer` order.
 
 ## Motion and map semantics
 
