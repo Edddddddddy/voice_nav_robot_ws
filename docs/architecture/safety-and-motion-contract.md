@@ -402,6 +402,10 @@ above. Every Goal receives exactly one terminal result.
   reserved control capacity and generation-tagged events. STOP/Cancel fences
   the generation first, starts asynchronous teardown, and uses a serialized
   state snapshot if the ROS service cannot enqueue or await its response.
+- Normal queue saturation rejects only the normal event and records one
+  QueueFault; the reserved STOP/Cancel lane remains usable. If queue admission
+  or the Runtime worker fails, the Adapter's independent emergency inhibit/
+  zero path still runs and remains idempotent.
 - Stationarity is measured only from odometry received at or after the actual
   steady-clock Gate `zero_proven_at`; its deadline is absolute at
   `zero_proven_at + 1200 ms`, with no cleanup-time extension.

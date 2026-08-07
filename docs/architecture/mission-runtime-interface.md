@@ -273,9 +273,15 @@ The production RelativeMotion Adapter keeps the public Core non-blocking: a
 start transaction and teardown run on bounded worker paths, while STOP/Cancel
 first fences the generation and starts the #35 Gate inhibit/zero path without
 holding the Node mutex. Runtime callbacks enter a Node-owned typed queue with
-control-event priority; a cached serialized state snapshot is used for service
-timeout responses. The #35 conditioning Module retains its `2000 ms` component
-RPC bound, `4000 ms` PREPARE-to-OPEN handover deadline, and
+control-event priority. The queue physically reserves eight control slots
+beside 120 normal slots; normal saturation records one QueueFault without
+closing STOP/Cancel. The Adapter also exposes an idempotent emergency
+inhibit/zero seam that does not depend on queue admission or the Runtime
+worker. A cached serialized state snapshot is used for service timeout
+responses, and explicit shutdown drains ingress, Adapter transactions, and
+completion callbacks before the queue, worker, and Core are released. The #35
+conditioning Module retains its `2000 ms` component RPC bound, `4000 ms`
+PREPARE-to-OPEN handover deadline, and
 `OPEN -> Collision Monitor -> Velocity Smoother -> producer` order.
 
 ## Motion and map semantics

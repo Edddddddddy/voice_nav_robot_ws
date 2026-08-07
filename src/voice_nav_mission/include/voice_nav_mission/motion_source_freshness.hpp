@@ -42,13 +42,6 @@ private:
   bool observed_{false};
 };
 
-// Collision Monitor's source_timeout contract is a ROS-time measurement age,
-// independent from steady callback liveness.  Negative age is fail-closed;
-// exactly the configured age remains usable and a greater age is stale.
-[[nodiscard]] bool raw_stamp_age_is_fresh(
-  std::chrono::nanoseconds age,
-  std::chrono::milliseconds timeout) noexcept;
-
 }  // namespace voice_nav_mission
 
 #endif  // VOICE_NAV_MISSION__MOTION_SOURCE_FRESHNESS_HPP_

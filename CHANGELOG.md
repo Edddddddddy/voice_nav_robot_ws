@@ -23,6 +23,11 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Runtime event serialization with STOP/Cancel control priority, and a
   serialized state snapshot for service deadline responses. STOP/Cancel proves
   Gate inhibit/zero before waiting for an in-flight #35 start operation.
+- Hardened the RelativeMotion production seam with physically separate 120-slot
+  normal and 8-slot control queues, independent emergency inhibit/zero,
+  cancel-observable PREPARE/RPC handover, unique cleanup ownership, explicit
+  Adapter/Node shutdown ordering, and steady `zero_proven_at` evidence for
+  business failures and cached terminal results.
 - Added absolute stationarity evidence anchored at the steady-clock
   `zero_proven_at`, with the exact `zero_proven_at + 1200 ms` deadline and no
   cleanup-time extension. The #35 conditioning handover is restored to its
