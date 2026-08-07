@@ -91,8 +91,13 @@ public:
 
   AuthorityResult open(const AuthorityOperation &) override
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
     calls_.push_back(AuthorityOperationKind::Open);
+    if (block_open_) {
+      open_entered_ = true;
+      open_cv_.notify_all();
+      open_cv_.wait(lock, [this]() {return release_open_;});
+    }
     if (throw_on_open_) {
       throw std::runtime_error("scripted MotionGate OPEN failure");
     }
@@ -189,6 +194,28 @@ public:
     throw_on_open_ = value;
   }
 
+  void block_open()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    block_open_ = true;
+    open_entered_ = false;
+    release_open_ = false;
+  }
+
+  bool wait_for_open(std::chrono::milliseconds timeout = 1s)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return open_cv_.wait_for(
+      lock, timeout, [this]() {return open_entered_;});
+  }
+
+  void release_blocked_open()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    release_open_ = true;
+    open_cv_.notify_all();
+  }
+
   void set_throw_on_renew(bool value)
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -269,6 +296,9 @@ private:
   std::size_t renew_count_{0U};
   std::optional<std::size_t> renew_failure_after_;
   bool throw_on_open_{false};
+  bool block_open_{false};
+  bool open_entered_{false};
+  bool release_open_{false};
   bool throw_on_renew_{false};
   bool block_renew_{false};
   bool renew_entered_{false};
@@ -278,6 +308,7 @@ private:
   bool release_inhibit_{false};
   std::condition_variable inhibit_cv_;
   std::condition_variable renew_cv_;
+  std::condition_variable open_cv_;
   std::vector<AuthorityOperationKind> calls_;
 };
 
@@ -1012,6 +1043,66 @@ TEST_F(MotionConditioningPipelineTest, TeardownDrainsProducerStartBeforeCleanup)
       calls.cbegin(), calls.cend(), AuthorityOperationKind::Inhibit), 1);
 }
 
+TEST_F(MotionConditioningPipelineTest, SecondStartCannotClaimTeardownOrOpen)
+{
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+  ASSERT_TRUE(pipeline.prepare().ok);
+  authority->block_open();
+
+  std::optional<MotionConditioningResult> first_result;
+  std::thread first_thread([&]() {first_result = pipeline.start();});
+  const bool open_entered = authority->wait_for_open();
+  if (!open_entered) {
+    authority->release_blocked_open();
+    first_thread.join();
+    FAIL() << "first start did not reach MotionGate OPEN barrier";
+  }
+
+  std::optional<MotionConditioningResult> second_result;
+  std::thread second_thread([&]() {second_result = pipeline.start();});
+  const auto second_deadline = std::chrono::steady_clock::now() + 200ms;
+  while (!second_result.has_value() &&
+    std::chrono::steady_clock::now() < second_deadline)
+  {
+    std::this_thread::sleep_for(1ms);
+  }
+  const bool second_returned = second_result.has_value();
+  const auto calls_before_release = authority->calls();
+  const auto opens_before_release = static_cast<std::size_t>(std::count(
+      calls_before_release.cbegin(), calls_before_release.cend(),
+      AuthorityOperationKind::Open));
+
+  std::optional<MotionConditioningResult> stop_result;
+  std::thread stop_thread([&]() {stop_result = pipeline.stop();});
+  std::this_thread::sleep_for(20ms);
+  const bool stop_waited_for_first = !stop_result.has_value();
+
+  authority->release_blocked_open();
+  first_thread.join();
+  second_thread.join();
+  stop_thread.join();
+
+  ASSERT_TRUE(second_returned);
+  ASSERT_TRUE(second_result.has_value());
+  EXPECT_FALSE(second_result->ok);
+  EXPECT_NE(second_result->detail.find("another start"), std::string::npos);
+  EXPECT_EQ(opens_before_release, 1U);
+  EXPECT_TRUE(stop_waited_for_first);
+  ASSERT_TRUE(first_result.has_value());
+  ASSERT_TRUE(stop_result.has_value());
+  EXPECT_FALSE(first_result->ok);
+  EXPECT_TRUE(stop_result->zero_proven);
+  const auto calls = authority->calls();
+  EXPECT_EQ(
+    std::count(
+      calls.cbegin(), calls.cend(), AuthorityOperationKind::Open), 1);
+  EXPECT_EQ(
+    std::count(
+      calls.cbegin(), calls.cend(), AuthorityOperationKind::Inhibit), 1);
+  EXPECT_EQ(graph->unload_count(), 2U);
+  EXPECT_EQ(producer->stop_count, 1U);
+}
+
 TEST_F(MotionConditioningPipelineTest, ProducerFalseFailsClosedAndCleansUp)
 {
   producer->allow_start = false;
@@ -1157,6 +1248,8 @@ TEST_F(MotionConditioningPipelineTest, LateLoadResponseIsReconciledAndBlocksNext
     std::count(
       calls_after_first.cbegin(), calls_after_first.cend(),
       AuthorityOperationKind::Prepare));
+  EXPECT_NE(first.detail.find("phase=pending_load"), std::string::npos);
+  EXPECT_NE(first.detail.find("fqn=/collision_monitor"), std::string::npos);
 }
 
 TEST_F(MotionConditioningPipelineTest, FqnMismatchIsUnloadedBeforePrepareFails)
@@ -1169,6 +1262,9 @@ TEST_F(MotionConditioningPipelineTest, FqnMismatchIsUnloadedBeforePrepareFails)
 
   EXPECT_FALSE(result.ok);
   EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
+  EXPECT_NE(result.detail.find("phase=load_fqn"), std::string::npos);
+  EXPECT_NE(result.detail.find("fqn=/wrong_collision_monitor"), std::string::npos);
+  EXPECT_NE(result.detail.find("unique_id=1"), std::string::npos);
   EXPECT_EQ(graph->loaded_count(), 0U);
 }
 
@@ -1237,6 +1333,9 @@ TEST_F(MotionConditioningPipelineTest, EachUniqueIdGetsAnIndependentUnloadBudget
   EXPECT_EQ(
     std::find(unload_completed.cbegin(), unload_completed.cend(), 1U),
     unload_completed.cend());
+  EXPECT_NE(result.detail.find("phase=unload"), std::string::npos);
+  EXPECT_NE(result.detail.find("fqn=/collision_monitor"), std::string::npos);
+  EXPECT_NE(result.detail.find("unique_id=1"), std::string::npos);
 }
 
 TEST_F(MotionConditioningPipelineTest, SensorLivenessLossFailsClosed)
@@ -1455,6 +1554,40 @@ TEST_F(MotionConditioningPipelineTest, LateOldCollisionCannotTerminateNextGenera
   EXPECT_FALSE(pipeline.last_result().collision_stop);
 }
 
+TEST_F(MotionConditioningPipelineTest, LateOldFailureTokenCannotTouchNextGeneration)
+{
+  auto pipeline_config = config();
+  pipeline_config.renew_period = 1s;
+  MotionConditioningPipeline pipeline(
+    *client, authority, producer, pipeline_config);
+  ASSERT_TRUE(pipeline.prepare().ok);
+  std::this_thread::sleep_for(50ms);
+  ASSERT_TRUE(pipeline.start().ok);
+  const auto old_token = pipeline.correlation_token();
+  const auto stopped = pipeline.stop();
+  ASSERT_TRUE(stopped.ok);
+
+  ASSERT_TRUE(pipeline.prepare().ok);
+  std::this_thread::sleep_for(50ms);
+  const auto running = pipeline.start();
+  ASSERT_TRUE(running.ok);
+  const auto calls_before = authority->calls();
+  const auto stops_before = producer->stop_count;
+  const auto late = pipeline.fail(
+    old_token,
+    MotionConditioningFailure::SafetyFault,
+    "late failure from the previous generation");
+
+  EXPECT_TRUE(late.ok);
+  EXPECT_EQ(late.state, MotionConditioningState::Running);
+  EXPECT_EQ(pipeline.state(), MotionConditioningState::Running);
+  EXPECT_EQ(pipeline.last_result().state, running.state);
+  EXPECT_EQ(pipeline.last_result().failure, running.failure);
+  EXPECT_EQ(producer->stop_count, stops_before);
+  EXPECT_EQ(authority->calls(), calls_before);
+  EXPECT_EQ(graph->loaded_count(), 2U);
+}
+
 TEST_F(MotionConditioningPipelineTest, StopWaitsForRenewFailureTeardownOwner)
 {
   MotionConditioningPipeline pipeline(*client, authority, producer, config());
@@ -1552,6 +1685,50 @@ TEST_F(MotionConditioningPipelineTest, DestructorReusesTeardownTerminalResult)
     inhibit_count);
   EXPECT_EQ(producer->stop_count, producer_stop_count);
   EXPECT_EQ(producer_stop_count, 1U);
+}
+
+TEST_F(MotionConditioningPipelineTest, DestructorWaitsForActiveTeardownOwner)
+{
+  auto pipeline = std::make_unique<MotionConditioningPipeline>(
+    *client, authority, producer, config());
+  ASSERT_TRUE(pipeline->prepare().ok);
+  std::this_thread::sleep_for(50ms);
+  ASSERT_TRUE(pipeline->start().ok);
+  authority->block_inhibit();
+
+  auto * raw_pipeline = pipeline.get();
+  std::optional<MotionConditioningResult> stop_result;
+  std::thread stop_thread([&]() {stop_result = raw_pipeline->stop();});
+  const bool inhibit_entered = authority->wait_for_inhibit();
+  if (!inhibit_entered) {
+    authority->release_blocked_inhibit();
+    stop_thread.join();
+    FAIL() << "teardown did not reach the inhibit barrier";
+  }
+
+  auto owned_pipeline = std::move(pipeline);
+  std::atomic<bool> destructor_finished{false};
+  std::thread destructor_thread(
+    [owned = std::move(owned_pipeline), &destructor_finished]() mutable {
+      owned.reset();
+      destructor_finished.store(true);
+    });
+  std::this_thread::sleep_for(20ms);
+  EXPECT_FALSE(destructor_finished.load());
+
+  authority->release_blocked_inhibit();
+  stop_thread.join();
+  destructor_thread.join();
+
+  ASSERT_TRUE(stop_result.has_value());
+  EXPECT_TRUE(stop_result->zero_proven);
+  EXPECT_TRUE(destructor_finished.load());
+  EXPECT_EQ(producer->stop_count, 1U);
+  const auto calls = authority->calls();
+  EXPECT_EQ(
+    std::count(
+      calls.cbegin(), calls.cend(), AuthorityOperationKind::Inhibit), 1);
+  EXPECT_EQ(graph->unload_count(), 2U);
 }
 
 TEST_F(MotionConditioningPipelineTest, RenewAuthorityLossFailsClosed)
