@@ -424,7 +424,7 @@ def test_malformed_or_unusable_runtime_snapshot_fails_closed(changes):
     assert decision.kind is DecisionKind.REPLY
 
 
-def test_clarification_answers_are_typed_and_bad_answers_restart_the_question():
+def test_clarification_answers_reject_complete_unknown_place_and_end_pending():
     clock = ManualClock()
     core = make_core(clock=clock)
 
@@ -440,10 +440,196 @@ def test_clarification_answers_are_typed_and_bad_answers_restart_the_question():
 
     assert missing_place.kind is DecisionKind.CLARIFY
     assert missing_place.reason == 'missing_place'
-    assert bad_answer.kind is DecisionKind.CLARIFY
-    assert bad_answer.reason == 'missing_place'
-    assert good_answer.kind is DecisionKind.MISSION
-    assert good_answer.steps[0].target_id == 'lobby'
+    assert bad_answer.kind is DecisionKind.REPLY
+    assert bad_answer.reason == 'unknown_place'
+    assert good_answer.kind is DecisionKind.LLM_NEEDED
+
+
+def test_complete_out_of_range_angle_answer_rejects_and_ends_pending():
+    core = make_core()
+
+    clarify = core.handle_turn(make_turn('左转'), make_state())
+    illegal = core.handle_turn(
+        make_turn('361 度', sequence=2), make_state()
+    )
+    bare_answer = core.handle_turn(
+        make_turn('90 度', sequence=3), make_state()
+    )
+
+    assert clarify.kind is DecisionKind.CLARIFY
+    assert illegal.kind is DecisionKind.REPLY
+    assert illegal.reason == 'angle_out_of_range'
+    assert bare_answer.kind is DecisionKind.LLM_NEEDED
+
+
+def test_reclarification_validates_siblings_before_overwrite():
+    core = make_core()
+
+    clarify = core.handle_turn(
+        make_turn('前进 1 米然后左转'), make_state()
+    )
+    rejected = core.handle_turn(
+        make_turn('1 厘米', sequence=2),
+        make_state(supported_step_mask=0b0010),
+    )
+    bare_answer = core.handle_turn(
+        make_turn('90 度', sequence=3), make_state()
+    )
+
+    assert clarify.kind is DecisionKind.CLARIFY
+    assert rejected.kind is DecisionKind.REPLY
+    assert rejected.reason == 'unsupported_step'
+    assert bare_answer.kind is DecisionKind.LLM_NEEDED
+
+
+@pytest.mark.parametrize(
+    ('text', 'initial_changes', 'changed_changes', 'reason'),
+    [
+        (
+            '去 lobby 然后前进',
+            {'operating_mode': OperatingMode.NAVIGATION},
+            {
+                'operating_mode': OperatingMode.NAVIGATION,
+                'named_place_ids': ('charging',),
+            },
+            'unknown_place',
+        ),
+        (
+            '前进 1 米然后左转',
+            {'max_steps': 2},
+            {'max_steps': 1},
+            'step_count_exceeds_snapshot',
+        ),
+        (
+            '保存地图为 map_a 然后前进',
+            {'operating_mode': OperatingMode.MAPPING},
+            {'operating_mode': OperatingMode.NAVIGATION},
+            'mode_mismatch',
+        ),
+    ],
+)
+def test_reclarification_pending_commit_rejects_changed_snapshot_siblings(
+    text, initial_changes, changed_changes, reason
+):
+    core = make_core()
+
+    clarify = core.handle_turn(
+        make_turn(text), make_state(**initial_changes)
+    )
+    rejected = core.handle_turn(
+        make_turn('1 厘米', sequence=2), make_state(**changed_changes)
+    )
+    bare_answer = core.handle_turn(
+        make_turn('1 米', sequence=3), make_state(**initial_changes)
+    )
+
+    assert clarify.kind is DecisionKind.CLARIFY
+    assert rejected.kind is DecisionKind.REPLY
+    assert rejected.reason == reason
+    assert bare_answer.kind is DecisionKind.LLM_NEEDED
+
+
+def test_valid_wrong_unit_reclarifies_and_then_accepts_a_typed_answer():
+    core = make_core()
+
+    clarify = core.handle_turn(make_turn('左转'), make_state())
+    repeated = core.handle_turn(
+        make_turn('90 弧度', sequence=2), make_state()
+    )
+    mission = core.handle_turn(
+        make_turn('90 度', sequence=3), make_state()
+    )
+
+    assert clarify.kind is DecisionKind.CLARIFY
+    assert repeated.kind is DecisionKind.CLARIFY
+    assert repeated.reason == 'missing_angle'
+    assert mission.kind is DecisionKind.MISSION
+    assert mission.steps[0].kind == MissionStep.ROTATE_ANGLE
+
+
+@pytest.mark.parametrize(
+    'answer', ['0 度', '1 度', '361 度', '360.0001 度']
+)
+def test_complete_illegal_angle_answers_end_pending(answer):
+    core = make_core()
+
+    core.handle_turn(make_turn('左转'), make_state())
+    rejected = core.handle_turn(
+        make_turn(answer, sequence=2), make_state()
+    )
+    bare_answer = core.handle_turn(
+        make_turn('90 度', sequence=3), make_state()
+    )
+
+    assert rejected.kind is DecisionKind.REPLY
+    assert rejected.reason == 'angle_out_of_range'
+    assert bare_answer.kind is DecisionKind.LLM_NEEDED
+
+
+@pytest.mark.parametrize('answer', ['0 米', '3 米'])
+def test_complete_illegal_distance_answers_end_pending(answer):
+    core = make_core()
+
+    core.handle_turn(make_turn('前进'), make_state())
+    rejected = core.handle_turn(
+        make_turn(answer, sequence=2), make_state()
+    )
+    bare_answer = core.handle_turn(
+        make_turn('1 米', sequence=3), make_state()
+    )
+
+    assert rejected.kind is DecisionKind.REPLY
+    assert rejected.reason == 'distance_out_of_range'
+    assert bare_answer.kind is DecisionKind.LLM_NEEDED
+
+
+@pytest.mark.parametrize(
+    ('command', 'answer', 'reason', 'state_changes'),
+    [
+        ('去', '../place', 'invalid_place_id', {}),
+        (
+            '保存地图',
+            '../map',
+            'invalid_map_id',
+            {'operating_mode': OperatingMode.MAPPING},
+        ),
+    ],
+)
+def test_complete_illegal_id_answers_end_pending(
+    command, answer, reason, state_changes
+):
+    core = make_core()
+    state = make_state(**state_changes)
+
+    core.handle_turn(make_turn(command), state)
+    rejected = core.handle_turn(make_turn(answer, sequence=2), state)
+    bare_answer = core.handle_turn(
+        make_turn('lobby' if command == '去' else 'map_a', sequence=3),
+        state,
+    )
+
+    assert rejected.kind is DecisionKind.REPLY
+    assert rejected.reason == reason
+    assert bare_answer.kind is DecisionKind.LLM_NEEDED
+
+
+@pytest.mark.parametrize(
+    ('command', 'answer'),
+    [('前进', 'n/a 米'), ('左转', 'n/a 度')],
+)
+def test_complete_typed_unit_with_invalid_number_ends_pending(command, answer):
+    core = make_core()
+
+    core.handle_turn(make_turn(command), make_state())
+    rejected = core.handle_turn(make_turn(answer, sequence=2), make_state())
+    bare_answer = core.handle_turn(
+        make_turn('1 米' if command == '前进' else '90 度', sequence=3),
+        make_state(),
+    )
+
+    assert rejected.kind is DecisionKind.REPLY
+    assert rejected.reason == 'invalid_number'
+    assert bare_answer.kind is DecisionKind.LLM_NEEDED
 
 
 def test_clarification_is_session_scoped_and_stop_clears_pending_state():
