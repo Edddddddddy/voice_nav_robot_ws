@@ -34,6 +34,10 @@ PLACE_ID_PATTERN = re.compile(r'^[a-z][a-z0-9_-]{0,31}$')
 _RUNTIME_ROTATE_ANGLE_MAX_RAD = struct.unpack(
     '<f', struct.pack('<f', 6.283185)
 )[0]
+_CLAUSE_BOUNDARY = re.compile(
+    r'(?:[，,；;。！!?、]\s*(?:然后|再)?|(?:然后|再))'
+)
+_SENTENCE_TERMINATORS = frozenset('。！!?')
 
 
 class DecisionKind(str, Enum):
@@ -844,31 +848,34 @@ class AgentCore:
         if text == '取消任务':
             return _ParseResult('cancel')
         clauses = [clause.strip() for clause in _split_clauses(text)]
+        if clauses and not clauses[-1] and _has_single_terminal_ending(text):
+            clauses.pop()
         if len(clauses) > 3:
             return _ParseResult('invalid', reason='too_many_steps')
         if any(not clause for clause in clauses):
             return _ParseResult('invalid', reason='empty_clause')
 
-        steps: list[MissionStep] = []
         clause_results: list[_ClauseResult] = []
-        missing: list[_PendingIntent] = []
         for clause in clauses:
             result = self._parse_clause(clause, state)
             clause_results.append(result)
-            if result.kind == 'unknown':
-                if steps or missing:
-                    return _ParseResult('invalid', reason='mixed_unknown_rule')
-                return _ParseResult('unknown')
-            if result.kind == 'cancel':
-                return _ParseResult('invalid', reason='mixed_cancel')
-            if result.kind == 'invalid':
-                return _ParseResult('invalid', reason=result.reason)
-            if result.kind == 'missing':
-                assert result.pending is not None
-                missing.append(result.pending)
-            else:
-                assert result.step is not None
-                steps.append(result.step)
+        unknowns = [result for result in clause_results if result.kind == 'unknown']
+        if unknowns and len(clause_results) > 1:
+            return _ParseResult('invalid', reason='mixed_unknown_rule')
+
+        invalids = [result for result in clause_results if result.kind == 'invalid']
+        if invalids:
+            return _ParseResult('invalid', reason=invalids[0].reason)
+
+        if any(result.kind == 'cancel' for result in clause_results):
+            return _ParseResult('invalid', reason='mixed_cancel')
+
+        if unknowns:
+            return _ParseResult('unknown')
+
+        missing = [result.pending for result in clause_results
+                   if result.kind == 'missing']
+        missing = [pending for pending in missing if pending is not None]
 
         if missing:
             if len(missing) > 1:
@@ -896,7 +903,12 @@ class AgentCore:
                 ),
             )
             return _ParseResult('missing', pending=pending)
-        return _ParseResult('complete', steps=tuple(steps))
+        steps = tuple(
+            result.step
+            for result in clause_results
+            if result.step is not None
+        )
+        return _ParseResult('complete', steps=steps)
 
     def _parse_clause(
         self, clause: str, state: MissionState
@@ -926,11 +938,7 @@ class AgentCore:
                 if clause.startswith(prefix)
             )
             remainder = clause[len(prefix):].strip()
-            if (
-                not remainder
-                or remainder == '米'
-                or _parse_number(remainder) is not None
-            ):
+            if not remainder or remainder == '米':
                 sign = -1 if prefix == '后退' else 1
                 return _ClauseResult(
                     'missing',
@@ -941,6 +949,24 @@ class AgentCore:
                         sign=sign,
                     ),
                 )
+            value = _parse_number(remainder)
+            if value is not None:
+                if _within_signed_range(
+                    value,
+                    self._policy.move_distance_min_m,
+                    self._policy.move_distance_max_m,
+                ):
+                    sign = -1 if prefix == '后退' else 1
+                    return _ClauseResult(
+                        'missing',
+                        pending=_PendingIntent(
+                            session_id='',
+                            parameter='missing_distance',
+                            operation='move',
+                            sign=sign,
+                        ),
+                    )
+                return _ClauseResult('invalid', reason='distance_out_of_range')
             return _ClauseResult('invalid', reason='invalid_distance_unit')
 
         rotation = re.fullmatch(r'(左转|右转)\s*(\S+)\s*度', clause)
@@ -962,11 +988,7 @@ class AgentCore:
         if clause.startswith('左转') or clause.startswith('右转'):
             prefix = '右转' if clause.startswith('右转') else '左转'
             remainder = clause[len(prefix):].strip()
-            if (
-                not remainder
-                or remainder == '度'
-                or _parse_number(remainder) is not None
-            ):
+            if not remainder or remainder == '度':
                 sign = -1 if prefix == '右转' else 1
                 return _ClauseResult(
                     'missing',
@@ -977,6 +999,25 @@ class AgentCore:
                         sign=sign,
                     ),
                 )
+            value = _parse_number(remainder)
+            if value is not None:
+                sign = -1 if prefix == '右转' else 1
+                angle_rad = _angle_from_degrees(sign, value)
+                if angle_rad is not None and _within_angle_wire_range(
+                    angle_rad,
+                    self._policy.rotate_angle_min_rad,
+                    self._policy.rotate_angle_max_rad,
+                ):
+                    return _ClauseResult(
+                        'missing',
+                        pending=_PendingIntent(
+                            session_id='',
+                            parameter='missing_angle',
+                            operation='rotate',
+                            sign=sign,
+                        ),
+                    )
+                return _ClauseResult('invalid', reason='angle_out_of_range')
             return _ClauseResult('invalid', reason='invalid_angle_unit')
 
         place = re.fullmatch(r'(去|前往)\s*(.*)', clause)
@@ -1235,27 +1276,39 @@ def _normalize(text: str) -> str:
     normalized = normalized.translate(
         str.maketrans({chr(code): chr(code + 32) for code in range(65, 91)})
     )
-    normalized = re.sub(r'[，,；;]\s*(?:然后|再)?', ' 然后 ', normalized)
-    for punctuation in '。！!?、':
-        normalized = normalized.replace(punctuation, ' ')
     return ' '.join(normalized.split())
 
 
 def _strip_invocation(text: str) -> str:
     result = text.strip()
-    while True:
-        if result.startswith('小智'):
-            result = result[2:].lstrip()
-        elif result.startswith('请'):
-            result = result[1:].lstrip()
-        else:
-            return result
-        while result.startswith('然后') or result.startswith('再'):
-            result = result[2 if result.startswith('然后') else 1:].lstrip()
+    if result.startswith('小智'):
+        result = _consume_invocation_prefix(result[2:])
+    if result.startswith('请'):
+        result = _consume_invocation_prefix(result[1:])
+    return result
+
+
+def _consume_invocation_prefix(text: str) -> str:
+    result = text.lstrip()
+    boundary = _CLAUSE_BOUNDARY.match(result)
+    if boundary is not None:
+        result = result[boundary.end():].lstrip()
+    return result
 
 
 def _split_clauses(text: str) -> list[str]:
-    return re.split(r'(?:然后|再)', text)
+    return _CLAUSE_BOUNDARY.split(text)
+
+
+def _has_single_terminal_ending(text: str) -> bool:
+    if not text or text[-1] not in _SENTENCE_TERMINATORS:
+        return False
+    prefix = text[:-1].rstrip()
+    if not prefix or prefix[-1] in _SENTENCE_TERMINATORS:
+        return False
+    if prefix[-1] in '，,；;、' or prefix.endswith(('然后', '再')):
+        return False
+    return True
 
 
 def _contains_stop_clause(text: str) -> bool:
