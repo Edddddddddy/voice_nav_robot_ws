@@ -554,17 +554,29 @@ private:
       finish_teardown(result, TeardownIntent::Failure);
       return result;
     }
+    if (prepare_cancel_requested_.load()) {
+      return finish_cancelled_prepare(
+        "conditioning PREPARE was cancelled before the Gate request");
+    }
 
     AuthorityResult gate_prepare;
     try {
       gate_prepare = authority_->prepare(make_operation());
     } catch (const std::exception & error) {
+      if (prepare_cancel_requested_.load()) {
+        return finish_cancelled_prepare(
+          "conditioning PREPARE was cancelled while the Gate request drained");
+      }
       const auto result = fail_owned(
         MotionConditioningFailure::SafetyFault,
         std::string{"MotionGate PREPARE raised: "} + error.what(), true);
       finish_teardown(result, TeardownIntent::Failure);
       return result;
     } catch (...) {
+      if (prepare_cancel_requested_.load()) {
+        return finish_cancelled_prepare(
+          "conditioning PREPARE was cancelled while the Gate request drained");
+      }
       const auto result = fail_owned(
         MotionConditioningFailure::SafetyFault,
         "MotionGate PREPARE raised an unknown exception", true);
@@ -593,6 +605,10 @@ private:
           std::chrono::steady_clock::now() + config_.prepare_open_deadline;
       }
     }
+    if (prepare_cancel_requested_.load()) {
+      return finish_cancelled_prepare(
+        "conditioning PREPARE was cancelled after the Gate request");
+    }
     if (!gate_prepare_valid) {
       const auto result = fail_owned(
         MotionConditioningFailure::SafetyFault,
@@ -608,13 +624,26 @@ private:
     }
     set_teardown_generation(prepared_generation);
 
+    if (prepare_cancel_requested_.load()) {
+      return finish_cancelled_prepare(
+        "conditioning PREPARE was cancelled before component setup");
+    }
+
     setup_failure_detail_.clear();
     if (!load_and_configure_components()) {
+      if (prepare_cancel_requested_.load()) {
+        return finish_cancelled_prepare(
+          "conditioning PREPARE was cancelled while component setup drained");
+      }
       const auto result = fail_owned(
         MotionConditioningFailure::SafetyFault,
         "Nav2 component load/configure failed: " + setup_failure_detail_, true);
       finish_teardown(result, TeardownIntent::Failure);
       return result;
+    }
+    if (prepare_cancel_requested_.load()) {
+      return finish_cancelled_prepare(
+        "conditioning PREPARE was cancelled after component setup");
     }
     if (std::chrono::steady_clock::now() >= prepare_open_deadline_) {
       const auto result = fail_owned(
@@ -624,14 +653,28 @@ private:
       return result;
     }
     MotionConditioningResult result;
+    bool prepare_cancelled = false;
     {
       std::lock_guard<std::recursive_mutex> lock(mutex_);
-      state_ = MotionConditioningState::Prepared;
-      result = remember(make_result(
-          state_, MotionConditioningFailure::None,
-          gate_prepare.zero_proven && gate_prepare.snapshot.zero_published,
-          true, false, lease_id_, candidate_topic_,
-          "conditioning generation prepared"));
+      prepare_cancelled = prepare_cancel_requested_.load();
+      if (prepare_cancelled) {
+        state_ = MotionConditioningState::Stopped;
+        result = remember(make_result(
+            state_, MotionConditioningFailure::ExecutionFailed, false, false,
+            collision_stop_, lease_id_, candidate_topic_,
+            "conditioning PREPARE was cancelled before commit"));
+      } else {
+        state_ = MotionConditioningState::Prepared;
+        result = remember(make_result(
+            state_, MotionConditioningFailure::None,
+            gate_prepare.zero_proven && gate_prepare.snapshot.zero_published,
+            true, false, lease_id_, candidate_topic_,
+            "conditioning generation prepared"));
+        if (result.zero_proven) {
+          result.zero_proven_at = std::chrono::steady_clock::now();
+          last_result_.zero_proven_at = result.zero_proven_at;
+        }
+      }
     }
     finish_prepare(result);
     return result;
@@ -675,10 +718,12 @@ private:
           MotionConditioningFailure::SafetyFault, std::move(invalid_detail));
       }
       std::lock_guard<std::recursive_mutex> lock(mutex_);
-      return make_result(
+      auto result = make_result(
         state_, MotionConditioningFailure::SafetyFault, false,
         last_result_.zero_proven, collision_stop_, lease_id_, candidate_topic_,
         std::move(invalid_detail));
+      result.zero_proven_at = last_result_.zero_proven_at;
+      return result;
     }
 
     StartOperationGuard start_operation(*this, generation);
@@ -991,9 +1036,11 @@ private:
       std::lock_guard<std::recursive_mutex> lock(mutex_);
       state_ = MotionConditioningState::Failed;
       result = remember(make_result(
-          state_, MotionConditioningFailure::SafetyFault, false, false,
+          state_, MotionConditioningFailure::SafetyFault, false,
+          last_zero_proven_at_ != std::chrono::steady_clock::time_point{},
           collision_stop_, lease_id_, candidate_topic_,
           "conditioning stop raised during teardown"));
+      result.zero_proven_at = last_zero_proven_at_;
     }
     finish_teardown(result, TeardownIntent::Stop);
     return result;
@@ -1018,9 +1065,11 @@ private:
       std::lock_guard<std::recursive_mutex> lock(mutex_);
       state_ = MotionConditioningState::Failed;
       result = remember(make_result(
-          state_, MotionConditioningFailure::SafetyFault, false, false,
+          state_, MotionConditioningFailure::SafetyFault, false,
+          last_zero_proven_at_ != std::chrono::steady_clock::time_point{},
           collision_stop_, lease_id_, candidate_topic_,
           "conditioning failure raised during teardown"));
+      result.zero_proven_at = last_zero_proven_at_;
     }
     finish_teardown(result, TeardownIntent::Failure);
     return result;
@@ -1082,6 +1131,13 @@ private:
     Failure,
   };
 
+  enum class TeardownOwner : std::uint8_t
+  {
+    None,
+    Prepare,
+    Cleanup,
+  };
+
   struct TerminalRecord
   {
     std::uint64_t generation{0U};
@@ -1131,10 +1187,12 @@ private:
   [[nodiscard]] MotionConditioningResult start_busy_result() const
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    return make_result(
+    auto result = make_result(
       state_, MotionConditioningFailure::SafetyFault, false,
       last_result_.zero_proven, collision_stop_, lease_id_, candidate_topic_,
       "another start already owns this conditioning generation");
+    result.zero_proven_at = last_result_.zero_proven_at;
+    return result;
   }
 
   [[nodiscard]] bool wait_for_existing_teardown(
@@ -1168,9 +1226,11 @@ private:
       std::lock_guard<std::recursive_mutex> lock(mutex_);
       state_ = MotionConditioningState::Failed;
       result = remember(make_result(
-          state_, MotionConditioningFailure::SafetyFault, false, false,
+          state_, MotionConditioningFailure::SafetyFault, false,
+          last_zero_proven_at_ != std::chrono::steady_clock::time_point{},
           collision_stop_, lease_id_, candidate_topic_,
           "synchronous conditioning failure raised during teardown"));
+      result.zero_proven_at = last_zero_proven_at_;
     }
     finish_teardown(result, TeardownIntent::Failure);
     return result;
@@ -1180,29 +1240,58 @@ private:
     MotionConditioningResult & existing,
     bool wait_for_existing)
   {
-    std::unique_lock<std::mutex> teardown_lock(teardown_mutex_);
-    if (teardown_in_progress_.load()) {
-      if (!wait_for_existing) {
-        existing = teardown_result_;
-        return false;
+    for (;; ) {
+      bool prepare_takeover = false;
+      {
+        std::unique_lock<std::mutex> teardown_lock(teardown_mutex_);
+        if (teardown_in_progress_.load()) {
+          if (!wait_for_existing) {
+            existing = teardown_result_;
+            return false;
+          }
+          if (teardown_owner_ == TeardownOwner::Prepare) {
+            // Fence PREPARE immediately, but leave component ownership to the
+            // one cleanup transaction that will claim the owner after
+            // PREPARE's in-flight RPC has returned.
+            prepare_cancel_requested_.store(true);
+            {
+              std::lock_guard<std::recursive_mutex> state_lock(mutex_);
+              teardown_generation_ = generation_;
+              invalidate_activation_locked();
+            }
+            prepare_takeover = true;
+          } else {
+            teardown_cv_.wait(teardown_lock, [this]() {
+                return !teardown_in_progress_.load();
+              });
+            existing = teardown_result_;
+            return false;
+          }
+        } else if (terminal_record_) {
+          existing = terminal_record_->result;
+          return false;
+        } else {
+          {
+            std::lock_guard<std::recursive_mutex> state_lock(mutex_);
+            teardown_generation_ = generation_;
+            invalidate_activation_locked();
+          }
+          teardown_owner_ = TeardownOwner::Cleanup;
+          teardown_in_progress_.store(true);
+          return true;
+        }
       }
-      teardown_cv_.wait(teardown_lock, [this]() {
-          return !teardown_in_progress_.load();
-      });
-      existing = teardown_result_;
-      return false;
+
+      if (prepare_takeover) {
+        // This call deliberately bypasses the normal authority-call mutex so
+        // emergency zero proof does not wait behind PREPARE/OPEN.
+        (void)inhibit_gate(true);
+        std::unique_lock<std::mutex> teardown_lock(teardown_mutex_);
+        teardown_cv_.wait(teardown_lock, [this]() {
+            return !teardown_in_progress_.load();
+          });
+      }
     }
-    if (terminal_record_) {
-      existing = terminal_record_->result;
-      return false;
-    }
-    {
-      std::lock_guard<std::recursive_mutex> state_lock(mutex_);
-      teardown_generation_ = generation_;
-      invalidate_activation_locked();
-    }
-    teardown_in_progress_.store(true);
-    return true;
   }
 
   [[nodiscard]] bool begin_token_teardown(
@@ -1242,6 +1331,7 @@ private:
       teardown_generation_ = generation_;
       invalidate_activation_locked();
     }
+    teardown_owner_ = TeardownOwner::Cleanup;
     teardown_in_progress_.store(true);
     return true;
   }
@@ -1301,8 +1391,12 @@ private:
   void drain_start_operations()
   {
     std::unique_lock<std::mutex> teardown_lock(teardown_mutex_);
-    start_operation_cv_.wait(teardown_lock, [this]() {
-        return active_start_operations_ == 0U;
+    const auto owner_iterator = start_operation_threads_.find(
+      std::this_thread::get_id());
+    const auto own_operations = owner_iterator == start_operation_threads_.cend() ?
+      0U : owner_iterator->second;
+    start_operation_cv_.wait(teardown_lock, [this, own_operations]() {
+        return active_start_operations_ <= own_operations;
       });
   }
 
@@ -1342,6 +1436,8 @@ private:
       teardown_generation_ = generation_;
       invalidate_activation_locked();
       terminal_record_.reset();
+      prepare_cancel_requested_.store(false);
+      teardown_owner_ = TeardownOwner::Prepare;
       teardown_in_progress_.store(true);
     }
     return true;
@@ -1352,9 +1448,25 @@ private:
     {
       std::lock_guard<std::mutex> lock(teardown_mutex_);
       teardown_result_ = result;
+      teardown_owner_ = TeardownOwner::None;
       teardown_in_progress_.store(false);
     }
     teardown_cv_.notify_all();
+  }
+
+  [[nodiscard]] MotionConditioningResult finish_cancelled_prepare(
+    std::string detail)
+  {
+    MotionConditioningResult result;
+    {
+      std::lock_guard<std::recursive_mutex> lock(mutex_);
+      state_ = MotionConditioningState::Stopped;
+      result = remember(make_result(
+          state_, MotionConditioningFailure::ExecutionFailed, false, false,
+          collision_stop_, lease_id_, candidate_topic_, std::move(detail)));
+    }
+    finish_prepare(result);
+    return result;
   }
 
   void set_teardown_generation(std::uint64_t generation)
@@ -1379,9 +1491,11 @@ private:
       std::lock_guard<std::recursive_mutex> lock(mutex_);
       state_ = MotionConditioningState::Failed;
       result = remember(make_result(
-          state_, MotionConditioningFailure::SafetyFault, false, false,
+          state_, MotionConditioningFailure::SafetyFault, false,
+          last_zero_proven_at_ != std::chrono::steady_clock::time_point{},
           collision_stop_, lease_id_, candidate_topic_,
           "conditioning callback failure raised during teardown"));
+      result.zero_proven_at = last_zero_proven_at_;
     }
     finish_teardown(result, TeardownIntent::Failure);
   }
@@ -1397,6 +1511,7 @@ private:
         terminal_record_ = TerminalRecord{teardown_generation_, intent, result};
         terminal_records_.emplace(teardown_generation_, result);
       }
+      teardown_owner_ = TeardownOwner::None;
       teardown_in_progress_.store(false);
     }
     teardown_cv_.notify_all();
@@ -1423,39 +1538,45 @@ private:
     // Gate zero before disabling/waiting for callbacks or an in-flight
     // component RPC so a concurrent STOP/Cancel cannot leave the producer
     // commanded while a 2s/4s start operation drains.
-    zero_proven = inhibit_gate(true);
-    if (zero_proven) {
-      zero_proven_at = std::chrono::steady_clock::now();
+    {
+      std::lock_guard<std::recursive_mutex> lock(mutex_);
+      zero_proven = last_zero_proven_at_ !=
+        std::chrono::steady_clock::time_point{} &&
+      last_zero_proven_lease_id_ == lease_id_;
+      if (zero_proven) {
+        zero_proven_at = last_zero_proven_at_;
+      }
+    }
+    if (!zero_proven) {
+      zero_proven = inhibit_gate(true, &zero_proven_at);
     }
     disable_renew_callbacks();
     wait_for_renew_callbacks();
-    if (destroying_.load()) {
-      drain_start_operations();
-    }
+    // The emergency zero proof above is independent and immediate.  The
+    // unique cleanup owner waits on the start-operation CV until every
+    // in-flight lifecycle/RPC boundary has returned, then owns producer and
+    // component cleanup.  A normal STOP has a bounded response barrier: if a
+    // start operation is still inside an uncancellable external call, the
+    // emergency zero is retained and destruction resumes the same cleanup
+    // responsibility after that operation drains.
     if (!destroying_.load() && !wait_for_start_operations()) {
       cleanup_blocked_ = true;
-      if (!zero_proven && inhibit_gate()) {
-        zero_proven = true;
-        zero_proven_at = std::chrono::steady_clock::now();
-      }
       std::lock_guard<std::recursive_mutex> lock(mutex_);
       state_ = MotionConditioningState::Failed;
       auto result = make_result(
-          state_, MotionConditioningFailure::SafetyFault, false, false,
+          state_, MotionConditioningFailure::SafetyFault, false,
+          zero_proven,
           collision_stop_, lease_id_, candidate_topic_,
           "active start operation did not drain before teardown deadline");
-      result.zero_proven = zero_proven;
       result.zero_proven_at = zero_proven_at;
       return remember(std::move(result));
     }
+    drain_start_operations();
     const bool producer_stopped = safe_producer_stop();
     bool components_clean = false;
     try {
       if (!destroying_.load() && !zero_proven) {
-        zero_proven = inhibit_gate();
-        if (zero_proven) {
-          zero_proven_at = std::chrono::steady_clock::now();
-        }
+        zero_proven = inhibit_gate(false, &zero_proven_at);
       }
       components_clean = cleanup_components();
     } catch (...) {
@@ -1518,23 +1639,23 @@ private:
     if (wait_for_callbacks) {
       wait_for_renew_callbacks();
     }
-    if (destroying_.load()) {
-      drain_start_operations();
-    } else if (!wait_for_start_operations()) {
+    if (!destroying_.load() && !wait_for_start_operations()) {
       cleanup_blocked_ = true;
-      (void)inhibit_gate();
       std::lock_guard<std::recursive_mutex> lock(mutex_);
       state_ = MotionConditioningState::Failed;
-      return remember(make_result(
+      auto result = make_result(
           state_, MotionConditioningFailure::SafetyFault, false, false,
           collision_stop_, lease_id_, candidate_topic_,
-          "active start operation did not drain before failure teardown"));
+          "active start operation did not drain before failure teardown");
+      return remember(std::move(result));
     }
+    drain_start_operations();
     const bool producer_stopped = safe_producer_stop();
     bool zero_proven = false;
+    std::chrono::steady_clock::time_point zero_proven_at{};
     bool components_clean = false;
     try {
-      zero_proven = inhibit_gate();
+      zero_proven = inhibit_gate(false, &zero_proven_at);
       components_clean = cleanup_components();
     } catch (...) {
       zero_proven = false;
@@ -1561,9 +1682,11 @@ private:
     detail = with_cleanup_failure(std::move(detail));
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     state_ = MotionConditioningState::Failed;
-    return remember(make_result(
+    auto result = make_result(
         state_, failure, false, zero_proven && producer_stopped,
-        collision_stop_, lease_id_, candidate_topic_, std::move(detail)));
+        collision_stop_, lease_id_, candidate_topic_, std::move(detail));
+    result.zero_proven_at = zero_proven_at;
+    return remember(std::move(result));
   }
 
   void invalidate_activation_locked()
@@ -1605,7 +1728,7 @@ private:
   {
     MotionConditioningResult terminal;
     if (terminal_result_for_generation(generation, terminal)) {
-      return make_result(
+      auto result = make_result(
         terminal.state,
         terminal.failure == MotionConditioningFailure::None ?
         MotionConditioningFailure::SafetyFault : terminal.failure,
@@ -1615,6 +1738,8 @@ private:
         terminal.lease_id,
         terminal.candidate_topic,
         "activation generation was cancelled before producer start");
+      result.zero_proven_at = terminal.zero_proven_at;
+      return result;
     }
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto result = last_result_;
@@ -1966,6 +2091,9 @@ private:
 
   [[nodiscard]] bool load_and_configure_components()
   {
+    const auto cancelled = [this]() {
+        return prepare_cancel_requested_.load();
+      };
     const auto common = std::vector<rcl_interfaces::msg::Parameter>{
       parameter("use_sim_time", true),
       parameter("enable_stamped_cmd_vel", true),
@@ -2008,6 +2136,10 @@ private:
       setup_failure_detail_ = "Collision Monitor load RPC failed";
       return false;
     }
+    if (cancelled()) {
+      setup_failure_detail_ = "conditioning PREPARE was cancelled after Collision Monitor load";
+      return false;
+    }
     components_loaded_ = true;
 
     auto smoother_parameters = common;
@@ -2041,28 +2173,54 @@ private:
       setup_failure_detail_ = "Velocity Smoother load RPC failed";
       return false;
     }
+    if (cancelled()) {
+      setup_failure_detail_ = "conditioning PREPARE was cancelled after Velocity Smoother load";
+      return false;
+    }
     if (!change_state(
       kCollisionMonitorFqn,
       lifecycle_msgs::msg::Transition::TRANSITION_CONFIGURE,
       prepare_open_deadline_) ||
+      cancelled() ||
       !change_state(
         kVelocitySmootherFqn,
         lifecycle_msgs::msg::Transition::TRANSITION_CONFIGURE,
         prepare_open_deadline_))
     {
+      if (cancelled()) {
+        setup_failure_detail_ = "conditioning PREPARE was cancelled during component configure";
+        return false;
+      }
       setup_failure_detail_ = "component configure RPC failed";
+      return false;
+    }
+    if (cancelled()) {
+      setup_failure_detail_ = "conditioning PREPARE was cancelled after component configure";
       return false;
     }
     if (component_state(kCollisionMonitorFqn, prepare_open_deadline_) !=
       lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE ||
+      cancelled() ||
       component_state(kVelocitySmootherFqn, prepare_open_deadline_) !=
       lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE)
     {
+      if (cancelled()) {
+        setup_failure_detail_ = "conditioning PREPARE was cancelled while checking component state";
+        return false;
+      }
       setup_failure_detail_ = "component did not reach inactive state after configure";
+      return false;
+    }
+    if (cancelled()) {
+      setup_failure_detail_ = "conditioning PREPARE was cancelled before writer binding";
       return false;
     }
     if (!pin_collision_writer(prepare_open_deadline_)) {
       setup_failure_detail_ = "collision state writer was not visible";
+      return false;
+    }
+    if (cancelled()) {
+      setup_failure_detail_ = "conditioning PREPARE was cancelled after writer binding";
       return false;
     }
     return true;
@@ -2102,6 +2260,9 @@ private:
         collision_writer_generation_ = generation_;
         collision_writer_bound_ = true;
         return true;
+      }
+      if (prepare_cancel_requested_.load()) {
+        return false;
       }
       std::this_thread::sleep_for(5ms);
     }
@@ -2491,7 +2652,9 @@ private:
     return success;
   }
 
-  [[nodiscard]] bool inhibit_gate(const bool emergency = false)
+  [[nodiscard]] bool inhibit_gate(
+    const bool emergency = false,
+    std::chrono::steady_clock::time_point * zero_proven_at = nullptr)
   {
     try {
       std::string lease_id;
@@ -2500,7 +2663,15 @@ private:
         lease_id = lease_id_;
       }
       if (lease_id.empty()) {
-        return gate_snapshot_proves_zero(authority_->snapshot());
+        const bool proven = gate_snapshot_proves_zero(authority_->snapshot());
+        if (proven) {
+          const auto proven_at = std::chrono::steady_clock::now();
+          if (zero_proven_at != nullptr) {
+            *zero_proven_at = proven_at;
+          }
+          remember_zero_proof(proven_at, {});
+        }
+        return proven;
       }
       std::unique_lock<std::mutex> authority_lock(
         authority_call_mutex_, std::defer_lock);
@@ -2516,18 +2687,32 @@ private:
       }
       const auto operation = make_operation(lease_id);
       const auto result = authority_->inhibit(operation);
-      if (!result.applied &&
+      const bool proven = (!result.applied &&
         result.snapshot.gate_instance_id == operation.gate_instance_id &&
-        gate_snapshot_proves_zero(result.snapshot))
-      {
-        return true;
+        gate_snapshot_proves_zero(result.snapshot)) ||
+        (result.applied && result.zero_proven &&
+        result.snapshot.gate_instance_id == operation.gate_instance_id &&
+        gate_snapshot_proves_zero(result.snapshot));
+      if (proven) {
+        const auto proven_at = std::chrono::steady_clock::now();
+        if (zero_proven_at != nullptr) {
+          *zero_proven_at = proven_at;
+        }
+        remember_zero_proof(proven_at, operation.lease_id);
       }
-      return result.applied && result.zero_proven &&
-             result.snapshot.gate_instance_id == operation.gate_instance_id &&
-             gate_snapshot_proves_zero(result.snapshot);
+      return proven;
     } catch (...) {
       return false;
     }
+  }
+
+  void remember_zero_proof(
+    const std::chrono::steady_clock::time_point proven_at,
+    std::string lease_id)
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    last_zero_proven_at_ = proven_at;
+    last_zero_proven_lease_id_ = std::move(lease_id);
   }
 
   [[nodiscard]] bool cleanup_generation(const std::string &)
@@ -2573,6 +2758,8 @@ private:
     cleanup_complete_.store(true);
     cleanup_identity_fault_ = false;
     cleanup_failure_.reset();
+    last_zero_proven_at_ = {};
+    last_zero_proven_lease_id_.clear();
     lease_id_.clear();
     candidate_topic_.clear();
     generation_request_id_.clear();
@@ -2904,6 +3091,8 @@ private:
   std::mutex authority_call_mutex_;
   MotionConditioningState state_{MotionConditioningState::Stopped};
   MotionConditioningResult last_result_{};
+  std::chrono::steady_clock::time_point last_zero_proven_at_{};
+  std::string last_zero_proven_lease_id_;
   bool collision_stop_{false};
   std::optional<MotionConditioningCorrelationToken> collision_token_;
   bool components_loaded_{false};
@@ -2934,6 +3123,8 @@ private:
   std::size_t active_start_operations_{0U};
   std::unordered_map<std::thread::id, std::size_t> start_operation_threads_;
   MotionConditioningResult teardown_result_{};
+  TeardownOwner teardown_owner_{TeardownOwner::None};
+  std::atomic<bool> prepare_cancel_requested_{false};
   std::optional<TerminalRecord> terminal_record_;
   std::unordered_map<std::uint64_t, MotionConditioningResult> terminal_records_;
   std::uint64_t teardown_generation_{0U};
