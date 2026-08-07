@@ -30,12 +30,36 @@ import rclpy
 from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
 from rclpy.event_handler import PublisherEventCallbacks
 from rclpy.executors import SingleThreadedExecutor
-from rclpy.qos import DurabilityPolicy, HistoryPolicy, ReliabilityPolicy
+from rclpy.qos import (
+    DurabilityPolicy,
+    HistoryPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+)
 
-from voice_nav_agent.agent_node import _state_qos, _voice_turn_qos
 from voice_nav_interfaces.action import ExecuteMission, Speak
 from voice_nav_interfaces.msg import MissionState, VoiceTurn
 from voice_nav_interfaces.srv import StopMission
+
+
+def _test_state_qos():
+    """Create the public MissionState publisher contract for this launch test."""
+    return QoSProfile(
+        history=HistoryPolicy.KEEP_LAST,
+        depth=1,
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    )
+
+
+def _test_voice_turn_qos():
+    """Create the public VoiceTurn publisher contract for this launch test."""
+    return QoSProfile(
+        history=HistoryPolicy.KEEP_LAST,
+        depth=1,
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.VOLATILE,
+    )
 
 
 @pytest.mark.launch_test
@@ -61,34 +85,51 @@ class AgentNodeLaunchTest(unittest.TestCase):
         self.node = rclpy.create_node('agent_launch_probe')
         self.executor = SingleThreadedExecutor()
         self.executor.add_node(self.node)
+        self.state_b_node = None
+        self.state_publisher_node = None
         self.spin_thread = threading.Thread(
             target=self.executor.spin,
             daemon=True,
         )
         self.spin_thread.start()
+        self.state_matched_events = {
+            'A': threading.Event(),
+            'B': threading.Event(),
+        }
+        self.state_current_match_events = {
+            'A': threading.Event(),
+            'B': threading.Event(),
+        }
+        self.state_rematched_events = {
+            'A': threading.Event(),
+            'B': threading.Event(),
+        }
+        self.state_rebuild_waiting = {'A': False, 'B': False}
+        self.b_state_published = threading.Event()
+        self.b_state_observed = threading.Event()
+        self.b_state_publish_count = 0
+        self.state_observer = None
+        self.state_publisher = self._create_state_publisher('A')
+        self.state_matched = self.state_matched_events['A']
+        self.state_publisher.publish(
+            self._state_message('runtime-a', 11)
+        )
         proc_info.assertWaitForStartup(agent, timeout=10.0)
 
         self.turn_matched = threading.Event()
         self.turn_publisher = self.node.create_publisher(
             VoiceTurn,
             '/voice/turn',
-            _voice_turn_qos(),
+            _test_voice_turn_qos(),
             event_callbacks=PublisherEventCallbacks(
                 matched=lambda _event: self.turn_matched.set(),
             ),
         )
-        self.state_matched = threading.Event()
-        self.state_publisher = self.node.create_publisher(
-            MissionState,
-            '/mission/state',
-            _state_qos(),
-            event_callbacks=PublisherEventCallbacks(
-                matched=lambda _event: self.state_matched.set(),
-            ),
-        )
         self.stop_event = threading.Event()
         self.speak_event = threading.Event()
+        self.mission_event = threading.Event()
         self.stop_requests = []
+        self.mission_goals = []
         self.speak_goals = []
         self.stop_service = self.node.create_service(
             StopMission,
@@ -102,6 +143,10 @@ class AgentNodeLaunchTest(unittest.TestCase):
             execute_callback=self._speak,
             goal_callback=self._accept_goal,
             cancel_callback=self._accept_cancel,
+        )
+        self.stop_probe = self.node.create_client(
+            StopMission,
+            '/mission/stop',
         )
         self.mission_server = ActionServer(
             self.node,
@@ -122,6 +167,105 @@ class AgentNodeLaunchTest(unittest.TestCase):
             '/mission/execute',
         )
 
+    def _create_state_publisher(self, label):
+        publisher_node = self.node
+        if label == 'B':
+            if self.state_b_node is None:
+                self.state_b_node = rclpy.create_node(
+                    'agent_launch_state_b'
+                )
+                self.executor.add_node(self.state_b_node)
+            publisher_node = self.state_b_node
+        self.state_publisher_node = publisher_node
+        return publisher_node.create_publisher(
+            MissionState,
+            '/mission/state',
+            _test_state_qos(),
+            event_callbacks=PublisherEventCallbacks(
+                matched=self._state_match_callback(label),
+            ),
+        )
+
+    def _state_match_callback(self, label):
+        def matched(event):
+            if event.current_count_change < 0:
+                self.state_current_match_events[label].clear()
+                return
+            if event.current_count_change > 0:
+                self.state_current_match_events[label].set()
+                self.state_matched_events[label].set()
+                if self.state_rebuild_waiting[label]:
+                    self.state_rematched_events[label].set()
+
+        return matched
+
+    def _publish_b_state_once(self):
+        if self.b_state_published.is_set():
+            return
+        self.b_state_publish_count += 1
+        self.state_publisher.publish(
+            self._state_message('runtime-b', 22)
+        )
+        self.b_state_published.set()
+
+    def _observe_state_sample(self, message):
+        if message.runtime_instance_id == 'runtime-b':
+            self.b_state_observed.set()
+
+    @staticmethod
+    def _state_message(runtime_instance_id, admission_epoch):
+        message = MissionState()
+        message.runtime_instance_id = runtime_instance_id
+        message.admission_epoch = admission_epoch
+        message.operating_mode = MissionState.NAVIGATION
+        message.availability = MissionState.AVAILABLE
+        message.gate_state = MissionState.GATE_INHIBITED
+        message.active_step = 2**32 - 1
+        message.supported_step_mask = 0b1111
+        message.max_steps = 3
+        message.named_place_ids = ['lobby']
+        return message
+
+    def _publish_rule_turn(self, sequence, turn_id):
+        turn = VoiceTurn()
+        turn.voice_instance_id = 'voice-launch'
+        turn.voice_seq = sequence
+        turn.session_id = 'session-launch'
+        turn.turn_id = turn_id
+        turn.kind = VoiceTurn.COMMAND
+        turn.text = '前进 1 米'
+        turn.confidence = 1.0
+        self.turn_publisher.publish(turn)
+
+    def _publish_stop_turn(self, sequence, turn_id):
+        turn = VoiceTurn()
+        turn.voice_instance_id = 'voice-launch'
+        turn.voice_seq = sequence
+        turn.session_id = 'session-launch'
+        turn.turn_id = turn_id
+        turn.kind = VoiceTurn.STOP
+        turn.text = '停止'
+        turn.confidence = 1.0
+        self.turn_publisher.publish(turn)
+
+    def _state_endpoint_gid(self, label='A'):
+        node_name = (
+            'agent_launch_probe'
+            if label == 'A'
+            else 'agent_launch_state_b'
+        )
+        infos = [
+            info
+            for info in self.node.get_publishers_info_by_topic(
+                '/mission/state'
+            )
+            if info.node_name == node_name
+        ]
+        assert len(infos) == 1
+        endpoint_gid = bytes(infos[0].endpoint_gid)
+        assert endpoint_gid
+        return endpoint_gid
+
     @staticmethod
     def _accept_goal(_request):
         return GoalResponse.ACCEPT
@@ -131,6 +275,8 @@ class AgentNodeLaunchTest(unittest.TestCase):
         return CancelResponse.ACCEPT
 
     def _mission(self, goal_handle):
+        self.mission_goals.append(goal_handle.request)
+        self.mission_event.set()
         goal_handle.succeed()
         result = ExecuteMission.Result()
         result.code = ExecuteMission.Result.SUCCEEDED
@@ -157,11 +303,20 @@ class AgentNodeLaunchTest(unittest.TestCase):
         self.spin_thread.join(5.0)
         self.speak_probe.destroy()
         self.mission_probe.destroy()
+        self.stop_probe.destroy()
+        if self.state_observer is not None:
+            self.node.destroy_subscription(self.state_observer)
         self.mission_server.destroy()
         self.speak_server.destroy()
         self.stop_service.destroy()
         self.node.destroy_publisher(self.turn_publisher)
-        self.node.destroy_publisher(self.state_publisher)
+        if self.state_publisher is not None:
+            self.state_publisher_node.destroy_publisher(
+                self.state_publisher
+            )
+        if self.state_b_node is not None:
+            self.executor.remove_node(self.state_b_node)
+            self.state_b_node.destroy_node()
         self.executor.remove_node(self.node)
         self.node.destroy_node()
         if rclpy.ok():
@@ -185,6 +340,7 @@ class AgentNodeLaunchTest(unittest.TestCase):
         self.turn_publisher.publish(turn)
         assert self.stop_event.wait(10.0)
         assert self.speak_event.wait(10.0)
+        assert self.state_current_match_events['A'].wait(10.0)
 
         assert len(self.stop_requests) == 1
         assert self.stop_requests[0].request_id == 'stop-launch'
@@ -262,6 +418,91 @@ class AgentNodeLaunchTest(unittest.TestCase):
             state_qos.history == HistoryPolicy.UNKNOWN
             and state_qos.depth == 0
         )
+
+    def test_installed_agent_restarts_state_epoch_through_public_ros_behavior(self):
+        """Prove A, no-state B, and one-shot B replay through installed ROS ports."""
+        assert self.turn_matched.wait(10.0)
+        assert self.state_matched.wait(10.0)
+        assert self.state_current_match_events['A'].wait(10.0)
+        assert self.speak_probe.wait_for_server(timeout_sec=10.0)
+        assert self.mission_probe.wait_for_server(timeout_sec=10.0)
+
+        state_a_gid = self._state_endpoint_gid()
+
+        assert self.stop_probe.wait_for_service(timeout_sec=10.0)
+        self.stop_event.clear()
+        self.speak_event.clear()
+        self._publish_stop_turn(1, 'state-a-barrier')
+        assert self.stop_event.wait(10.0)
+        assert self.speak_event.wait(10.0)
+
+        self.mission_event.clear()
+        self.speak_event.clear()
+        self._publish_rule_turn(2, 'mission-a')
+        assert self.speak_event.wait(10.0)
+        assert self.mission_event.wait(10.0)
+        assert self.speak_event.wait(10.0)
+        assert len(self.mission_goals) == 1
+        assert self.mission_goals[0].runtime_instance_id == 'runtime-a'
+        assert self.mission_goals[0].admission_epoch == 11
+
+        state_a_publisher = self.state_publisher
+        # Destroy A immediately after its accepted sample; the old sample may
+        # still be queued while the graph changes to B.
+        self.node.destroy_publisher(state_a_publisher)
+        self.state_publisher = self._create_state_publisher('B')
+        assert self.state_matched_events['B'].wait(10.0)
+        assert self.state_current_match_events['B'].wait(10.0)
+        state_b_gid = self._state_endpoint_gid('B')
+        assert state_b_gid != state_a_gid
+        self.state_observer = self.node.create_subscription(
+            MissionState,
+            '/mission/state',
+            self._observe_state_sample,
+            _test_state_qos(),
+        )
+
+        self.state_rebuild_waiting['B'] = True
+        self.mission_event.clear()
+        self.speak_event.clear()
+        self._publish_rule_turn(3, 'mission-without-b-state')
+        assert self.speak_event.wait(10.0)
+        assert len(self.mission_goals) == 1
+        assert not self.mission_event.is_set()
+        assert self.state_rematched_events['B'].wait(10.0)
+        self._publish_b_state_once()
+        assert self.b_state_published.wait(10.0)
+        assert self.b_state_publish_count == 1
+        assert self.b_state_observed.wait(10.0)
+
+        self.stop_event.clear()
+        self.speak_event.clear()
+        self._publish_stop_turn(4, 'state-b-barrier')
+        assert self.stop_event.wait(10.0)
+        assert self.speak_event.wait(10.0)
+
+        self.mission_event.clear()
+        self.speak_event.clear()
+        self._publish_rule_turn(5, 'mission-b')
+        assert self.mission_event.wait(10.0), [
+            (info.node_name, bytes(info.endpoint_gid))
+            for info in self.node.get_publishers_info_by_topic(
+                '/mission/state'
+            )
+        ]
+        assert self.speak_event.wait(10.0)
+        assert len(self.mission_goals) == 2
+        assert self.mission_goals[1].runtime_instance_id == 'runtime-b'
+        assert self.mission_goals[1].admission_epoch == 22
+
+        self.mission_event.clear()
+        self.speak_event.clear()
+        self._publish_rule_turn(6, 'mission-b-again')
+        assert self.mission_event.wait(10.0)
+        assert self.speak_event.wait(10.0)
+        assert len(self.mission_goals) == 3
+        assert self.mission_goals[2].runtime_instance_id == 'runtime-b'
+        assert self.mission_goals[2].admission_epoch == 22
 
     def _subscription_info(self, topic):
         infos = self.node.get_subscriptions_info_by_topic(topic)
