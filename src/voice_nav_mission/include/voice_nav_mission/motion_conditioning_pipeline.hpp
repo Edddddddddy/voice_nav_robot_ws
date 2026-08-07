@@ -85,6 +85,7 @@ struct MotionConditioningConfig
   std::string collision_state_topic{
     "/voice_nav_internal/motion/collision_state"};
   std::function<std::string()> request_id_generator;
+  std::function<void(const MotionConditioningCorrelationToken &)> before_token_claim;
 };
 
 class MotionProducerPort
@@ -111,10 +112,6 @@ public:
   [[nodiscard]] MotionConditioningResult prepare();
   [[nodiscard]] MotionConditioningResult start();
   [[nodiscard]] MotionConditioningResult stop();
-  // Synchronous owner-side failure; asynchronous ingress must use a token.
-  [[nodiscard]] MotionConditioningResult fail(
-    MotionConditioningFailure failure,
-    std::string detail);
   [[nodiscard]] MotionConditioningResult fail(
     MotionConditioningCorrelationToken token,
     MotionConditioningFailure failure,
