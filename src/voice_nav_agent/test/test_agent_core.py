@@ -1,0 +1,532 @@
+# Copyright 2026 Edddddddddy
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import math
+import time
+
+import pytest
+
+from voice_nav_agent.core import (
+    AgentCore,
+    AgentPolicy,
+    Availability,
+    DecisionKind,
+    GateState,
+    MissionProposal,
+    MissionState,
+    MissionStep,
+    OperatingMode,
+    SemanticValidator,
+    VoiceTurn,
+)
+
+
+class ManualClock:
+    def __init__(self):
+        self.value = 0.0
+
+    def now(self):
+        return self.value
+
+    def advance(self, seconds):
+        self.value += seconds
+
+
+def make_state(**changes):
+    values = {
+        'runtime_instance_id': 'runtime-a',
+        'admission_epoch': 7,
+        'operating_mode': OperatingMode.NAVIGATION,
+        'availability': Availability.AVAILABLE,
+        'gate_state': GateState.GATE_INHIBITED,
+        'active_step': 4294967295,
+        'supported_step_mask': 0b1111,
+        'max_steps': 3,
+        'named_place_ids': ('lobby', 'charging'),
+    }
+    values.update(changes)
+    return MissionState(**values)
+
+
+def make_turn(text, sequence=1, **changes):
+    values = {
+        'voice_instance_id': 'voice-a',
+        'voice_seq': sequence,
+        'session_id': 'session-a',
+        'turn_id': f'turn-{sequence}',
+        'kind': VoiceTurn.COMMAND,
+        'text': text,
+        'confidence': 1.0,
+        'during_playback': False,
+    }
+    values.update(changes)
+    return VoiceTurn(**values)
+
+
+def make_core(clock=None, **policy_changes):
+    return AgentCore(
+        'agent-a',
+        policy=AgentPolicy(**policy_changes),
+        clock=clock or ManualClock().now,
+    )
+
+
+def test_rule_mission_normalizes_text_and_captures_immutable_snapshot():
+    clock = ManualClock()
+    core = make_core(clock=clock)
+    state = make_state()
+
+    decision = core.handle_turn(
+        make_turn('  小智，  向前走 0.5 米！ '), state
+    )
+
+    assert decision.kind is DecisionKind.MISSION
+    assert decision.mission.steps == (
+        MissionStep(kind=MissionStep.MOVE_DISTANCE, distance_m=0.5),
+    )
+    assert decision.mission.token.source_instance_id == 'agent-a'
+    assert decision.mission.token.source_seq == 1
+    assert decision.mission.token.runtime_instance_id == 'runtime-a'
+    assert decision.mission.token.admission_epoch == 7
+    assert decision.mission.token.named_place_ids == ('lobby', 'charging')
+
+    changed = make_state(runtime_instance_id='runtime-new', admission_epoch=8)
+    assert decision.mission.token.runtime_instance_id == 'runtime-a'
+    assert decision.mission.token.admission_epoch == 7
+    assert changed != state
+
+
+@pytest.mark.parametrize(
+    ('text', 'kind', 'distance', 'angle'),
+    [
+        ('后退半米', MissionStep.MOVE_DISTANCE, -0.5, 0.0),
+        ('左转90度', MissionStep.ROTATE_ANGLE, 0.0, math.pi / 2),
+        ('右转 5 度', MissionStep.ROTATE_ANGLE, 0.0, -math.radians(5)),
+    ],
+)
+def test_rule_mission_supports_bounded_numbers_and_signed_steps(
+    text, kind, distance, angle
+):
+    core = make_core()
+
+    decision = core.handle_turn(make_turn(text), make_state())
+
+    assert decision.kind is DecisionKind.MISSION
+    assert decision.mission.steps[0].kind == kind
+    assert decision.mission.steps[0].distance_m == pytest.approx(distance)
+    assert decision.mission.steps[0].angle_rad == pytest.approx(angle)
+
+
+def test_rule_mission_preserves_one_to_three_step_order_and_place_id():
+    core = make_core()
+
+    decision = core.handle_turn(
+        make_turn('前进 1 米然后左转 90 度再去 lobby'), make_state()
+    )
+
+    assert decision.kind is DecisionKind.MISSION
+    assert [step.kind for step in decision.mission.steps] == [
+        MissionStep.MOVE_DISTANCE,
+        MissionStep.ROTATE_ANGLE,
+        MissionStep.NAVIGATE_TO,
+    ]
+    assert decision.mission.steps[2].target_id == 'lobby'
+
+
+@pytest.mark.parametrize(
+    ('text', 'reason'),
+    [
+        ('前进 1 米然后左转 90 度再去 lobby然后保存地图为 map_a', 'too_many_steps'),
+        ('前进', 'missing_distance'),
+        ('左转 90', 'invalid_angle_unit'),
+        ('前进 3 米', 'distance_out_of_range'),
+        ('去 unknown', 'unknown_place'),
+        ('保存地图为 ../map', 'invalid_map_id'),
+    ],
+)
+def test_invalid_or_incomplete_closed_rules_never_make_a_mission(text, reason):
+    core = make_core()
+
+    decision = core.handle_turn(make_turn(text), make_state())
+
+    assert decision.kind in (DecisionKind.CLARIFY, DecisionKind.REPLY)
+    assert decision.reason == reason
+
+
+def test_mode_and_capability_rejections_are_structured_replies():
+    core = make_core()
+
+    wrong_mode = core.handle_turn(
+        make_turn('保存地图为 map_a'),
+        make_state(operating_mode=OperatingMode.NAVIGATION),
+    )
+    no_capability = core.handle_turn(
+        make_turn('前进 1 米', sequence=2),
+        make_state(supported_step_mask=0),
+    )
+    too_many_for_snapshot = core.handle_turn(
+        make_turn('前进 1 米然后左转 90 度再去 lobby', sequence=3),
+        make_state(max_steps=2),
+    )
+
+    assert wrong_mode.kind is DecisionKind.REPLY
+    assert wrong_mode.reason == 'mode_mismatch'
+    assert no_capability.kind is DecisionKind.REPLY
+    assert no_capability.reason == 'unsupported_step'
+    assert too_many_for_snapshot.kind is DecisionKind.REPLY
+    assert too_many_for_snapshot.reason == 'step_count_exceeds_snapshot'
+
+
+def test_save_map_is_mapping_only_and_uses_a_logical_map_id():
+    core = make_core()
+
+    decision = core.handle_turn(
+        make_turn('保存地图为 map_a'),
+        make_state(operating_mode=OperatingMode.MAPPING),
+    )
+
+    assert decision.kind is DecisionKind.MISSION
+    assert decision.steps == (
+        MissionStep(MissionStep.SAVE_MAP, target_id='map_a'),
+    )
+
+
+@pytest.mark.parametrize(
+    'changes',
+    [
+        {'runtime_instance_id': ''},
+        {'admission_epoch': 0},
+        {'availability': Availability.BUSY},
+        {'gate_state': GateState.GATE_ARMED},
+        {'max_steps': 4},
+        {'supported_step_mask': 0x10},
+        {'named_place_ids': ('lobby', 'lobby')},
+        {'named_place_ids': ('大厅',)},
+    ],
+)
+def test_malformed_or_unusable_runtime_snapshot_fails_closed(changes):
+    core = make_core()
+
+    decision = core.handle_turn(make_turn('前进 1 米'), make_state(**changes))
+
+    assert decision.kind is DecisionKind.REPLY
+
+
+def test_clarification_answers_are_typed_and_bad_answers_restart_the_question():
+    clock = ManualClock()
+    core = make_core(clock=clock)
+
+    missing_place = core.handle_turn(
+        make_turn('去'), make_state()
+    )
+    bad_answer = core.handle_turn(
+        make_turn('unknown', sequence=2), make_state()
+    )
+    good_answer = core.handle_turn(
+        make_turn('lobby', sequence=3), make_state()
+    )
+
+    assert missing_place.kind is DecisionKind.CLARIFY
+    assert missing_place.reason == 'missing_place'
+    assert bad_answer.kind is DecisionKind.CLARIFY
+    assert bad_answer.reason == 'missing_place'
+    assert good_answer.kind is DecisionKind.MISSION
+    assert good_answer.steps[0].target_id == 'lobby'
+
+
+def test_clarification_capacity_is_bounded_and_expired_entries_are_reclaimed():
+    clock = ManualClock()
+    core = make_core(clock=clock, clarification_capacity=1)
+
+    first = core.handle_turn(
+        make_turn('前进', session_id='session-a'), make_state()
+    )
+    full = core.handle_turn(
+        make_turn('左转', sequence=2, session_id='session-b'), make_state()
+    )
+    clock.advance(15.0)
+    reclaimed = core.handle_turn(
+        make_turn('左转', sequence=3, session_id='session-b'), make_state()
+    )
+
+    assert first.kind is DecisionKind.CLARIFY
+    assert full.kind is DecisionKind.REPLY
+    assert full.reason == 'clarification_capacity_exhausted'
+    assert reclaimed.kind is DecisionKind.CLARIFY
+
+
+def test_new_complete_command_replaces_old_pending_intent():
+    core = make_core()
+
+    first = core.handle_turn(make_turn('前进'), make_state())
+    replacement = core.handle_turn(
+        make_turn('左转 90 度', sequence=2), make_state()
+    )
+    answer_to_old = core.handle_turn(
+        make_turn('1 米', sequence=3), make_state()
+    )
+
+    assert first.kind is DecisionKind.CLARIFY
+    assert replacement.kind is DecisionKind.MISSION
+    assert answer_to_old.kind is DecisionKind.LLM_NEEDED
+
+
+def test_retired_voice_instance_set_fails_closed_without_silent_eviction():
+    core = make_core()
+    core.handle_turn(make_turn('前进 1 米'), make_state())
+
+    for sequence in range(1, 65):
+        decision = core.handle_turn(
+            make_turn(
+                '前进 1 米',
+                sequence=1,
+                voice_instance_id=f'voice-{sequence}',
+                turn_id=f'turn-{sequence}',
+            ),
+            make_state(),
+        )
+        assert decision.kind is DecisionKind.MISSION
+
+    capacity = core.handle_turn(
+        make_turn(
+            '前进 1 米',
+            sequence=1,
+            voice_instance_id='voice-65',
+            turn_id='turn-65',
+        ),
+        make_state(),
+    )
+    old = core.handle_turn(
+        make_turn(
+            '前进 1 米',
+            sequence=2,
+            voice_instance_id='voice-1',
+            turn_id='old-turn',
+        ),
+        make_state(),
+    )
+
+    assert capacity.kind is DecisionKind.REPLY
+    assert capacity.reason == 'voice_instance_capacity_exhausted'
+    assert old.kind is DecisionKind.IGNORE
+
+
+def test_unknown_well_formed_expression_becomes_llm_needed_with_same_token():
+    core = make_core()
+
+    decision = core.handle_turn(make_turn('绕到大厅'), make_state())
+
+    assert decision.kind is DecisionKind.LLM_NEEDED
+    assert decision.normalized_text == '绕到大厅'
+    assert decision.token.source_seq == 1
+    assert decision.token.runtime_instance_id == 'runtime-a'
+
+
+def test_cancel_is_local_and_does_not_require_runtime_snapshot():
+    clock = ManualClock()
+    core = make_core(clock=clock)
+
+    core.handle_turn(make_turn('前进', sequence=1), make_state())
+    decision = core.handle_turn(
+        make_turn('小智取消任务', sequence=2), runtime_snapshot_or_none=None
+    )
+
+    assert decision.kind is DecisionKind.CANCEL
+    assert decision.source_instance_id == 'agent-a'
+    assert decision.source_seq == 2
+
+
+def test_stop_uses_final_voice_identity_rule_and_bypasses_command_fencing():
+    clock = ManualClock()
+    core = make_core(clock=clock)
+
+    core.handle_turn(make_turn('前进', sequence=1), make_state())
+    first = core.handle_turn(
+        make_turn(
+            '停止',
+            sequence=9,
+            turn_id='stop-turn',
+            kind=VoiceTurn.STOP,
+        ),
+        runtime_snapshot_or_none=None,
+    )
+    retry = core.handle_turn(
+        make_turn(
+            '任意文本',
+            sequence=9,
+            turn_id='stop-turn',
+            kind=VoiceTurn.STOP,
+        ),
+        runtime_snapshot_or_none=None,
+    )
+
+    assert first.kind is DecisionKind.STOP
+    assert first.request_id == 'stop-turn'
+    assert first.source_instance_id == 'voice-a'
+    assert first.source_seq == 9
+    assert first.reason == 'voice_stop'
+    assert retry == first
+
+    restarted = make_core()
+    after_restart = restarted.handle_turn(
+        make_turn(
+            '任意文本',
+            sequence=9,
+            turn_id='stop-turn',
+            kind=VoiceTurn.STOP,
+        ),
+        runtime_snapshot_or_none=None,
+    )
+    collision = restarted.handle_turn(
+        make_turn(
+            '任意文本',
+            sequence=10,
+            voice_instance_id='voice-b',
+            turn_id='stop-turn',
+            kind=VoiceTurn.STOP,
+        ),
+        runtime_snapshot_or_none=None,
+    )
+
+    assert after_restart == first
+    assert collision != first
+
+
+def test_duplicate_and_retired_commands_are_ignored_without_new_effect():
+    core = make_core()
+
+    first = core.handle_turn(make_turn('前进 1 米', sequence=4), make_state())
+    duplicate = core.handle_turn(make_turn('前进 2 米', sequence=4), make_state())
+    old_instance = core.handle_turn(
+        make_turn(
+            '前进 2 米',
+            sequence=1,
+            voice_instance_id='voice-old',
+            turn_id='old-turn',
+        ),
+        make_state(),
+    )
+
+    assert first.kind is DecisionKind.MISSION
+    assert duplicate.kind is DecisionKind.IGNORE
+    assert old_instance.kind is DecisionKind.MISSION
+
+    late_old = core.handle_turn(
+        make_turn(
+            '前进 1 米',
+            sequence=5,
+            voice_instance_id='voice-a',
+            turn_id='late-turn',
+        ),
+        make_state(),
+    )
+    assert late_old.kind is DecisionKind.IGNORE
+
+
+def test_clarification_uses_current_snapshot_and_expires_on_steady_clock():
+    clock = ManualClock()
+    core = make_core(clock=clock)
+
+    clarify = core.handle_turn(make_turn('前进'), make_state())
+    completed = core.handle_turn(
+        make_turn('1 米', sequence=2),
+        make_state(runtime_instance_id='runtime-b', admission_epoch=8),
+    )
+
+    assert clarify.kind is DecisionKind.CLARIFY
+    assert clarify.reason == 'missing_distance'
+    assert completed.kind is DecisionKind.MISSION
+    assert completed.mission.steps[0].distance_m == 1.0
+    assert completed.mission.token.runtime_instance_id == 'runtime-b'
+    assert completed.mission.token.admission_epoch == 8
+
+    expired = AgentCore('agent-b', clock=clock.now)
+    expired.handle_turn(make_turn('前进'), make_state())
+    clock.advance(15.0)
+    no_longer_pending = expired.handle_turn(
+        make_turn('1 米', sequence=2), make_state()
+    )
+    assert no_longer_pending.kind is DecisionKind.LLM_NEEDED
+
+
+def test_voice_instance_change_clears_clarification_and_old_instance_is_retired():
+    core = make_core()
+
+    core.handle_turn(make_turn('前进'), make_state())
+    changed = core.handle_turn(
+        make_turn('前进 1 米', sequence=1, voice_instance_id='voice-b'),
+        make_state(),
+    )
+    late = core.handle_turn(
+        make_turn('1 米', sequence=2, voice_instance_id='voice-a'),
+        make_state(),
+    )
+
+    assert changed.kind is DecisionKind.MISSION
+    assert late.kind is DecisionKind.IGNORE
+
+
+def test_bad_envelope_is_ignored_and_stop_phrase_wins_over_motion():
+    core = make_core()
+
+    bad = core.handle_turn(
+        make_turn('前进 1 米', confidence=float('nan')), make_state()
+    )
+    stop = core.handle_turn(
+        make_turn('紧急停止然后前进 2 米', sequence=2), make_state()
+    )
+
+    assert bad.kind is DecisionKind.IGNORE
+    assert bad.reason == 'invalid_envelope'
+    assert stop.kind is DecisionKind.STOP
+    assert stop.reason == 'voice_stop'
+
+
+def test_runtime_snapshot_is_required_and_malformed_union_is_rejected_by_validator():
+    core = make_core()
+
+    missing = core.handle_turn(make_turn('前进 1 米'), None)
+    assert missing.kind is DecisionKind.REPLY
+    assert missing.reason == 'runtime_snapshot_missing'
+
+    state = make_state()
+    token = core.handle_turn(
+        make_turn('前进 1 米', sequence=2), state
+    ).mission.token
+    invalid = MissionProposal(
+        token=token,
+        steps=(MissionStep(MissionStep.MOVE_DISTANCE, distance_m=1.0, angle_rad=1.0),),
+    )
+    result = SemanticValidator().validate(invalid, token)
+
+    assert not result.accepted
+    assert result.rejection.reason == 'invalid_union'
+
+
+def test_warm_rule_decision_p95_stays_within_fifty_milliseconds():
+    core = make_core()
+    state = make_state()
+    samples = []
+
+    for sequence in range(1, 1001):
+        started = time.perf_counter()
+        decision = core.handle_turn(
+            make_turn('前进 1 米', sequence=sequence), state
+        )
+        samples.append(time.perf_counter() - started)
+        assert decision.kind is DecisionKind.MISSION
+
+    samples.sort()
+    p95 = samples[int(len(samples) * 0.95) - 1]
+    assert p95 <= 0.05
