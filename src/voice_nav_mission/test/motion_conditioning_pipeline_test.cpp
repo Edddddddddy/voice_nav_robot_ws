@@ -61,6 +61,83 @@ using GetState = lifecycle_msgs::srv::GetState;
 using ListControllers = controller_manager_msgs::srv::ListControllers;
 using CollisionState = nav2_msgs::msg::CollisionMonitorState;
 
+class CallbackBarrier final
+{
+public:
+  void arm()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    armed_ = true;
+    entered_ = false;
+    released_ = false;
+  }
+
+  bool wait_for_entry(std::chrono::milliseconds timeout = 1s)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, timeout, [this]() {return entered_;});
+  }
+
+  void release()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    released_ = true;
+    condition_.notify_all();
+  }
+
+  void operator()()
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (!armed_) {
+      return;
+    }
+    entered_ = true;
+    condition_.notify_all();
+    condition_.wait(lock, [this]() {return released_;});
+  }
+
+private:
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  bool armed_{false};
+  bool entered_{false};
+  bool released_{false};
+};
+
+class CallbackCounter final
+{
+public:
+  void expect(std::size_t count)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    target_ = count;
+    count_ = 0U;
+  }
+
+  void operator()()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (target_ != 0U) {
+      ++count_;
+      condition_.notify_all();
+    }
+  }
+
+  bool wait_for_target(std::chrono::milliseconds timeout = 2s)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, timeout, [this]() {
+               return count_ >= target_;
+      });
+  }
+
+private:
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  std::size_t target_{0U};
+  std::size_t count_{0U};
+};
+
 class FakeAuthority final : public MotionAuthorityPort
 {
 public:
@@ -405,6 +482,7 @@ public:
         } else if (request->node_name == "velocity_smoother") {
           smoother_state_ = lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED;
         }
+        graph_condition_.notify_all();
       }, rmw_qos_profile_services_default, load_callback_group_);
     list_nodes_service_ = container_->create_service<ListNodes>(
       "/motion_conditioning_container/_container/list_nodes",
@@ -510,6 +588,16 @@ public:
     return unload_count_;
   }
 
+  bool wait_for_loaded_count(
+    std::size_t expected,
+    std::chrono::milliseconds timeout = 2s) const
+  {
+    std::unique_lock<std::mutex> lock(graph_mutex_);
+    return graph_condition_.wait_for(lock, timeout, [this, expected]() {
+               return loaded_.size() >= expected;
+      });
+  }
+
   void set_activation_delay(std::chrono::milliseconds delay)
   {
     activation_delay_ = delay;
@@ -570,6 +658,33 @@ public:
     publish_scan_ = scan;
     publish_odom_ = odom;
     publish_clock_ = clock;
+  }
+
+  void publish_health_once()
+  {
+    rosgraph_msgs::msg::Clock clock;
+    clock.clock = rclcpp::Clock(RCL_SYSTEM_TIME).now();
+    if (publish_clock_) {
+      clock_publisher_->publish(clock);
+      if (clock.clock.nanosec == 999999999U) {
+        ++clock.clock.sec;
+        clock.clock.nanosec = 0U;
+      } else {
+        ++clock.clock.nanosec;
+      }
+      clock_publisher_->publish(clock);
+    }
+    sensor_msgs::msg::LaserScan scan;
+    scan.header.stamp = clock.clock;
+    scan.ranges = {10.0F, 10.0F};
+    if (publish_scan_) {
+      scan_message_publisher_->publish(scan);
+    }
+    nav_msgs::msg::Odometry odom;
+    odom.header.stamp = clock.clock;
+    if (publish_odom_) {
+      odom_message_publisher_->publish(odom);
+    }
   }
 
   void set_clock_frozen(bool value)
@@ -697,6 +812,7 @@ private:
   std::vector<rclcpp::Service<GetState>::SharedPtr> get_services_;
   std::unordered_map<std::uint64_t, std::string> loaded_;
   mutable std::mutex graph_mutex_;
+  mutable std::condition_variable graph_condition_;
   std::uint64_t next_id_{1U};
   std::size_t unload_count_{0U};
   std::vector<std::uint64_t> unload_requests_;
@@ -716,7 +832,7 @@ private:
   bool controller_active_{true};
   bool freeze_clock_{false};
   rclcpp::Time frozen_clock_;
-  std::mutex health_mutex_;
+  mutable std::mutex health_mutex_;
   std::mutex activation_mutex_;
   std::condition_variable activation_cv_;
   bool activation_barrier_{false};
@@ -809,6 +925,46 @@ protected:
                static_cast<char>('1' + (*request)++ % 8U);
       };
     return value;
+  }
+
+  bool wait_for_candidate_writer(
+    const std::string & topic,
+    std::chrono::milliseconds timeout = 2s)
+  {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+      const auto publishers = client->get_publishers_info_by_topic(topic);
+      const auto found = std::any_of(
+        publishers.cbegin(), publishers.cend(), [](const auto & endpoint) {
+          return endpoint.node_name() == "collision_monitor" &&
+                 endpoint.topic_type() == "geometry_msgs/msg/TwistStamped";
+        });
+      if (found) {
+        return true;
+      }
+      std::this_thread::yield();
+    }
+    return false;
+  }
+
+  bool wait_for_no_candidate_writer(
+    const std::string & topic,
+    std::chrono::milliseconds timeout = 2s)
+  {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+      const auto publishers = client->get_publishers_info_by_topic(topic);
+      const auto found = std::any_of(
+        publishers.cbegin(), publishers.cend(), [](const auto & endpoint) {
+          return endpoint.node_name() == "collision_monitor" &&
+                 endpoint.topic_type() == "geometry_msgs/msg/TwistStamped";
+        });
+      if (!found) {
+        return true;
+      }
+      std::this_thread::yield();
+    }
+    return false;
   }
 
   std::unique_ptr<FakeComponentGraph> graph;
@@ -1892,6 +2048,163 @@ TEST_F(MotionConditioningPipelineTest, DestructorDrainsActiveStartBeyondStopBarr
   EXPECT_FALSE(start_result->ok);
   EXPECT_TRUE(destructor_finished.load());
   EXPECT_EQ(graph->loaded_count(), 0U);
+}
+
+TEST_F(MotionConditioningPipelineTest, StopTimeoutDestructorOwnsFinalCleanup)
+{
+  producer->block_start = true;
+  auto health_ready = std::make_shared<CallbackCounter>();
+  auto pipeline_config = config();
+  pipeline_config.writer_graph_timeout = 1s;
+  pipeline_config.prepare_open_deadline = 5s;
+  pipeline_config.dependency_liveness_timeout = 2s;
+  pipeline_config.health_rpc_timeout = 500ms;
+  pipeline_config.after_health_callback = [health_ready]() {
+      (*health_ready)();
+    };
+  auto pipeline = std::make_unique<MotionConditioningPipeline>(
+    *client, authority, producer, pipeline_config);
+  const auto prepared = pipeline->prepare();
+  ASSERT_TRUE(prepared.ok);
+  ASSERT_TRUE(graph->wait_for_loaded_count(2U));
+  ASSERT_TRUE(wait_for_candidate_writer(prepared.candidate_topic));
+  health_ready->expect(4U);
+  graph->publish_health_once();
+  ASSERT_TRUE(health_ready->wait_for_target());
+
+  auto * raw_pipeline = pipeline.get();
+  std::optional<MotionConditioningResult> start_result;
+  std::thread start_thread([&]() {start_result = raw_pipeline->start();});
+  if (!producer->wait_for_start(2s)) {
+    producer->release_blocked_start();
+    start_thread.join();
+    FAIL() << "conditioning start did not reach producer barrier detail=" <<
+      (start_result.has_value() ? start_result->detail : "no result");
+  }
+
+  std::promise<MotionConditioningResult> stop_promise;
+  auto stop_future = stop_promise.get_future();
+  std::thread stop_thread([&]() {
+      stop_promise.set_value(raw_pipeline->stop());
+    });
+  ASSERT_EQ(
+    stop_future.wait_for(2s),
+    std::future_status::ready);
+  const auto stop_result = stop_future.get();
+  EXPECT_FALSE(stop_result.ok);
+  EXPECT_EQ(stop_result.failure, MotionConditioningFailure::SafetyFault);
+
+  producer->release_blocked_start();
+  start_thread.join();
+  stop_thread.join();
+  ASSERT_TRUE(start_result.has_value());
+  EXPECT_FALSE(start_result->ok);
+  EXPECT_EQ(producer->start_count, 1U);
+  const auto calls = authority->calls();
+  EXPECT_EQ(
+    std::count(
+      calls.cbegin(), calls.cend(), AuthorityOperationKind::Prepare), 1);
+
+  pipeline.reset();
+
+  EXPECT_EQ(graph->loaded_count(), 0U);
+  EXPECT_EQ(graph->unload_count(), 2U);
+  EXPECT_TRUE(wait_for_no_candidate_writer(prepared.candidate_topic));
+  EXPECT_EQ(producer->stop_count, 1U);
+}
+
+TEST_F(MotionConditioningPipelineTest, DestructorDrainsHealthSubscriptionCallback)
+{
+  auto health_barrier = std::make_shared<CallbackBarrier>();
+  auto callback_wait_barrier = std::make_shared<CallbackBarrier>();
+  auto pipeline_config = config();
+  pipeline_config.writer_graph_timeout = 1s;
+  pipeline_config.prepare_open_deadline = 5s;
+  pipeline_config.dependency_liveness_timeout = 2s;
+  pipeline_config.health_rpc_timeout = 500ms;
+  pipeline_config.before_health_callback = [health_barrier]() {
+      (*health_barrier)();
+    };
+  pipeline_config.before_callback_wait = [callback_wait_barrier]() {
+      (*callback_wait_barrier)();
+    };
+
+  auto pipeline = std::make_unique<MotionConditioningPipeline>(
+    *client, authority, producer, pipeline_config);
+  ASSERT_TRUE(pipeline->prepare().ok);
+  health_barrier->arm();
+  graph->publish_health_once();
+  ASSERT_TRUE(health_barrier->wait_for_entry());
+  callback_wait_barrier->arm();
+
+  auto owned_pipeline = std::move(pipeline);
+  std::promise<void> destructor_promise;
+  auto destructor_future = destructor_promise.get_future();
+  std::thread destructor_thread(
+    [owned = std::move(owned_pipeline), &destructor_promise]() mutable {
+      owned.reset();
+      destructor_promise.set_value();
+    });
+
+  ASSERT_TRUE(callback_wait_barrier->wait_for_entry());
+  callback_wait_barrier->release();
+  health_barrier->release();
+  ASSERT_EQ(
+    destructor_future.wait_for(2s),
+    std::future_status::ready);
+  destructor_thread.join();
+}
+
+TEST_F(MotionConditioningPipelineTest, DestructorDrainsQueuedRenewCallback)
+{
+  auto renew_barrier = std::make_shared<CallbackBarrier>();
+  auto renew_wait_barrier = std::make_shared<CallbackBarrier>();
+  auto health_ready = std::make_shared<CallbackCounter>();
+  auto pipeline_config = config();
+  pipeline_config.writer_graph_timeout = 1s;
+  pipeline_config.prepare_open_deadline = 2s;
+  pipeline_config.after_health_callback = [health_ready]() {
+      (*health_ready)();
+    };
+  pipeline_config.before_renew_callback = [renew_barrier]() {
+      (*renew_barrier)();
+    };
+  pipeline_config.before_renew_wait = [renew_wait_barrier]() {
+      (*renew_wait_barrier)();
+    };
+
+  auto pipeline = std::make_unique<MotionConditioningPipeline>(
+    *client, authority, producer, pipeline_config);
+  const auto prepared = pipeline->prepare();
+  ASSERT_TRUE(prepared.ok);
+  ASSERT_TRUE(graph->wait_for_loaded_count(2U));
+  ASSERT_TRUE(wait_for_candidate_writer(prepared.candidate_topic));
+  health_ready->expect(4U);
+  graph->publish_health_once();
+  ASSERT_TRUE(health_ready->wait_for_target());
+  const auto started = pipeline->start();
+  ASSERT_TRUE(started.ok) << started.detail << " calls=" << authority->calls().size()
+                          << " loaded=" << graph->loaded_count();
+  renew_barrier->arm();
+  ASSERT_TRUE(renew_barrier->wait_for_entry());
+  renew_wait_barrier->arm();
+
+  auto owned_pipeline = std::move(pipeline);
+  std::promise<void> destructor_promise;
+  auto destructor_future = destructor_promise.get_future();
+  std::thread destructor_thread(
+    [owned = std::move(owned_pipeline), &destructor_promise]() mutable {
+      owned.reset();
+      destructor_promise.set_value();
+    });
+
+  ASSERT_TRUE(renew_wait_barrier->wait_for_entry());
+  renew_wait_barrier->release();
+  renew_barrier->release();
+  ASSERT_EQ(
+    destructor_future.wait_for(2s),
+    std::future_status::ready);
+  destructor_thread.join();
 }
 
 TEST_F(MotionConditioningPipelineTest, RenewAuthorityLossFailsClosed)

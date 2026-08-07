@@ -86,6 +86,11 @@ struct MotionConditioningConfig
     "/voice_nav_internal/motion/collision_state"};
   std::function<std::string()> request_id_generator;
   std::function<void(const MotionConditioningCorrelationToken &)> before_token_claim;
+  std::function<void()> before_health_callback;
+  std::function<void()> after_health_callback;
+  std::function<void()> before_renew_callback;
+  std::function<void()> before_callback_wait;
+  std::function<void()> before_renew_wait;
 };
 
 class MotionProducerPort

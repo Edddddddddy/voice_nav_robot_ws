@@ -199,6 +199,115 @@ public:
     bool active_{false};
   };
 
+  struct IngressCallbackState
+  {
+    std::function<void(const LaserScan::ConstSharedPtr)> scan_handler;
+    std::function<void(const Odometry::ConstSharedPtr)> odom_handler;
+    std::function<void(const Clock::ConstSharedPtr)> clock_handler;
+    std::function<void(
+        const CollisionState::ConstSharedPtr &, const rclcpp::MessageInfo &)>
+    collision_handler;
+    std::function<void()> renew_handler;
+
+    bool enter()
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (!accepting) {
+        return false;
+      }
+      ++active;
+      return true;
+    }
+
+    void leave()
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      if (active > 0U) {
+        --active;
+      }
+      if (active == 0U) {
+        condition.notify_all();
+      }
+    }
+
+    void disable()
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      accepting = false;
+    }
+
+    void wait()
+    {
+      std::unique_lock<std::mutex> lock(mutex);
+      condition.wait(lock, [this]() {return active == 0U;});
+    }
+
+    std::size_t active_count() const
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      return active;
+    }
+
+    std::function<void(const LaserScan::ConstSharedPtr)> copy_scan_handler() const
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      return scan_handler;
+    }
+
+    std::function<void(const Odometry::ConstSharedPtr)> copy_odom_handler() const
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      return odom_handler;
+    }
+
+    std::function<void(const Clock::ConstSharedPtr)> copy_clock_handler() const
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      return clock_handler;
+    }
+
+    std::function<void(
+        const CollisionState::ConstSharedPtr &, const rclcpp::MessageInfo & )>
+    copy_collision_handler() const
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      return collision_handler;
+    }
+
+    std::function<void()> copy_renew_handler() const
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      return renew_handler;
+    }
+
+private:
+    mutable std::mutex mutex;
+    std::condition_variable condition;
+    bool accepting{true};
+    std::size_t active{0U};
+  };
+
+  struct IngressCallbackGuard
+  {
+    explicit IngressCallbackGuard(std::shared_ptr<IngressCallbackState> state)
+    : state_(std::move(state)), active_(state_ && state_->enter()) {}
+
+    ~IngressCallbackGuard()
+    {
+      if (active_) {
+        state_->leave();
+      }
+    }
+
+    bool is_active() const
+    {
+      return active_;
+    }
+
+    std::shared_ptr<IngressCallbackState> state_;
+    bool active_{false};
+  };
+
   Impl(
     rclcpp::Node & node,
     std::shared_ptr<MotionAuthorityPort> authority,
@@ -235,53 +344,59 @@ public:
       config_.controller_manager_service,
       rmw_qos_profile_services_default,
       component_callback_group_);
-    rclcpp::SubscriptionOptions health_options;
-    health_options.callback_group = component_callback_group_;
-    scan_subscription_ = node_.create_subscription<LaserScan>(
-      config_.scan_topic,
-      rclcpp::SensorDataQoS(),
-      [this](const LaserScan::ConstSharedPtr) {
-        std::lock_guard<std::mutex> lock(health_mutex_);
-        last_scan_receipt_ = std::chrono::steady_clock::now();
-      },
-      health_options);
-    odom_subscription_ = node_.create_subscription<Odometry>(
-      config_.odom_topic,
-      rclcpp::SensorDataQoS(),
-      [this](const Odometry::ConstSharedPtr) {
-        std::lock_guard<std::mutex> lock(health_mutex_);
-        last_odom_receipt_ = std::chrono::steady_clock::now();
-      },
-      health_options);
-    clock_subscription_ = node_.create_subscription<Clock>(
-      config_.clock_topic,
-      rclcpp::ClockQoS(),
-      [this](const Clock::ConstSharedPtr message) {
-        std::lock_guard<std::mutex> lock(health_mutex_);
-        const auto stamp = static_cast<std::int64_t>(message->clock.sec) * 1000000000LL +
-        static_cast<std::int64_t>(message->clock.nanosec);
-        const auto receipt = std::chrono::steady_clock::now();
-        if (clock_seen_ && stamp > last_clock_stamp_) {
-          last_clock_progress_receipt_ = receipt;
+    callback_state_ = std::make_shared<IngressCallbackState>();
+    callback_state_->scan_handler = [this](const LaserScan::ConstSharedPtr) {
+        if (config_.before_health_callback) {
+          config_.before_health_callback();
         }
-        clock_seen_ = true;
-        last_clock_stamp_ = stamp;
-        last_clock_receipt_ = receipt;
-      },
-      health_options);
-    rclcpp::SubscriptionOptions collision_options;
-    collision_options.callback_group = component_callback_group_;
-    collision_subscription_ = node_.create_subscription<CollisionState>(
-      config_.collision_state_topic,
-      rclcpp::QoS(rclcpp::KeepLast(10)).reliable().durability_volatile(),
-      [this](
-        const CollisionState::ConstSharedPtr message,
-        const rclcpp::MessageInfo & message_info) {
+        {
+          std::lock_guard<std::mutex> lock(health_mutex_);
+          last_scan_receipt_ = std::chrono::steady_clock::now();
+        }
+        if (config_.after_health_callback) {
+          config_.after_health_callback();
+        }
+      };
+    callback_state_->odom_handler = [this](const Odometry::ConstSharedPtr) {
+        if (config_.before_health_callback) {
+          config_.before_health_callback();
+        }
+        {
+          std::lock_guard<std::mutex> lock(health_mutex_);
+          last_odom_receipt_ = std::chrono::steady_clock::now();
+        }
+        if (config_.after_health_callback) {
+          config_.after_health_callback();
+        }
+      };
+    callback_state_->clock_handler = [this](const Clock::ConstSharedPtr message) {
+        if (config_.before_health_callback) {
+          config_.before_health_callback();
+        }
+        {
+          std::lock_guard<std::mutex> lock(health_mutex_);
+          const auto stamp = static_cast<std::int64_t>(message->clock.sec) * 1000000000LL +
+            static_cast<std::int64_t>(message->clock.nanosec);
+          const auto receipt = std::chrono::steady_clock::now();
+          if (clock_seen_ && stamp > last_clock_stamp_) {
+            last_clock_progress_receipt_ = receipt;
+          }
+          clock_seen_ = true;
+          last_clock_stamp_ = stamp;
+          last_clock_receipt_ = receipt;
+        }
+        if (config_.after_health_callback) {
+          config_.after_health_callback();
+        }
+      };
+    callback_state_->collision_handler = [this](
+      const CollisionState::ConstSharedPtr message,
+      const rclcpp::MessageInfo & message_info) {
+        const auto publisher_gid = message_writer_gid(message_info);
         if (
           message->action_type == CollisionState::STOP &&
           message->polygon_name == "stop_zone")
         {
-          const auto publisher_gid = message_writer_gid(message_info);
           std::lock_guard<std::recursive_mutex> lock(mutex_);
           if (
             !destroying_.load() &&
@@ -295,6 +410,73 @@ public:
             collision_token_ = correlation_token_;
           }
         }
+      };
+    callback_state_->renew_handler = [this]() {on_renew();};
+    rclcpp::SubscriptionOptions health_options;
+    health_options.callback_group = component_callback_group_;
+    const auto weak_callback_state = std::weak_ptr<IngressCallbackState>(callback_state_);
+    scan_subscription_ = node_.create_subscription<LaserScan>(
+      config_.scan_topic,
+      rclcpp::SensorDataQoS(),
+      [weak_callback_state](const LaserScan::ConstSharedPtr message) {
+        auto state = weak_callback_state.lock();
+        IngressCallbackGuard guard(state);
+        if (!guard.is_active()) {
+          return;
+        }
+        const auto handler = state->copy_scan_handler();
+        if (handler) {
+          handler(message);
+        }
+      },
+      health_options);
+    odom_subscription_ = node_.create_subscription<Odometry>(
+      config_.odom_topic,
+      rclcpp::SensorDataQoS(),
+      [weak_callback_state](const Odometry::ConstSharedPtr message) {
+        auto state = weak_callback_state.lock();
+        IngressCallbackGuard guard(state);
+        if (!guard.is_active()) {
+          return;
+        }
+        const auto handler = state->copy_odom_handler();
+        if (handler) {
+          handler(message);
+        }
+      },
+      health_options);
+    clock_subscription_ = node_.create_subscription<Clock>(
+      config_.clock_topic,
+      rclcpp::ClockQoS(),
+      [weak_callback_state](const Clock::ConstSharedPtr message) {
+        auto state = weak_callback_state.lock();
+        IngressCallbackGuard guard(state);
+        if (!guard.is_active()) {
+          return;
+        }
+        const auto handler = state->copy_clock_handler();
+        if (handler) {
+          handler(message);
+        }
+      },
+      health_options);
+    rclcpp::SubscriptionOptions collision_options;
+    collision_options.callback_group = component_callback_group_;
+    collision_subscription_ = node_.create_subscription<CollisionState>(
+      config_.collision_state_topic,
+      rclcpp::QoS(rclcpp::KeepLast(10)).reliable().durability_volatile(),
+      [weak_callback_state](
+        const CollisionState::ConstSharedPtr message,
+        const rclcpp::MessageInfo & message_info) {
+        auto state = weak_callback_state.lock();
+        IngressCallbackGuard guard(state);
+        if (!guard.is_active()) {
+          return;
+        }
+        const auto handler = state->copy_collision_handler();
+        if (handler) {
+          handler(message, message_info);
+        }
       },
       collision_options);
   }
@@ -302,9 +484,13 @@ public:
   ~Impl()
   {
     destroying_.store(true);
+    disable_ingress_callbacks();
     (void)stop();
     drain_start_operations();
     wait_for_renew_callbacks();
+    finalize_destruction_cleanup();
+    wait_for_ingress_callbacks();
+    callback_state_.reset();
   }
 
   MotionConditioningResult prepare()
@@ -587,9 +773,21 @@ public:
       } else {
         try {
           enable_renew_callbacks();
+          const auto weak_callback_state =
+            std::weak_ptr<IngressCallbackState>(callback_state_);
           renew_timer_ = node_.create_wall_timer(
             config_.renew_period,
-            [this]() {on_renew();},
+            [weak_callback_state]() {
+              auto state = weak_callback_state.lock();
+              IngressCallbackGuard guard(state);
+              if (!guard.is_active()) {
+                return;
+              }
+              const auto handler = state->copy_renew_handler();
+              if (handler) {
+                handler();
+              }
+            },
             renew_callback_group_);
         } catch (const std::exception & error) {
           timer_error =
@@ -1249,6 +1447,29 @@ private:
                {}, {}, "conditioning generation stopped"));
   }
 
+  void finalize_destruction_cleanup()
+  {
+    drain_start_operations();
+    if (cleanup_complete_.load() && producer_stop_proven_.load()) {
+      return;
+    }
+    bool expected = false;
+    if (!destruction_cleanup_claimed_.compare_exchange_strong(expected, true)) {
+      return;
+    }
+    const bool producer_stopped = safe_producer_stop();
+    bool components_clean = false;
+    try {
+      components_clean = cleanup_components();
+    } catch (...) {
+      components_clean = false;
+      record_cleanup_failure(
+        "cleanup", config_.container_fqn, 0U,
+        "destruction cleanup raised an unknown exception");
+    }
+    cleanup_complete_.store(producer_stopped && components_clean);
+  }
+
   [[nodiscard]] MotionConditioningResult fail_owned(
     MotionConditioningFailure failure,
     std::string detail,
@@ -1411,6 +1632,29 @@ private:
     }
   }
 
+  void disable_ingress_callbacks()
+  {
+    if (callback_state_) {
+      callback_state_->disable();
+    }
+    scan_subscription_.reset();
+    odom_subscription_.reset();
+    clock_subscription_.reset();
+    collision_subscription_.reset();
+    disable_renew_callbacks();
+  }
+
+  void wait_for_ingress_callbacks()
+  {
+    if (!callback_state_) {
+      return;
+    }
+    if (callback_state_->active_count() != 0U && config_.before_callback_wait) {
+      config_.before_callback_wait();
+    }
+    callback_state_->wait();
+  }
+
   void wait_for_failure_completion()
   {
     std::unique_lock<std::mutex> lock(teardown_mutex_);
@@ -1454,6 +1698,16 @@ private:
 
   void wait_for_renew_callbacks()
   {
+    std::function<void()> wait_hook;
+    {
+      std::lock_guard<std::mutex> lock(callback_mutex_);
+      if (active_renew_callbacks_ != 0U) {
+        wait_hook = config_.before_renew_wait;
+      }
+    }
+    if (wait_hook) {
+      wait_hook();
+    }
     std::unique_lock<std::mutex> lock(callback_mutex_);
     callback_cv_.wait(lock, [this]() {return active_renew_callbacks_ == 0U;});
   }
@@ -1503,6 +1757,7 @@ private:
       request->remap_rules = remaps;
       request->extra_arguments.push_back(
         parameter("use_intra_process_comms", false));
+      cleanup_complete_.store(false);
       auto future = load_client_->async_send_request(request);
       pending_loads_.push_back(
         PendingLoad{generation_, expected_fqn, std::move(future)});
@@ -2013,6 +2268,7 @@ private:
     if (!components_loaded_ && pending_loads_.empty() &&
       residual_components_.empty())
     {
+      cleanup_complete_.store(true);
       return true;
     }
     bool success = true;
@@ -2156,6 +2412,7 @@ private:
     if (!success) {
       cleanup_blocked_ = true;
     }
+    cleanup_complete_.store(success);
     return success;
   }
 
@@ -2222,6 +2479,7 @@ private:
     smoother_component_ = {};
     pending_loads_.clear();
     residual_components_.clear();
+    cleanup_complete_.store(true);
     cleanup_identity_fault_ = false;
     cleanup_failure_.reset();
     lease_id_.clear();
@@ -2296,6 +2554,9 @@ private:
       RenewCallbackGuard callback_guard(*this);
       if (!callback_guard.active_) {
         return;
+      }
+      if (config_.before_renew_callback) {
+        config_.before_renew_callback();
       }
       std::string activation_gate_instance;
       bool activation = false;
@@ -2552,6 +2813,8 @@ private:
   std::atomic<bool> activation_in_progress_{false};
   std::atomic<bool> activation_failed_{false};
   std::atomic<bool> destroying_{false};
+  std::atomic<bool> cleanup_complete_{true};
+  std::atomic<bool> destruction_cleanup_claimed_{false};
   std::atomic<bool> teardown_in_progress_{false};
   mutable std::mutex teardown_mutex_;
   std::condition_variable teardown_cv_;
@@ -2568,6 +2831,7 @@ private:
   std::condition_variable callback_cv_;
   std::size_t active_renew_callbacks_{0U};
   bool renew_callbacks_enabled_{true};
+  std::shared_ptr<IngressCallbackState> callback_state_;
   rclcpp::CallbackGroup::SharedPtr component_callback_group_;
   rclcpp::CallbackGroup::SharedPtr renew_callback_group_;
   rclcpp::Client<LoadNode>::SharedPtr load_client_;
