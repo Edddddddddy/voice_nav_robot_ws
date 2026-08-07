@@ -392,9 +392,10 @@ class AgentNode(Node):
     def _planning_snapshot(
         self, *, require_execute_ready: bool
     ) -> Optional[MissionState]:
-        if self._latest_state is None:
-            return None
         publishers = self._compatible_state_publishers()
+        if self._latest_state is None:
+            self._reconcile_empty_state_epoch(publishers)
+            return None
         current_gid = None
         if len(publishers) == 1:
             current_gid = _gid_key(getattr(publishers[0], 'endpoint_gid', None))
@@ -420,6 +421,18 @@ class AgentNode(Node):
         ):
             return None
         return self._latest_state
+
+    def _reconcile_empty_state_epoch(self, publishers: list[Any]) -> None:
+        """Reconcile a unique publisher before a fail-closed empty Turn."""
+        if len(publishers) != 1:
+            return
+        current_gid = _gid_key(getattr(publishers[0], 'endpoint_gid', None))
+        current_epoch_gid = _gid_key(self._state_subscription_epoch_gid)
+        if (
+            not _gid_is_present(current_gid)
+            or current_gid != current_epoch_gid
+        ):
+            self._schedule_state_subscription_rebuild()
 
     def _compatible_state_publishers(self) -> list[Any]:
         try:

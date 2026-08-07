@@ -100,15 +100,9 @@ class AgentNodeLaunchTest(unittest.TestCase):
             'A': threading.Event(),
             'B': threading.Event(),
         }
-        self.state_rematched_events = {
-            'A': threading.Event(),
-            'B': threading.Event(),
-        }
-        self.state_rebuild_waiting = {'A': False, 'B': False}
         self.b_state_published = threading.Event()
-        self.b_state_observed = threading.Event()
         self.b_state_publish_count = 0
-        self.state_observer = None
+        self.b_publish_on_speak = False
         self.state_publisher = self._create_state_publisher('A')
         self.state_matched = self.state_matched_events['A']
         self.state_publisher.publish(
@@ -141,7 +135,7 @@ class AgentNodeLaunchTest(unittest.TestCase):
             Speak,
             '/voice/speak',
             execute_callback=self._speak,
-            goal_callback=self._accept_goal,
+            goal_callback=self._accept_speak_goal,
             cancel_callback=self._accept_cancel,
         )
         self.stop_probe = self.node.create_client(
@@ -191,11 +185,12 @@ class AgentNodeLaunchTest(unittest.TestCase):
             if event.current_count_change < 0:
                 self.state_current_match_events[label].clear()
                 return
-            if event.current_count_change > 0:
+            if (
+                event.current_count_change > 0
+                or event.total_count_change > 0
+            ):
                 self.state_current_match_events[label].set()
                 self.state_matched_events[label].set()
-                if self.state_rebuild_waiting[label]:
-                    self.state_rematched_events[label].set()
 
         return matched
 
@@ -207,10 +202,6 @@ class AgentNodeLaunchTest(unittest.TestCase):
             self._state_message('runtime-b', 22)
         )
         self.b_state_published.set()
-
-    def _observe_state_sample(self, message):
-        if message.runtime_instance_id == 'runtime-b':
-            self.b_state_observed.set()
 
     @staticmethod
     def _state_message(runtime_instance_id, admission_epoch):
@@ -266,8 +257,29 @@ class AgentNodeLaunchTest(unittest.TestCase):
         assert endpoint_gid
         return endpoint_gid
 
+    def _agent_state_subscription_gid(self):
+        infos = [
+            info
+            for info in self.node.get_subscriptions_info_by_topic(
+                '/mission/state'
+            )
+            if info.node_name == 'agent_node'
+        ]
+        assert len(infos) <= 1
+        if not infos:
+            return None
+        endpoint_gid = bytes(infos[0].endpoint_gid)
+        assert endpoint_gid
+        return endpoint_gid
+
     @staticmethod
     def _accept_goal(_request):
+        return GoalResponse.ACCEPT
+
+    def _accept_speak_goal(self, _request):
+        if self.b_publish_on_speak:
+            self._publish_b_state_once()
+            self.b_publish_on_speak = False
         return GoalResponse.ACCEPT
 
     @staticmethod
@@ -304,8 +316,6 @@ class AgentNodeLaunchTest(unittest.TestCase):
         self.speak_probe.destroy()
         self.mission_probe.destroy()
         self.stop_probe.destroy()
-        if self.state_observer is not None:
-            self.node.destroy_subscription(self.state_observer)
         self.mission_server.destroy()
         self.speak_server.destroy()
         self.stop_service.destroy()
@@ -445,6 +455,8 @@ class AgentNodeLaunchTest(unittest.TestCase):
         assert len(self.mission_goals) == 1
         assert self.mission_goals[0].runtime_instance_id == 'runtime-a'
         assert self.mission_goals[0].admission_epoch == 11
+        state_a_subscription_gid = self._agent_state_subscription_gid()
+        assert state_a_subscription_gid
 
         state_a_publisher = self.state_publisher
         # Destroy A immediately after its accepted sample; the old sample may
@@ -455,41 +467,48 @@ class AgentNodeLaunchTest(unittest.TestCase):
         assert self.state_current_match_events['B'].wait(10.0)
         state_b_gid = self._state_endpoint_gid('B')
         assert state_b_gid != state_a_gid
-        self.state_observer = self.node.create_subscription(
-            MissionState,
-            '/mission/state',
-            self._observe_state_sample,
-            _test_state_qos(),
+        assert self._agent_state_subscription_gid() == (
+            state_a_subscription_gid
         )
+        self.state_current_match_events['B'].clear()
 
-        self.state_rebuild_waiting['B'] = True
         self.mission_event.clear()
         self.speak_event.clear()
         self._publish_rule_turn(3, 'mission-without-b-state')
         assert self.speak_event.wait(10.0)
         assert len(self.mission_goals) == 1
         assert not self.mission_event.is_set()
-        assert self.state_rematched_events['B'].wait(10.0)
-        self._publish_b_state_once()
-        assert self.b_state_published.wait(10.0)
-        assert self.b_state_publish_count == 1
-        assert self.b_state_observed.wait(10.0)
 
         self.stop_event.clear()
         self.speak_event.clear()
         self._publish_stop_turn(4, 'state-b-barrier')
         assert self.stop_event.wait(10.0)
         assert self.speak_event.wait(10.0)
+        assert self.state_current_match_events['B'].wait(10.0)
+        state_b_subscription_gid = self._agent_state_subscription_gid()
+        assert state_b_subscription_gid
+        assert state_b_subscription_gid != state_a_subscription_gid
+
+        self.b_publish_on_speak = True
+        self.mission_event.clear()
+        self.speak_event.clear()
+        self._publish_rule_turn(5, 'publish-b-state')
+        assert self.speak_event.wait(10.0)
+        assert len(self.mission_goals) == 1
+        assert not self.mission_event.is_set()
+        assert self.b_state_published.wait(10.0)
+        assert self.b_state_publish_count == 1
+
+        self.stop_event.clear()
+        self.speak_event.clear()
+        self._publish_stop_turn(6, 'state-b-barrier-after-publish')
+        assert self.stop_event.wait(10.0)
+        assert self.speak_event.wait(10.0)
 
         self.mission_event.clear()
         self.speak_event.clear()
-        self._publish_rule_turn(5, 'mission-b')
-        assert self.mission_event.wait(10.0), [
-            (info.node_name, bytes(info.endpoint_gid))
-            for info in self.node.get_publishers_info_by_topic(
-                '/mission/state'
-            )
-        ]
+        self._publish_rule_turn(7, 'mission-b')
+        assert self.mission_event.wait(10.0)
         assert self.speak_event.wait(10.0)
         assert len(self.mission_goals) == 2
         assert self.mission_goals[1].runtime_instance_id == 'runtime-b'
@@ -497,7 +516,7 @@ class AgentNodeLaunchTest(unittest.TestCase):
 
         self.mission_event.clear()
         self.speak_event.clear()
-        self._publish_rule_turn(6, 'mission-b-again')
+        self._publish_rule_turn(8, 'mission-b-again')
         assert self.mission_event.wait(10.0)
         assert self.speak_event.wait(10.0)
         assert len(self.mission_goals) == 3
