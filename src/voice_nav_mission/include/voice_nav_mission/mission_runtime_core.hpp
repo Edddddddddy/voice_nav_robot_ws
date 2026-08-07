@@ -301,6 +301,9 @@ public:
         std::uint64_t, const MissionFeedback &)>;
   using ResultCallback = std::function<void(
         std::uint64_t, const MissionResult &)>;
+  using ChildFeedbackDispatcher = std::function<bool(const MotionToken &, double)>;
+  using ChildResultDispatcher = std::function<bool(
+        const MotionToken &, const ChildResult &)>;
 
   RuntimeCore(
     RuntimeConfig config,
@@ -309,7 +312,9 @@ public:
     std::shared_ptr<RelativeMotionPort> relative_motion,
     StateCallback state_callback = {},
     FeedbackCallback feedback_callback = {},
-    ResultCallback result_callback = {});
+    ResultCallback result_callback = {},
+    ChildFeedbackDispatcher child_feedback_dispatcher = {},
+    ChildResultDispatcher child_result_dispatcher = {});
 
   [[nodiscard]] AdmissionResult admit(const MissionGoal & goal);
   void cancel(std::uint64_t mission_id);
@@ -317,6 +322,9 @@ public:
   void observe_gate(const GateSnapshot & snapshot);
   void observe_dependencies();
   void on_tick();
+  void on_child_feedback(const MotionToken & token, double progress);
+  void on_child_result(const MotionToken & token, const ChildResult & result);
+  void fail_closed(std::string detail);
 
   [[nodiscard]] RuntimeState state() const;
   [[nodiscard]] bool usable() const noexcept;
@@ -376,8 +384,6 @@ private:
     std::uint32_t step_index,
     double progress);
   void start_step();
-  void on_child_feedback(const MotionToken & token, double progress);
-  void on_child_result(const MotionToken & token, const ChildResult & result);
   TerminalOutcome select_terminal_and_stop(
     MissionResultCode code,
     std::string detail,
@@ -403,6 +409,8 @@ private:
   StateCallback state_callback_;
   FeedbackCallback feedback_callback_;
   ResultCallback result_callback_;
+  ChildFeedbackDispatcher child_feedback_dispatcher_;
+  ChildResultDispatcher child_result_dispatcher_;
   RuntimeState state_;
   GateSnapshot gate_snapshot_;
   bool gate_bound_{false};

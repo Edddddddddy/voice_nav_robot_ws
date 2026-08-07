@@ -83,10 +83,6 @@ struct MotionConditioningConfig
   std::chrono::milliseconds health_rpc_timeout{100};
   std::chrono::milliseconds control_response_deadline{100};
   std::chrono::milliseconds stop_barrier{250};
-  // Production can activate the real Nav2 chain before OPEN while Gate is
-  // still selecting zero.  This lets the candidate writer publish fresh
-  // zeros before the 150 ms Gate freshness window starts.
-  bool preopen_zero_generation{false};
   std::string container_fqn{"/motion_conditioning_container"};
   std::string raw_topic{"/voice_nav_internal/motion/raw"};
   std::string smoothed_topic{"/voice_nav_internal/motion/smoothed"};

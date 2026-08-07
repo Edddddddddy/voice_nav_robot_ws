@@ -15,16 +15,22 @@
 #include "voice_nav_mission/mission_runtime_core.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
@@ -60,13 +66,171 @@ constexpr std::int64_t kTrustedControlResponseDeadlineMs = 100;
 constexpr std::int64_t kTrustedStopBarrierMs = 250;
 constexpr std::int64_t kTrustedCancelGraceMs = 250;
 constexpr std::int64_t kTrustedStationarityDeadlineMs = 1200;
-constexpr std::int64_t kTrustedConditioningRpcTimeoutMs = 5000;
-constexpr std::int64_t kTrustedConditioningHandoverDeadlineMs = 10000;
 constexpr std::int64_t kTrustedCollisionSourceTimeoutMs = 300;
 constexpr float kTrustedMoveDistanceMinM = 0.05F;
 constexpr float kTrustedMoveDistanceMaxM = 2.0F;
 constexpr float kTrustedRotateAngleMinRad = 0.05F;
 constexpr float kTrustedRotateAngleMaxRad = 6.283185F;
+
+struct StopWaiter
+{
+  std::mutex mutex;
+  std::condition_variable condition;
+  bool completed{false};
+  StopResponse response{};
+};
+
+struct AdmitEvent
+{
+  MissionGoal goal;
+  std::shared_ptr<GoalHandle> goal_handle;
+};
+
+struct CancelEvent
+{
+  std::uint64_t mission_id{0U};
+};
+
+struct StopEvent
+{
+  StopRequest request;
+  std::shared_ptr<StopWaiter> waiter;
+};
+
+struct TickEvent
+{
+  SteadyClockPort::TimePoint now{};
+};
+
+struct GateSnapshotEvent
+{
+  GateSnapshot snapshot;
+};
+
+struct ChildFeedbackEvent
+{
+  MotionToken token;
+  double progress{0.0};
+};
+
+struct ChildResultEvent
+{
+  MotionToken token;
+  ChildResult result;
+};
+
+struct QueueFaultEvent
+{
+  std::string detail;
+};
+
+using RuntimeEventPayload = std::variant<
+  AdmitEvent,
+  CancelEvent,
+  StopEvent,
+  TickEvent,
+  GateSnapshotEvent,
+  ChildFeedbackEvent,
+  ChildResultEvent,
+  QueueFaultEvent>;
+
+struct RuntimeEvent
+{
+  std::uint64_t generation{0U};
+  RuntimeEventPayload payload;
+};
+
+// The queue is owned by MissionRuntimeNode.  Producers never call RuntimeCore;
+// they only enqueue a typed event carrying the child generation.  A reserved
+// overflow bit is the fail-closed path when the bounded queue cannot accept
+// another event.
+class RuntimeEventQueue final
+{
+public:
+  static constexpr std::size_t kCapacity = 128U;
+  static constexpr std::size_t kControlReserve = 8U;
+
+  [[nodiscard]] bool push(RuntimeEvent event) noexcept
+  {
+    try {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (closed_ || overflow_fault_) {
+        return false;
+      }
+      const bool control = std::holds_alternative<CancelEvent>(event.payload) ||
+        std::holds_alternative<StopEvent>(event.payload) ||
+        std::holds_alternative<QueueFaultEvent>(event.payload);
+      const auto total_size = events_.size() + control_events_.size();
+      if (total_size >= kCapacity ||
+        (!control && events_.size() >= kCapacity - kControlReserve))
+      {
+        overflow_fault_ = true;
+        condition_.notify_one();
+        return false;
+      }
+      if (control) {
+        control_events_.push_back(std::move(event));
+      } else {
+        events_.push_back(std::move(event));
+      }
+      condition_.notify_one();
+      return true;
+    } catch (...) {
+      overflow_fault_.store(true);
+      condition_.notify_one();
+      return false;
+    }
+  }
+
+  [[nodiscard]] bool wait_pop(RuntimeEvent & event)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    condition_.wait(lock, [this]() {
+        return closed_ || overflow_fault_.load() ||
+               !control_events_.empty() || !events_.empty();
+      });
+    if (overflow_fault_.exchange(false)) {
+      event = RuntimeEvent{0U, QueueFaultEvent{"Runtime event queue overflow"}};
+      return true;
+    }
+    if (!control_events_.empty()) {
+      event = std::move(control_events_.front());
+      control_events_.pop_front();
+      return true;
+    }
+    if (events_.empty()) {
+      return false;
+    }
+    event = std::move(events_.front());
+    events_.pop_front();
+    return true;
+  }
+
+  void close() noexcept
+  {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      closed_ = true;
+      control_events_.clear();
+      events_.clear();
+    }
+    condition_.notify_all();
+  }
+
+  void request_fault() noexcept
+  {
+    overflow_fault_.store(true);
+    condition_.notify_one();
+  }
+
+private:
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  std::deque<RuntimeEvent> control_events_;
+  std::deque<RuntimeEvent> events_;
+  std::atomic<bool> overflow_fault_{false};
+  bool closed_{false};
+};
 
 class RosSteadyClock final : public SteadyClockPort
 {
@@ -98,24 +262,20 @@ public:
       config_.control_response_deadline,
       config_.stop_barrier,
       [this](const GateSnapshot & snapshot) {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
-        if (core_) {
-          core_->observe_gate(snapshot);
-        } else {
-          pending_gate_snapshot_ = snapshot;
+        try {
+          (void)enqueue_event(RuntimeEvent{
+              0U, GateSnapshotEvent{snapshot}});
+        } catch (...) {
+          event_queue_.request_fault();
         }
       });
+    const auto initial_gate_snapshot = authority_->snapshot();
     RelativeMotionPolicy motion_policy;
     motion_policy.stationarity_deadline = config_.stationarity_deadline;
     MotionConditioningConfig conditioning_config;
     conditioning_config.stop_barrier = config_.stop_barrier;
-    conditioning_config.preopen_zero_generation = true;
     conditioning_config.collision_source_timeout = std::chrono::milliseconds(
       kTrustedCollisionSourceTimeoutMs);
-    conditioning_config.component_rpc_timeout = std::chrono::milliseconds(
-      kTrustedConditioningRpcTimeoutMs);
-    conditioning_config.prepare_open_deadline = std::chrono::milliseconds(
-      kTrustedConditioningHandoverDeadlineMs);
     relative_motion_ = std::make_shared<RelativeMotionRosAdapter>(
       *this, authority_, motion_policy, conditioning_config);
     core_ = std::make_unique<RuntimeCore>(
@@ -129,8 +289,28 @@ public:
       },
       [this](std::uint64_t mission_id, const MissionResult & result) {
         action_adapter_.finish(mission_id, result);
+      },
+      [this](const MotionToken & token, const double progress) {
+        try {
+          return enqueue_event(RuntimeEvent{
+              token.mission_generation, ChildFeedbackEvent{token, progress}});
+        } catch (...) {
+          event_queue_.request_fault();
+          return false;
+        }
+      },
+      [this](const MotionToken & token, const ChildResult & result) {
+        try {
+          return enqueue_event(RuntimeEvent{
+              token.mission_generation, ChildResultEvent{token, result}});
+        } catch (...) {
+          event_queue_.request_fault();
+          return false;
+        }
       });
-    core_->observe_gate(pending_gate_snapshot_.value_or(authority_->snapshot()));
+    runtime_worker_ = std::thread([this]() {run_runtime_events();});
+    (void)enqueue_event(RuntimeEvent{
+        0U, GateSnapshotEvent{initial_gate_snapshot}});
 
     action_server_ = rclcpp_action::create_server<ExecuteMission>(
       this,
@@ -154,11 +334,17 @@ public:
       });
     timer_ = create_wall_timer(
       std::chrono::milliseconds(20), [this]() {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
-        authority_->refresh_endpoint();
-        core_->on_tick();
+        const auto now = clock_->now();
+        (void)enqueue_event(RuntimeEvent{0U, TickEvent{now}});
       });
-    publish_state(core_->state());
+  }
+
+  ~MissionRuntimeNode() override
+  {
+    event_queue_.close();
+    if (runtime_worker_.joinable()) {
+      runtime_worker_.join();
+    }
   }
 
 private:
@@ -258,19 +444,27 @@ private:
   rclcpp_action::CancelResponse on_cancel(
     const std::shared_ptr<GoalHandle> & goal_handle)
   {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    for (const auto & entry : goals_) {
-      if (entry.second == goal_handle) {
-        core_->cancel(entry.first);
-        return rclcpp_action::CancelResponse::ACCEPT;
+    std::optional<std::uint64_t> mission_id;
+    {
+      std::lock_guard<std::recursive_mutex> lock(mutex_);
+      for (const auto & entry : goals_) {
+        if (entry.second == goal_handle) {
+          mission_id = entry.first;
+          break;
+        }
       }
+      if (!mission_id.has_value()) {
+        pending_goal_cancels_.insert(goal_handle.get());
+      }
+    }
+    if (mission_id.has_value()) {
+      (void)enqueue_event(RuntimeEvent{*mission_id, CancelEvent{*mission_id}});
     }
     return rclcpp_action::CancelResponse::ACCEPT;
   }
 
   void on_accepted(const std::shared_ptr<GoalHandle> & goal_handle)
   {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
     const auto goal_message = goal_handle->get_goal();
     MissionGoal goal;
     goal.source_instance_id = goal_message->source_instance_id;
@@ -282,37 +476,178 @@ private:
       goal.steps.push_back(MissionStep{
           step.kind, step.distance_m, step.angle_rad, step.target_id});
     }
+    if (!enqueue_event(RuntimeEvent{0U, AdmitEvent{std::move(goal), goal_handle}})) {
+      abort_goal(goal_handle, MissionResult{
+          MissionResultCode::SafetyFault, -1,
+          "Runtime event queue could not accept Mission admission"});
+    }
+  }
+
+  [[nodiscard]] bool enqueue_event(RuntimeEvent event) noexcept
+  {
+    return event_queue_.push(std::move(event));
+  }
+
+  void run_runtime_events()
+  {
+    RuntimeEvent event;
+    while (event_queue_.wait_pop(event)) {
+      try {
+        std::visit(
+          [this](auto & typed_event) {process_event(typed_event);},
+          event.payload);
+      } catch (const std::exception & error) {
+        if (core_) {
+          core_->fail_closed(
+            std::string{"Runtime event worker raised: "} + error.what());
+        }
+      } catch (...) {
+        if (core_) {
+          core_->fail_closed("Runtime event worker raised an unknown exception");
+        }
+      }
+    }
+  }
+
+  void process_event(AdmitEvent & event)
+  {
+    std::uint64_t admitted_id = 0U;
+    bool cancel_after_admission = false;
     action_adapter_.on_accepted(
-      goal,
+      event.goal,
       [this](const MissionGoal & value) {return core_->admit(value);},
-      [this, goal_handle](std::uint64_t mission_id) {
-        goals_.emplace(mission_id, goal_handle);
+      [this, &event, &admitted_id, &cancel_after_admission](
+        const std::uint64_t mission_id) {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        goals_.emplace(mission_id, event.goal_handle);
+        admitted_id = mission_id;
+        const auto found = pending_goal_cancels_.find(event.goal_handle.get());
+        if (found != pending_goal_cancels_.end()) {
+          pending_goal_cancels_.erase(found);
+          cancel_after_admission = true;
+        }
       },
-      [this](std::uint64_t mission_id, const ActionResultDelivery & delivery) {
+      [this](const std::uint64_t mission_id, const ActionResultDelivery & delivery) {
         finish_goal(mission_id, delivery);
       },
-      [goal_handle](const MissionResult & result) {
-        auto action_result = std::make_shared<ExecuteMission::Result>();
-        fill_result(result, *action_result);
-        goal_handle->abort(action_result);
+      [this, &event](const MissionResult & result) {
+        {
+          std::lock_guard<std::recursive_mutex> lock(mutex_);
+          pending_goal_cancels_.erase(event.goal_handle.get());
+        }
+        abort_goal(event.goal_handle, result);
       });
+    if (cancel_after_admission && admitted_id != 0U) {
+      core_->cancel(admitted_id);
+    }
+  }
+
+  void process_event(CancelEvent & event)
+  {
+    core_->cancel(event.mission_id);
+  }
+
+  void process_event(StopEvent & event)
+  {
+    StopResponse response;
+    try {
+      response = core_->stop(event.request);
+    } catch (const std::exception & error) {
+      response = StopResponse{
+        2U, {}, 0U, false,
+        std::string{"STOP worker raised: "} + error.what()};
+      core_->fail_closed(response.detail);
+    } catch (...) {
+      response = StopResponse{
+        2U, {}, 0U, false, "STOP worker raised an unknown exception"};
+      core_->fail_closed(response.detail);
+    }
+    {
+      std::lock_guard<std::mutex> lock(event.waiter->mutex);
+      event.waiter->response = std::move(response);
+      event.waiter->completed = true;
+    }
+    event.waiter->condition.notify_one();
+  }
+
+  void process_event(TickEvent & event)
+  {
+    (void)event;
+    authority_->refresh_endpoint();
+    core_->on_tick();
+  }
+
+  void process_event(GateSnapshotEvent & event)
+  {
+    core_->observe_gate(event.snapshot);
+  }
+
+  void process_event(ChildFeedbackEvent & event)
+  {
+    core_->on_child_feedback(event.token, event.progress);
+  }
+
+  void process_event(ChildResultEvent & event)
+  {
+    core_->on_child_result(event.token, event.result);
+  }
+
+  void process_event(QueueFaultEvent & event)
+  {
+    core_->fail_closed(event.detail);
+  }
+
+  static void abort_goal(
+    const std::shared_ptr<GoalHandle> & goal_handle,
+    const MissionResult & result)
+  {
+    auto action_result = std::make_shared<ExecuteMission::Result>();
+    fill_result(result, *action_result);
+    goal_handle->abort(action_result);
   }
 
   void on_stop(
     const StopMission::Request & request,
     StopMission::Response & response)
   {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    const auto stop = core_->stop(StopRequest{
-        request.request_id,
-        request.source_instance_id,
-        request.source_seq,
-        request.reason});
-    response.code = stop.code;
-    response.runtime_instance_id = stop.runtime_instance_id;
-    response.admission_epoch = stop.admission_epoch;
-    response.motion_inhibited = stop.motion_inhibited;
-    response.detail = stop.detail;
+    auto waiter = std::make_shared<StopWaiter>();
+    const auto accepted = enqueue_event(RuntimeEvent{
+        0U,
+        StopEvent{
+          StopRequest{
+            request.request_id,
+            request.source_instance_id,
+            request.source_seq,
+            request.reason},
+          waiter}});
+    if (!accepted) {
+      const auto state = state_snapshot();
+      response.code = 2U;
+      response.runtime_instance_id = state.runtime_instance_id;
+      response.admission_epoch = state.admission_epoch;
+      response.motion_inhibited = false;
+      response.detail = "Runtime event queue could not accept STOP";
+      return;
+    }
+    std::unique_lock<std::mutex> lock(waiter->mutex);
+    const auto wait_deadline = std::chrono::steady_clock::now() +
+      config_.stationarity_deadline + config_.stop_barrier;
+    if (!waiter->condition.wait_until(
+        lock, wait_deadline, [waiter]() {return waiter->completed;}))
+    {
+      const auto state = state_snapshot();
+      response.code = 2U;
+      response.runtime_instance_id = state.runtime_instance_id;
+      response.admission_epoch = state.admission_epoch;
+      response.motion_inhibited = false;
+      response.detail = "STOP response deadline expired before zero proof";
+      return;
+    }
+    response.code = waiter->response.code;
+    response.runtime_instance_id = waiter->response.runtime_instance_id;
+    response.admission_epoch = waiter->response.admission_epoch;
+    response.motion_inhibited = waiter->response.motion_inhibited;
+    response.detail = waiter->response.detail;
   }
 
   void finish_goal(
@@ -363,6 +698,11 @@ private:
 
   void publish_state(const RuntimeState & state)
   {
+    {
+      std::lock_guard<std::recursive_mutex> lock(mutex_);
+      cached_state_ = state;
+      cached_state_valid_ = true;
+    }
     if (!state_publisher_) {
       return;
     }
@@ -383,13 +723,23 @@ private:
     state_publisher_->publish(message);
   }
 
+  [[nodiscard]] RuntimeState state_snapshot()
+  {
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    return cached_state_;
+  }
+
   RuntimeConfig config_;
   std::shared_ptr<RosSteadyClock> clock_;
   std::shared_ptr<RosMotionAuthorityPort> authority_;
   std::shared_ptr<RelativeMotionRosAdapter> relative_motion_;
   std::unique_ptr<RuntimeCore> core_;
+  RuntimeEventQueue event_queue_;
+  std::thread runtime_worker_;
   std::recursive_mutex mutex_;
-  std::optional<GateSnapshot> pending_gate_snapshot_;
+  std::unordered_set<const GoalHandle *> pending_goal_cancels_;
+  RuntimeState cached_state_{};
+  bool cached_state_valid_{false};
   rclcpp::Publisher<MissionStateMessage>::SharedPtr state_publisher_;
   rclcpp_action::Server<ExecuteMission>::SharedPtr action_server_;
   rclcpp::Service<StopMission>::SharedPtr stop_service_;

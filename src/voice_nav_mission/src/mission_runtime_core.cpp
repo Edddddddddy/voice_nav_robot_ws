@@ -93,14 +93,18 @@ RuntimeCore::RuntimeCore(
   std::shared_ptr<RelativeMotionPort> relative_motion,
   StateCallback state_callback,
   FeedbackCallback feedback_callback,
-  ResultCallback result_callback)
+  ResultCallback result_callback,
+  ChildFeedbackDispatcher child_feedback_dispatcher,
+  ChildResultDispatcher child_result_dispatcher)
 : config_(std::move(config)),
   clock_(std::move(clock)),
   authority_(std::move(authority)),
   relative_motion_(std::move(relative_motion)),
   state_callback_(std::move(state_callback)),
   feedback_callback_(std::move(feedback_callback)),
-  result_callback_(std::move(result_callback))
+  result_callback_(std::move(result_callback)),
+  child_feedback_dispatcher_(std::move(child_feedback_dispatcher)),
+  child_result_dispatcher_(std::move(child_result_dispatcher))
 {
   if (!clock_ || !authority_ || !relative_motion_) {
     throw std::invalid_argument("Runtime Core requires clock and all ports");
@@ -773,10 +777,18 @@ void RuntimeCore::start_step()
       token,
       active_->steps[active_->step_index],
       [this](const MotionToken & callback_token, double progress) {
-        on_child_feedback(callback_token, progress);
+        if (child_feedback_dispatcher_) {
+          (void)child_feedback_dispatcher_(callback_token, progress);
+        } else {
+          on_child_feedback(callback_token, progress);
+        }
       },
       [this](const MotionToken & callback_token, const ChildResult & result) {
-        on_child_result(callback_token, result);
+        if (child_result_dispatcher_) {
+          (void)child_result_dispatcher_(callback_token, result);
+        } else {
+          on_child_result(callback_token, result);
+        }
       });
     if (
       active_.has_value() && active_->id == token.mission_id &&
@@ -860,6 +872,18 @@ void RuntimeCore::on_child_result(
   ++active_->step_index;
   ++active_->step_generation;
   start_step();
+}
+
+void RuntimeCore::fail_closed(std::string detail)
+{
+  if (active_.has_value()) {
+    select_terminal_and_stop(
+      MissionResultCode::SafetyFault,
+      std::move(detail));
+    return;
+  }
+  state_.availability = RuntimeAvailability::Faulted;
+  publish_state();
 }
 
 RuntimeCore::TerminalOutcome RuntimeCore::select_terminal_and_stop(
