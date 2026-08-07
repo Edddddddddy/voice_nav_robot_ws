@@ -620,6 +620,23 @@ TEST(MotionGateCore, OpenSnapshotExposesBoundWriterAndLiveAuthority)
   EXPECT_TRUE(state.zero_selected);
 }
 
+TEST(MotionGateCore, ArmedWindowStartsAfterAcceptingReaderHandover)
+{
+  MotionGateCore gate(MotionGateConfig{}, kGateId);
+  const auto prepared = prepare_with(gate, 1U, at(0ms));
+  ASSERT_EQ(prepared.code, ResultCode::Applied);
+  const auto opened = open_with(gate, 2U, at(1ms), writer_gid());
+  ASSERT_EQ(opened.code, ResultCode::Applied);
+
+  gate.start_armed_window(at(100ms));
+
+  EXPECT_EQ(gate.tick(at(249ms)).linear_x, 0.0);
+  EXPECT_EQ(gate.snapshot().state, State::Armed);
+  EXPECT_EQ(gate.tick(at(250ms)).linear_x, 0.0);
+  EXPECT_EQ(gate.snapshot().state, State::Inhibited);
+  EXPECT_EQ(gate.snapshot().reason, Reason::CandidateExpired);
+}
+
 TEST(MotionGateCore, CandidateClampsOnlySupportedFiniteAxes)
 {
   auto context = make_armed_gate();

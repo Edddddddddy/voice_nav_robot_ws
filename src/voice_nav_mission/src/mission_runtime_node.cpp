@@ -38,6 +38,7 @@
 #include "voice_nav_interfaces/srv/stop_mission.hpp"
 #include "voice_nav_mission/mission_action_result_router.hpp"
 #include "voice_nav_mission/motion_authority_ros_adapter.hpp"
+#include "voice_nav_mission/relative_motion_ros_adapter.hpp"
 
 namespace voice_nav_mission
 {
@@ -58,6 +59,10 @@ constexpr std::int64_t kTrustedGateDiscoveryDeadlineMs = 2000;
 constexpr std::int64_t kTrustedControlResponseDeadlineMs = 100;
 constexpr std::int64_t kTrustedStopBarrierMs = 250;
 constexpr std::int64_t kTrustedCancelGraceMs = 250;
+constexpr std::int64_t kTrustedStationarityDeadlineMs = 1200;
+constexpr std::int64_t kTrustedConditioningRpcTimeoutMs = 5000;
+constexpr std::int64_t kTrustedConditioningHandoverDeadlineMs = 10000;
+constexpr std::int64_t kTrustedCollisionSourceTimeoutMs = 300;
 constexpr float kTrustedMoveDistanceMinM = 0.05F;
 constexpr float kTrustedMoveDistanceMaxM = 2.0F;
 constexpr float kTrustedRotateAngleMinRad = 0.05F;
@@ -72,20 +77,6 @@ public:
   }
 };
 
-class UnavailableRelativeMotionPort final : public RelativeMotionPort
-{
-public:
-  [[nodiscard]] bool healthy() const override {return false;}
-  void start(
-    const MotionToken &, const MissionStep &, FeedbackCallback, ResultCallback) override
-  {
-    throw std::logic_error("production relative motion adapter is unavailable");
-  }
-  [[nodiscard]] bool cancel(
-    const MotionToken &, SteadyClockPort::TimePoint) override {return true;}
-  void tick(SteadyClockPort::TimePoint) override {}
-};
-
 }  // namespace
 
 class MissionRuntimeNode final : public rclcpp::Node
@@ -93,8 +84,7 @@ class MissionRuntimeNode final : public rclcpp::Node
 public:
   explicit MissionRuntimeNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions())
   : Node("mission_runtime_node", options),
-    clock_(std::make_shared<RosSteadyClock>()),
-    relative_motion_(std::make_shared<UnavailableRelativeMotionPort>())
+    clock_(std::make_shared<RosSteadyClock>())
   {
     if (std::string(get_fully_qualified_name()) != "/mission_runtime_node") {
       throw std::runtime_error("mission_runtime_node must run at /mission_runtime_node");
@@ -115,6 +105,19 @@ public:
           pending_gate_snapshot_ = snapshot;
         }
       });
+    RelativeMotionPolicy motion_policy;
+    motion_policy.stationarity_deadline = config_.stationarity_deadline;
+    MotionConditioningConfig conditioning_config;
+    conditioning_config.stop_barrier = config_.stop_barrier;
+    conditioning_config.preopen_zero_generation = true;
+    conditioning_config.collision_source_timeout = std::chrono::milliseconds(
+      kTrustedCollisionSourceTimeoutMs);
+    conditioning_config.component_rpc_timeout = std::chrono::milliseconds(
+      kTrustedConditioningRpcTimeoutMs);
+    conditioning_config.prepare_open_deadline = std::chrono::milliseconds(
+      kTrustedConditioningHandoverDeadlineMs);
+    relative_motion_ = std::make_shared<RelativeMotionRosAdapter>(
+      *this, authority_, motion_policy, conditioning_config);
     core_ = std::make_unique<RuntimeCore>(
       config_,
       clock_,
@@ -176,6 +179,8 @@ private:
       "stop_barrier_ms", kTrustedStopBarrierMs, descriptor);
     const auto cancel_grace_ms = declare_parameter<std::int64_t>(
       "cancel_grace_ms", kTrustedCancelGraceMs, descriptor);
+    const auto stationarity_deadline_ms = declare_parameter<std::int64_t>(
+      "stationarity_deadline_ms", kTrustedStationarityDeadlineMs, descriptor);
     const auto source_cache_size = declare_parameter<std::int64_t>(
       "source_cache_size", 64, descriptor);
     const auto stop_cache_size = declare_parameter<std::int64_t>(
@@ -200,7 +205,9 @@ private:
       gate_discovery_deadline_ms != kTrustedGateDiscoveryDeadlineMs ||
       control_response_deadline_ms != kTrustedControlResponseDeadlineMs ||
       stop_barrier_ms != kTrustedStopBarrierMs ||
-      cancel_grace_ms != kTrustedCancelGraceMs || source_cache_size != 64 ||
+      cancel_grace_ms != kTrustedCancelGraceMs ||
+      stationarity_deadline_ms != kTrustedStationarityDeadlineMs ||
+      source_cache_size != 64 ||
       stop_cache_size != 64 || max_steps != 3 ||
       !std::isfinite(move_distance_min_m) ||
       !std::isfinite(move_distance_max_m) ||
@@ -227,6 +234,8 @@ private:
     config.control_response_deadline = std::chrono::milliseconds(control_response_deadline_ms);
     config.stop_barrier = std::chrono::milliseconds(stop_barrier_ms);
     config.cancel_grace = std::chrono::milliseconds(cancel_grace_ms);
+    config.stationarity_deadline =
+      std::chrono::milliseconds(stationarity_deadline_ms);
     config.move_distance_min_m = static_cast<float>(move_distance_min_m);
     config.move_distance_max_m = static_cast<float>(move_distance_max_m);
     config.rotate_angle_min_rad = static_cast<float>(rotate_angle_min_rad);
@@ -377,7 +386,7 @@ private:
   RuntimeConfig config_;
   std::shared_ptr<RosSteadyClock> clock_;
   std::shared_ptr<RosMotionAuthorityPort> authority_;
-  std::shared_ptr<UnavailableRelativeMotionPort> relative_motion_;
+  std::shared_ptr<RelativeMotionRosAdapter> relative_motion_;
   std::unique_ptr<RuntimeCore> core_;
   std::recursive_mutex mutex_;
   std::optional<GateSnapshot> pending_gate_snapshot_;
@@ -397,8 +406,12 @@ int main(int argc, char * argv[])
   int exit_code = 0;
   try {
     auto node = std::make_shared<voice_nav_mission::MissionRuntimeNode>();
+    // The conditioning Module keeps the public Core synchronous while its ROS
+    // ports wait on Gate and component-service responses.  Keep spare workers
+    // available for those responses and for the conditioning health streams
+    // while another worker is in the Runtime timer or Action callback.
     rclcpp::executors::MultiThreadedExecutor executor(
-      rclcpp::ExecutorOptions{}, 2U);
+      rclcpp::ExecutorOptions{}, 32U);
     executor.add_node(node);
     executor.spin();
   } catch (const std::exception & error) {

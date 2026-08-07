@@ -221,6 +221,9 @@ enum class ChildResultCode : std::uint8_t
   Succeeded = 0,
   Failed = 1,
   Timeout = 2,
+  DependencyUnavailable = 3,
+  SafetyFault = 4,
+  InternalError = 5,
 };
 
 struct ChildResult
@@ -246,6 +249,19 @@ public:
     const MotionToken & token,
     SteadyClockPort::TimePoint deadline) = 0;
   virtual void tick(SteadyClockPort::TimePoint now) = 0;
+
+  // The production ROS Adapter owns the #35 conditioning lifecycle. The
+  // default keeps deterministic package-private fakes compatible with the
+  // existing Core contract.
+  [[nodiscard]] virtual bool owns_authority_lifecycle() const noexcept
+  {
+    return false;
+  }
+
+  [[nodiscard]] virtual bool zero_proven() const noexcept
+  {
+    return true;
+  }
 };
 
 struct RuntimeConfig
@@ -256,6 +272,7 @@ struct RuntimeConfig
   std::chrono::milliseconds control_response_deadline{100};
   std::chrono::milliseconds stop_barrier{250};
   std::chrono::milliseconds cancel_grace{250};
+  std::chrono::milliseconds stationarity_deadline{250};
   std::size_t source_cache_size{64U};
   std::size_t stop_cache_size{64U};
   std::uint8_t max_steps{3U};

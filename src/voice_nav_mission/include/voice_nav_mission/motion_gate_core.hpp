@@ -203,6 +203,10 @@ public:
     SteadyTimePoint now,
     const OpenBindingProvider & binding_provider);
 
+  // Begin the bounded authority and candidate windows after the accepting
+  // reader and writer handover are complete.
+  void start_armed_window(SteadyTimePoint now);
+
   [[nodiscard]] ControlResult renew(
     const ControlRequest & request,
     SteadyTimePoint now);

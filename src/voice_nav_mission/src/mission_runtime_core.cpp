@@ -113,7 +113,8 @@ RuntimeCore::RuntimeCore(
     config_.mission_deadline.count() <= 0 ||
     config_.gate_discovery_deadline.count() <= 0 ||
     config_.control_response_deadline.count() <= 0 ||
-    config_.stop_barrier.count() <= 0 || config_.cancel_grace.count() <= 0)
+    config_.stop_barrier.count() <= 0 || config_.cancel_grace.count() <= 0 ||
+    config_.stationarity_deadline.count() <= 0)
   {
     throw std::invalid_argument("invalid trusted Runtime configuration");
   }
@@ -226,29 +227,31 @@ AdmissionResult RuntimeCore::admit(const MissionGoal & goal)
       "Mission generation exhausted")};
   }
 
-  const auto prepare = authority_->prepare(make_operation());
-  if (!prepare.applied) {
-    return AdmissionResult{0U, false, reject(
-      MissionResultCode::DependencyUnavailable,
-      prepare.detail.empty() ? "MotionGate PREPARE failed" : prepare.detail)};
-  }
-  gate_snapshot_ = prepare.snapshot;
-  current_lease_id_ = prepare.lease_id;
-  const auto open = authority_->open(make_operation(current_lease_id_));
-  if (!open.applied) {
-    const bool cleanup = inhibit_and_prove_zero();
-    if (!cleanup) {
-      state_.availability = RuntimeAvailability::Faulted;
-      publish_state();
+  if (!relative_motion_->owns_authority_lifecycle()) {
+    const auto prepare = authority_->prepare(make_operation());
+    if (!prepare.applied) {
       return AdmissionResult{0U, false, reject(
-        MissionResultCode::SafetyFault,
-        "MotionGate OPEN failed and zero cleanup could not be proven")};
+        MissionResultCode::DependencyUnavailable,
+        prepare.detail.empty() ? "MotionGate PREPARE failed" : prepare.detail)};
     }
-    return AdmissionResult{0U, false, reject(
-      MissionResultCode::DependencyUnavailable,
-      open.detail.empty() ? "MotionGate OPEN failed" : open.detail)};
+    gate_snapshot_ = prepare.snapshot;
+    current_lease_id_ = prepare.lease_id;
+    const auto open = authority_->open(make_operation(current_lease_id_));
+    if (!open.applied) {
+      const bool cleanup = inhibit_and_prove_zero();
+      if (!cleanup) {
+        state_.availability = RuntimeAvailability::Faulted;
+        publish_state();
+        return AdmissionResult{0U, false, reject(
+          MissionResultCode::SafetyFault,
+          "MotionGate OPEN failed and zero cleanup could not be proven")};
+      }
+      return AdmissionResult{0U, false, reject(
+        MissionResultCode::DependencyUnavailable,
+        open.detail.empty() ? "MotionGate OPEN failed" : open.detail)};
+    }
+    gate_snapshot_ = open.snapshot;
   }
-  gate_snapshot_ = open.snapshot;
 
   active_ = ActiveMission{
     mission_id,
@@ -293,8 +296,20 @@ StopResponse RuntimeCore::stop(const StopRequest & request)
       if (rotate_epoch) {
         epoch_ok = this->rotate_epoch();
       }
-      const bool zero = inhibit_and_prove_zero();
-      return TerminalOutcome{zero, true, epoch_ok};
+      bool zero = false;
+      bool canceled = true;
+      if (relative_motion_->owns_authority_lifecycle()) {
+        try {
+          canceled = relative_motion_->cancel(
+            MotionToken{}, clock_->now() + config_.stationarity_deadline);
+          zero = canceled && relative_motion_->zero_proven();
+        } catch (...) {
+          canceled = false;
+        }
+      } else {
+        zero = inhibit_and_prove_zero();
+      }
+      return TerminalOutcome{zero, canceled, epoch_ok};
     };
 
   if (!valid_bounded_id(request.request_id, kMaximumRuntimeIdLength, false)) {
@@ -490,11 +505,13 @@ void RuntimeCore::on_tick()
       "Mission deadline elapsed on the injected steady clock");
     return;
   }
-  const auto renewed = authority_->renew(make_operation(current_lease_id_));
-  if (!renewed.applied) {
-    select_terminal_and_stop(
-      MissionResultCode::SafetyFault,
-      renewed.detail.empty() ? "MotionGate authority renewal failed" : renewed.detail);
+  if (!relative_motion_->owns_authority_lifecycle()) {
+    const auto renewed = authority_->renew(make_operation(current_lease_id_));
+    if (!renewed.applied) {
+      select_terminal_and_stop(
+        MissionResultCode::SafetyFault,
+        renewed.detail.empty() ? "MotionGate authority renewal failed" : renewed.detail);
+    }
   }
 }
 
@@ -814,9 +831,18 @@ void RuntimeCore::on_child_result(
     return;
   }
   if (result.code != ChildResultCode::Succeeded) {
+    MissionResultCode result_code = MissionResultCode::ExecutionFailed;
+    if (result.code == ChildResultCode::DependencyUnavailable) {
+      result_code = MissionResultCode::DependencyUnavailable;
+    } else if (result.code == ChildResultCode::Timeout) {
+      result_code = MissionResultCode::Timeout;
+    } else if (result.code == ChildResultCode::SafetyFault) {
+      result_code = MissionResultCode::SafetyFault;
+    } else if (result.code == ChildResultCode::InternalError) {
+      result_code = MissionResultCode::InternalError;
+    }
     select_terminal_and_stop(
-      result.code == ChildResultCode::Timeout ?
-      MissionResultCode::Timeout : MissionResultCode::ExecutionFailed,
+      result_code,
       result.detail.empty() ? "relative-motion child failed" : result.detail);
     return;
   }
@@ -860,13 +886,24 @@ RuntimeCore::TerminalOutcome RuntimeCore::select_terminal_and_stop(
     code = MissionResultCode::SafetyFault;
   }
   publish_feedback(FeedbackPhase::SafeStopping, active_->step_index, 0.0);
-  const bool zero = inhibit_and_prove_zero();
   bool canceled = true;
-  try {
-    canceled = relative_motion_->cancel(
-      token, clock_->now() + config_.cancel_grace);
-  } catch (...) {
-    canceled = false;
+  bool zero = false;
+  if (relative_motion_->owns_authority_lifecycle()) {
+    try {
+      canceled = relative_motion_->cancel(
+        token, clock_->now() + config_.stationarity_deadline);
+      zero = canceled && relative_motion_->zero_proven();
+    } catch (...) {
+      canceled = false;
+    }
+  } else {
+    zero = inhibit_and_prove_zero();
+    try {
+      canceled = relative_motion_->cancel(
+        token, clock_->now() + config_.cancel_grace);
+    } catch (...) {
+      canceled = false;
+    }
   }
   if (!zero || !canceled) {
     state_.availability = RuntimeAvailability::Faulted;

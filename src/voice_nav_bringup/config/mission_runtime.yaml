@@ -1,11 +1,13 @@
 mission_runtime_node:
   ros__parameters:
+    use_sim_time: true
     operating_mode: mapping
     mission_deadline_ms: 30000
     gate_discovery_deadline_ms: 2000
     control_response_deadline_ms: 100
     stop_barrier_ms: 250
     cancel_grace_ms: 250
+    stationarity_deadline_ms: 1200
     source_cache_size: 64
     stop_cache_size: 64
     max_steps: 3

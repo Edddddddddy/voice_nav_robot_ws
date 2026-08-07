@@ -13,8 +13,12 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `nav2_velocity_smoother` and `nav2_collision_monitor`, including bounded
   Gate handover, per-lease candidate topics, writer/GID proof, cleanup, and
   synthetic failure-injection seams. The trusted MotionGate PREPARE budget is
-  `6000 ms`; product Mission MOVE/ROTATE execution remains unavailable until
-  Task #64.
+  `6000 ms`.
+- Added the production odometry-closed-loop RelativeMotionPort, its deep
+  ROS-free MOVE/ROTATE controller, ROS source Adapter, steady-clock freshness
+  and generation-fencing tests, and Runtime integration without changing the
+  public ROS IDL. The implementation reuses Issue #35 conditioning and keeps
+  final velocity publication owned by MotionGate.
 - Added the reviewed VN-0010 implementation for an independent,
   fail-closed MotionGate: package-private bounded ROS types, an internal
   non-installed static `MotionGateCore`, the installed `motion_gate_node`,
@@ -41,6 +45,11 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Changed simulation motion-source handling to preserve raw scan stamps and
+  frames, use direct `/scan` with latest-only bridge / consumer queues, and
+  keep 200 ms steady dependency liveness separate from the 300 ms raw
+  ROS-time Collision Monitor source-age limit. Headless raw-age / TF physical
+  acceptance is intentionally not claimed here and is tracked by Issue #72.
 - Finalized the pre-1.0 Mission V1 public Interface migration: bounded
   `MissionStep`, fenced `ExecuteMission`, `MissionState`, and `StopMission`
   types now generate successfully for C++ and Python, with public contract
