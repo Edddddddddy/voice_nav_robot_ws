@@ -149,8 +149,13 @@ public:
 
   AuthorityResult prepare(const AuthorityOperation &) override
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
     calls_.push_back(AuthorityOperationKind::Prepare);
+    if (block_prepare_) {
+      prepare_entered_ = true;
+      prepare_cv_.notify_all();
+      prepare_cv_.wait(lock, [this]() {return release_prepare_;});
+    }
     ++generation_;
     snapshot_.control_seq++;
     snapshot_.lease_id = "lease-" + std::to_string(generation_);
@@ -233,6 +238,28 @@ public:
   {
     std::lock_guard<std::mutex> lock(mutex_);
     writer_bound_ = value;
+  }
+
+  void block_prepare()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    block_prepare_ = true;
+    prepare_entered_ = false;
+    release_prepare_ = false;
+  }
+
+  bool wait_for_prepare(std::chrono::milliseconds timeout = 1s)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return prepare_cv_.wait_for(
+      lock, timeout, [this]() {return prepare_entered_;});
+  }
+
+  void release_blocked_prepare()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    release_prepare_ = true;
+    prepare_cv_.notify_all();
   }
 
   void set_authority_live(bool value)
@@ -369,6 +396,9 @@ private:
   bool writer_bound_{true};
   bool authority_live_{true};
   bool prepare_zero_proof_{true};
+  bool block_prepare_{false};
+  bool prepare_entered_{false};
+  bool release_prepare_{false};
   bool inhibit_zero_proof_{true};
   std::size_t renew_count_{0U};
   std::optional<std::size_t> renew_failure_after_;
@@ -384,6 +414,7 @@ private:
   bool inhibit_entered_{false};
   bool release_inhibit_{false};
   std::condition_variable inhibit_cv_;
+  std::condition_variable prepare_cv_;
   std::condition_variable renew_cv_;
   std::condition_variable open_cv_;
   std::vector<AuthorityOperationKind> calls_;
@@ -1002,6 +1033,7 @@ TEST_F(MotionConditioningPipelineTest, GateCandidateAndWriterBindingAreRequired)
   EXPECT_EQ(producer->start_count, 0U);
   EXPECT_EQ(started.failure, MotionConditioningFailure::SafetyFault);
   EXPECT_TRUE(started.zero_proven);
+  EXPECT_NE(started.zero_proven_at, std::chrono::steady_clock::time_point{});
 
   const auto calls = authority->calls();
   ASSERT_GE(calls.size(), 3U);
@@ -1076,6 +1108,9 @@ TEST_F(MotionConditioningPipelineTest, CollisionStopIsReportedAndFailsClosed)
     MotionConditioningFailure::ExecutionFailed);
   EXPECT_GE(producer->stop_count, 1U);
   EXPECT_TRUE(pipeline.last_result().zero_proven);
+  EXPECT_NE(
+    pipeline.last_result().zero_proven_at,
+    std::chrono::steady_clock::time_point{});
 }
 
 TEST_F(MotionConditioningPipelineTest, LeaseLossDuringActivationNeverStartsProducer)
@@ -1134,6 +1169,38 @@ TEST_F(MotionConditioningPipelineTest, StopAtActivationBarrierRejectsLateProduce
   EXPECT_EQ(pipeline.last_result().state, stopped->state);
   EXPECT_EQ(pipeline.last_result().failure, stopped->failure);
   EXPECT_EQ(pipeline.last_result().zero_proven, stopped->zero_proven);
+}
+
+TEST_F(MotionConditioningPipelineTest, StopDuringPrepareRetainsUniqueCleanupOwner)
+{
+  authority->block_prepare();
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+
+  std::optional<MotionConditioningResult> prepared;
+  std::thread prepare_thread([&]() {prepared = pipeline.prepare();});
+  ASSERT_TRUE(authority->wait_for_prepare());
+
+  std::optional<MotionConditioningResult> stopped;
+  std::thread stop_thread([&]() {stopped = pipeline.stop();});
+  const bool inhibit_seen = authority->wait_for_inhibit();
+
+  authority->release_blocked_prepare();
+  prepare_thread.join();
+  stop_thread.join();
+
+  EXPECT_FALSE(inhibit_seen);
+  ASSERT_TRUE(prepared.has_value());
+  ASSERT_TRUE(stopped.has_value());
+  EXPECT_FALSE(prepared->ok);
+  EXPECT_TRUE(stopped->ok);
+  EXPECT_EQ(stopped->state, MotionConditioningState::Stopped);
+  EXPECT_TRUE(stopped->zero_proven);
+  const auto calls = authority->calls();
+  EXPECT_EQ(
+    std::count(
+      calls.cbegin(), calls.cend(), AuthorityOperationKind::Inhibit), 1);
+  EXPECT_EQ(graph->unload_count(), 0U);
+  EXPECT_EQ(pipeline.state(), MotionConditioningState::Stopped);
 }
 
 TEST_F(MotionConditioningPipelineTest, TeardownDrainsBlockedActivationBeforeCleanup)
@@ -1284,6 +1351,7 @@ TEST_F(MotionConditioningPipelineTest, ProducerFalseFailsClosedAndCleansUp)
   EXPECT_FALSE(result.ok);
   EXPECT_EQ(result.state, MotionConditioningState::Failed);
   EXPECT_TRUE(result.zero_proven);
+  EXPECT_NE(result.zero_proven_at, std::chrono::steady_clock::time_point{});
   EXPECT_GE(producer->stop_count, 1U);
   EXPECT_EQ(graph->loaded_count(), 0U);
 }
@@ -1302,6 +1370,7 @@ TEST_F(MotionConditioningPipelineTest, ProducerThrowFailsClosedAndCleansUp)
     result.failure == MotionConditioningFailure::InternalError ||
     result.failure == MotionConditioningFailure::SafetyFault);
   EXPECT_TRUE(result.zero_proven);
+  EXPECT_NE(result.zero_proven_at, std::chrono::steady_clock::time_point{});
   EXPECT_GE(producer->stop_count, 1U);
   EXPECT_EQ(graph->loaded_count(), 0U);
 }
@@ -1324,8 +1393,38 @@ TEST_F(MotionConditioningPipelineTest, CleanupFailureEscalatesExecutionFailureTo
   EXPECT_EQ(result.state, MotionConditioningState::Failed);
   EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
   EXPECT_FALSE(result.detail.empty());
+  EXPECT_TRUE(result.zero_proven);
+  EXPECT_NE(result.zero_proven_at, std::chrono::steady_clock::time_point{});
   EXPECT_FALSE(graph->unload_requests().empty());
   EXPECT_FALSE(pipeline.prepare().ok);
+}
+
+TEST_F(MotionConditioningPipelineTest, BusinessFailureAndCachedTerminalShareZeroProof)
+{
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+  ASSERT_TRUE(pipeline.prepare().ok);
+  std::this_thread::sleep_for(50ms);
+  ASSERT_TRUE(pipeline.start().ok);
+  const auto token = pipeline.correlation_token();
+
+  const auto failed = pipeline.fail(
+    token,
+    MotionConditioningFailure::ExecutionFailed,
+    "scripted execution failure with proven zero");
+
+  EXPECT_FALSE(failed.ok);
+  EXPECT_EQ(failed.failure, MotionConditioningFailure::ExecutionFailed);
+  EXPECT_TRUE(failed.zero_proven);
+  ASSERT_NE(failed.zero_proven_at, std::chrono::steady_clock::time_point{});
+  EXPECT_EQ(pipeline.last_result().zero_proven_at, failed.zero_proven_at);
+
+  const auto cached = pipeline.fail(
+    token,
+    MotionConditioningFailure::DependencyUnavailable,
+    "late failure must not replace the terminal result");
+  EXPECT_EQ(cached.failure, failed.failure);
+  EXPECT_EQ(cached.zero_proven, failed.zero_proven);
+  EXPECT_EQ(cached.zero_proven_at, failed.zero_proven_at);
 }
 
 TEST_F(MotionConditioningPipelineTest, ZeroProofFailureEscalatesExecutionFailureToSafetyFault)
@@ -1526,13 +1625,14 @@ TEST_F(MotionConditioningPipelineTest, LifecycleTimeoutRetainsIndependentUnloadB
 TEST_F(MotionConditioningPipelineTest, EachUniqueIdGetsAnIndependentUnloadBudget)
 {
   auto pipeline_config = config();
-  pipeline_config.component_rpc_timeout = 5ms;
+  pipeline_config.component_rpc_timeout = 50ms;
   pipeline_config.writer_graph_timeout = 150ms;
   pipeline_config.prepare_open_deadline = 2s;
   MotionConditioningPipeline pipeline(
     *client, authority, producer, pipeline_config);
 
-  ASSERT_TRUE(pipeline.prepare().ok);
+  const auto prepared = pipeline.prepare();
+  ASSERT_TRUE(prepared.ok) << prepared.detail;
   graph->set_unload_delay_for(1U, 500ms);
 
   const auto result = pipeline.stop();

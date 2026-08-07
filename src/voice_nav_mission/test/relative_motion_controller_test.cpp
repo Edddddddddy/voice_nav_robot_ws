@@ -171,6 +171,63 @@ TEST(RelativeMotionController, NegativeRotateUnwrapsAcrossPiWithoutReversing)
   EXPECT_NEAR(crossed.progress, 0.206, 0.01);
 }
 
+TEST(RelativeMotionController, PositiveAndNegativeOneAndHalfPiCrossTheWrap)
+{
+  const auto t0 = SteadyClockPort::TimePoint{};
+
+  RelativeMotionController positive;
+  positive.start(kToken, rotate(1.5708F), t0);
+  positive.observe_odom(odom(0.0, 0.0, 3.0), t0);
+  const auto positive_crossing = positive.observe_odom(
+    odom(0.0, 0.0, -3.0), t0 + 100ms);
+  EXPECT_EQ(positive_crossing.kind, RelativeMotionEventKind::Running);
+  EXPECT_GT(positive_crossing.command.angular_z_rps, 0.0);
+  const auto positive_complete = positive.observe_odom(
+    odom(0.0, 0.0, -1.712385), t0 + 200ms);
+  EXPECT_EQ(positive_complete.kind, RelativeMotionEventKind::ZeroRequested);
+  EXPECT_GT(positive_complete.progress, 0.98);
+
+  RelativeMotionController negative;
+  negative.start(kToken, rotate(-1.5708F), t0);
+  negative.observe_odom(odom(0.0, 0.0, -3.0), t0);
+  const auto negative_crossing = negative.observe_odom(
+    odom(0.0, 0.0, 3.0), t0 + 100ms);
+  EXPECT_EQ(negative_crossing.kind, RelativeMotionEventKind::Running);
+  EXPECT_LT(negative_crossing.command.angular_z_rps, 0.0);
+  const auto negative_complete = negative.observe_odom(
+    odom(0.0, 0.0, 1.712385), t0 + 200ms);
+  EXPECT_EQ(negative_complete.kind, RelativeMotionEventKind::ZeroRequested);
+  EXPECT_GT(negative_complete.progress, 0.98);
+}
+
+TEST(RelativeMotionController, PositiveAndNegativeFullTurnsTraverseTheWrap)
+{
+  constexpr double kPi = 3.14159265358979323846;
+  const auto t0 = SteadyClockPort::TimePoint{};
+
+  RelativeMotionController positive;
+  positive.start(kToken, rotate(6.283185F), t0);
+  positive.observe_odom(odom(0.0, 0.0, 0.0), t0);
+  positive.observe_odom(odom(0.0, 0.0, kPi - 0.01), t0 + 100ms);
+  positive.observe_odom(odom(0.0, 0.0, -kPi + 0.01), t0 + 200ms);
+  const auto positive_complete = positive.observe_odom(
+    odom(0.0, 0.0, 0.0), t0 + 300ms);
+  EXPECT_EQ(positive_complete.kind, RelativeMotionEventKind::ZeroRequested);
+  EXPECT_GT(positive_complete.progress, 0.98);
+  EXPECT_DOUBLE_EQ(positive_complete.command.angular_z_rps, 0.0);
+
+  RelativeMotionController negative;
+  negative.start(kToken, rotate(-6.283185F), t0);
+  negative.observe_odom(odom(0.0, 0.0, 0.0), t0);
+  negative.observe_odom(odom(0.0, 0.0, -kPi + 0.01), t0 + 100ms);
+  negative.observe_odom(odom(0.0, 0.0, kPi - 0.01), t0 + 200ms);
+  const auto negative_complete = negative.observe_odom(
+    odom(0.0, 0.0, 0.0), t0 + 300ms);
+  EXPECT_EQ(negative_complete.kind, RelativeMotionEventKind::ZeroRequested);
+  EXPECT_GT(negative_complete.progress, 0.98);
+  EXPECT_DOUBLE_EQ(negative_complete.command.angular_z_rps, 0.0);
+}
+
 TEST(RelativeMotionController, ProgressIsMonotonicWhenTheRobotBacktracks)
 {
   RelativeMotionController controller;
