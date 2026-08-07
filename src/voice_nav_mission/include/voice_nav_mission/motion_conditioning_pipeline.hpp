@@ -57,6 +57,13 @@ struct MotionConditioningResult
   std::string detail;
 };
 
+struct MotionConditioningCorrelationToken
+{
+  std::uint64_t generation{0U};
+  std::string lease_id;
+  std::string request_id;
+};
+
 struct MotionConditioningConfig
 {
   std::chrono::milliseconds component_rpc_timeout{2000};
@@ -104,9 +111,16 @@ public:
   [[nodiscard]] MotionConditioningResult prepare();
   [[nodiscard]] MotionConditioningResult start();
   [[nodiscard]] MotionConditioningResult stop();
+  // Synchronous owner-side failure; asynchronous ingress must use a token.
   [[nodiscard]] MotionConditioningResult fail(
     MotionConditioningFailure failure,
     std::string detail);
+  [[nodiscard]] MotionConditioningResult fail(
+    MotionConditioningCorrelationToken token,
+    MotionConditioningFailure failure,
+    std::string detail);
+
+  [[nodiscard]] MotionConditioningCorrelationToken correlation_token() const;
 
   [[nodiscard]] MotionConditioningState state() const noexcept;
   [[nodiscard]] MotionConditioningResult last_result() const;
