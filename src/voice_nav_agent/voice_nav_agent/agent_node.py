@@ -65,6 +65,7 @@ MISSION_STOP_SERVICE = '/mission/stop'
 VOICE_SPEAK_ACTION = '/voice/speak'
 RESPONSE_DEADLINE_SECONDS = 1.0
 MAX_UINT64 = (1 << 64) - 1
+_UNSET = object()
 
 _CONTROL_SEPARATOR_RE = re.compile(r'[，,。；;！!?、\s]+')
 
@@ -173,14 +174,15 @@ class AgentNode(Node):
 
         self._latest_state: Optional[MissionState] = None
         self._state_sample_signature: Optional[tuple[Any, ...]] = None
-
-        self._state_subscription = self.create_subscription(
-            MissionStateMessage,
-            MISSION_STATE_TOPIC,
-            self._on_state_message,
-            _state_qos(),
+        self._state_subscription_generation = 0
+        self._state_subscription_epoch_gid: Any = None
+        self._state_rebuild_scheduled = False
+        self._state_rebuild_guard = self.create_guard_condition(
+            self._on_state_rebuild_event,
             callback_group=self._callback_group,
         )
+        self._state_subscription = None
+        self._install_state_subscription()
         self._turn_subscription = self.create_subscription(
             VoiceTurnMessage,
             VOICE_TURN_TOPIC,
@@ -216,13 +218,101 @@ class AgentNode(Node):
         """Return the single Agent Core instance owned by this node."""
         return self._core
 
-    def _on_state_message(self, message: MissionStateMessage) -> None:
-        self._seam.invoke(self._observe_state, message)
+    def _on_state_message(
+        self,
+        message: MissionStateMessage,
+        message_info: Any,
+        generation: Optional[int] = None,
+        epoch_gid: Any = _UNSET,
+    ) -> None:
+        if generation is None:
+            generation = self._state_subscription_generation
+        if epoch_gid is _UNSET:
+            epoch_gid = self._state_subscription_epoch_gid
+        self._seam.invoke(
+            self._observe_state,
+            message,
+            message_info,
+            generation,
+            epoch_gid,
+        )
 
-    def _observe_state(self, message: MissionStateMessage) -> None:
+    def _install_state_subscription(self) -> None:
+        self._state_subscription_generation += 1
+        generation = self._state_subscription_generation
+        epoch_gid = self._capture_state_epoch_gid()
+        self._state_subscription_epoch_gid = epoch_gid
+
+        def callback(message: MissionStateMessage, message_info: Any) -> None:
+            self._on_state_message(
+                message,
+                message_info,
+                generation,
+                epoch_gid,
+            )
+
+        self._state_subscription = self.create_subscription(
+            MissionStateMessage,
+            MISSION_STATE_TOPIC,
+            callback,
+            _state_qos(),
+            callback_group=self._callback_group,
+        )
+
+    def _on_state_rebuild_event(self) -> None:
+        self._seam.invoke(self._rebuild_state_subscription)
+
+    def _schedule_state_subscription_rebuild(self) -> None:
+        if self._state_rebuild_scheduled:
+            return
+        self._state_rebuild_scheduled = True
+        try:
+            self._state_rebuild_guard.trigger()
+        except (AttributeError, RuntimeError):
+            self._state_rebuild_scheduled = False
+
+    def _rebuild_state_subscription(self) -> None:
+        self._state_rebuild_scheduled = False
+        self._latest_state = None
+        self._state_sample_signature = None
+        if self._state_subscription is not None:
+            self.destroy_subscription(self._state_subscription)
+        self._install_state_subscription()
+
+    def _capture_state_epoch_gid(self) -> Any:
         publishers = self._compatible_state_publishers()
         if len(publishers) != 1:
+            return None
+        gid = _gid_key(getattr(publishers[0], 'endpoint_gid', None))
+        return gid if _gid_is_present(gid) else None
+
+    def _observe_state(
+        self,
+        message: MissionStateMessage,
+        message_info: Any,
+        generation: int,
+        epoch_gid: Any,
+    ) -> None:
+        if generation != self._state_subscription_generation:
+            return
+        epoch_gid = _gid_key(epoch_gid)
+        current_epoch_gid = _gid_key(self._state_subscription_epoch_gid)
+        publishers = self._compatible_state_publishers()
+        current_gid = None
+        if len(publishers) == 1:
+            current_gid = _gid_key(getattr(publishers[0], 'endpoint_gid', None))
+        message_gid = _message_publisher_gid(message_info)
+        proof_valid = (
+            _gid_is_present(epoch_gid)
+            and _gid_is_present(current_gid)
+            and epoch_gid == current_epoch_gid
+            and current_gid == epoch_gid
+            and (message_gid is None or message_gid == current_gid)
+        )
+        if not proof_valid:
+            self._latest_state = None
             self._state_sample_signature = None
+            self._schedule_state_subscription_rebuild()
             return
         self._latest_state = MissionState(
             runtime_instance_id=message.runtime_instance_id,
@@ -305,11 +395,25 @@ class AgentNode(Node):
         if self._latest_state is None:
             return None
         publishers = self._compatible_state_publishers()
-        if len(publishers) != 1 or self._state_sample_signature is None:
+        current_gid = None
+        if len(publishers) == 1:
+            current_gid = _gid_key(getattr(publishers[0], 'endpoint_gid', None))
+        current_epoch_gid = _gid_key(self._state_subscription_epoch_gid)
+        if (
+            not _gid_is_present(current_gid)
+            or current_gid != current_epoch_gid
+            or self._state_sample_signature is None
+        ):
+            self._latest_state = None
+            self._state_sample_signature = None
+            self._schedule_state_subscription_rebuild()
             return None
         if _publisher_signature(publishers[0]) != (
             self._state_sample_signature
         ):
+            self._latest_state = None
+            self._state_sample_signature = None
+            self._schedule_state_subscription_rebuild()
             return None
         if require_execute_ready and not _action_server_ready(
             self._mission_client
@@ -486,13 +590,9 @@ class AgentNode(Node):
             )
             return
         if slot.cancel_requested:
-            self._speak_text(
-                '取消请求正在处理。',
-                Speak.Goal.NORMAL,
-                turn.session_id,
-                turn.turn_id,
-                turn_generation,
-            )
+            slot.terminal_turn_generation = turn_generation
+            slot.terminal_session_id = turn.session_id
+            slot.terminal_turn_id = turn.turn_id
             return
         slot.cancel_requested = True
         slot.state = MissionSlotState.CANCEL_PENDING
@@ -560,7 +660,6 @@ class AgentNode(Node):
         if slot.cancel_failure_spoken:
             return
         slot.cancel_failure_spoken = True
-        slot.terminal_speech_spoken = True
         self.get_logger().warning(
             f'Mission cancel was not confirmed: {reason}'
         )
@@ -934,17 +1033,58 @@ def _state_qos() -> QoSProfile:
 
 def _publisher_signature(info: Any) -> tuple[Any, ...]:
     """Create a stable identity for one discovered state publisher."""
-    gid = getattr(info, 'endpoint_gid', None)
-    try:
-        hash(gid)
-    except TypeError:
-        gid = tuple(gid) if gid is not None else None
+    gid = _gid_key(getattr(info, 'endpoint_gid', None))
     return (
         gid,
         getattr(info, 'node_name', None),
         getattr(info, 'node_namespace', None),
         getattr(info, 'topic_type', None),
     )
+
+
+def _gid_key(gid: Any) -> Any:
+    """Normalize ROS GID containers for exact metadata comparison."""
+    if gid is None:
+        return None
+    if isinstance(gid, dict):
+        return _gid_key(gid.get('data'))
+    if hasattr(gid, 'data'):
+        return _gid_key(getattr(gid, 'data'))
+    if isinstance(gid, bytes):
+        return gid
+    try:
+        return bytes(gid)
+    except (TypeError, ValueError):
+        try:
+            return tuple(gid)
+        except TypeError:
+            return gid
+
+
+def _gid_is_present(gid: Any) -> bool:
+    """Return whether a normalized endpoint GID can prove an epoch."""
+    if gid is None:
+        return False
+    try:
+        return len(gid) > 0
+    except TypeError:
+        return True
+
+
+def _message_publisher_gid(message_info: Any) -> Any:
+    """Read an optional publisher GID from current or future ROS metadata."""
+    if isinstance(message_info, dict):
+        raw_message_gid = message_info.get('publisher_gid')
+    else:
+        raw_message_gid = getattr(message_info, 'publisher_gid', None)
+    return _gid_key(raw_message_gid)
+
+
+def _publisher_gid_matches(message_info: Any, publisher_info: Any) -> bool:
+    """Accept a state sample only from the endpoint that actually published it."""
+    message_gid = _message_publisher_gid(message_info)
+    endpoint_gid = _gid_key(getattr(publisher_info, 'endpoint_gid', None))
+    return message_gid is not None and message_gid == endpoint_gid
 
 
 def _compatible_state_publisher(info: Any) -> bool:

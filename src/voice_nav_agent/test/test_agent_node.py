@@ -33,11 +33,12 @@ from voice_nav_interfaces.srv import StopMission
 
 
 class ScriptedFuture:
-    """A deterministic future that never sleeps to deliver a callback."""
+    """A pending future released only by an explicit scripted outcome."""
 
-    def __init__(self, result=None, *, done=True):
-        self._result = result
-        self._done = done
+    def __init__(self):
+        self._result = None
+        self._error = None
+        self._done = False
         self._callbacks = []
 
     def add_done_callback(self, callback):
@@ -47,10 +48,26 @@ class ScriptedFuture:
             self._callbacks.append(callback)
 
     def result(self):
+        if not self._done:
+            raise RuntimeError('scripted future is still pending')
+        if self._error is not None:
+            raise self._error
         return self._result
 
     def resolve(self, result):
+        self._finish(result=result)
+
+    def reject(self, error=None):
+        self._finish(error=error or RuntimeError('scripted rejection'))
+
+    def timeout(self):
+        self.reject(TimeoutError('scripted timeout'))
+
+    def _finish(self, *, result=None, error=None):
+        if self._done:
+            raise RuntimeError('scripted future already completed')
         self._result = result
+        self._error = error
         self._done = True
         callbacks = tuple(self._callbacks)
         self._callbacks.clear()
@@ -59,17 +76,13 @@ class ScriptedFuture:
 
 
 class FakeGoalHandle:
-    """Scripted Action Goal handle with an independently released result."""
+    """Scripted Action Goal handle with independently released futures."""
 
-    def __init__(self, result=None, *, result_done=True):
+    def __init__(self):
         self.accepted = True
         self.cancel_calls = 0
-        response = CancelGoal.Response()
-        response.return_code = CancelGoal.Response.ERROR_NONE
-        self.cancel_future = ScriptedFuture(response)
-        self.result_future = ScriptedFuture(
-            _wrapped_result(result), done=result_done
-        )
+        self.cancel_future = ScriptedFuture()
+        self.result_future = ScriptedFuture()
 
     def cancel_goal_async(self):
         self.cancel_calls += 1
@@ -80,42 +93,58 @@ class FakeGoalHandle:
 
 
 class FakeActionClient:
-    """Fake Action client with scripted acceptance and terminal outcomes."""
+    """Fake Action client with explicit acceptance and terminal futures."""
 
-    def __init__(self, result=None, *, result_done=True):
+    def __init__(self, *, ready=True):
         self.goals = []
         self.handles = []
-        self.result = result
-        self.result_done = result_done
+        self.send_futures = []
+        self._ready = ready
 
     def server_is_ready(self):
-        return True
+        return self._ready
 
     def send_goal_async(self, goal):
         self.goals.append(goal)
-        handle = FakeGoalHandle(
-            self.result,
-            result_done=self.result_done,
-        )
+        handle = FakeGoalHandle()
         self.handles.append(handle)
-        return ScriptedFuture(handle)
+        future = ScriptedFuture()
+        self.send_futures.append(future)
+        return future
 
 
 class FakeStopClient:
     """Fake Stop service that exposes each request future to the test."""
 
-    def __init__(self):
+    def __init__(self, *, ready=True):
         self.requests = []
         self.futures = []
+        self._ready = ready
 
     def service_is_ready(self):
-        return True
+        return self._ready
 
     def call_async(self, request):
-        future = ScriptedFuture(None, done=False)
+        future = ScriptedFuture()
         self.requests.append(request)
         self.futures.append(future)
         return future
+
+
+class ScriptedTimer:
+    """A one-shot deadline that fires only when the test releases it."""
+
+    def __init__(self, callback):
+        self._callback = callback
+        self.cancelled = False
+
+    def cancel(self):
+        self.cancelled = True
+
+    def timeout(self):
+        if not self.cancelled:
+            self.cancelled = True
+            self._callback()
 
 
 def _wrapped_result(code):
@@ -126,6 +155,12 @@ def _wrapped_result(code):
         else code
     )
     return SimpleNamespace(result=result)
+
+
+def _cancel_response(return_code=CancelGoal.Response.ERROR_NONE):
+    response = CancelGoal.Response()
+    response.return_code = return_code
+    return response
 
 
 def _make_state():
@@ -142,6 +177,21 @@ def _make_state():
     )
 
 
+def _make_state_message(runtime_instance_id):
+    """Build one state sample for a scripted publisher callback."""
+    return SimpleNamespace(
+        runtime_instance_id=runtime_instance_id,
+        admission_epoch=7,
+        operating_mode=OperatingMode.NAVIGATION,
+        availability=Availability.AVAILABLE,
+        gate_state=GateState.GATE_INHIBITED,
+        active_step=2**32 - 1,
+        supported_step_mask=0b1111,
+        max_steps=3,
+        named_place_ids=['lobby'],
+    )
+
+
 def _make_turn(text, sequence=1, *, turn_id=None, kind=VoiceTurn.COMMAND):
     message = VoiceTurn()
     message.voice_instance_id = 'voice-a'
@@ -154,12 +204,9 @@ def _make_turn(text, sequence=1, *, turn_id=None, kind=VoiceTurn.COMMAND):
     return message
 
 
-def _make_node(monkeypatch, *, mission_result=None, result_done=True):
+def _make_node(monkeypatch):
     node = AgentNode(agent_instance_id='a' * 32)
-    node._mission_client = FakeActionClient(
-        mission_result,
-        result_done=result_done,
-    )
+    node._mission_client = FakeActionClient()
     node._speak_client = FakeActionClient()
     node._stop_client = FakeStopClient()
     info = SimpleNamespace(
@@ -169,13 +216,27 @@ def _make_node(monkeypatch, *, mission_result=None, result_done=True):
         topic_type='voice_nav_interfaces/msg/MissionState',
     )
     node._latest_state = _make_state()
+    node._state_subscription_epoch_gid = info.endpoint_gid
     node._state_sample_signature = _publisher_signature(info)
     monkeypatch.setattr(
         node,
-        '_compatible_state_publishers',
-        lambda: [info],
+        'get_publishers_info_by_topic',
+        lambda _topic: [info],
     )
     return node
+
+
+def _script_deadlines(monkeypatch, node):
+    """Replace only the ROS clock/timer seam with explicit deadlines."""
+    timers = []
+
+    def make_timer(_seconds, callback):
+        timer = ScriptedTimer(callback)
+        timers.append(timer)
+        return timer
+
+    monkeypatch.setattr(node, '_one_shot_timer', make_timer)
+    return timers
 
 
 @pytest.fixture(scope='module', autouse=True)
@@ -200,25 +261,189 @@ def test_rule_mission_maps_typed_goal_and_terminal_speech(monkeypatch):
         assert goal.admission_epoch == 7
         assert len(goal.steps) == 1
         assert goal.steps[0].distance_m == 1.0
+        node._mission_client.send_futures[0].resolve(
+            node._mission_client.handles[0]
+        )
+        node._mission_client.handles[0].result_future.resolve(
+            _wrapped_result(ExecuteMission.Result.SUCCEEDED)
+        )
         assert node._mission_slot is None
         assert node._speak_client.goals[-1].text == '任务已完成。'
     finally:
         node.destroy_node()
 
 
-def test_pending_cancel_cancels_exact_goal_once(monkeypatch):
-    node = _make_node(
-        monkeypatch,
-        mission_result=ExecuteMission.Result.CANCELED,
-        result_done=False,
+def test_state_sample_requires_exact_publisher_gid_after_restart(monkeypatch):
+    """An old publisher sample cannot refresh a replacement publisher token."""
+    node = AgentNode(agent_instance_id='a' * 32)
+    publisher_a = SimpleNamespace(
+        endpoint_gid=b'publisher-a',
+        node_name='runtime_a',
+        node_namespace='/',
+        topic_type='voice_nav_interfaces/msg/MissionState',
     )
+    publisher_b = SimpleNamespace(
+        endpoint_gid=b'publisher-b',
+        node_name='runtime_b',
+        node_namespace='/',
+        topic_type='voice_nav_interfaces/msg/MissionState',
+    )
+    publishers = [publisher_a]
+    monkeypatch.setattr(
+        node,
+        'get_publishers_info_by_topic',
+        lambda _topic: list(publishers),
+    )
+    try:
+        generation_a = node._state_subscription_generation
+        node._state_subscription_epoch_gid = b'publisher-a'
+        node._on_state_message(
+            _make_state_message('runtime_a'),
+            SimpleNamespace(publisher_gid=b'publisher-a'),
+            generation_a,
+            b'publisher-a',
+        )
+        assert node._planning_snapshot(require_execute_ready=False).runtime_instance_id == (
+            'runtime_a'
+        )
+
+        publishers[:] = [publisher_b]
+        node._on_state_message(
+            _make_state_message('runtime_a'),
+            SimpleNamespace(publisher_gid=b'publisher-a'),
+            generation_a,
+            b'publisher-a',
+        )
+        assert node._planning_snapshot(require_execute_ready=False) is None
+        node._on_state_rebuild_event()
+        generation_b = node._state_subscription_generation
+        assert generation_b != generation_a
+        assert node._planning_snapshot(require_execute_ready=False) is None
+
+        node._on_state_message(
+            _make_state_message('runtime_b'),
+            {
+                'publisher_gid': {
+                    'implementation_identifier': 'rmw_fastrtps_cpp',
+                    'data': b'publisher-b',
+                }
+            },
+            generation_b,
+            b'publisher-b',
+        )
+        assert node._planning_snapshot(require_execute_ready=False).runtime_instance_id == (
+            'runtime_b'
+        )
+        node._on_state_message(
+            _make_state_message('runtime_a'),
+            SimpleNamespace(publisher_gid=b'publisher-a'),
+            generation_a,
+            b'publisher-a',
+        )
+        assert node._planning_snapshot(require_execute_ready=False).runtime_instance_id == (
+            'runtime_b'
+        )
+    finally:
+        node.destroy_node()
+
+
+def test_state_epoch_proof_accepts_jazzy_metadata_and_rebuilds_after_restart(
+    monkeypatch,
+):
+    """Jazzy metadata uses the subscription epoch to fence a restarted publisher."""
+    node = AgentNode(agent_instance_id='b' * 32)
+    publisher_a = SimpleNamespace(
+        endpoint_gid=b'publisher-a',
+        node_name='runtime_a',
+        node_namespace='/',
+        topic_type='voice_nav_interfaces/msg/MissionState',
+    )
+    publisher_b = SimpleNamespace(
+        endpoint_gid=b'publisher-b',
+        node_name='runtime_b',
+        node_namespace='/',
+        topic_type='voice_nav_interfaces/msg/MissionState',
+    )
+    publishers = [publisher_a]
+    monkeypatch.setattr(
+        node,
+        'get_publishers_info_by_topic',
+        lambda _topic: list(publishers),
+    )
+    jazzy_info = {
+        'source_timestamp': 1,
+        'received_timestamp': 1,
+        'publication_sequence_number': 1,
+        'reception_sequence_number': None,
+    }
+    try:
+        generation_a = node._state_subscription_generation
+        node._state_subscription_epoch_gid = b'publisher-a'
+        node._on_state_message(
+            _make_state_message('runtime_a'),
+            jazzy_info,
+            generation_a,
+            b'publisher-a',
+        )
+        assert node._planning_snapshot(require_execute_ready=False).runtime_instance_id == (
+            'runtime_a'
+        )
+
+        publishers[:] = [publisher_a, publisher_b]
+        node._on_state_message(
+            _make_state_message('runtime_a'),
+            jazzy_info,
+            generation_a,
+            b'publisher-a',
+        )
+        assert node._planning_snapshot(require_execute_ready=False) is None
+        publishers[:] = []
+        node._on_state_message(
+            _make_state_message('runtime_a'),
+            jazzy_info,
+            generation_a,
+            b'publisher-a',
+        )
+        assert node._planning_snapshot(require_execute_ready=False) is None
+        publishers[:] = [publisher_b]
+        node._on_state_rebuild_event()
+        generation_b = node._state_subscription_generation
+        assert node._planning_snapshot(require_execute_ready=False) is None
+
+        node._on_state_message(
+            _make_state_message('runtime_a'),
+            jazzy_info,
+            generation_a,
+            b'publisher-a',
+        )
+        assert node._planning_snapshot(require_execute_ready=False) is None
+        node._on_state_message(
+            _make_state_message('runtime_b'),
+            jazzy_info,
+            generation_b,
+            b'publisher-b',
+        )
+        assert node._planning_snapshot(require_execute_ready=False).runtime_instance_id == (
+            'runtime_b'
+        )
+    finally:
+        node.destroy_node()
+
+
+def test_pending_cancel_cancels_exact_goal_once(monkeypatch):
+    node = _make_node(monkeypatch)
     try:
         node._on_turn_message(_make_turn('前进 1 米'))
         handle = node._mission_client.handles[0]
         node._on_turn_message(_make_turn('取消任务', sequence=2))
 
-        assert handle.cancel_calls == 1
+        assert handle.cancel_calls == 0
         assert node._mission_slot is not None
+        node._mission_client.send_futures[0].resolve(handle)
+        assert handle.cancel_calls == 1
+        response = CancelGoal.Response()
+        response.return_code = CancelGoal.Response.ERROR_NONE
+        handle.cancel_future.resolve(response)
         handle.result_future.resolve(
             _wrapped_result(ExecuteMission.Result.CANCELED)
         )
@@ -228,15 +453,87 @@ def test_pending_cancel_cancels_exact_goal_once(monkeypatch):
         node.destroy_node()
 
 
-def test_stop_reuses_voice_identity_and_never_cancels_mission(monkeypatch):
-    node = _make_node(
-        monkeypatch,
-        mission_result=ExecuteMission.Result.SUCCEEDED,
-        result_done=False,
-    )
+def test_repeated_cancel_rebinds_terminal_correlation_without_extra_cancel(
+    monkeypatch,
+):
+    """The latest Cancel turn owns one real terminal reply."""
+    node = _make_node(monkeypatch)
     try:
         node._on_turn_message(_make_turn('前进 1 米'))
         handle = node._mission_client.handles[0]
+        node._mission_client.send_futures[0].resolve(handle)
+
+        node._on_turn_message(_make_turn('取消任务', sequence=2))
+        node._on_turn_message(_make_turn('取消任务', sequence=3))
+
+        assert handle.cancel_calls == 1
+        assert node._speak_client.goals == []
+
+        response = CancelGoal.Response()
+        response.return_code = CancelGoal.Response.ERROR_NONE
+        handle.cancel_future.resolve(response)
+        handle.result_future.resolve(
+            _wrapped_result(ExecuteMission.Result.CANCELED)
+        )
+
+        assert [goal.text for goal in node._speak_client.goals] == [
+            '任务已取消。'
+        ]
+        assert node._mission_slot is None
+    finally:
+        node.destroy_node()
+
+
+@pytest.mark.parametrize(
+    ('terminal_code', 'expected_text'),
+    [
+        (ExecuteMission.Result.CANCELED, '任务已取消。'),
+        (ExecuteMission.Result.SUCCEEDED, '任务已完成。'),
+        (ExecuteMission.Result.EXECUTION_FAILED, '任务执行失败。'),
+    ],
+)
+@pytest.mark.parametrize('accept_before_cancel', [False, True])
+def test_repeated_cancel_keeps_first_real_terminal_code(
+    monkeypatch,
+    terminal_code,
+    expected_text,
+    accept_before_cancel,
+):
+    """SEND_PENDING and ACTIVE share one cancel and one code-based reply."""
+    node = _make_node(monkeypatch)
+    try:
+        node._on_turn_message(_make_turn('前进 1 米'))
+        client = node._mission_client
+        handle = client.handles[0]
+        if accept_before_cancel:
+            client.send_futures[0].resolve(handle)
+
+        node._on_turn_message(_make_turn('取消任务', sequence=2))
+        node._on_turn_message(_make_turn('取消任务', sequence=3))
+        if not accept_before_cancel:
+            client.send_futures[0].resolve(handle)
+
+        assert handle.cancel_calls == 1
+        assert node._speak_client.goals == []
+        cancel_response = CancelGoal.Response()
+        cancel_response.return_code = CancelGoal.Response.ERROR_NONE
+        handle.cancel_future.resolve(cancel_response)
+        handle.result_future.resolve(_wrapped_result(terminal_code))
+
+        assert [goal.text for goal in node._speak_client.goals] == [
+            expected_text
+        ]
+        assert node._mission_slot is None
+    finally:
+        node.destroy_node()
+
+
+def test_stop_reuses_voice_identity_and_never_cancels_mission(monkeypatch):
+    node = _make_node(monkeypatch)
+    try:
+        node._on_turn_message(_make_turn('前进 1 米'))
+        handle = node._mission_client.handles[0]
+        node._mission_client.send_futures[0].resolve(handle)
         stop = _make_turn(
             '停止',
             sequence=8,
@@ -280,18 +577,244 @@ def test_cancel_without_local_handle_only_speaks_reply(monkeypatch):
 
 
 def test_new_turn_does_not_cancel_existing_mission(monkeypatch):
-    node = _make_node(
-        monkeypatch,
-        mission_result=ExecuteMission.Result.SUCCEEDED,
-        result_done=False,
-    )
+    node = _make_node(monkeypatch)
     try:
         node._on_turn_message(_make_turn('前进 1 米'))
         handle = node._mission_client.handles[0]
+        node._mission_client.send_futures[0].resolve(handle)
         node._on_turn_message(_make_turn('前进 0.5 米', sequence=2))
 
         assert len(node._mission_client.goals) == 1
         assert handle.cancel_calls == 0
+        assert node._speak_client.goals[-1].text == '本地任务正在处理。'
+    finally:
+        node.destroy_node()
+
+
+def test_mission_send_timeout_cancels_late_accepted_handle(monkeypatch):
+    node = _make_node(monkeypatch)
+    timers = _script_deadlines(monkeypatch, node)
+    try:
+        node._on_turn_message(_make_turn('前进 1 米'))
+        client = node._mission_client
+        handle = client.handles[0]
+        timers[0].timeout()
+
+        assert node._mission_slot is None
+        assert [goal.text for goal in node._speak_client.goals] == [
+            '任务提交未确认。'
+        ]
+
+        client.send_futures[0].resolve(handle)
+        assert handle.cancel_calls == 1
+        assert node._mission_slot is None
+        assert [goal.text for goal in node._speak_client.goals] == [
+            '任务提交未确认。'
+        ]
+    finally:
+        node.destroy_node()
+
+
+@pytest.mark.parametrize('outcome', ['reject', 'unaccepted'])
+def test_mission_goal_send_failure_clears_slot(monkeypatch, outcome):
+    node = _make_node(monkeypatch)
+    try:
+        node._on_turn_message(_make_turn('前进 1 米'))
+        future = node._mission_client.send_futures[0]
+        if outcome == 'reject':
+            future.reject(RuntimeError('send failed'))
+        else:
+            future.resolve(SimpleNamespace(accepted=False))
+
+        assert node._mission_slot is None
+        assert [goal.text for goal in node._speak_client.goals] == [
+            '任务提交失败。'
+        ]
+    finally:
+        node.destroy_node()
+
+
+@pytest.mark.parametrize(
+    ('outcome', 'expected_texts'),
+    [
+        ('cancel_reject', ['取消请求未确认。', '任务已完成。']),
+        ('cancel_timeout', ['取消请求未确认。', '任务已完成。']),
+        ('result_first', ['任务已完成。']),
+        ('cancel_success', ['任务已取消。']),
+    ],
+)
+def test_cancel_response_and_result_races_use_real_terminal_code(
+    monkeypatch,
+    outcome,
+    expected_texts,
+):
+    node = _make_node(monkeypatch)
+    timers = _script_deadlines(monkeypatch, node)
+    try:
+        node._on_turn_message(_make_turn('前进 1 米'))
+        client = node._mission_client
+        handle = client.handles[0]
+        client.send_futures[0].resolve(handle)
+        node._on_turn_message(_make_turn('取消任务', sequence=2))
+
+        if outcome == 'cancel_reject':
+            handle.cancel_future.reject(RuntimeError('cancel rejected'))
+            handle.result_future.resolve(
+                _wrapped_result(ExecuteMission.Result.SUCCEEDED)
+            )
+        elif outcome == 'cancel_timeout':
+            timers[-1].timeout()
+            handle.result_future.resolve(
+                _wrapped_result(ExecuteMission.Result.SUCCEEDED)
+            )
+        elif outcome == 'result_first':
+            handle.result_future.resolve(
+                _wrapped_result(ExecuteMission.Result.SUCCEEDED)
+            )
+            handle.cancel_future.resolve(_cancel_response())
+        else:
+            handle.cancel_future.resolve(_cancel_response())
+            handle.result_future.resolve(
+                _wrapped_result(ExecuteMission.Result.CANCELED)
+            )
+
+        assert [goal.text for goal in node._speak_client.goals] == (
+            expected_texts
+        )
+        assert node._mission_slot is None
+    finally:
+        node.destroy_node()
+
+
+@pytest.mark.parametrize(
+    ('code', 'inhibited', 'expected_text'),
+    [
+        (StopMission.Response.APPLIED, True, '已停止。'),
+        (StopMission.Response.DUPLICATE, True, '已停止。'),
+        (StopMission.Response.APPLIED, False, '停止请求未确认。'),
+        (StopMission.Response.SAFETY_FAULT, True, '停止请求未确认。'),
+    ],
+)
+def test_stop_response_matrix_is_urgent_and_code_bounded(
+    monkeypatch,
+    code,
+    inhibited,
+    expected_text,
+):
+    node = _make_node(monkeypatch)
+    try:
+        node._on_turn_message(_make_turn('停止', kind=VoiceTurn.STOP))
+        response = StopMission.Response()
+        response.code = code
+        response.motion_inhibited = inhibited
+        node._stop_client.futures[0].resolve(response)
+
+        assert node._speak_client.goals[-1].priority == Speak.Goal.URGENT
+        assert node._speak_client.goals[-1].text == expected_text
+    finally:
+        node.destroy_node()
+
+
+def test_stop_timeout_and_stale_response_are_fenced(monkeypatch):
+    node = _make_node(monkeypatch)
+    timers = _script_deadlines(monkeypatch, node)
+    try:
+        first = _make_turn(
+            '停止', sequence=1, turn_id='stop-1', kind=VoiceTurn.STOP
+        )
+        second = _make_turn(
+            '停止', sequence=2, turn_id='stop-2', kind=VoiceTurn.STOP
+        )
+        node._on_turn_message(first)
+        first_future = node._stop_client.futures[0]
+        node._on_turn_message(second)
+        second_future = node._stop_client.futures[1]
+
+        first_response = StopMission.Response()
+        first_response.code = StopMission.Response.APPLIED
+        first_response.motion_inhibited = True
+        first_future.resolve(first_response)
+        assert node._speak_client.goals == []
+
+        timers[-1].timeout()
+        second_response = StopMission.Response()
+        second_response.code = StopMission.Response.DUPLICATE
+        second_response.motion_inhibited = True
+        second_future.resolve(second_response)
+
+        assert [goal.text for goal in node._speak_client.goals] == [
+            '停止请求未确认。'
+        ]
+    finally:
+        node.destroy_node()
+
+
+def test_speak_late_acceptance_is_canceled_after_timeout(monkeypatch):
+    node = _make_node(monkeypatch)
+    timers = _script_deadlines(monkeypatch, node)
+    try:
+        node._speak_text(
+            '稍后回答',
+            Speak.Goal.NORMAL,
+            'session-a',
+            'turn-a',
+            1,
+        )
+        future = node._speak_client.send_futures[0]
+        handle = node._speak_client.handles[0]
+        timers[0].timeout()
+        future.resolve(handle)
+
+        assert node._speak_operation is None
+        assert handle.cancel_calls == 1
+    finally:
+        node.destroy_node()
+
+
+def test_speak_failure_and_barge_in_never_cancel_mission(monkeypatch):
+    node = _make_node(monkeypatch)
+    try:
+        node._on_turn_message(_make_turn('前进 1 米'))
+        mission_client = node._mission_client
+        mission_handle = mission_client.handles[0]
+        mission_client.send_futures[0].resolve(mission_handle)
+
+        node._on_turn_message(_make_turn('前进 0.5 米', sequence=2))
+        first_speak = node._speak_client.handles[0]
+        node._speak_client.send_futures[0].resolve(first_speak)
+        first_speak.result_future.resolve(
+            SimpleNamespace(result=SimpleNamespace(code=Speak.Result.FAILED))
+        )
+        assert node._mission_slot is not None
+        assert mission_handle.cancel_calls == 0
+
+        node._on_turn_message(_make_turn('前进 0.25 米', sequence=3))
+        second_speak = node._speak_client.handles[1]
+        node._speak_client.send_futures[1].resolve(second_speak)
+        node._on_turn_message(_make_turn('前进 0.1 米', sequence=4))
+        assert second_speak.cancel_calls == 1
+        assert mission_handle.cancel_calls == 0
+        assert node._mission_slot is not None
+    finally:
+        node.destroy_node()
+
+
+def test_new_turn_fences_old_mission_terminal_speech(monkeypatch):
+    node = _make_node(monkeypatch)
+    try:
+        node._on_turn_message(_make_turn('前进 1 米'))
+        mission_client = node._mission_client
+        mission_handle = mission_client.handles[0]
+        mission_client.send_futures[0].resolve(mission_handle)
+        node._on_turn_message(_make_turn('前进 0.5 米', sequence=2))
+        mission_handle.result_future.resolve(
+            _wrapped_result(ExecuteMission.Result.SUCCEEDED)
+        )
+
+        assert node._mission_slot is None
+        assert '任务已完成。' not in [
+            goal.text for goal in node._speak_client.goals
+        ]
         assert node._speak_client.goals[-1].text == '本地任务正在处理。'
     finally:
         node.destroy_node()
