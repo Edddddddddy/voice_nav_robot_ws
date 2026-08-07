@@ -24,6 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'agent_node = voice_nav_agent.agent_node:main',
         ],
     },
 )

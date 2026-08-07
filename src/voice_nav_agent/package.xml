@@ -7,6 +7,10 @@
   <maintainer email="983166955@qq.com">Edddddddddy</maintainer>
   <license>Apache-2.0</license>
 
+  <exec_depend>action_msgs</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>voice_nav_interfaces</exec_depend>
+
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>
