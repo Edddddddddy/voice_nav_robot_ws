@@ -177,11 +177,11 @@ def _make_state():
     )
 
 
-def _make_state_message(runtime_instance_id):
+def _make_state_message(runtime_instance_id, admission_epoch=7):
     """Build one state sample for a scripted publisher callback."""
     return SimpleNamespace(
         runtime_instance_id=runtime_instance_id,
-        admission_epoch=7,
+        admission_epoch=admission_epoch,
         operating_mode=OperatingMode.NAVIGATION,
         availability=Availability.AVAILABLE,
         gate_state=GateState.GATE_INHIBITED,
@@ -347,6 +347,90 @@ def test_state_sample_requires_exact_publisher_gid_after_restart(monkeypatch):
         node.destroy_node()
 
 
+def test_state_ingress_replays_b_and_fences_late_a_before_mission(monkeypatch):
+    """Inject B once after rebuild and fence a late A generation callback."""
+    node = AgentNode(agent_instance_id='c' * 32)
+    node._mission_client = FakeActionClient()
+    node._speak_client = FakeActionClient()
+    node._stop_client = FakeStopClient()
+    publisher_a = SimpleNamespace(
+        endpoint_gid=b'publisher-a',
+        node_name='runtime_a',
+        node_namespace='/',
+        topic_type='voice_nav_interfaces/msg/MissionState',
+    )
+    publisher_b = SimpleNamespace(
+        endpoint_gid=b'publisher-b',
+        node_name='runtime_b',
+        node_namespace='/',
+        topic_type='voice_nav_interfaces/msg/MissionState',
+    )
+    publishers = [publisher_a]
+    monkeypatch.setattr(
+        node,
+        'get_publishers_info_by_topic',
+        lambda _topic: list(publishers),
+    )
+    jazzy_info = {
+        'source_timestamp': 1,
+        'received_timestamp': 1,
+        'publication_sequence_number': 1,
+        'reception_sequence_number': None,
+    }
+    try:
+        node._on_state_rebuild_event()
+        generation_a = node._state_subscription_generation
+        node._on_state_message(
+            _make_state_message('runtime_a', admission_epoch=11),
+            jazzy_info,
+            generation_a,
+            b'publisher-a',
+        )
+        assert node._planning_snapshot(
+            require_execute_ready=False
+        ).runtime_instance_id == 'runtime_a'
+
+        publishers[:] = [publisher_b]
+        node._on_state_message(
+            _make_state_message('runtime_a', admission_epoch=11),
+            SimpleNamespace(publisher_gid=b'publisher-a'),
+            generation_a,
+            b'publisher-a',
+        )
+        assert node._planning_snapshot(require_execute_ready=False) is None
+
+        node._on_state_rebuild_event()
+        generation_b = node._state_subscription_generation
+        assert generation_b != generation_a
+        node._on_state_message(
+            _make_state_message('runtime_b', admission_epoch=22),
+            jazzy_info,
+            generation_b,
+            b'publisher-b',
+        )
+        snapshot = node._planning_snapshot(require_execute_ready=False)
+        assert snapshot.runtime_instance_id == 'runtime_b'
+        assert snapshot.admission_epoch == 22
+
+        node._on_turn_message(_make_turn('前进 1 米', sequence=9))
+        assert len(node._mission_client.goals) == 1
+        assert node._mission_client.goals[0].runtime_instance_id == 'runtime_b'
+        assert node._mission_client.goals[0].admission_epoch == 22
+
+        node._on_state_message(
+            _make_state_message('runtime_a', admission_epoch=11),
+            SimpleNamespace(publisher_gid=b'publisher-a'),
+            generation_a,
+            b'publisher-a',
+        )
+        snapshot = node._planning_snapshot(require_execute_ready=False)
+        assert snapshot.runtime_instance_id == 'runtime_b'
+        assert snapshot.admission_epoch == 22
+        assert len(node._mission_client.goals) == 1
+    finally:
+        node.destroy_node()
+
+
 def test_state_epoch_proof_accepts_jazzy_metadata_and_rebuilds_after_restart(
     monkeypatch,
 ):
@@ -426,6 +510,43 @@ def test_state_epoch_proof_accepts_jazzy_metadata_and_rebuilds_after_restart(
         assert node._planning_snapshot(require_execute_ready=False).runtime_instance_id == (
             'runtime_b'
         )
+    finally:
+        node.destroy_node()
+
+
+def test_turn_reconciles_empty_state_epoch_before_fail_closed(monkeypatch):
+    """A legal Turn reconciles a unique publisher before returning no state."""
+    monkeypatch.setattr(
+        AgentNode,
+        '_capture_state_epoch_gid',
+        lambda _node: None,
+    )
+    node = AgentNode(agent_instance_id='d' * 32)
+    node._mission_client = FakeActionClient()
+    node._speak_client = FakeActionClient()
+    node._stop_client = FakeStopClient()
+    publisher = SimpleNamespace(
+        endpoint_gid=b'publisher-b',
+        node_name='runtime_b',
+        node_namespace='/',
+        topic_type='voice_nav_interfaces/msg/MissionState',
+    )
+    monkeypatch.setattr(
+        node,
+        'get_publishers_info_by_topic',
+        lambda _topic: [publisher],
+    )
+    rebuilds = []
+    monkeypatch.setattr(
+        node,
+        '_schedule_state_subscription_rebuild',
+        lambda: rebuilds.append(True),
+    )
+    try:
+        node._on_turn_message(_make_turn('\u524d\u8fdb 1 \u7c73'))
+
+        assert node._mission_client.goals == []
+        assert rebuilds == [True]
     finally:
         node.destroy_node()
 
