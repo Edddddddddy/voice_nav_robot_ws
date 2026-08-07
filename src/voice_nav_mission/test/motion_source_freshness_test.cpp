@@ -37,21 +37,6 @@ TEST(MotionSourceFreshness, RawScanCallbackStoppedAt201MsStopsRenew)
   EXPECT_FALSE(freshness.fresh_at(t0 + 201ms));
 }
 
-TEST(MotionSourceFreshness, RawScanStampAge299MsIsUsable)
-{
-  EXPECT_TRUE(raw_stamp_age_is_fresh(299ms, 300ms));
-}
-
-TEST(MotionSourceFreshness, RawScanStampAge300MsKeepsInclusiveBoundary)
-{
-  EXPECT_TRUE(raw_stamp_age_is_fresh(300ms, 300ms));
-}
-
-TEST(MotionSourceFreshness, RawScanStampAge301MsFailsClosed)
-{
-  EXPECT_FALSE(raw_stamp_age_is_fresh(301ms, 300ms));
-}
-
 TEST(MotionSourceFreshness, UnobservedAndBackwardSteadyTimeAreNotFresh)
 {
   SteadySourceFreshness freshness(200ms);

@@ -44,12 +44,4 @@ bool SteadySourceFreshness::fresh_at(const TimePoint now) const noexcept
          now - last_receipt_ <= timeout_;
 }
 
-bool raw_stamp_age_is_fresh(
-  const std::chrono::nanoseconds age,
-  const std::chrono::milliseconds timeout) noexcept
-{
-  return timeout.count() > 0 && age >= std::chrono::nanoseconds::zero() &&
-         age <= timeout;
-}
-
 }  // namespace voice_nav_mission
