@@ -26,10 +26,13 @@ Named Place 快照；不会在规划过程中刷新。STOP 遵循 D-046-003B：r
 planning token；缺少或不匹配该 context 的 proposal 不能进入 Mission。Voice
 fencing 的 retired-instance 容量耗尽后锁存为 fail-closed，直到建立新的 Core/
 Voice 生命周期；锁存期间 COMMAND 一律拒绝，STOP 仍走 D-046-003B 快路径。
-Core 将 `，`、`,`、`；`、`;` 与 `然后`、`再` 统一为 clause separator，分割后
-对每个 clause trim，空 clause 或超过三步拒绝。旋转角度以 Runtime 冻结的
-float32 `6.283185F` 作为 wire 上限；中文 `±360°` 显式映射为相应 binary32
-值，外部 proposal 的 wire 表示超过该上限时拒绝。
+Core 在 STOP 扫描前保留 `，,；;。！!?、` 与 `然后`、`再` 的 clause 边界；
+单个句末 `。！!?` 可结束最后一个非空 clause，重复或内部空 clause 拒绝。称呼
+和批准请求词最多消费一个批准边界，不会吞掉后续重复 separator。完整收集
+clause 后再分类，只有单独 unknown 表达进入 LLM-needed，unknown 与规则或缺参
+混合时确定性拒绝。旋转角度以 Runtime 冻结的 float32 `6.283185F` 作为 wire
+上限；中文 `±360°` 显式映射为相应 binary32 值，外部 proposal 的 wire 表示
+超过该上限时拒绝。
 
 ## Public ROS surface
 

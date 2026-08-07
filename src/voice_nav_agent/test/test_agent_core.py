@@ -189,6 +189,55 @@ def test_empty_clause_fails_closed_after_separator_split(text):
 
 
 @pytest.mark.parametrize(
+    'separator',
+    ['，', ',', '；', ';', '。', '！', '!', '？', '?', '、'],
+)
+def test_every_approved_punctuation_preserves_a_fixed_stop_clause(separator):
+    decision = make_core().handle_turn(
+        make_turn(f'前进 1 米{separator}紧急停止'), make_state()
+    )
+
+    assert decision.kind is DecisionKind.STOP
+    assert decision.reason == 'voice_stop'
+
+
+@pytest.mark.parametrize('terminator', ['。', '！', '!', '？', '?'])
+def test_one_sentence_terminator_may_end_the_last_non_empty_clause(terminator):
+    decision = make_core().handle_turn(
+        make_turn(f'前进 1 米{terminator}'), make_state()
+    )
+
+    assert decision.kind is DecisionKind.MISSION
+    assert decision.steps[0].distance_m == 1.0
+
+
+@pytest.mark.parametrize(
+    'text',
+    [
+        '前进 1 米。。左转 90 度',
+        '前进 1 米，，左转 90 度',
+        '前进 1 米然后然后左转 90 度',
+        '小智然后然后前进 1 米',
+        '小智，，前进 1 米',
+    ],
+)
+def test_repeated_internal_separator_or_connector_fails_closed(text):
+    decision = make_core().handle_turn(make_turn(text), make_state())
+
+    assert decision.kind is DecisionKind.REPLY
+    assert decision.reason == 'empty_clause'
+
+
+def test_invocation_may_consume_one_composite_boundary_but_not_two():
+    decision = make_core().handle_turn(
+        make_turn('小智，然后前进 1 米'), make_state()
+    )
+
+    assert decision.kind is DecisionKind.MISSION
+    assert decision.steps[0].distance_m == 1.0
+
+
+@pytest.mark.parametrize(
     ('text', 'reason'),
     [
         ('前进 1 米然后左转 90 度再去 lobby然后保存地图为 map_a', 'too_many_steps'),
@@ -223,6 +272,31 @@ def test_single_missing_parameter_enters_clarification(text, reason):
 
     assert decision.kind is DecisionKind.CLARIFY
     assert decision.reason == reason
+
+
+@pytest.mark.parametrize(
+    ('text', 'reason'),
+    [
+        ('前进 0', 'distance_out_of_range'),
+        ('后退 0', 'distance_out_of_range'),
+        ('前进 3', 'distance_out_of_range'),
+        ('左转 0', 'angle_out_of_range'),
+        ('左转 361', 'angle_out_of_range'),
+    ],
+)
+def test_out_of_range_missing_unit_value_is_rejected_before_clarification(
+    text, reason
+):
+    core = make_core()
+
+    decision = core.handle_turn(make_turn(text), make_state())
+    answer_after_rejection = core.handle_turn(
+        make_turn('1 米', sequence=2), make_state()
+    )
+
+    assert decision.kind is DecisionKind.REPLY
+    assert decision.reason == reason
+    assert answer_after_rejection.kind is DecisionKind.LLM_NEEDED
 
 
 def test_mode_and_capability_rejections_are_structured_replies():
@@ -448,6 +522,28 @@ def test_unknown_well_formed_expression_becomes_llm_needed_with_same_token():
     assert decision.normalized_text == '绕到大厅'
     assert decision.token.source_seq == 1
     assert decision.token.runtime_instance_id == 'runtime-a'
+
+
+@pytest.mark.parametrize(
+    'text',
+    [
+        '绕到大厅然后前进',
+        '前进然后绕到大厅',
+        '绕到大厅然后前进 1 米',
+        '前进 1 米然后绕到大厅',
+    ],
+)
+def test_unknown_mixed_with_rule_or_missing_is_order_independent_rejection(text):
+    core = make_core()
+
+    decision = core.handle_turn(make_turn(text), make_state())
+    answer_after_rejection = core.handle_turn(
+        make_turn('1 米', sequence=2), make_state()
+    )
+
+    assert decision.kind is DecisionKind.REPLY
+    assert decision.reason == 'mixed_unknown_rule'
+    assert answer_after_rejection.kind is DecisionKind.LLM_NEEDED
 
 
 def test_cancel_is_local_and_does_not_require_runtime_snapshot():
