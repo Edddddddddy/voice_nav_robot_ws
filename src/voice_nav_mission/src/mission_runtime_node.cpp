@@ -15,7 +15,6 @@
 #include "voice_nav_mission/mission_runtime_core.hpp"
 
 #include <algorithm>
-#include <atomic>
 #include <cmath>
 #include <chrono>
 #include <condition_variable>
@@ -45,8 +44,9 @@
 #include "voice_nav_mission/mission_action_result_router.hpp"
 #include "voice_nav_mission/motion_authority_ros_adapter.hpp"
 #include "voice_nav_mission/relative_motion_ros_adapter.hpp"
-#include "voice_nav_mission/runtime_completion_mailbox.hpp"
+#include "voice_nav_mission/runtime_admission_gate.hpp"
 #include "voice_nav_mission/runtime_emergency_fence.hpp"
+#include "voice_nav_mission/runtime_execution_plane.hpp"
 #include "voice_nav_mission/runtime_event_ingress.hpp"
 #include "voice_nav_mission/runtime_event_queue.hpp"
 
@@ -174,6 +174,7 @@ public:
   : Node("mission_runtime_node", options),
     clock_(std::make_shared<RosSteadyClock>()),
     action_admission_tracker_([this]() {return clock_->now();}),
+    admission_gate_(),
     event_queue_([]() {
         return RuntimeEvent{0U, QueueFaultEvent{"Runtime event queue overflow"}};
       }),
@@ -184,24 +185,19 @@ public:
       runtime_event_lane,
       [this]() {request_independent_emergency();},
       [this](const RuntimeEmergencyFenceSnapshot & snapshot) {
-        if (core_) {
-          core_->fail_closed_at_epoch(snapshot.admission_epoch, snapshot.detail);
+        if (execution_plane_ && execution_plane_->core()) {
+          execution_plane_->core()->fail_closed_at_epoch(
+            snapshot.admission_epoch, snapshot.detail);
         }
         // Keep completion cleanup independently wakeable even after this
         // one-shot fence has been consumed by the runtime worker.
-        completion_mailbox_.request_reap();
+        if (execution_plane_) {
+          execution_plane_->completion_mailbox().request_reap();
+        }
       },
       [](const RuntimeEvent & event) {
         return std::holds_alternative<CancelEvent>(event.payload) ||
                std::holds_alternative<StopEvent>(event.payload);
-      }),
-    completion_mailbox_(
-      [this](const MotionToken & token) {
-        return enqueue_internal_event(RuntimeEvent{
-        token.mission_generation, ChildResultEvent{token}});
-      },
-      [this](std::string detail) {
-        request_emergency_fence(std::move(detail));
       })
   {
     if (std::string(get_fully_qualified_name()) != "/mission_runtime_node") {
@@ -226,14 +222,19 @@ public:
     conditioning_config.collision_source_timeout = std::chrono::milliseconds(
       kTrustedCollisionSourceTimeoutMs);
     conditioning_config.admission_fence_check = [this](const std::uint64_t epoch) {
-        return event_ingress_.admission_allowed(epoch);
+        return admission_gate_.admission_allowed(
+          epoch,
+          [this](const std::uint64_t value) {
+            return event_ingress_.admission_allowed(value);
+          });
       };
     conditioning_config.completion_relay = [this](RelativeMotionCompletionRecordPtr record) {
-        return completion_mailbox_.relay(std::move(record));
+        return execution_plane_ &&
+               execution_plane_->completion_mailbox().relay(std::move(record));
       };
     relative_motion_ = std::make_shared<RelativeMotionRosAdapter>(
       *this, authority_, motion_policy, conditioning_config);
-    core_ = std::make_unique<RuntimeCore>(
+    execution_plane_ = std::make_unique<RuntimeExecutionPlane>(
       config_,
       clock_,
       authority_,
@@ -249,15 +250,19 @@ public:
         return enqueue_internal_event(RuntimeEvent{
           token.mission_generation, ChildFeedbackEvent{token, progress}});
       },
-      RuntimeCore::ChildResultDispatcher{},
       [this](const std::uint64_t epoch) {
-        return event_ingress_.admission_allowed(epoch);
-      },
-      [this](const MotionToken & token, RuntimeCore::ChildResultDelivery delivery) {
-        return completion_mailbox_.register_delivery(token, std::move(delivery));
+        return admission_gate_.admission_allowed(
+          epoch,
+          [this](const std::uint64_t value) {
+            return event_ingress_.admission_allowed(value);
+          });
       },
       [this](const MotionToken & token) {
-        completion_mailbox_.discard(token);
+        return enqueue_internal_event(RuntimeEvent{
+          token.mission_generation, ChildResultEvent{token}});
+      },
+      [this](std::string detail) {
+        request_emergency_fence(std::move(detail));
       });
     runtime_worker_ = std::thread([this]() {run_runtime_events();});
     (void)enqueue_event(RuntimeEvent{
@@ -351,9 +356,7 @@ private:
       shutdown_barrier_owner_ = std::this_thread::get_id();
     }
 
-    quiescing_.store(true);
-    action_admission_tracker_.begin_quiesce();
-    ingress_stopped_.store(true);
+    admission_gate_.begin_quiesce(action_admission_tracker_);
     timer_.reset();
     stop_service_.reset();
     // Keep the Action Server alive while a goal accepted by on_goal is still
@@ -376,8 +379,10 @@ private:
     if (relative_motion_) {
       relative_motion_->finalize_shutdown();
     }
-    completion_mailbox_.stop();
-    core_.reset();
+    if (execution_plane_) {
+      execution_plane_->shutdown();
+      execution_plane_.reset();
+    }
     relative_motion_.reset();
     authority_.reset();
 
@@ -476,9 +481,12 @@ private:
     const std::shared_ptr<const ExecuteMission::Goal> & goal)
   {
     const auto uuid_key = goal_uuid_key(uuid);
-    if (!rclcpp::ok() || quiescing_.load() || event_ingress_.blocked() ||
-      !event_ingress_.admission_allowed(goal->admission_epoch) ||
-      !action_admission_tracker_.try_provision(uuid_key))
+    if (!rclcpp::ok() || !admission_gate_.try_provision(
+        action_admission_tracker_, uuid_key, goal->admission_epoch,
+        [this](const std::uint64_t epoch) {
+          return !event_ingress_.blocked() &&
+                 event_ingress_.admission_allowed(epoch);
+        }))
     {
       return rclcpp_action::GoalResponse::REJECT;
     }
@@ -514,17 +522,6 @@ private:
     const auto uuid_key = goal_uuid_key(goal_handle->get_goal_id());
     auto admission_lease = action_admission_tracker_.enter_accepted(uuid_key);
     const auto goal_message = goal_handle->get_goal();
-    if (!admission_lease.has_ticket() || admission_lease.was_revoked() ||
-      quiescing_.load() ||
-      event_ingress_.blocked() ||
-      !event_ingress_.admission_allowed(goal_message->admission_epoch))
-    {
-      abort_goal(goal_handle, MissionResult{
-          MissionResultCode::SafetyFault, -1,
-          quiescing_.load() ? "Runtime is quiescing" :
-          "Runtime admission epoch is fenced"});
-      return;
-    }
     MissionGoal goal;
     goal.source_instance_id = goal_message->source_instance_id;
     goal.source_seq = goal_message->source_seq;
@@ -535,19 +532,30 @@ private:
       goal.steps.push_back(MissionStep{
           step.kind, step.distance_m, step.angle_rad, step.target_id});
     }
-    if (!enqueue_event(RuntimeEvent{0U, AdmitEvent{std::move(goal), goal_handle}})) {
+    const auto queued = admission_lease.has_ticket() &&
+      !admission_lease.was_revoked() && admission_gate_.submit([this, &goal,
+        goal_handle, goal_message]() {
+          if (event_ingress_.blocked() ||
+          !event_ingress_.admission_allowed(goal_message->admission_epoch))
+          {
+            return false;
+          }
+          return enqueue_internal_event(RuntimeEvent{
+          0U, AdmitEvent{std::move(goal), goal_handle}});
+      });
+    if (!queued) {
       abort_goal(goal_handle, MissionResult{
           MissionResultCode::SafetyFault, -1,
-          "Runtime event queue could not accept Mission admission"});
+          admission_gate_.quiescing() ? "Runtime is quiescing" :
+          "Runtime admission queue could not accept Mission admission"});
     }
   }
 
   [[nodiscard]] bool enqueue_event(RuntimeEvent event) noexcept
   {
-    if (ingress_stopped_.load()) {
-      return false;
-    }
-    return enqueue_internal_event(std::move(event));
+    return admission_gate_.submit([this, &event]() {
+               return enqueue_internal_event(std::move(event));
+    });
   }
 
   [[nodiscard]] bool enqueue_internal_event(RuntimeEvent event) noexcept
@@ -583,11 +591,31 @@ private:
 
   void process_event(AdmitEvent & event)
   {
+    if (!execution_plane_ || !execution_plane_->core()) {
+      abort_goal(event.goal_handle, MissionResult{
+          MissionResultCode::SafetyFault, -1,
+          "Runtime execution plane is unavailable"});
+      return;
+    }
+    const auto start_permit = admission_gate_.claim_start(
+      event.goal.admission_epoch);
+    if (!start_permit.issued) {
+      abort_goal(event.goal_handle, MissionResult{
+          MissionResultCode::SafetyFault, -1,
+          "Runtime admission was quiesced before dispatch"});
+      return;
+    }
     std::uint64_t admitted_id = 0U;
     bool cancel_after_admission = false;
     action_adapter_.on_accepted(
       event.goal,
-      [this](const MissionGoal & value) {return core_->admit(value);},
+      [this, start_permit](const MissionGoal & value) {
+        return execution_plane_->core()->admit(value, [this, start_permit]() {
+                 return admission_gate_.start_allowed(start_permit) &&
+                        event_ingress_.admission_allowed(
+              start_permit.admission_epoch);
+          });
+      },
       [this, &event, &admitted_id, &cancel_after_admission](
         const std::uint64_t mission_id) {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -610,31 +638,31 @@ private:
         abort_goal(event.goal_handle, result);
       });
     if (cancel_after_admission && admitted_id != 0U) {
-      core_->cancel(admitted_id);
+      execution_plane_->core()->cancel(admitted_id);
     }
   }
 
   void process_event(CancelEvent & event)
   {
-    core_->cancel(event.mission_id);
+    execution_plane_->core()->cancel(event.mission_id);
   }
 
   void process_event(StopEvent & event)
   {
     StopResponse response;
     try {
-      response = core_->stop(event.request);
+      response = execution_plane_->core()->stop(event.request);
     } catch (const std::exception & error) {
       request_independent_emergency();
       response = StopResponse{
         2U, {}, 0U, false,
         std::string{"STOP worker raised: "} + error.what()};
-      core_->fail_closed(response.detail);
+      execution_plane_->core()->fail_closed(response.detail);
     } catch (...) {
       request_independent_emergency();
       response = StopResponse{
         2U, {}, 0U, false, "STOP worker raised an unknown exception"};
-      core_->fail_closed(response.detail);
+      execution_plane_->core()->fail_closed(response.detail);
     }
     {
       std::lock_guard<std::mutex> lock(event.waiter->mutex);
@@ -648,22 +676,22 @@ private:
   {
     (void)action_admission_tracker_.revoke_expired(event.now);
     authority_->refresh_endpoint();
-    core_->on_tick();
+    execution_plane_->core()->on_tick();
   }
 
   void process_event(GateSnapshotEvent & event)
   {
-    core_->observe_gate(event.snapshot);
+    execution_plane_->core()->observe_gate(event.snapshot);
   }
 
   void process_event(ChildFeedbackEvent & event)
   {
-    core_->on_child_feedback(event.token, event.progress);
+    execution_plane_->core()->on_child_feedback(event.token, event.progress);
   }
 
   void process_event(ChildResultEvent & event)
   {
-    const auto dispatch = completion_mailbox_.take(event.token);
+    const auto dispatch = execution_plane_->completion_mailbox().take(event.token);
     if (!dispatch.has_value()) {
       return;
     }
@@ -827,20 +855,18 @@ private:
   RuntimeConfig config_;
   std::shared_ptr<RosSteadyClock> clock_;
   ActionAdmissionTracker action_admission_tracker_;
+  RuntimeAdmissionGate admission_gate_;
   std::shared_ptr<RosMotionAuthorityPort> authority_;
   std::shared_ptr<RelativeMotionRosAdapter> relative_motion_;
-  std::unique_ptr<RuntimeCore> core_;
+  std::unique_ptr<RuntimeExecutionPlane> execution_plane_;
   RuntimeEventQueueType event_queue_;
   RuntimeEmergencyFence emergency_fence_{1U};
   RuntimeEventIngress<RuntimeEvent> event_ingress_;
-  NodeCompletionMailbox completion_mailbox_;
   std::thread runtime_worker_;
   std::recursive_mutex mutex_;
   std::unordered_set<const GoalHandle *> pending_goal_cancels_;
   RuntimeState cached_state_{};
   bool cached_state_valid_{false};
-  std::atomic<bool> ingress_stopped_{false};
-  std::atomic<bool> quiescing_{false};
   std::shared_ptr<rclcpp::Context> shutdown_context_;
   rclcpp::PreShutdownCallbackHandle shutdown_callback_handle_;
   std::mutex shutdown_mutex_;

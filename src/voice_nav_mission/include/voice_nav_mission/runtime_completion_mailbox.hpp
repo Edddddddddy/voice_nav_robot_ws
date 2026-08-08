@@ -41,9 +41,11 @@ public:
     TokenEnqueue token_enqueue,
     EmergencyRequest emergency_request)
   : token_enqueue_(std::move(token_enqueue)),
-    emergency_request_(std::move(emergency_request)),
-    reaper_thread_([this]() {run_reaper();})
+    emergency_request_(std::move(emergency_request))
   {
+    // All synchronization state is constructed before the reaper can
+    // observe a relay rejection or an explicit stop.
+    reaper_thread_ = std::thread([this]() {run_reaper();});
   }
 
   ~NodeCompletionMailbox()
@@ -183,11 +185,11 @@ private:
   TokenEnqueue token_enqueue_;
   EmergencyRequest emergency_request_;
   NodeCompletionRegistry registry_;
-  std::thread reaper_thread_;
   mutable std::mutex reaper_mutex_;
   std::condition_variable reaper_condition_;
   bool reaper_work_pending_{false};
   bool reaper_stopped_{false};
+  std::thread reaper_thread_;
 };
 
 }  // namespace voice_nav_mission

@@ -119,6 +119,20 @@ TEST(RuntimeCore, ProductionUnavailablePortDoesNotAcquireGate)
   EXPECT_FALSE(fixture.core.has_active_mission());
 }
 
+TEST(RuntimeCore, RevokedStartPermitPreventsRelativeMotionSideEffect)
+{
+  Fixture fixture;
+  const auto admission = fixture.core.admit(
+    goal(1U), []() {return false;});
+
+  EXPECT_FALSE(admission.accepted);
+  EXPECT_EQ(admission.result.code, MissionResultCode::SafetyFault);
+  EXPECT_TRUE(fixture.relative->started_steps().empty());
+  EXPECT_TRUE(fixture.authority->operations().empty());
+  EXPECT_TRUE(fixture.results.empty());
+  EXPECT_FALSE(fixture.core.has_active_mission());
+}
+
 TEST(RuntimeCore, FakeFSMIsOrderedBusyAndExactlyOnce)
 {
   Fixture fixture;
