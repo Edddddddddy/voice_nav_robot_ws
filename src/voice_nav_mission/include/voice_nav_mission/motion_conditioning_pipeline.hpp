@@ -24,6 +24,7 @@
 #include <rclcpp/rclcpp.hpp>
 
 #include "voice_nav_mission/mission_runtime_core.hpp"
+#include "voice_nav_mission/runtime_transaction_plane.hpp"
 
 namespace voice_nav_mission
 {
@@ -125,6 +126,8 @@ struct MotionConditioningConfig
   std::function<void()> before_adapter_command_supplier;
   std::function<void()> before_adapter_ingress_wait;
   std::function<bool(std::uint64_t)> admission_fence_check;
+  std::shared_ptr<RuntimeTransactionPlane> transaction_plane;
+  std::function<std::uint64_t()> transaction_generation_provider;
   RelativeMotionCompletionRelay completion_relay;
 };
 

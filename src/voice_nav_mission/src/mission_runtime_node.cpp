@@ -19,6 +19,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -61,6 +62,88 @@ using MissionStateMessage = voice_nav_interfaces::msg::MissionState;
 using MissionStepMessage = voice_nav_interfaces::msg::MissionStep;
 using GoalHandle = rclcpp_action::ServerGoalHandle<ExecuteMission>;
 using GoalUUID = rclcpp_action::GoalUUID;
+
+// Shared by the rclcpp_action server callbacks and the shutdown coordinator.
+// Each handler runs while the lifetime mutex is held, so shutdown cannot
+// destroy Node-owned state while an already-entered callback still uses it.
+class ActionCallbackLifetime final
+{
+public:
+  using GoalHandler = std::function<rclcpp_action::GoalResponse(
+        const GoalUUID &, std::shared_ptr<const ExecuteMission::Goal>)>;
+  using CancelHandler = std::function<rclcpp_action::CancelResponse(
+        const std::shared_ptr<GoalHandle> &)>;
+  using AcceptedHandler = std::function<void(const std::shared_ptr<GoalHandle> &)>;
+  using LateAcceptedHandler = std::function<void(const std::shared_ptr<GoalHandle> &)>;
+
+  ActionCallbackLifetime(
+    GoalHandler goal_handler,
+    CancelHandler cancel_handler,
+    AcceptedHandler accepted_handler,
+    LateAcceptedHandler late_accepted_handler)
+  : goal_handler_(std::move(goal_handler)),
+    cancel_handler_(std::move(cancel_handler)),
+    accepted_handler_(std::move(accepted_handler)),
+    late_accepted_handler_(std::move(late_accepted_handler))
+  {
+  }
+
+  [[nodiscard]] rclcpp_action::GoalResponse on_goal(
+    const GoalUUID & uuid,
+    std::shared_ptr<const ExecuteMission::Goal> goal)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!active_ || !goal_handler_) {
+      return rclcpp_action::GoalResponse::REJECT;
+    }
+    return goal_handler_(uuid, std::move(goal));
+  }
+
+  [[nodiscard]] rclcpp_action::CancelResponse on_cancel(
+    const std::shared_ptr<GoalHandle> & goal_handle)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!active_ || !cancel_handler_) {
+      return rclcpp_action::CancelResponse::REJECT;
+    }
+    return cancel_handler_(goal_handle);
+  }
+
+  void on_accepted(const std::shared_ptr<GoalHandle> & goal_handle)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (active_ && accepted_handler_) {
+      accepted_handler_(goal_handle);
+      return;
+    }
+    if (late_accepted_handler_) {
+      late_accepted_handler_(goal_handle);
+    }
+  }
+
+  void deactivate() noexcept
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    active_ = false;
+    goal_handler_ = {};
+    cancel_handler_ = {};
+    accepted_handler_ = {};
+  }
+
+  [[nodiscard]] bool active() const noexcept
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return active_;
+  }
+
+private:
+  mutable std::mutex mutex_;
+  GoalHandler goal_handler_;
+  CancelHandler cancel_handler_;
+  AcceptedHandler accepted_handler_;
+  LateAcceptedHandler late_accepted_handler_;
+  bool active_{true};
+};
 
 constexpr char kExecuteAction[] = "/mission/execute";
 constexpr char kStopService[] = "/mission/stop";
@@ -186,6 +269,8 @@ public:
       [this]() {request_independent_emergency();},
       [this](const RuntimeEmergencyFenceSnapshot & snapshot) {
         if (execution_plane_ && execution_plane_->core()) {
+          std::lock_guard<std::recursive_mutex> lock(
+            execution_plane_->core_serial_mutex());
           execution_plane_->core()->fail_closed_at_epoch(
             snapshot.admission_epoch, snapshot.detail);
         }
@@ -221,6 +306,7 @@ public:
     conditioning_config.stop_barrier = config_.stop_barrier;
     conditioning_config.collision_source_timeout = std::chrono::milliseconds(
       kTrustedCollisionSourceTimeoutMs);
+    conditioning_config.transaction_plane = admission_gate_.transaction_plane();
     conditioning_config.admission_fence_check = [this](const std::uint64_t epoch) {
         return admission_gate_.admission_allowed(
           epoch,
@@ -270,18 +356,40 @@ public:
 
     action_callback_group_ = create_callback_group(
       rclcpp::CallbackGroupType::Reentrant);
+    action_callback_lifetime_ = std::make_shared<ActionCallbackLifetime>(
+      [this](const GoalUUID & uuid, std::shared_ptr<const ExecuteMission::Goal> goal) {
+        return on_goal(uuid, std::move(goal));
+      },
+      [this](const std::shared_ptr<GoalHandle> & goal_handle) {
+        return on_cancel(goal_handle);
+      },
+      [this](const std::shared_ptr<GoalHandle> & goal_handle) {
+        on_accepted(goal_handle);
+      },
+      [](const std::shared_ptr<GoalHandle> & goal_handle) {
+        auto result = std::make_shared<ExecuteMission::Result>();
+        fill_result(
+          MissionResult{
+          MissionResultCode::SafetyFault, -1,
+          "Runtime action callback arrived after bounded shutdown"},
+          *result);
+        goal_handle->abort(result);
+      });
     action_server_ = rclcpp_action::create_server<ExecuteMission>(
       this,
       kExecuteAction,
-      [this](const rclcpp_action::GoalUUID & uuid,
-      std::shared_ptr<const ExecuteMission::Goal> goal) {
-        return on_goal(uuid, goal);
+      [lifetime = action_callback_lifetime_](
+        const rclcpp_action::GoalUUID & uuid,
+        std::shared_ptr<const ExecuteMission::Goal> goal) {
+        return lifetime->on_goal(uuid, std::move(goal));
       },
-      [this](const std::shared_ptr<GoalHandle> goal_handle) {
-        return on_cancel(goal_handle);
+      [lifetime = action_callback_lifetime_](
+        const std::shared_ptr<GoalHandle> goal_handle) {
+        return lifetime->on_cancel(goal_handle);
       },
-      [this](const std::shared_ptr<GoalHandle> goal_handle) {
-        on_accepted(goal_handle);
+      [lifetime = action_callback_lifetime_](
+        const std::shared_ptr<GoalHandle> goal_handle) {
+        lifetime->on_accepted(goal_handle);
       },
       rcl_action_server_get_default_options(),
       action_callback_group_);
@@ -320,13 +428,13 @@ private:
       reinterpret_cast<const char *>(uuid.data()), uuid.size());
   }
 
-  void wait_for_action_admission_drain() noexcept
+  [[nodiscard]] bool wait_for_action_admission_drain() noexcept
   {
     (void)action_admission_tracker_.revoke_expired(clock_->now());
     const auto handoff_deadline = std::chrono::steady_clock::now() +
       ActionAdmissionTracker::kDefaultHandoffDeadline;
     if (action_admission_tracker_.wait_for_drain_until(handoff_deadline)) {
-      return;
+      return true;
     }
     // A response may have been sent without an on_accepted callback.  Revoke
     // those provisional tickets at the fixed bound, then give an already
@@ -334,7 +442,7 @@ private:
     (void)action_admission_tracker_.revoke_all_provisional(clock_->now());
     const auto callback_deadline = std::chrono::steady_clock::now() +
       ActionAdmissionTracker::kDefaultHandoffDeadline;
-    (void)action_admission_tracker_.wait_for_drain_until(callback_deadline);
+    return action_admission_tracker_.wait_for_drain_until(callback_deadline);
   }
 
   void shutdown_barrier() noexcept
@@ -359,10 +467,13 @@ private:
     admission_gate_.begin_quiesce(action_admission_tracker_);
     timer_.reset();
     stop_service_.reset();
+    if (action_callback_lifetime_) {
+      action_callback_lifetime_->deactivate();
+    }
     // Keep the Action Server alive while a goal accepted by on_goal is still
     // waiting for on_accepted, and while any Action callback is aborting or
     // handing the goal to the runtime queue.
-    wait_for_action_admission_drain();
+    const auto action_admission_drained = wait_for_action_admission_drain();
     if (relative_motion_) {
       relative_motion_->begin_shutdown();
       relative_motion_->wait_for_internal_completion();
@@ -374,8 +485,19 @@ private:
     // Keep the Action Server and its GoalHandles alive until the runtime
     // worker has executed finish_goal and published each client-visible
     // terminal result.
-    action_server_.reset();
-    action_admission_tracker_.clear();
+    if (action_admission_drained) {
+      action_server_.reset();
+      action_admission_tracker_.clear();
+    } else {
+      // The revoked tombstone or a late callback is still held by the shared
+      // action lifetime state.  Keep the Action Server and tracker alive; the
+      // inactive callback path will reject new goals and abort a late handle
+      // exactly once instead of fabricating a result for a missing handle.
+      action_shutdown_fail_closed_ = true;
+      RCLCPP_ERROR(
+        get_logger(),
+        "Action callback drain deadline expired; preserving shared server lifetime");
+    }
     if (relative_motion_) {
       relative_motion_->finalize_shutdown();
     }
@@ -580,6 +702,8 @@ private:
   {
     event_ingress_.run(
       [this](RuntimeEvent & event) {
+        std::lock_guard<std::recursive_mutex> lock(
+          execution_plane_->core_serial_mutex());
         std::visit(
           [this](auto & typed_event) {process_event(typed_event);},
           event.payload);
@@ -610,11 +734,13 @@ private:
     action_adapter_.on_accepted(
       event.goal,
       [this, start_permit](const MissionGoal & value) {
-        return execution_plane_->core()->admit(value, [this, start_permit]() {
-                 return admission_gate_.start_allowed(start_permit) &&
-                        event_ingress_.admission_allowed(
-              start_permit.admission_epoch);
-          });
+        return execution_plane_->core()->admit(
+          value,
+          [this, start_permit]() {
+            return admission_gate_.start_allowed(start_permit) &&
+                   event_ingress_.admission_allowed(start_permit.admission_epoch);
+          },
+          start_permit.generation);
       },
       [this, &event, &admitted_id, &cancel_after_admission](
         const std::uint64_t mission_id) {
@@ -874,8 +1000,10 @@ private:
   std::thread::id shutdown_barrier_owner_{};
   bool shutdown_barrier_started_{false};
   bool shutdown_barrier_complete_{false};
+  bool action_shutdown_fail_closed_{false};
   rclcpp::Publisher<MissionStateMessage>::SharedPtr state_publisher_;
   rclcpp::CallbackGroup::SharedPtr action_callback_group_;
+  std::shared_ptr<ActionCallbackLifetime> action_callback_lifetime_;
   rclcpp_action::Server<ExecuteMission>::SharedPtr action_server_;
   rclcpp::Service<StopMission>::SharedPtr stop_service_;
   rclcpp::TimerBase::SharedPtr timer_;

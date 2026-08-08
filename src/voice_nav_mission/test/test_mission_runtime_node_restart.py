@@ -13,10 +13,11 @@
 # limitations under the License.
 
 from collections import deque
+import signal
 import time
 import unittest
 
-from action_msgs.msg import GoalStatus
+import launch
 from launch import LaunchDescription
 from launch_ros.actions import Node
 import launch_testing
@@ -32,13 +33,11 @@ from rclpy.qos import (
     ReliabilityPolicy,
 )
 from voice_nav_interfaces.action import ExecuteMission
-from voice_nav_interfaces.msg import MissionState, MissionStep
-from voice_nav_interfaces.srv import StopMission
+from voice_nav_interfaces.msg import MissionState
 
 
 STATE_TOPIC = '/mission/state'
 ACTION_NAME = '/mission/execute'
-STOP_NAME = '/mission/stop'
 RUNTIME_NODE = 'mission_runtime_node'
 
 
@@ -48,7 +47,8 @@ def generate_test_description():
         executable='mission_runtime_node',
         name=RUNTIME_NODE,
         output='screen',
-        respawn=False,
+        respawn=True,
+        respawn_delay=0.0,
         parameters=[
             {
                 'operating_mode': 'mapping',
@@ -70,7 +70,7 @@ def generate_test_description():
     )
 
 
-class MissionRuntimeNodeTest(unittest.TestCase):
+class MissionRuntimeRestartTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
@@ -82,10 +82,11 @@ class MissionRuntimeNodeTest(unittest.TestCase):
             rclpy.shutdown()
 
     def setUp(self):
-        self.node = rclpy.create_node('mission_runtime_contract_client')
+        self.node = rclpy.create_node('mission_runtime_restart_client')
         self.executor = MultiThreadedExecutor(num_threads=4)
         self.executor.add_node(self.node)
-        self.states = deque(maxlen=10)
+        self.states = deque(maxlen=20)
+        self.runtime_ids = set()
         self.state_subscription = self.node.create_subscription(
             MissionState,
             STATE_TOPIC,
@@ -100,85 +101,54 @@ class MissionRuntimeNodeTest(unittest.TestCase):
         self.action_client = ActionClient(
             self.node, ExecuteMission, ACTION_NAME
         )
-        self.stop_client = self.node.create_client(StopMission, STOP_NAME)
         self.addCleanup(self.cleanup)
 
     def cleanup(self):
         self.action_client.destroy()
-        self.stop_client.destroy()
         self.node.destroy_node()
 
     def on_state(self, message):
         self.states.append(message)
+        self.runtime_ids.add(message.runtime_instance_id)
 
-    def spin_until(self, predicate, timeout=5.0):
+    def spin_until(self, predicate, timeout=10.0):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             self.executor.spin_once(timeout_sec=0.1)
             value = predicate()
             if value is not None and value is not False:
                 return value
-        self.fail('等待 Runtime Interface 超时')
+        self.fail('等待 Runtime identity 超时')
 
-    def fresh_runtime_state(self):
+    def test_restart_rotates_identity_in_independent_process_fixture(
+        self, launch_service, proc_info, runtime
+    ):
         self.assertTrue(self.action_client.wait_for_server(timeout_sec=10.0))
+        first = self.spin_until(lambda: self.states[-1] if self.states else None)
+        first_id = first.runtime_instance_id
         self.states.clear()
-        return self.spin_until(lambda: self.states[-1] if self.states else None)
-
-    def make_goal(self, state, source, distance=0.5):
-        goal = ExecuteMission.Goal()
-        goal.source_instance_id = source
-        goal.source_seq = 1
-        goal.runtime_instance_id = state.runtime_instance_id
-        goal.admission_epoch = state.admission_epoch
-        move = MissionStep()
-        move.kind = MissionStep.MOVE_DISTANCE
-        move.distance_m = distance
-        goal.steps.append(move)
-        return goal
-
-    def test_late_state_and_business_rejection_without_gate(self):
-        state = self.fresh_runtime_state()
-        self.assertRegex(state.runtime_instance_id, r'^[0-9a-f]{32}$')
-        self.assertEqual(state.admission_epoch, 1)
-        self.assertEqual(state.operating_mode, MissionState.MAPPING)
-        self.assertEqual(state.availability, MissionState.UNAVAILABLE)
-        self.assertEqual(state.active_step, 2**32 - 1)
-        self.assertEqual(state.supported_step_mask, 3)
-        self.assertEqual(state.max_steps, 3)
-
-        send_future = self.action_client.send_goal_async(
-            self.make_goal(state, 'source-test')
+        launch_service.emit_event(
+            launch.events.process.SignalProcess(
+                signal_number=signal.SIGINT,
+                process_matcher=launch.events.matches_action(runtime),
+            )
         )
-        goal_handle = self.spin_until(lambda: send_future.result())
-        self.assertTrue(goal_handle)
-        result_future = goal_handle.get_result_async()
-        wrapped = self.spin_until(
-            lambda: result_future.result()
+        second = self.spin_until(
+            lambda: next(
+                (
+                    state for state in self.states
+                    if state.runtime_instance_id != first_id
+                ),
+                None,
+            ),
+            timeout=15.0,
         )
-        self.assertEqual(wrapped.status, GoalStatus.STATUS_ABORTED)
-        self.assertEqual(
-            wrapped.result.code,
-            ExecuteMission.Result.DEPENDENCY_UNAVAILABLE,
-        )
-        self.assertEqual(wrapped.result.failed_step, -1)
-
-    def test_invalid_goal_is_aborted_with_structured_result(self):
-        state = self.fresh_runtime_state()
-        send_future = self.action_client.send_goal_async(
-            self.make_goal(state, 'source-invalid', distance=0.0)
-        )
-        goal_handle = self.spin_until(lambda: send_future.result())
-        self.assertTrue(goal_handle)
-        result_future = goal_handle.get_result_async()
-        wrapped = self.spin_until(
-            lambda: result_future.result()
-        )
-        self.assertEqual(wrapped.status, GoalStatus.STATUS_ABORTED)
-        self.assertEqual(
-            wrapped.result.code, ExecuteMission.Result.INVALID_PLAN
-        )
-        self.assertEqual(wrapped.result.failed_step, -1)
+        self.assertNotEqual(second.runtime_instance_id, first_id)
+        self.assertEqual(second.admission_epoch, 1)
+        self.assertEqual(second.availability, MissionState.UNAVAILABLE)
+        self.assertEqual(second.gate_state, MissionState.GATE_FAULTED)
+        self.assertEqual(self.runtime_ids, {first_id, second.runtime_instance_id})
+        proc_info.assertWaitForStartup(runtime, timeout=10.0)
 
 
 @launch_testing.post_shutdown_test()

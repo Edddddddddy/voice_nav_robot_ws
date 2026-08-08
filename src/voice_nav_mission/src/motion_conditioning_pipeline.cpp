@@ -35,6 +35,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -562,9 +563,11 @@ private:
         "conditioning PREPARE was cancelled before the Gate request");
     }
 
-    AuthorityResult gate_prepare;
+    std::optional<AuthorityResult> gate_prepare_result;
     try {
-      gate_prepare = authority_->prepare(make_operation());
+      gate_prepare_result = submit_side_effect(
+        RuntimeTransactionSideEffect::Prepare,
+        [this]() {return authority_->prepare(make_operation());});
     } catch (const std::exception & error) {
       if (prepare_cancel_requested_.load()) {
         return finish_cancelled_prepare(
@@ -586,6 +589,19 @@ private:
       finish_teardown(result, TeardownIntent::Failure);
       return result;
     }
+
+    if (!gate_prepare_result.has_value()) {
+      if (prepare_cancel_requested_.load()) {
+        return finish_cancelled_prepare(
+          "conditioning PREPARE was cancelled at its transaction commit");
+      }
+      const auto result = fail_owned(
+        MotionConditioningFailure::SafetyFault,
+        "generation permit was revoked before MotionGate PREPARE", true);
+      finish_teardown(result, TeardownIntent::Failure);
+      return result;
+    }
+    const auto gate_prepare = std::move(*gate_prepare_result);
 
     bool gate_prepare_valid = false;
     std::string gate_prepare_detail;
@@ -734,7 +750,7 @@ private:
       return start_busy_result();
     }
 
-    AuthorityResult gate_open;
+    std::optional<AuthorityResult> gate_open_result;
     AuthorityOperation open_operation;
     bool activation_ready = false;
     try {
@@ -821,12 +837,17 @@ private:
     bool producer_started = false;
     std::unique_lock<std::mutex> producer_lock;
     try {
-      std::lock_guard<std::mutex> authority_lock(authority_call_mutex_);
-      gate_open = authority_->open(open_operation);
-      if (gate_open.snapshot.gate_instance_id != open_operation.gate_instance_id) {
-        gate_open.applied = false;
-        gate_open.detail = "MotionGate OPEN returned a stale gate identity";
-      }
+      gate_open_result = submit_side_effect(
+        RuntimeTransactionSideEffect::Open,
+        [this, &open_operation]() {
+          std::lock_guard<std::mutex> authority_lock(authority_call_mutex_);
+          auto result = authority_->open(open_operation);
+          if (result.snapshot.gate_instance_id != open_operation.gate_instance_id) {
+            result.applied = false;
+            result.detail = "MotionGate OPEN returned a stale gate identity";
+          }
+          return result;
+        });
     } catch (const std::exception & error) {
       return abort_activation(
         generation,
@@ -838,6 +859,13 @@ private:
         MotionConditioningFailure::SafetyFault,
         "MotionGate OPEN raised an unknown exception");
     }
+    if (!gate_open_result.has_value()) {
+      return abort_activation(
+        generation,
+        MotionConditioningFailure::SafetyFault,
+        "generation permit was revoked before MotionGate OPEN");
+    }
+    const auto gate_open = std::move(*gate_open_result);
     if (!activation_token_current(generation) ||
       !gate_open.applied || !gate_open.snapshot.authority_live ||
       gate_open.snapshot.motion_inhibited ||
@@ -1004,7 +1032,17 @@ private:
 
     if (!producer_started) {
       try {
-        producer_started = producer_ && producer_->start(config_.raw_topic);
+        const auto producer_result = submit_side_effect(
+          RuntimeTransactionSideEffect::ControllerStart,
+          [this]() {return producer_ && producer_->start(config_.raw_topic);});
+        if (!producer_result.has_value()) {
+          producer_lock.unlock();
+          return abort_activation(
+            generation,
+            MotionConditioningFailure::SafetyFault,
+            "generation permit was revoked before controller start");
+        }
+        producer_started = *producer_result;
       } catch (const std::exception & error) {
         producer_lock.unlock();
         return abort_activation(
@@ -1129,6 +1167,22 @@ private:
   }
 
 private:
+  template<typename Operation>
+  [[nodiscard]] auto submit_side_effect(
+    const RuntimeTransactionSideEffect side_effect,
+    Operation && operation)
+  -> std::optional<std::invoke_result_t<Operation>>
+  {
+    if (!config_.transaction_plane) {
+      return std::forward<Operation>(operation)();
+    }
+    const auto generation = config_.transaction_generation_provider ?
+      config_.transaction_generation_provider() :
+      config_.transaction_plane->generation();
+    return config_.transaction_plane->submit(
+      generation, side_effect, std::forward<Operation>(operation));
+  }
+
   static std::chrono::milliseconds remaining_until(
     std::chrono::steady_clock::time_point deadline)
   {

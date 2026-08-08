@@ -46,6 +46,7 @@
 
 #include "voice_nav_mission/mission_authority_convergence.hpp"
 #include "voice_nav_mission/motion_conditioning_pipeline.hpp"
+#include "voice_nav_mission/runtime_transaction_plane.hpp"
 
 namespace voice_nav_mission
 {
@@ -100,6 +101,46 @@ private:
   std::mutex mutex_;
   std::condition_variable condition_;
   bool armed_{false};
+  bool entered_{false};
+  bool released_{false};
+};
+
+class TransactionCommitBarrier final
+{
+public:
+  explicit TransactionCommitBarrier(const RuntimeTransactionSideEffect target)
+  : target_(target)
+  {
+  }
+
+  void operator()(const RuntimeTransactionSideEffect side_effect)
+  {
+    if (side_effect != target_) {
+      return;
+    }
+    std::unique_lock<std::mutex> lock(mutex_);
+    entered_ = true;
+    condition_.notify_all();
+    condition_.wait(lock, [this]() {return released_;});
+  }
+
+  bool wait_for_entry(std::chrono::milliseconds timeout = 1s)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, timeout, [this]() {return entered_;});
+  }
+
+  void release()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    released_ = true;
+    condition_.notify_all();
+  }
+
+private:
+  RuntimeTransactionSideEffect target_;
+  std::mutex mutex_;
+  std::condition_variable condition_;
   bool entered_{false};
   bool released_{false};
 };
@@ -1157,6 +1198,131 @@ TEST_F(MotionConditioningPipelineTest, LeaseLossDuringActivationNeverStartsProdu
     std::count(
       calls.cbegin(), calls.cend(),
       AuthorityOperationKind::Renew), 2);
+}
+
+TEST_F(
+  MotionConditioningPipelineTest,
+  TransactionQuiesceAtPrepareCommitPreventsAllStartSideEffects)
+{
+  auto commit = std::make_shared<TransactionCommitBarrier>(
+    RuntimeTransactionSideEffect::Prepare);
+  auto pipeline_config = config();
+  pipeline_config.transaction_plane = std::make_shared<RuntimeTransactionPlane>(
+    1U,
+    [commit](const RuntimeTransactionSideEffect side_effect) {
+      (*commit)(side_effect);
+    });
+  pipeline_config.transaction_generation_provider = []() {return 1U;};
+  MotionConditioningPipeline pipeline(
+    *client, authority, producer, pipeline_config);
+
+  std::optional<MotionConditioningResult> result;
+  std::thread prepare_thread([&]() {result = pipeline.prepare();});
+  ASSERT_TRUE(commit->wait_for_entry());
+  pipeline_config.transaction_plane->quiesce(2U);
+  commit->release();
+  prepare_thread.join();
+
+  ASSERT_TRUE(result.has_value());
+  EXPECT_FALSE(result->ok);
+  const auto calls = authority->calls();
+  EXPECT_EQ(
+    std::count(calls.cbegin(), calls.cend(), AuthorityOperationKind::Prepare), 0);
+  EXPECT_EQ(
+    std::count(calls.cbegin(), calls.cend(), AuthorityOperationKind::Open), 0);
+  EXPECT_EQ(producer->start_count, 0U);
+  const auto snapshot = authority->snapshot();
+  EXPECT_EQ(snapshot.state, GateState::Inhibited);
+  EXPECT_TRUE(snapshot.motion_inhibited);
+  EXPECT_TRUE(snapshot.zero_published);
+}
+
+TEST_F(
+  MotionConditioningPipelineTest,
+  TransactionQuiesceAtOpenCommitPreventsOpenAndControllerStart)
+{
+  auto commit = std::make_shared<TransactionCommitBarrier>(
+    RuntimeTransactionSideEffect::Open);
+  auto pipeline_config = config();
+  pipeline_config.transaction_plane = std::make_shared<RuntimeTransactionPlane>(
+    1U,
+    [commit](const RuntimeTransactionSideEffect side_effect) {
+      (*commit)(side_effect);
+    });
+  pipeline_config.transaction_generation_provider = []() {return 1U;};
+  MotionConditioningPipeline pipeline(
+    *client, authority, producer, pipeline_config);
+  ASSERT_TRUE(pipeline.prepare().ok);
+
+  std::optional<MotionConditioningResult> result;
+  std::thread start_thread([&]() {result = pipeline.start();});
+  const auto entered = commit->wait_for_entry(2s);
+  if (!entered) {
+    commit->release();
+    start_thread.join();
+  }
+  ASSERT_TRUE(entered);
+  pipeline_config.transaction_plane->quiesce(2U);
+  commit->release();
+  start_thread.join();
+
+  ASSERT_TRUE(result.has_value());
+  EXPECT_FALSE(result->ok);
+  const auto calls = authority->calls();
+  EXPECT_EQ(
+    std::count(calls.cbegin(), calls.cend(), AuthorityOperationKind::Open), 0);
+  EXPECT_EQ(producer->start_count, 0U);
+  const auto snapshot = authority->snapshot();
+  EXPECT_EQ(snapshot.state, GateState::Inhibited);
+  EXPECT_TRUE(snapshot.motion_inhibited);
+  EXPECT_TRUE(snapshot.zero_published);
+}
+
+TEST_F(
+  MotionConditioningPipelineTest,
+  TransactionQuiesceAtControllerStartPreventsProducerStart)
+{
+  auto commit = std::make_shared<TransactionCommitBarrier>(
+    RuntimeTransactionSideEffect::ControllerStart);
+  auto pipeline_config = config();
+  auto health_ready = std::make_shared<CallbackCounter>();
+  pipeline_config.transaction_plane = std::make_shared<RuntimeTransactionPlane>(
+    1U,
+    [commit](const RuntimeTransactionSideEffect side_effect) {
+      (*commit)(side_effect);
+    });
+  pipeline_config.transaction_generation_provider = []() {return 1U;};
+  pipeline_config.prepare_open_deadline = 4s;
+  pipeline_config.after_health_callback = [health_ready]() {
+      (*health_ready)();
+    };
+  MotionConditioningPipeline pipeline(
+    *client, authority, producer, pipeline_config);
+  ASSERT_TRUE(pipeline.prepare().ok);
+  health_ready->expect(4U);
+  graph->publish_health_once();
+  ASSERT_TRUE(health_ready->wait_for_target());
+
+  std::optional<MotionConditioningResult> result;
+  std::thread start_thread([&]() {result = pipeline.start();});
+  const auto entered = commit->wait_for_entry(5s);
+  if (!entered) {
+    commit->release();
+    start_thread.join();
+  }
+  ASSERT_TRUE(entered) <<
+    (result.has_value() ? result->detail : "controller start did not return");
+  pipeline_config.transaction_plane->quiesce(2U);
+  commit->release();
+  start_thread.join();
+
+  ASSERT_TRUE(result.has_value());
+  EXPECT_FALSE(result->ok);
+  EXPECT_EQ(producer->start_count, 0U);
+  const auto snapshot = authority->snapshot();
+  EXPECT_EQ(snapshot.state, GateState::Inhibited);
+  EXPECT_TRUE(snapshot.motion_inhibited);
+  EXPECT_TRUE(snapshot.zero_published);
 }
 
 TEST_F(MotionConditioningPipelineTest, StopAtActivationBarrierRejectsLateProducerStart)
