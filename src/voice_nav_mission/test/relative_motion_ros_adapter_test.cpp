@@ -210,8 +210,9 @@ TEST_F(
   EXPECT_TRUE(shutdown_finished.load());
   EXPECT_TRUE(adapter.zero_proven());
   EXPECT_EQ(authority->inhibit_count(), 1U);
-  EXPECT_EQ(result_count.load(), 0U);
+  EXPECT_EQ(result_count.load(), 1U);
   adapter.shutdown();
+  EXPECT_EQ(result_count.load(), 1U);
 }
 
 }  // namespace

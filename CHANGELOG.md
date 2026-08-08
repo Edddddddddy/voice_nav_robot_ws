@@ -64,6 +64,12 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   keep 200 ms steady dependency liveness separate from the 300 ms raw
   ROS-time Collision Monitor source-age limit. Headless raw-age / TF physical
   acceptance is intentionally not claimed here and is tracked by Issue #72.
+- Recorded the RelativeMotion production seam contract: control saturation
+  raises an independent EmergencyFence, cancellation and start-drain cleanup
+  are generation-fenced, health failures preserve the distinction between
+  `DEPENDENCY_UNAVAILABLE` and unproven Gate inhibit/zero
+  (`SAFETY_FAULT`), active shutdown delivers completion once, and recent
+  terminal records remain bounded.
 - Finalized the pre-1.0 Mission V1 public Interface migration: bounded
   `MissionStep`, fenced `ExecuteMission`, `MissionState`, and `StopMission`
   types now generate successfully for C++ and Python, with public contract
