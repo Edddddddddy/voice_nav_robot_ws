@@ -596,6 +596,90 @@ class CiReadinessContractTest(unittest.TestCase):
                         ),
                     )
 
+    def test_generated_metadata_rejects_nonstandard_labelled_extra(self):
+        checker = load_generated_checker()
+        payload = generated_mission_payload()
+        extra = payload["tests"][0].copy()
+        extra["name"] = "test_unapproved_launch.py"
+        payload["tests"].append(extra)
+
+        with self.assertRaises(
+            checker.GeneratedLaunchTestContractError,
+        ):
+            checker.validate_package_payload(
+                "voice_nav_mission",
+                payload,
+                expected_working_directory=(
+                    GENERATED_MISSION_WORKING_DIRECTORY
+                ),
+            )
+
+    def test_generated_metadata_rejects_nonstandard_runner_extra(self):
+        checker = load_generated_checker()
+        payload = generated_mission_payload()
+        extra = payload["tests"][0].copy()
+        extra["name"] = "test_unapproved_runner.py"
+        extra["properties"] = [
+            prop.copy() for prop in extra["properties"]
+        ]
+        label = next(
+            prop
+            for prop in extra["properties"]
+            if prop["name"] == "LABELS"
+        )
+        label["value"] = ["unit"]
+        payload["tests"].append(extra)
+
+        with self.assertRaises(
+            checker.GeneratedLaunchTestContractError,
+        ):
+            checker.validate_package_payload(
+                "voice_nav_mission",
+                payload,
+                expected_working_directory=(
+                    GENERATED_MISSION_WORKING_DIRECTORY
+                ),
+            )
+
+    def test_generated_metadata_rejects_ambiguous_or_missing_command(self):
+        checker = load_generated_checker()
+
+        def wrong_source_with_decoy(payload):
+            command = payload["tests"][0]["command"]
+            command[5] = (
+                "/workspace/src/voice_nav_mission/test/unapproved.py"
+            )
+            command.append(
+                "/workspace/src/voice_nav_mission/test/"
+                "test_motion_gate_node.py"
+            )
+
+        def duplicate_command(payload):
+            payload["tests"][0]["command"].append("--command")
+
+        def missing_source(payload):
+            payload["tests"][0]["command"].pop()
+
+        mutations = (
+            ("wrong source with decoy", wrong_source_with_decoy),
+            ("duplicate command", duplicate_command),
+            ("missing source", missing_source),
+        )
+        for name, mutate in mutations:
+            with self.subTest(command=name):
+                payload = generated_mission_payload()
+                mutate(payload)
+                with self.assertRaises(
+                    checker.GeneratedLaunchTestContractError,
+                ):
+                    checker.validate_package_payload(
+                        "voice_nav_mission",
+                        payload,
+                        expected_working_directory=(
+                            GENERATED_MISSION_WORKING_DIRECTORY
+                        ),
+                    )
+
     def test_generated_metadata_rejects_isolation_override(self):
         checker = load_generated_checker()
         payload = generated_mission_payload()

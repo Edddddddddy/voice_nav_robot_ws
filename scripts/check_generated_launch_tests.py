@@ -96,6 +96,43 @@ def _properties(test: dict, package_name: str) -> dict[str, object]:
     return properties
 
 
+def _property_value(test: dict, property_name: str) -> object:
+    raw_properties = test.get("properties")
+    if not isinstance(raw_properties, list):
+        return None
+    for raw_property in raw_properties:
+        if (
+            isinstance(raw_property, dict)
+            and raw_property.get("name") == property_name
+        ):
+            return raw_property.get("value")
+    return None
+
+
+def _has_launch_test_label(test: dict) -> bool:
+    labels = _property_value(test, "LABELS")
+    return isinstance(labels, list) and "launch_test" in labels
+
+
+def _uses_official_runner(test: dict) -> bool:
+    command = test.get("command")
+    return isinstance(command, list) and any(
+        isinstance(token, str)
+        and token.endswith(
+            "/ament_cmake_ros/cmake/run_test_isolated.py"
+        )
+        for token in command
+    )
+
+
+def _is_launch_test_candidate(test: dict) -> bool:
+    name = test.get("name")
+    return (
+        isinstance(name, str)
+        and name.startswith("test_test_")
+    ) or _has_launch_test_label(test) or _uses_official_runner(test)
+
+
 def validate_package_payload(
     package_name: str,
     payload: object,
@@ -117,10 +154,14 @@ def validate_package_payload(
         test
         for test in tests
         if isinstance(test, dict)
-        and isinstance(test.get("name"), str)
-        and test["name"].startswith("test_test_")
+        and _is_launch_test_candidate(test)
     ]
-    names = [test["name"] for test in launch_tests]
+    names = [test.get("name") for test in launch_tests]
+    if not all(isinstance(name, str) for name in names):
+        raise GeneratedLaunchTestContractError(
+            f"{package_name} generated launch-test inventory differs: "
+            f"expected={sorted(expected)}, actual={names!r}"
+        )
     if len(names) != len(set(names)) or set(names) != set(expected):
         raise GeneratedLaunchTestContractError(
             f"{package_name} generated launch-test inventory differs: "
@@ -188,12 +229,25 @@ def validate_package_payload(
             raise GeneratedLaunchTestContractError(
                 f"{package_name}:{test_name} bypasses the official runner"
             )
+        command_markers = [
+            index
+            for index, token in enumerate(command)
+            if token == "--command"
+        ]
+        if len(command_markers) != 1:
+            raise GeneratedLaunchTestContractError(
+                f"{package_name}:{test_name} must have one unambiguous "
+                "--command separator"
+            )
+        source_index = command_markers[0] + 1
+        if source_index >= len(command):
+            raise GeneratedLaunchTestContractError(
+                f"{package_name}:{test_name} has no command source"
+            )
         expected_source_suffix = (
             f"/src/{package_name}/test/{expected_test['source']}"
         )
-        if not any(
-            token.endswith(expected_source_suffix) for token in command
-        ):
+        if not command[source_index].endswith(expected_source_suffix):
             raise GeneratedLaunchTestContractError(
                 f"{package_name}:{test_name} runs the wrong source test"
             )
