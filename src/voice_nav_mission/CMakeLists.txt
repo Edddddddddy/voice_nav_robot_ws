@@ -218,6 +218,10 @@ if(BUILD_TESTING)
     runtime_event_queue_test
     PRIVATE include
   )
+  target_link_libraries(
+    runtime_event_queue_test
+    mission_runtime_core
+  )
 
   ament_add_gtest(
     relative_motion_ros_adapter_test

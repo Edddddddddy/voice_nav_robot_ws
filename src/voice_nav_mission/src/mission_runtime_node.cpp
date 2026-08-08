@@ -184,6 +184,10 @@ public:
         if (core_) {
           core_->fail_closed_at_epoch(snapshot.admission_epoch, snapshot.detail);
         }
+      },
+      [](const RuntimeEvent & event) {
+        return std::holds_alternative<CancelEvent>(event.payload) ||
+               std::holds_alternative<StopEvent>(event.payload);
       })
   {
     if (std::string(get_fully_qualified_name()) != "/mission_runtime_node") {
@@ -446,34 +450,17 @@ private:
     event_ingress_.request_emergency(std::move(detail));
   }
 
-  void process_emergency_fence()
-  {
-    (void)event_ingress_.process_pending_fence();
-  }
-
   void run_runtime_events()
   {
-    RuntimeEvent event;
-    while (true) {
-      const auto wait_result = event_ingress_.wait_pop(event);
-      if (wait_result == RuntimeEventQueueType::WaitResult::Closed) {
-        break;
-      }
-      if (wait_result == RuntimeEventQueueType::WaitResult::ExternalWake) {
-        process_emergency_fence();
-        continue;
-      }
-      try {
+    event_ingress_.run(
+      [this](RuntimeEvent & event) {
         std::visit(
           [this](auto & typed_event) {process_event(typed_event);},
           event.payload);
-      } catch (const std::exception & error) {
-        request_emergency_fence(
-          std::string{"Runtime event worker raised: "} + error.what());
-      } catch (...) {
-        request_emergency_fence("Runtime event worker raised an unknown exception");
-      }
-    }
+      },
+      [this](std::string detail) {
+        request_emergency_fence(std::move(detail));
+      });
   }
 
   void process_event(AdmitEvent & event)
