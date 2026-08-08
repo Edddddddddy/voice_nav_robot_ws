@@ -231,6 +231,13 @@ Node mutex. Stationarity starts at the actual steady-clock `zero_proven_at` and
 uses the absolute `zero_proven_at + 1200 ms` deadline. This Task proves the
 pure-control and ROS-integration layers; headless physical raw-stamp-age and TF
 acceptance is tracked independently by Issue #72.
+Shutdown closes command, timer, scan/clock, conditioning-health, collision,
+and renew ingress immediately, while retaining only the Adapter's odom
+subscription for the post-zero proof. The retained callback is observation-only
+after Gate zero and cannot renew, plan, publish, or advance Runtime counters.
+Gate zero remains bounded by the trusted `250 ms` stop barrier; the Node-level
+trusted shutdown deadline is the joint `250 ms + 1200 ms` budget, and the odom
+ingress is drained after stationarity succeeds or fails.
 
 ### Simulation Module
 

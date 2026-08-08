@@ -33,6 +33,12 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   cleanup-time extension. The #35 conditioning handover is restored to its
   `2000 ms` component RPC / `4000 ms` PREPARE-to-OPEN policy and
   `OPEN -> Collision Monitor -> Velocity Smoother -> producer` order.
+- Added the production shutdown split for RelativeMotion: runtime ingress is
+  closed immediately, only the Adapter odom ingress remains for the bounded
+  post-zero `200 ms` stationarity proof, and the Node uses the trusted joint
+  `250 ms` Gate stop barrier plus `1200 ms` stationarity deadline. Counters and
+  terminal state are frozen after the barrier, including the no-odom
+  fail-closed path.
 - Added the reviewed VN-0010 implementation for an independent,
   fail-closed MotionGate: package-private bounded ROS types, an internal
   non-installed static `MotionGateCore`, the installed `motion_gate_node`,

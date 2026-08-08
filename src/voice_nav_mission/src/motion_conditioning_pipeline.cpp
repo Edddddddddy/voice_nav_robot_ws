@@ -227,6 +227,7 @@ public:
         return false;
       }
       ++active;
+      ++active_by_thread[std::this_thread::get_id()];
       return true;
     }
 
@@ -236,9 +237,16 @@ public:
       if (active > 0U) {
         --active;
       }
-      if (active == 0U) {
-        condition.notify_all();
+      const auto thread_iterator = active_by_thread.find(
+        std::this_thread::get_id());
+      if (thread_iterator != active_by_thread.end()) {
+        if (thread_iterator->second > 1U) {
+          --thread_iterator->second;
+        } else {
+          active_by_thread.erase(thread_iterator);
+        }
       }
+      condition.notify_all();
     }
 
     void disable()
@@ -250,7 +258,13 @@ public:
     void wait()
     {
       std::unique_lock<std::mutex> lock(mutex);
-      condition.wait(lock, [this]() {return active == 0U;});
+      const auto current_thread = std::this_thread::get_id();
+      condition.wait(lock, [this, current_thread]() {
+          const auto current_iterator = active_by_thread.find(current_thread);
+          const auto current_active = current_iterator == active_by_thread.end() ?
+          0U : current_iterator->second;
+          return active <= current_active;
+        });
     }
 
     std::size_t active_count() const
@@ -296,6 +310,7 @@ private:
     std::condition_variable condition;
     bool accepting{true};
     std::size_t active{0U};
+    std::unordered_map<std::thread::id, std::size_t> active_by_thread;
   };
 
   struct IngressCallbackGuard
@@ -1163,6 +1178,11 @@ private:
     return result;
   }
 
+  void begin_shutdown_ingress() noexcept
+  {
+    disable_ingress_callbacks();
+  }
+
   MotionConditioningResult fail(
     MotionConditioningCorrelationToken token,
     MotionConditioningFailure failure,
@@ -1813,6 +1833,11 @@ private:
 
   [[nodiscard]] MotionConditioningResult stop_owned()
   {
+    // Close health, collision, and renew ingress before the independent Gate
+    // zero operation.  The RelativeMotion ROS Adapter owns a separate odom
+    // ingress for the post-zero stationarity proof; this Module's odom is
+    // only dependency health and must not keep running during teardown.
+    disable_ingress_callbacks();
     bool zero_proven = false;
     std::chrono::steady_clock::time_point zero_proven_at{};
     // Invalidation in begin_teardown() is the cancellation fence.  Prove
@@ -1831,6 +1856,7 @@ private:
     if (!zero_proven) {
       zero_proven = inhibit_gate(true, &zero_proven_at);
     }
+    wait_for_ingress_callbacks();
     disable_renew_callbacks();
     wait_for_renew_callbacks();
     // The emergency zero proof above is independent and immediate.  The
@@ -1916,6 +1942,9 @@ private:
     std::string detail,
     bool wait_for_callbacks)
   {
+    // A failed generation cannot keep renewing or observing runtime health
+    // while its immutable zero/terminal cleanup is in flight.
+    disable_ingress_callbacks();
     disable_renew_callbacks();
     if (wait_for_callbacks) {
       wait_for_renew_callbacks();
@@ -1926,6 +1955,7 @@ private:
     bool zero_proven = false;
     std::chrono::steady_clock::time_point zero_proven_at{};
     zero_proven = inhibit_gate(true, &zero_proven_at);
+    wait_for_ingress_callbacks();
     if (!destroying_.load() && !wait_for_start_operations()) {
       cleanup_blocked_ = true;
       schedule_cleanup_continuation();
@@ -3643,6 +3673,19 @@ MotionConditioningState MotionConditioningPipeline::state() const noexcept
 MotionConditioningResult MotionConditioningPipeline::last_result() const
 {
   return impl_->last_result();
+}
+
+void MotionConditioningPipeline::begin_shutdown_ingress() noexcept
+{
+  if (impl_) {
+    impl_->begin_shutdown_ingress();
+  }
+}
+
+void detail::begin_motion_conditioning_shutdown(
+  MotionConditioningPipeline & pipeline) noexcept
+{
+  pipeline.begin_shutdown_ingress();
 }
 
 }  // namespace voice_nav_mission

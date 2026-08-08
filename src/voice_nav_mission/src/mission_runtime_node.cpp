@@ -477,9 +477,10 @@ private:
       shutdown_barrier_owner_ = std::this_thread::get_id();
     }
 
+    const auto shutdown_deadline = std::chrono::steady_clock::now() +
+      config_.stop_barrier + config_.stationarity_deadline;
     const auto shutdown_outcome = shutdown_coordinator_ ?
-      shutdown_coordinator_->run(
-        std::chrono::steady_clock::now() + config_.stop_barrier) :
+      shutdown_coordinator_->run(shutdown_deadline) :
       RuntimeShutdownCoordinator::Outcome{false, true};
     if (!shutdown_outcome.transaction_drained) {
       action_shutdown_fail_closed_ = true;

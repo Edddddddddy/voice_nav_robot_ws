@@ -97,6 +97,36 @@ private:
   bool shutdown_waiting_{false};
 };
 
+class CallbackCount final
+{
+public:
+  void observe()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++count_;
+    condition_.notify_all();
+  }
+
+  bool wait_for(const std::size_t expected)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, 1s, [this, expected]() {
+               return count_ >= expected;
+           });
+  }
+
+  std::size_t value() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return count_;
+  }
+
+private:
+  mutable std::mutex mutex_;
+  std::condition_variable condition_;
+  std::size_t count_{0U};
+};
+
 class ReapState final
 {
 public:
@@ -1032,6 +1062,48 @@ TEST_F(
       };
     },
     OdomPublisher{});
+}
+
+TEST_F(
+  RelativeMotionRosAdapterTest,
+  ShutdownRetainsOdomIngressForPostZeroStationarity)
+{
+  auto node = std::make_shared<rclcpp::Node>(
+    "relative_motion_adapter_stationarity_odom");
+  auto authority = std::make_shared<BlockingAuthority>();
+  MotionConditioningConfig conditioning_config;
+  conditioning_config.odom_topic = "/adapter_stationarity/odom";
+  conditioning_config.scan_topic = "/adapter_stationarity/scan";
+  conditioning_config.clock_topic = "/adapter_stationarity/clock";
+  conditioning_config.component_rpc_timeout = 100ms;
+  conditioning_config.prepare_open_deadline = 1s;
+  conditioning_config.stop_barrier = 100ms;
+  CallbackCount odom_callbacks;
+  conditioning_config.before_adapter_odom_callback = [&odom_callbacks]() {
+      odom_callbacks.observe();
+    };
+  auto relay = install_completion_relay(conditioning_config);
+  RelativeMotionRosAdapter adapter(*node, authority, {}, conditioning_config);
+
+  rclcpp::executors::MultiThreadedExecutor executor(
+    rclcpp::ExecutorOptions(), 2U);
+  executor.add_node(node);
+  std::thread spin_thread([&executor]() {executor.spin();});
+
+  auto publisher = OdomPublisher{}.create_publisher(*node, conditioning_config);
+  ASSERT_TRUE(wait_for_subscription(*node, publisher));
+  OdomPublisher{}.send(*publisher);
+  ASSERT_TRUE(odom_callbacks.wait_for(1U));
+
+  adapter.begin_shutdown();
+  OdomPublisher{}.send(*publisher);
+
+  EXPECT_TRUE(odom_callbacks.wait_for(2U));
+  EXPECT_EQ(odom_callbacks.value(), 2U);
+
+  adapter.finalize_shutdown();
+  executor.cancel();
+  spin_thread.join();
 }
 
 TEST_F(
