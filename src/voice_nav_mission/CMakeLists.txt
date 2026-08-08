@@ -457,6 +457,8 @@ if(BUILD_TESTING)
     motion_conditioning_pipeline_integration_test
     motion_conditioning_pipeline
     motion_gate_core
+    mission_runtime_core
+    relative_motion_ros_adapter
     "${motion_gate_typesupport}"
   )
   set_tests_properties(

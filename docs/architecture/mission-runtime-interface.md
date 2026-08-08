@@ -302,6 +302,15 @@ PREPARE-to-OPEN handover deadline, and
 odom/scan/clock callbacks and the raw producer timer use shared lifetime
 ingress with weak owner captures and an in-flight drain before Adapter state
 is released.
+During shutdown, command, raw-timer, scan/clock, conditioning-health,
+collision, and renew ingress closes in the first phase. The Adapter keeps only
+its odom ingress alive for the post-zero stationarity proof; that callback is
+observation-only after shutdown begins and cannot create plans, feedback, or
+raw output. Gate zero keeps the trusted `250 ms` stop barrier, while the Node
+shutdown coordinator uses the joint `250 ms + 1200 ms` deadline. Stationarity
+starts at the actual steady-clock `zero_proven_at` and must prove continuous
+`200 ms` freshness before that absolute deadline; the odom subscription is
+closed and drained after the proof reaches a terminal outcome.
 
 ## Motion and map semantics
 

@@ -29,6 +29,20 @@
 namespace voice_nav_mission
 {
 
+class MotionConditioningPipeline;
+
+namespace detail
+{
+
+// Package-private shutdown seam.  It closes the conditioning health,
+// collision, and renew ingress before the Adapter starts its independent
+// Gate-zero transaction; RelativeMotionRosAdapter owns the separate odom
+// stationarity ingress.
+void begin_motion_conditioning_shutdown(
+  MotionConditioningPipeline & pipeline) noexcept;
+
+}  // namespace detail
+
 enum class MotionConditioningState : std::uint8_t
 {
   Stopped = 0,
@@ -166,6 +180,11 @@ public:
   [[nodiscard]] MotionConditioningResult last_result() const;
 
 private:
+  friend void detail::begin_motion_conditioning_shutdown(
+    MotionConditioningPipeline & pipeline) noexcept;
+
+  void begin_shutdown_ingress() noexcept;
+
   class Impl;
   std::unique_ptr<Impl> impl_;
 };

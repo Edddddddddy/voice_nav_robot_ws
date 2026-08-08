@@ -78,20 +78,42 @@ public:
   using CommandSupplier = std::function<RelativeMotionCommand()>;
   using Barrier = std::function<void()>;
 
-  [[nodiscard]] AdapterIngressGuard enter()
+  [[nodiscard]] AdapterIngressGuard enter_runtime()
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!accepting_) {
+    if (!runtime_accepting_) {
       return {};
     }
     ++in_flight_;
     return AdapterIngressGuard(shared_from_this());
   }
 
-  void disable()
+  [[nodiscard]] AdapterIngressGuard enter_odom()
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    accepting_ = false;
+    if (!odom_accepting_) {
+      return {};
+    }
+    ++in_flight_;
+    return AdapterIngressGuard(shared_from_this());
+  }
+
+  void disable_runtime()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    runtime_accepting_ = false;
+  }
+
+  void disable_odom()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    odom_accepting_ = false;
+  }
+
+  [[nodiscard]] bool runtime_accepting() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return runtime_accepting_;
   }
 
   void wait()
@@ -174,7 +196,8 @@ private:
 
   mutable std::mutex mutex_;
   std::condition_variable condition_;
-  bool accepting_{true};
+  bool runtime_accepting_{true};
+  bool odom_accepting_{true};
   std::size_t in_flight_{0U};
   OdomHandler odom_handler_;
   ScanHandler scan_handler_;
@@ -311,7 +334,7 @@ public:
       timer_ = node_.create_wall_timer(
         50ms,
         [weak_self, ingress]() {
-          auto guard = ingress->enter();
+          auto guard = ingress->enter_runtime();
           if (!guard.is_active()) {
             return;
           }
@@ -355,12 +378,18 @@ private:
       }
       publisher = publisher_;
     }
+    if (!ingress_->runtime_accepting()) {
+      return;
+    }
     const auto barrier = ingress_->copy_command_barrier();
     if (barrier) {
       barrier();
     }
     supplier = ingress_->copy_command_supplier();
     const auto command = supplier ? supplier() : RelativeMotionCommand{};
+    if (!ingress_->runtime_accepting()) {
+      return;
+    }
     TwistStamped message;
     message.header.stamp = node_.get_clock()->now();
     message.header.frame_id = "base_footprint";
@@ -470,7 +499,7 @@ public:
       conditioning_config_.odom_topic,
       rclcpp::SensorDataQoS(),
       [ingress](const Odometry::ConstSharedPtr message) {
-        auto guard = ingress->enter();
+        auto guard = ingress->enter_odom();
         if (!guard.is_active()) {
           return;
         }
@@ -484,7 +513,7 @@ public:
       conditioning_config_.scan_topic,
       latest_sensor_qos(),
       [ingress](const LaserScan::ConstSharedPtr) {
-        auto guard = ingress->enter();
+        auto guard = ingress->enter_runtime();
         if (!guard.is_active()) {
           return;
         }
@@ -498,7 +527,7 @@ public:
       conditioning_config_.clock_topic,
       rclcpp::ClockQoS(),
       [ingress](const Clock::ConstSharedPtr message) {
-        auto guard = ingress->enter();
+        auto guard = ingress->enter_runtime();
         if (!guard.is_active()) {
           return;
         }
@@ -526,7 +555,8 @@ public:
   void begin_shutdown() noexcept
   {
     begin_shutdown(
-      std::chrono::steady_clock::now() + policy_.stationarity_deadline);
+      std::chrono::steady_clock::now() + conditioning_config_.stop_barrier +
+      policy_.stationarity_deadline);
   }
 
   void begin_shutdown(const TimePoint deadline) noexcept
@@ -542,7 +572,8 @@ public:
     // Stop new source callbacks, but retain the subscriptions, producer, and
     // conditioning Module until the internal terminal delivery has reached
     // the live Runtime queue/Core.
-    ingress_->disable();
+    ingress_->disable_runtime();
+    detail::begin_motion_conditioning_shutdown(*conditioning_);
     request_emergency_stop_until(deadline);
     transaction_condition_.notify_all();
   }
@@ -574,6 +605,7 @@ public:
     begin_shutdown();
     wait_for_internal_completion();
 
+    ingress_->disable_odom();
     clock_subscription_.reset();
     scan_subscription_.reset();
     odom_subscription_.reset();
@@ -915,6 +947,9 @@ private:
   [[nodiscard]] RelativeMotionCommand command() const
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (shutting_down_) {
+      return {};
+    }
     return command_;
   }
 
@@ -1174,10 +1209,17 @@ private:
     DeliveryPlan plan;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      if (shutting_down_ && !stationarity_waiting_) {
+        condition_variable_.notify_all();
+        return;
+      }
       odom_seen_ = true;
       last_odom_at_ = now;
       latest_odom_ = sample;
-      if (active_ && !starting_ && (!teardown_started_ || stationarity_waiting_)) {
+      if (active_ && stationarity_waiting_) {
+        (void)controller_.observe_odom(sample, now);
+        command_ = {};
+      } else if (active_ && !starting_ && !teardown_started_ && !shutting_down_) {
         const auto event = controller_.observe_odom(sample, now);
         command_ = event.command;
         plan_from_event_locked(event, now, plan);
@@ -1189,10 +1231,19 @@ private:
 
   void on_scan()
   {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (shutting_down_) {
+        return;
+      }
+    }
     if (conditioning_config_.before_adapter_scan_callback) {
       conditioning_config_.before_adapter_scan_callback();
     }
     std::lock_guard<std::mutex> lock(mutex_);
+    if (shutting_down_) {
+      return;
+    }
     scan_seen_ = true;
     last_scan_at_ = std::chrono::steady_clock::now();
     condition_variable_.notify_all();
@@ -1200,6 +1251,12 @@ private:
 
   void on_clock(const Clock::ConstSharedPtr & message)
   {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (shutting_down_) {
+        return;
+      }
+    }
     if (conditioning_config_.before_adapter_clock_callback) {
       conditioning_config_.before_adapter_clock_callback();
     }
@@ -1207,6 +1264,9 @@ private:
       1000000000LL + static_cast<std::int64_t>(message->clock.nanosec);
     const auto now = std::chrono::steady_clock::now();
     std::lock_guard<std::mutex> lock(mutex_);
+    if (shutting_down_) {
+      return;
+    }
     if (clock_seen_ && stamp > last_clock_stamp_) {
       clock_advanced_ = true;
       last_clock_progress_at_ = now;
