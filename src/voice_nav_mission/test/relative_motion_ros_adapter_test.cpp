@@ -19,6 +19,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -401,6 +402,113 @@ TEST_F(
 
 TEST_F(
   RelativeMotionRosAdapterTest,
+  BeginShutdownWaitsForInternalResultBeforeFinalize)
+{
+  auto node = std::make_shared<rclcpp::Node>("relative_motion_adapter_phases");
+  auto authority = std::make_shared<BlockingAuthority>();
+  MotionConditioningConfig conditioning_config;
+  conditioning_config.component_rpc_timeout = 100ms;
+  conditioning_config.prepare_open_deadline = 1s;
+  conditioning_config.stop_barrier = 100ms;
+  RelativeMotionRosAdapter adapter(*node, authority, {}, conditioning_config);
+
+  CallbackBarrier result_barrier;
+  std::atomic<std::size_t> result_count{0U};
+  const MotionToken token{19U, 3U, 7U, 1U};
+  adapter.start(
+    token,
+    MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::MoveDistance), 0.1F, 0.0F, {}},
+    {},
+    [&result_count, &result_barrier](const MotionToken &, const ChildResult &) {
+      result_count.fetch_add(1U);
+      result_barrier.enter();
+    });
+  ASSERT_TRUE(authority->wait_for_prepare());
+
+  adapter.begin_shutdown();
+  authority->release_prepare();
+  ASSERT_TRUE(result_barrier.wait_for_entries(1U));
+
+  std::promise<void> finalize_promise;
+  auto finalize_future = finalize_promise.get_future();
+  std::thread finalize_thread([&]() {
+      adapter.finalize_shutdown();
+      finalize_promise.set_value();
+    });
+  EXPECT_EQ(finalize_future.wait_for(0ms), std::future_status::timeout);
+
+  result_barrier.release();
+  ASSERT_EQ(
+    finalize_future.wait_for(2s),
+    std::future_status::ready);
+  finalize_thread.join();
+
+  EXPECT_EQ(result_count.load(), 1U);
+  adapter.finalize_shutdown();
+  adapter.shutdown();
+}
+
+TEST_F(
+  RelativeMotionRosAdapterTest,
+  StartDuringQuiesceFailsClosedAndHealthyIsFalse)
+{
+  auto node = std::make_shared<rclcpp::Node>("relative_motion_adapter_quiesce");
+  auto authority = std::make_shared<BlockingAuthority>();
+  MotionConditioningConfig conditioning_config;
+  conditioning_config.component_rpc_timeout = 100ms;
+  conditioning_config.prepare_open_deadline = 1s;
+  conditioning_config.stop_barrier = 100ms;
+  RelativeMotionRosAdapter adapter(*node, authority, {}, conditioning_config);
+
+  adapter.begin_shutdown();
+  EXPECT_FALSE(adapter.healthy());
+  std::atomic<std::size_t> result_count{0U};
+  std::atomic<ChildResultCode> result_code{ChildResultCode::Failed};
+  adapter.start(
+    MotionToken{20U, 3U, 8U, 1U},
+    MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::MoveDistance), 0.1F, 0.0F, {}},
+    {},
+    [&result_count, &result_code](const MotionToken &, const ChildResult & result) {
+      result_code.store(result.code);
+      result_count.fetch_add(1U);
+    });
+
+  EXPECT_EQ(result_count.load(), 1U);
+  EXPECT_EQ(result_code.load(), ChildResultCode::SafetyFault);
+  adapter.finalize_shutdown();
+}
+
+TEST_F(RelativeMotionRosAdapterTest, PortStartRejectsRotatedAdmissionEpoch)
+{
+  auto node = std::make_shared<rclcpp::Node>("relative_motion_adapter_fence");
+  auto authority = std::make_shared<BlockingAuthority>();
+  MotionConditioningConfig conditioning_config;
+  conditioning_config.admission_fence_check = [](const std::uint64_t) {
+      return false;
+    };
+  RelativeMotionRosAdapter adapter(*node, authority, {}, conditioning_config);
+
+  std::atomic<std::size_t> result_count{0U};
+  std::atomic<ChildResultCode> result_code{ChildResultCode::Failed};
+  adapter.start(
+    MotionToken{22U, 4U, 10U, 1U},
+    MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::MoveDistance), 0.1F, 0.0F, {}},
+    {},
+    [&result_count, &result_code](const MotionToken &, const ChildResult & result) {
+      result_code.store(result.code);
+      result_count.fetch_add(1U);
+    });
+
+  EXPECT_EQ(result_count.load(), 1U);
+  EXPECT_EQ(result_code.load(), ChildResultCode::SafetyFault);
+  EXPECT_EQ(authority->inhibit_count(), 0U);
+}
+
+TEST_F(
+  RelativeMotionRosAdapterTest,
   MultiThreadedExecutorDrainsQueuedAndInflightOdomIngress)
 {
   run_source_shutdown_barrier(
@@ -485,6 +593,122 @@ TEST_F(
   EXPECT_EQ(command_barrier.entries(), 1U);
   executor.cancel();
   spin_thread.join();
+}
+
+TEST_F(
+  RelativeMotionRosAdapterTest,
+  DestructorWithoutExplicitShutdownDrainsActiveExecutorCallbacks)
+{
+  auto node = std::make_shared<rclcpp::Node>(
+    "relative_motion_adapter_implicit_shutdown");
+  auto authority = std::make_shared<BlockingAuthority>();
+  MotionConditioningConfig conditioning_config;
+  conditioning_config.odom_topic = "/adapter_implicit/odom";
+  conditioning_config.scan_topic = "/adapter_implicit/scan";
+  conditioning_config.clock_topic = "/adapter_implicit/clock";
+  conditioning_config.component_rpc_timeout = 100ms;
+  conditioning_config.prepare_open_deadline = 1s;
+  conditioning_config.stop_barrier = 100ms;
+  CallbackBarrier odom_barrier;
+  CallbackBarrier scan_barrier;
+  CallbackBarrier clock_barrier;
+  CallbackBarrier command_barrier;
+  CallbackBarrier ingress_barrier;
+  conditioning_config.before_adapter_odom_callback = [&odom_barrier]() {
+      odom_barrier.enter();
+    };
+  conditioning_config.before_adapter_scan_callback = [&scan_barrier]() {
+      scan_barrier.enter();
+    };
+  conditioning_config.before_adapter_clock_callback = [&clock_barrier]() {
+      clock_barrier.enter();
+    };
+  conditioning_config.before_adapter_command_supplier = [&command_barrier]() {
+      command_barrier.enter();
+    };
+  conditioning_config.before_adapter_ingress_wait = [&ingress_barrier]() {
+      ingress_barrier.mark_shutdown_wait();
+    };
+
+  auto adapter = std::make_unique<RelativeMotionRosAdapter>(
+    *node, authority, RelativeMotionPolicy{}, conditioning_config);
+  rclcpp::executors::MultiThreadedExecutor executor(
+    rclcpp::ExecutorOptions(), 4U);
+  executor.add_node(node);
+  std::thread spin_thread([&executor]() {executor.spin();});
+
+  auto odom_publisher = OdomPublisher{}.create_publisher(*node, conditioning_config);
+  auto scan_publisher = ScanPublisher{}.create_publisher(*node, conditioning_config);
+  auto clock_publisher = ClockPublisher{}.create_publisher(*node, conditioning_config);
+  ASSERT_TRUE(wait_for_subscription(*node, odom_publisher));
+  ASSERT_TRUE(wait_for_subscription(*node, scan_publisher));
+  ASSERT_TRUE(wait_for_subscription(*node, clock_publisher));
+  ASSERT_TRUE(detail::RelativeMotionRosAdapterTestAccess::start_raw_producer(
+      *adapter, "/adapter_implicit/raw"));
+  ASSERT_TRUE(command_barrier.wait_for_entries(1U));
+
+  std::mutex result_mutex;
+  std::condition_variable result_condition;
+  std::size_t result_count = 0U;
+  const MotionToken token{21U, 3U, 9U, 1U};
+  adapter->start(
+    token,
+    MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::MoveDistance), 0.1F, 0.0F, {}},
+    {},
+    [&](const MotionToken &, const ChildResult &) {
+      std::lock_guard<std::mutex> lock(result_mutex);
+      ++result_count;
+      result_condition.notify_all();
+    });
+  ASSERT_TRUE(authority->wait_for_prepare());
+
+  OdomPublisher{}.send(*odom_publisher);
+  ScanPublisher{}.send(*scan_publisher);
+  ClockPublisher{}.send(*clock_publisher);
+  ASSERT_TRUE(odom_barrier.wait_for_entries(1U));
+  ASSERT_TRUE(scan_barrier.wait_for_entries(1U));
+  ASSERT_TRUE(clock_barrier.wait_for_entries(1U));
+  OdomPublisher{}.send(*odom_publisher);
+  ScanPublisher{}.send(*scan_publisher);
+  ClockPublisher{}.send(*clock_publisher);
+
+  auto owned_adapter = std::move(adapter);
+  std::promise<void> destructor_promise;
+  auto destructor_future = destructor_promise.get_future();
+  std::thread destructor_thread(
+    [owned = std::move(owned_adapter), &destructor_promise]() mutable {
+      owned.reset();
+      destructor_promise.set_value();
+    });
+
+  authority->release_prepare();
+  ASSERT_TRUE(ingress_barrier.wait_for_shutdown_wait());
+  EXPECT_EQ(destructor_future.wait_for(0ms), std::future_status::timeout);
+  {
+    std::unique_lock<std::mutex> lock(result_mutex);
+    ASSERT_TRUE(result_condition.wait_for(lock, 2s, [&]() {
+        return result_count == 1U;
+      }));
+  }
+
+  command_barrier.release();
+  odom_barrier.release();
+  scan_barrier.release();
+  clock_barrier.release();
+  ASSERT_EQ(
+    destructor_future.wait_for(2s),
+    std::future_status::ready);
+  destructor_thread.join();
+
+  executor.cancel();
+  spin_thread.join();
+
+  EXPECT_EQ(result_count, 1U);
+  EXPECT_EQ(odom_barrier.entries(), 1U);
+  EXPECT_EQ(scan_barrier.entries(), 1U);
+  EXPECT_EQ(clock_barrier.entries(), 1U);
+  EXPECT_EQ(command_barrier.entries(), 1U);
 }
 
 }  // namespace

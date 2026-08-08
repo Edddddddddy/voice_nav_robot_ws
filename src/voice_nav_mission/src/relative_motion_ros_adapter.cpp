@@ -495,10 +495,8 @@ public:
         }
       },
       options);
-    transaction_thread_ = std::thread([weak_impl]() {
-          if (const auto impl = weak_impl.lock()) {
-            impl->transaction_loop();
-          }
+    transaction_thread_ = std::thread([this]() {
+          transaction_loop();
       });
   }
 
@@ -512,26 +510,48 @@ public:
     shutdown();
   }
 
-  void shutdown() noexcept
+  void begin_shutdown() noexcept
   {
-    bool already_shutdown = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      already_shutdown = shutdown_complete_;
-      if (!already_shutdown) {
-        shutdown_delivery_requested_ = true;
-        shutting_down_ = true;
+      if (shutdown_complete_) {
+        return;
       }
+      shutdown_delivery_requested_ = true;
+      shutting_down_ = true;
     }
-    if (already_shutdown) {
-      return;
-    }
-
+    // Stop new source callbacks, but retain the subscriptions, producer, and
+    // conditioning Module until the internal terminal delivery has reached
+    // the live Runtime queue/Core.
     ingress_->disable();
     request_emergency_stop();
+    transaction_condition_.notify_all();
+  }
+
+  void wait_for_internal_completion() noexcept
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    condition_variable_.wait(lock, [this]() {
+        return !active_ && teardown_complete_ &&
+               transaction_kind_ == TransactionKind::Idle &&
+               !transaction_in_progress_ &&
+               !emergency_stop_in_progress_ &&
+               !completion_delivery_in_progress_;
+      });
+  }
+
+  void finalize_shutdown() noexcept
+  {
+    begin_shutdown();
+    wait_for_internal_completion();
+
     clock_subscription_.reset();
     scan_subscription_.reset();
     odom_subscription_.reset();
+    if (conditioning_config_.before_adapter_ingress_wait) {
+      conditioning_config_.before_adapter_ingress_wait();
+    }
+    ingress_->wait();
     try {
       if (producer_) {
         producer_->stop();
@@ -541,13 +561,7 @@ public:
       // ingress barrier still prevents a callback from using released state.
     }
     {
-      std::unique_lock<std::mutex> lock(mutex_);
-      condition_variable_.wait(lock, [this]() {
-          return !active_ && teardown_complete_ &&
-                 transaction_kind_ == TransactionKind::Idle &&
-                 !transaction_in_progress_ &&
-                 !emergency_stop_in_progress_;
-        });
+      std::lock_guard<std::mutex> lock(mutex_);
       transaction_stop_ = true;
     }
     transaction_condition_.notify_all();
@@ -557,22 +571,29 @@ public:
     join_emergency_thread();
     conditioning_.reset();
     producer_.reset();
-    if (conditioning_config_.before_adapter_ingress_wait) {
-      conditioning_config_.before_adapter_ingress_wait();
-    }
-    ingress_->wait();
     {
       std::lock_guard<std::mutex> lock(mutex_);
       shutdown_complete_ = true;
+      condition_variable_.notify_all();
     }
+  }
+
+  void shutdown() noexcept
+  {
+    begin_shutdown();
+    finalize_shutdown();
   }
 
   [[nodiscard]] bool healthy() const
   {
     const auto now = std::chrono::steady_clock::now();
     bool active = false;
+    MotionConditioningState conditioning_state = MotionConditioningState::Failed;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      if (shutting_down_ || !conditioning_) {
+        return false;
+      }
       active = active_;
       if (active) {
         return true;
@@ -580,8 +601,9 @@ public:
       if (!dependencies_fresh_locked(now)) {
         return false;
       }
+      conditioning_state = conditioning_->state();
     }
-    return conditioning_->state() != MotionConditioningState::Failed;
+    return conditioning_state != MotionConditioningState::Failed;
   }
 
   void start(
@@ -608,6 +630,10 @@ public:
           rejection_code = ChildResultCode::SafetyFault;
           rejection_detail =
             "relative-motion start rejected by the active admission fence";
+        } else if (shutting_down_) {
+          rejection_code = ChildResultCode::SafetyFault;
+          rejection_detail =
+            "relative-motion start rejected during adapter shutdown";
         }
       } else {
         active_ = true;
@@ -1237,6 +1263,7 @@ private:
       teardown_safe_ = zero_proven &&
         conditioning_result.failure != MotionConditioningFailure::SafetyFault;
       result_callback = std::move(result_callback_);
+      completion_delivery_in_progress_ = static_cast<bool>(result_callback);
       condition_variable_.notify_all();
     }
     if (result_callback) {
@@ -1256,6 +1283,11 @@ private:
       } catch (...) {
         fail_transaction("relative-motion start result delivery raised");
       }
+    }
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      completion_delivery_in_progress_ = false;
+      condition_variable_.notify_all();
     }
   }
 
@@ -1364,6 +1396,7 @@ private:
 
     ResultCallback result_callback;
     bool deliver_result = false;
+    bool completion_delivery_started = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       deliver_result = request.deliver_result ||
@@ -1380,8 +1413,11 @@ private:
           conditioning_result.failure != MotionConditioningFailure::SafetyFault;
         if (deliver_result) {
           result_callback = std::move(result_callback_);
+          completion_delivery_started = static_cast<bool>(result_callback);
+          completion_delivery_in_progress_ = completion_delivery_started;
         } else {
           result_callback_ = {};
+          completion_delivery_in_progress_ = false;
         }
         condition_variable_.notify_all();
       }
@@ -1394,6 +1430,11 @@ private:
           node_.get_logger(),
           "Relative motion teardown result delivery raised");
       }
+    }
+    if (completion_delivery_started) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      completion_delivery_in_progress_ = false;
+      condition_variable_.notify_all();
     }
     const bool safe = zero && (!mission_active || stationary) &&
       conditioning_result.failure != MotionConditioningFailure::SafetyFault;
@@ -1436,6 +1477,7 @@ private:
   bool shutting_down_{false};
   bool shutdown_delivery_requested_{false};
   bool shutdown_complete_{false};
+  bool completion_delivery_in_progress_{false};
   bool emergency_stop_in_progress_{false};
   std::atomic<bool> cancel_requested_{false};
   bool active_{false};
@@ -1476,7 +1518,13 @@ RelativeMotionRosAdapter::RelativeMotionRosAdapter(
   impl_->initialize();
 }
 
-RelativeMotionRosAdapter::~RelativeMotionRosAdapter() = default;
+RelativeMotionRosAdapter::~RelativeMotionRosAdapter()
+{
+  if (impl_) {
+    impl_->shutdown();
+    impl_.reset();
+  }
+}
 
 bool RelativeMotionRosAdapter::healthy() const
 {
@@ -1510,6 +1558,27 @@ bool RelativeMotionRosAdapter::emergency_stop(
   const SteadyClockPort::TimePoint deadline)
 {
   return impl_ && impl_->emergency_stop(deadline);
+}
+
+void RelativeMotionRosAdapter::begin_shutdown() noexcept
+{
+  if (impl_) {
+    impl_->begin_shutdown();
+  }
+}
+
+void RelativeMotionRosAdapter::wait_for_internal_completion() noexcept
+{
+  if (impl_) {
+    impl_->wait_for_internal_completion();
+  }
+}
+
+void RelativeMotionRosAdapter::finalize_shutdown() noexcept
+{
+  if (impl_) {
+    impl_->finalize_shutdown();
+  }
 }
 
 void RelativeMotionRosAdapter::shutdown() noexcept
