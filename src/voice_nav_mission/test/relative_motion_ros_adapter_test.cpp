@@ -18,6 +18,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <future>
 #include <memory>
@@ -90,6 +91,110 @@ private:
   bool released_{false};
   bool shutdown_waiting_{false};
 };
+
+class ExternalCompletionRelay final
+{
+public:
+  ExternalCompletionRelay()
+  : worker_([this]() {run();})
+  {
+  }
+
+  ~ExternalCompletionRelay()
+  {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stopped_ = true;
+    }
+    condition_.notify_all();
+    if (worker_.joinable()) {
+      worker_.join();
+    }
+  }
+
+  [[nodiscard]] bool publish(RelativeMotionCompletionRecordPtr record)
+  {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (stopped_) {
+        return false;
+      }
+      records_.push_back(std::move(record));
+    }
+    condition_.notify_one();
+    return true;
+  }
+
+  [[nodiscard]] bool wait_for_deliveries(const std::size_t count)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, 1s, [this, count]() {
+               return delivered_ >= count;
+             });
+  }
+
+  [[nodiscard]] std::size_t deliveries() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return delivered_;
+  }
+
+  [[nodiscard]] std::thread::id last_delivery_thread() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return last_delivery_thread_;
+  }
+
+private:
+  void run()
+  {
+    for (;; ) {
+      RelativeMotionCompletionRecordPtr record;
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        condition_.wait(lock, [this]() {
+            return stopped_ || !records_.empty();
+          });
+        if (records_.empty() && stopped_) {
+          return;
+        }
+        record = std::move(records_.front());
+        records_.pop_front();
+      }
+      if (record && record->delivery) {
+        try {
+          record->delivery(record->token, record->result);
+        } catch (...) {
+          // The relay remains available for the next immutable record.
+        }
+      }
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++delivered_;
+        last_delivery_thread_ = std::this_thread::get_id();
+      }
+      condition_.notify_all();
+    }
+  }
+
+  mutable std::mutex mutex_;
+  std::condition_variable condition_;
+  std::deque<RelativeMotionCompletionRecordPtr> records_;
+  std::thread worker_;
+  std::size_t delivered_{0U};
+  std::thread::id last_delivery_thread_{};
+  bool stopped_{false};
+};
+
+std::shared_ptr<ExternalCompletionRelay> install_completion_relay(
+  MotionConditioningConfig & config)
+{
+  auto relay = std::make_shared<ExternalCompletionRelay>();
+  config.completion_relay = [relay](RelativeMotionCompletionRecordPtr record) {
+      return relay->publish(std::move(record));
+    };
+  return relay;
+}
 
 template<typename PublisherT>
 bool wait_for_subscription(
@@ -271,6 +376,7 @@ void run_source_shutdown_barrier(
   conditioning_config.component_rpc_timeout = 100ms;
   conditioning_config.prepare_open_deadline = 1s;
   conditioning_config.stop_barrier = 100ms;
+  install_completion_relay(conditioning_config);
   CallbackBarrier callback_barrier;
   configure(conditioning_config, callback_barrier);
   RelativeMotionRosAdapter adapter(*node, authority, {}, conditioning_config);
@@ -333,6 +439,7 @@ TEST_F(
   conditioning_config.component_rpc_timeout = std::chrono::milliseconds(100);
   conditioning_config.prepare_open_deadline = std::chrono::seconds(1);
   conditioning_config.stop_barrier = std::chrono::milliseconds(100);
+  install_completion_relay(conditioning_config);
   RelativeMotionRosAdapter adapter(*node, authority, {}, conditioning_config);
 
   std::atomic<std::size_t> result_count{0U};
@@ -370,6 +477,7 @@ TEST_F(
   conditioning_config.component_rpc_timeout = std::chrono::milliseconds(100);
   conditioning_config.prepare_open_deadline = std::chrono::seconds(1);
   conditioning_config.stop_barrier = std::chrono::milliseconds(100);
+  install_completion_relay(conditioning_config);
   RelativeMotionRosAdapter adapter(*node, authority, {}, conditioning_config);
 
   std::atomic<std::size_t> result_count{0U};
@@ -410,6 +518,7 @@ TEST_F(
   conditioning_config.component_rpc_timeout = 100ms;
   conditioning_config.prepare_open_deadline = 1s;
   conditioning_config.stop_barrier = 100ms;
+  install_completion_relay(conditioning_config);
   RelativeMotionRosAdapter adapter(*node, authority, {}, conditioning_config);
 
   CallbackBarrier result_barrier;
@@ -459,6 +568,7 @@ TEST_F(
   conditioning_config.component_rpc_timeout = 100ms;
   conditioning_config.prepare_open_deadline = 1s;
   conditioning_config.stop_barrier = 100ms;
+  install_completion_relay(conditioning_config);
   RelativeMotionRosAdapter adapter(*node, authority, {}, conditioning_config);
 
   adapter.begin_shutdown();
@@ -488,6 +598,7 @@ TEST_F(RelativeMotionRosAdapterTest, PortStartRejectsRotatedAdmissionEpoch)
   conditioning_config.admission_fence_check = [](const std::uint64_t) {
       return false;
     };
+  install_completion_relay(conditioning_config);
   RelativeMotionRosAdapter adapter(*node, authority, {}, conditioning_config);
 
   std::atomic<std::size_t> result_count{0U};
@@ -505,6 +616,80 @@ TEST_F(RelativeMotionRosAdapterTest, PortStartRejectsRotatedAdmissionEpoch)
   EXPECT_EQ(result_count.load(), 1U);
   EXPECT_EQ(result_code.load(), ChildResultCode::SafetyFault);
   EXPECT_EQ(authority->inhibit_count(), 0U);
+}
+
+TEST_F(
+  RelativeMotionRosAdapterTest,
+  ExternalRelayStartFailureMayReleaseLastAdapterOwner)
+{
+  auto node = std::make_shared<rclcpp::Node>(
+    "relative_motion_adapter_external_start_failure");
+  auto authority = std::make_shared<BlockingAuthority>();
+  MotionConditioningConfig conditioning_config;
+  conditioning_config.component_rpc_timeout = 100ms;
+  conditioning_config.prepare_open_deadline = 1s;
+  conditioning_config.stop_barrier = 100ms;
+  auto relay = install_completion_relay(conditioning_config);
+  auto adapter = std::make_shared<RelativeMotionRosAdapter>(
+    *node, authority, RelativeMotionPolicy{}, conditioning_config);
+  const auto weak_adapter = std::weak_ptr<RelativeMotionRosAdapter>(adapter);
+  std::atomic<std::size_t> terminal_count{0U};
+  adapter->start(
+    MotionToken{23U, 5U, 11U, 1U},
+    MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::MoveDistance), 0.1F, 0.0F, {}},
+    {},
+    [held = adapter, &terminal_count](const MotionToken &, const ChildResult &) mutable {
+      ++terminal_count;
+      held.reset();
+    });
+  ASSERT_TRUE(authority->wait_for_prepare());
+  authority->release_prepare();
+  adapter.reset();
+
+  ASSERT_TRUE(relay->wait_for_deliveries(1U));
+  EXPECT_EQ(terminal_count.load(), 1U);
+  EXPECT_EQ(relay->deliveries(), 1U);
+  EXPECT_NE(relay->last_delivery_thread(), std::this_thread::get_id());
+  EXPECT_TRUE(weak_adapter.expired());
+}
+
+TEST_F(
+  RelativeMotionRosAdapterTest,
+  ExternalRelayEmergencyMayReleaseLastAdapterOwner)
+{
+  auto node = std::make_shared<rclcpp::Node>(
+    "relative_motion_adapter_external_emergency");
+  auto authority = std::make_shared<BlockingAuthority>();
+  MotionConditioningConfig conditioning_config;
+  conditioning_config.component_rpc_timeout = 100ms;
+  conditioning_config.prepare_open_deadline = 1s;
+  conditioning_config.stop_barrier = 100ms;
+  auto relay = install_completion_relay(conditioning_config);
+  auto adapter = std::make_shared<RelativeMotionRosAdapter>(
+    *node, authority, RelativeMotionPolicy{}, conditioning_config);
+  const auto weak_adapter = std::weak_ptr<RelativeMotionRosAdapter>(adapter);
+  std::atomic<std::size_t> terminal_count{0U};
+  adapter->start(
+    MotionToken{24U, 5U, 12U, 1U},
+    MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::MoveDistance), 0.1F, 0.0F, {}},
+    {},
+    [held = adapter, &terminal_count](const MotionToken &, const ChildResult &) mutable {
+      ++terminal_count;
+      held.reset();
+    });
+  ASSERT_TRUE(authority->wait_for_prepare());
+
+  adapter->begin_shutdown();
+  authority->release_prepare();
+  adapter.reset();
+
+  ASSERT_TRUE(relay->wait_for_deliveries(1U));
+  EXPECT_EQ(terminal_count.load(), 1U);
+  EXPECT_EQ(relay->deliveries(), 1U);
+  EXPECT_NE(relay->last_delivery_thread(), std::this_thread::get_id());
+  EXPECT_TRUE(weak_adapter.expired());
 }
 
 TEST_F(
@@ -569,6 +754,7 @@ TEST_F(
   conditioning_config.before_adapter_ingress_wait = [&command_barrier]() {
       command_barrier.mark_shutdown_wait();
     };
+  install_completion_relay(conditioning_config);
   RelativeMotionRosAdapter adapter(*node, authority, {}, conditioning_config);
 
   rclcpp::executors::MultiThreadedExecutor executor(
@@ -629,6 +815,7 @@ TEST_F(
   conditioning_config.before_adapter_ingress_wait = [&ingress_barrier]() {
       ingress_barrier.mark_shutdown_wait();
     };
+  install_completion_relay(conditioning_config);
 
   auto adapter = std::make_unique<RelativeMotionRosAdapter>(
     *node, authority, RelativeMotionPolicy{}, conditioning_config);
