@@ -102,6 +102,13 @@ struct MotionConditioningConfig
   std::function<void()> before_renew_callback;
   std::function<void()> before_callback_wait;
   std::function<void()> before_renew_wait;
+  // Package-private deterministic barriers used by the RelativeMotion ROS
+  // Adapter seam tests. Production configuration leaves these unset.
+  std::function<void()> before_adapter_odom_callback;
+  std::function<void()> before_adapter_scan_callback;
+  std::function<void()> before_adapter_clock_callback;
+  std::function<void()> before_adapter_command_supplier;
+  std::function<void()> before_adapter_ingress_wait;
 };
 
 class MotionProducerPort

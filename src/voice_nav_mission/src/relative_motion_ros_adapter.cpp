@@ -44,6 +44,157 @@ using Odometry = nav_msgs::msg::Odometry;
 using Clock = rosgraph_msgs::msg::Clock;
 using LaserScan = sensor_msgs::msg::LaserScan;
 
+class AdapterIngressState;
+
+class AdapterIngressGuard final
+{
+public:
+  AdapterIngressGuard() = default;
+  explicit AdapterIngressGuard(std::shared_ptr<AdapterIngressState> state);
+  ~AdapterIngressGuard();
+
+  AdapterIngressGuard(const AdapterIngressGuard &) = delete;
+  AdapterIngressGuard & operator=(const AdapterIngressGuard &) = delete;
+  AdapterIngressGuard(AdapterIngressGuard &&) = delete;
+  AdapterIngressGuard & operator=(AdapterIngressGuard &&) = delete;
+
+  [[nodiscard]] bool is_active() const noexcept
+  {
+    return active_;
+  }
+
+private:
+  std::shared_ptr<AdapterIngressState> state_;
+  bool active_{false};
+};
+
+class AdapterIngressState final
+  : public std::enable_shared_from_this<AdapterIngressState>
+{
+public:
+  using OdomHandler = std::function<void(const Odometry::ConstSharedPtr &)>;
+  using ScanHandler = std::function<void()>;
+  using ClockHandler = std::function<void(const Clock::ConstSharedPtr &)>;
+  using CommandSupplier = std::function<RelativeMotionCommand()>;
+  using Barrier = std::function<void()>;
+
+  [[nodiscard]] AdapterIngressGuard enter()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!accepting_) {
+      return {};
+    }
+    ++in_flight_;
+    return AdapterIngressGuard(shared_from_this());
+  }
+
+  void disable()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    accepting_ = false;
+  }
+
+  void wait()
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    condition_.wait(lock, [this]() {return in_flight_ == 0U;});
+  }
+
+  void set_odom_handler(OdomHandler handler)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    odom_handler_ = std::move(handler);
+  }
+
+  void set_scan_handler(ScanHandler handler)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    scan_handler_ = std::move(handler);
+  }
+
+  void set_clock_handler(ClockHandler handler)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    clock_handler_ = std::move(handler);
+  }
+
+  void set_command_supplier(CommandSupplier supplier)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    command_supplier_ = std::move(supplier);
+  }
+
+  void set_command_barrier(Barrier barrier)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    command_barrier_ = std::move(barrier);
+  }
+
+  [[nodiscard]] OdomHandler copy_odom_handler() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return odom_handler_;
+  }
+
+  [[nodiscard]] ScanHandler copy_scan_handler() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return scan_handler_;
+  }
+
+  [[nodiscard]] ClockHandler copy_clock_handler() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return clock_handler_;
+  }
+
+  [[nodiscard]] CommandSupplier copy_command_supplier() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return command_supplier_;
+  }
+
+  [[nodiscard]] Barrier copy_command_barrier() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return command_barrier_;
+  }
+
+private:
+  friend class AdapterIngressGuard;
+
+  void leave()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    --in_flight_;
+    if (in_flight_ == 0U) {
+      condition_.notify_all();
+    }
+  }
+
+  mutable std::mutex mutex_;
+  std::condition_variable condition_;
+  bool accepting_{true};
+  std::size_t in_flight_{0U};
+  OdomHandler odom_handler_;
+  ScanHandler scan_handler_;
+  ClockHandler clock_handler_;
+  CommandSupplier command_supplier_;
+  Barrier command_barrier_;
+};
+
+AdapterIngressGuard::AdapterIngressGuard(std::shared_ptr<AdapterIngressState> state)
+: state_(std::move(state)), active_(state_ != nullptr)
+{
+}
+
+AdapterIngressGuard::~AdapterIngressGuard()
+{
+  if (active_) {
+    state_->leave();
+  }
+}
+
 rclcpp::QoS latest_sensor_qos()
 {
   auto qos = rclcpp::SensorDataQoS();
@@ -119,18 +270,18 @@ MotionConditioningFailure conditioning_failure_for_relative(
   }
 }
 
-class RawMotionProducer final : public MotionProducerPort
+class RawMotionProducer final
+  : public MotionProducerPort,
+  public std::enable_shared_from_this<RawMotionProducer>
 {
 public:
-  using CommandSupplier = std::function<RelativeMotionCommand()>;
-
   RawMotionProducer(
     rclcpp::Node & node,
     rclcpp::CallbackGroup::SharedPtr callback_group,
-    CommandSupplier command_supplier)
+    std::shared_ptr<AdapterIngressState> ingress)
   : node_(node),
     callback_group_(std::move(callback_group)),
-    command_supplier_(std::move(command_supplier))
+    ingress_(std::move(ingress))
   {
   }
 
@@ -154,9 +305,19 @@ public:
       rclcpp::PublisherOptions options;
       options.use_intra_process_comm = rclcpp::IntraProcessSetting::Disable;
       publisher_ = node_.create_publisher<TwistStamped>(raw_topic, qos, options);
+      const auto weak_self = weak_from_this();
+      const auto ingress = ingress_;
       timer_ = node_.create_wall_timer(
         50ms,
-        [this]() {publish_current();},
+        [weak_self, ingress]() {
+          auto guard = ingress->enter();
+          if (!guard.is_active()) {
+            return;
+          }
+          if (const auto self = weak_self.lock()) {
+            self->publish_current();
+          }
+        },
         callback_group_);
       active_ = true;
       return true;
@@ -185,15 +346,19 @@ private:
   void publish_current()
   {
     std::shared_ptr<rclcpp::Publisher<TwistStamped>> publisher;
-    CommandSupplier supplier;
+    AdapterIngressState::CommandSupplier supplier;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!active_ || !publisher_) {
         return;
       }
       publisher = publisher_;
-      supplier = command_supplier_;
     }
+    const auto barrier = ingress_->copy_command_barrier();
+    if (barrier) {
+      barrier();
+    }
+    supplier = ingress_->copy_command_supplier();
     const auto command = supplier ? supplier() : RelativeMotionCommand{};
     TwistStamped message;
     message.header.stamp = node_.get_clock()->now();
@@ -218,7 +383,7 @@ private:
 
   rclcpp::Node & node_;
   rclcpp::CallbackGroup::SharedPtr callback_group_;
-  CommandSupplier command_supplier_;
+  std::shared_ptr<AdapterIngressState> ingress_;
   std::mutex mutex_;
   std::shared_ptr<rclcpp::Publisher<TwistStamped>> publisher_;
   rclcpp::TimerBase::SharedPtr timer_;
@@ -227,7 +392,8 @@ private:
 
 }  // namespace
 
-class RelativeMotionRosAdapter::Impl
+class RelativeMotionRosAdapter::Impl final
+  : public std::enable_shared_from_this<RelativeMotionRosAdapter::Impl>
 {
 public:
   using TimePoint = SteadyClockPort::TimePoint;
@@ -243,32 +409,102 @@ public:
     conditioning_config_(std::move(conditioning_config)),
     controller_(policy_),
     callback_group_(node_.create_callback_group(rclcpp::CallbackGroupType::Reentrant)),
+    ingress_(std::make_shared<AdapterIngressState>()),
     producer_(std::make_shared<RawMotionProducer>(
-      node_, callback_group_, [this]() {return command();})),
+      node_, callback_group_, ingress_)),
     conditioning_(std::make_unique<MotionConditioningPipeline>(
       node_, authority_, producer_, conditioning_config_))
   {
     if (!authority_) {
       throw std::invalid_argument("RelativeMotionRosAdapter requires a Gate port");
     }
+  }
+
+  void initialize()
+  {
+    const auto weak_impl = weak_from_this();
+    ingress_->set_odom_handler(
+      [weak_impl](const Odometry::ConstSharedPtr & message) {
+        if (const auto impl = weak_impl.lock()) {
+          impl->on_odom(message);
+        }
+      });
+    ingress_->set_scan_handler(
+      [weak_impl]() {
+        if (const auto impl = weak_impl.lock()) {
+          impl->on_scan();
+        }
+      });
+    ingress_->set_clock_handler(
+      [weak_impl](const Clock::ConstSharedPtr & message) {
+        if (const auto impl = weak_impl.lock()) {
+          impl->on_clock(message);
+        }
+      });
+    ingress_->set_command_supplier(
+      [weak_impl]() {
+        if (const auto impl = weak_impl.lock()) {
+          return impl->command();
+        }
+        return RelativeMotionCommand{};
+      });
+    ingress_->set_command_barrier(conditioning_config_.before_adapter_command_supplier);
+
     rclcpp::SubscriptionOptions options;
     options.callback_group = callback_group_;
+    const auto ingress = ingress_;
     odom_subscription_ = node_.create_subscription<Odometry>(
       conditioning_config_.odom_topic,
       rclcpp::SensorDataQoS(),
-      [this](const Odometry::ConstSharedPtr message) {on_odom(message);},
+      [ingress](const Odometry::ConstSharedPtr message) {
+        auto guard = ingress->enter();
+        if (!guard.is_active()) {
+          return;
+        }
+        const auto handler = ingress->copy_odom_handler();
+        if (handler) {
+          handler(message);
+        }
+      },
       options);
     scan_subscription_ = node_.create_subscription<LaserScan>(
       conditioning_config_.scan_topic,
       latest_sensor_qos(),
-      [this](const LaserScan::ConstSharedPtr) {on_scan();},
+      [ingress](const LaserScan::ConstSharedPtr) {
+        auto guard = ingress->enter();
+        if (!guard.is_active()) {
+          return;
+        }
+        const auto handler = ingress->copy_scan_handler();
+        if (handler) {
+          handler();
+        }
+      },
       options);
     clock_subscription_ = node_.create_subscription<Clock>(
       conditioning_config_.clock_topic,
       rclcpp::ClockQoS(),
-      [this](const Clock::ConstSharedPtr message) {on_clock(message);},
+      [ingress](const Clock::ConstSharedPtr message) {
+        auto guard = ingress->enter();
+        if (!guard.is_active()) {
+          return;
+        }
+        const auto handler = ingress->copy_clock_handler();
+        if (handler) {
+          handler(message);
+        }
+      },
       options);
-    transaction_thread_ = std::thread([this]() {transaction_loop();});
+    transaction_thread_ = std::thread([weak_impl]() {
+          if (const auto impl = weak_impl.lock()) {
+            impl->transaction_loop();
+          }
+      });
+  }
+
+  [[nodiscard]] bool start_raw_producer_for_test(const std::string & raw_topic)
+  {
+    return producer_ && producer_->start(raw_topic);
   }
 
   ~Impl()
@@ -291,7 +527,19 @@ public:
       return;
     }
 
+    ingress_->disable();
     request_emergency_stop();
+    clock_subscription_.reset();
+    scan_subscription_.reset();
+    odom_subscription_.reset();
+    try {
+      if (producer_) {
+        producer_->stop();
+      }
+    } catch (...) {
+      // The conditioning teardown remains the unique cleanup owner; the
+      // ingress barrier still prevents a callback from using released state.
+    }
     {
       std::unique_lock<std::mutex> lock(mutex_);
       condition_variable_.wait(lock, [this]() {
@@ -307,11 +555,12 @@ public:
       transaction_thread_.join();
     }
     join_emergency_thread();
-    clock_subscription_.reset();
-    scan_subscription_.reset();
-    odom_subscription_.reset();
     conditioning_.reset();
     producer_.reset();
+    if (conditioning_config_.before_adapter_ingress_wait) {
+      conditioning_config_.before_adapter_ingress_wait();
+    }
+    ingress_->wait();
     {
       std::lock_guard<std::mutex> lock(mutex_);
       shutdown_complete_ = true;
@@ -815,6 +1064,9 @@ private:
 
   void on_odom(const Odometry::ConstSharedPtr & message)
   {
+    if (conditioning_config_.before_adapter_odom_callback) {
+      conditioning_config_.before_adapter_odom_callback();
+    }
     const auto & orientation = message->pose.pose.orientation;
     const auto norm = orientation.x * orientation.x +
       orientation.y * orientation.y + orientation.z * orientation.z +
@@ -852,6 +1104,9 @@ private:
 
   void on_scan()
   {
+    if (conditioning_config_.before_adapter_scan_callback) {
+      conditioning_config_.before_adapter_scan_callback();
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     scan_seen_ = true;
     last_scan_at_ = std::chrono::steady_clock::now();
@@ -860,6 +1115,9 @@ private:
 
   void on_clock(const Clock::ConstSharedPtr & message)
   {
+    if (conditioning_config_.before_adapter_clock_callback) {
+      conditioning_config_.before_adapter_clock_callback();
+    }
     const auto stamp = static_cast<std::int64_t>(message->clock.sec) *
       1000000000LL + static_cast<std::int64_t>(message->clock.nanosec);
     const auto now = std::chrono::steady_clock::now();
@@ -1145,6 +1403,7 @@ private:
   MotionConditioningConfig conditioning_config_;
   RelativeMotionController controller_;
   rclcpp::CallbackGroup::SharedPtr callback_group_;
+  std::shared_ptr<AdapterIngressState> ingress_;
   std::shared_ptr<RawMotionProducer> producer_;
   std::unique_ptr<MotionConditioningPipeline> conditioning_;
 
@@ -1198,10 +1457,11 @@ RelativeMotionRosAdapter::RelativeMotionRosAdapter(
   std::shared_ptr<MotionAuthorityPort> authority,
   RelativeMotionPolicy policy,
   MotionConditioningConfig conditioning_config)
-: impl_(std::make_unique<Impl>(
+: impl_(std::make_shared<Impl>(
     node, std::move(authority), std::move(policy),
     std::move(conditioning_config)))
 {
+  impl_->initialize();
 }
 
 RelativeMotionRosAdapter::~RelativeMotionRosAdapter() = default;
@@ -1260,6 +1520,13 @@ bool RelativeMotionRosAdapter::owns_authority_lifecycle() const noexcept
 bool RelativeMotionRosAdapter::zero_proven() const noexcept
 {
   return impl_->zero_proven();
+}
+
+bool detail::RelativeMotionRosAdapterTestAccess::start_raw_producer(
+  RelativeMotionRosAdapter & adapter,
+  const std::string & raw_topic)
+{
+  return adapter.impl_ && adapter.impl_->start_raw_producer_for_test(raw_topic);
 }
 
 }  // namespace voice_nav_mission

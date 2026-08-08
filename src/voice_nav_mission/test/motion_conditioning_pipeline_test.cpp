@@ -1446,10 +1446,18 @@ TEST_F(MotionConditioningPipelineTest, ProducerFalseFailsClosedAndCleansUp)
 TEST_F(MotionConditioningPipelineTest, ProducerThrowFailsClosedAndCleansUp)
 {
   producer->throw_on_start = true;
-  MotionConditioningPipeline pipeline(*client, authority, producer, config());
-  graph->publish_health_once();
+  auto health_ready = std::make_shared<CallbackCounter>();
+  auto pipeline_config = config();
+  pipeline_config.after_health_callback = [health_ready]() {
+      (*health_ready)();
+    };
+  MotionConditioningPipeline pipeline(
+    *client, authority, producer, pipeline_config);
 
   ASSERT_TRUE(pipeline.prepare().ok);
+  health_ready->expect(4U);
+  graph->publish_health_once();
+  ASSERT_TRUE(health_ready->wait_for_target());
   MotionConditioningResult result;
   EXPECT_NO_THROW(result = pipeline.start());
 

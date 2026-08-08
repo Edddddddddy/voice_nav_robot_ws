@@ -306,7 +306,7 @@ TEST(RuntimeEventIngressTest, ProductionWorkerFencePreemptsChildResult)
     fence,
     [](const WorkerEvent & event) {
       return event.kind == WorkerEvent::Kind::Normal ?
-        Queue::Lane::Normal : Queue::Lane::Control;
+             Queue::Lane::Normal : Queue::Lane::Control;
     },
     [&]() {
       {
@@ -332,17 +332,17 @@ TEST(RuntimeEventIngressTest, ProductionWorkerFencePreemptsChildResult)
   ASSERT_TRUE(ingress.enqueue(WorkerEvent{WorkerEvent::Kind::Stop}));
   ASSERT_TRUE(ingress.enqueue(
     WorkerEvent{WorkerEvent::Kind::ChildResult, token,
-      ChildResult{ChildResultCode::Succeeded, "late child"}}));
+        ChildResult{ChildResultCode::Succeeded, "late child"}}));
   ASSERT_TRUE(ingress.enqueue(WorkerEvent{WorkerEvent::Kind::QueueFault}));
   for (std::size_t index = 3U; index < Queue::kControlReserve; ++index) {
     ASSERT_TRUE(ingress.enqueue(
       WorkerEvent{WorkerEvent::Kind::ChildResult, token,
-        ChildResult{ChildResultCode::Succeeded, "late child"}}));
+          ChildResult{ChildResultCode::Succeeded, "late child"}}));
   }
   ASSERT_TRUE(ingress.enqueue(WorkerEvent{WorkerEvent::Kind::Normal}));
   EXPECT_FALSE(ingress.enqueue(
     WorkerEvent{WorkerEvent::Kind::ChildResult, token,
-      ChildResult{ChildResultCode::Succeeded, "overflow child"}}));
+        ChildResult{ChildResultCode::Succeeded, "overflow child"}}));
 
   std::thread worker([&]() {
       ingress.run(
@@ -353,7 +353,7 @@ TEST(RuntimeEventIngressTest, ProductionWorkerFencePreemptsChildResult)
               dispatched.push_back(event.kind);
             }
             (void)core.stop(StopRequest{
-                "worker-stop", "worker-source", 99U, "worker fence seam"});
+              "worker-stop", "worker-source", 99U, "worker fence seam"});
           } else if (event.kind == WorkerEvent::Kind::ChildResult) {
             {
               std::lock_guard<std::mutex> lock(zero_mutex);
