@@ -982,6 +982,21 @@ if(BUILD_TESTING)
     TIMEOUT 60
     RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
   )
+  add_launch_test(
+    test/test_mission_runtime_node.py
+    TIMEOUT 60
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
+  )
+  add_launch_test(
+    test/test_mission_runtime_node_active_shutdown.py
+    TIMEOUT 60
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
+  )
+  add_launch_test(
+    test/test_mission_runtime_node_restart.py
+    TIMEOUT 60
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
+  )
   set_tests_properties(
     test_test_motion_gate_node.py
     PROPERTIES
@@ -989,6 +1004,30 @@ if(BUILD_TESTING)
   )
   set_tests_properties(
     test_test_motion_gate_node.py
+    PROPERTIES
+      ENVIRONMENT_MODIFICATION
+        "ROS_DOMAIN_ID=unset:;DISABLE_ROS_ISOLATION=unset:"
+  )
+  set_tests_properties(
+    test_test_mission_runtime_node.py
+    PROPERTIES
+      RUN_SERIAL TRUE
+  )
+  set_tests_properties(
+    test_test_mission_runtime_node.py
+    PROPERTIES
+      ENVIRONMENT_MODIFICATION
+        "ROS_DOMAIN_ID=unset:;DISABLE_ROS_ISOLATION=unset:"
+  )
+  set_tests_properties(
+    test_test_mission_runtime_node_active_shutdown.py
+    test_test_mission_runtime_node_restart.py
+    PROPERTIES
+      RUN_SERIAL TRUE
+  )
+  set_tests_properties(
+    test_test_mission_runtime_node_active_shutdown.py
+    test_test_mission_runtime_node_restart.py
     PROPERTIES
       ENVIRONMENT_MODIFICATION
         "ROS_DOMAIN_ID=unset:;DISABLE_ROS_ISOLATION=unset:"
@@ -2256,6 +2295,7 @@ class MotionGateContractTest(unittest.TestCase):
                 "test/test_motion_gate_node.py",
                 "60",
                 "test_test_motion_gate_node.py",
+                "exactly 4 approved add_launch_test registrations",
             ),
             (
                 "voice_nav_bringup",
@@ -2263,11 +2303,17 @@ class MotionGateContractTest(unittest.TestCase):
                 "test/test_motion_gate_product.py",
                 "180",
                 "test_test_motion_gate_product.py",
+                "exactly one add_launch_test",
             ),
         )
-        for package, relative_path, test_path, timeout, test_name in (
-            specifications
-        ):
+        for (
+            package,
+            relative_path,
+            test_path,
+            timeout,
+            test_name,
+            duplicate_diagnostic,
+        ) in specifications:
             mutations = (
                 (
                     f"TIMEOUT {timeout}",
@@ -2330,7 +2376,7 @@ class MotionGateContractTest(unittest.TestCase):
                         '"${ament_cmake_ros_DIR}/run_test_isolated.py"\n'
                         "  )"
                     ),
-                    "exactly one add_launch_test",
+                    duplicate_diagnostic,
                 ),
             )
             for old, new, diagnostic in mutations:

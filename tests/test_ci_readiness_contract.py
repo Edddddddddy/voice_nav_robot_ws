@@ -300,6 +300,8 @@ class CiReadinessContractTest(unittest.TestCase):
             {
                 "test_test_motion_gate_node.py",
                 "test_test_mission_runtime_node.py",
+                "test_test_mission_runtime_node_active_shutdown.py",
+                "test_test_mission_runtime_node_restart.py",
             },
         )
         self.assertEqual(
@@ -330,7 +332,7 @@ class CiReadinessContractTest(unittest.TestCase):
     def test_launch_tests_use_official_process_scoped_domain_leases(self):
         expected_launch_test_counts = {
             SIMULATION_CMAKE: 3,
-            MISSION_CMAKE: 2,
+            MISSION_CMAKE: 4,
             BRINGUP_CMAKE: 1,
         }
         expected_isolation_reset_counts = {
@@ -362,13 +364,54 @@ class CiReadinessContractTest(unittest.TestCase):
                     cmake,
                 )
                 self.assertEqual(cmake.count(isolated_runner), expected_count)
-                self.assertEqual(
-                    cmake.count("ENVIRONMENT_MODIFICATION"),
-                    expected_isolation_reset_counts[cmake_path],
-                )
+                environment_reset_groups = [
+                    body
+                    for body in re.findall(
+                        r"set_tests_properties\((.*?)\)",
+                        cmake,
+                        flags=re.DOTALL,
+                    )
+                    if (
+                        "ENVIRONMENT_MODIFICATION" in body
+                        and environment_reset in body
+                    )
+                ]
+                reset_group_targets = [
+                    set(
+                        re.findall(
+                            r"\btest_[A-Za-z0-9_]+\.py\b",
+                            group,
+                        )
+                    )
+                    for group in environment_reset_groups
+                ]
+                if cmake_path == MISSION_CMAKE:
+                    singleton_reset_groups = [
+                        targets
+                        for targets in reset_group_targets
+                        if len(targets) == 1
+                    ]
+                    self.assertEqual(
+                        len(singleton_reset_groups),
+                        expected_isolation_reset_counts[cmake_path],
+                    )
+                    self.assertEqual(
+                        set().union(*reset_group_targets),
+                        {
+                            "test_test_motion_gate_node.py",
+                            "test_test_mission_runtime_node.py",
+                            "test_test_mission_runtime_node_active_shutdown.py",
+                            "test_test_mission_runtime_node_restart.py",
+                        },
+                    )
+                else:
+                    self.assertEqual(
+                        len(environment_reset_groups),
+                        expected_isolation_reset_counts[cmake_path],
+                    )
                 self.assertEqual(
                     cmake.count(environment_reset),
-                    expected_isolation_reset_counts[cmake_path],
+                    len(environment_reset_groups),
                 )
                 self.assertNotIn("DISABLED", cmake)
                 self.assertNotIn("SKIP_RETURN_CODE", cmake)
