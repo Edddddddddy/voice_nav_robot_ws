@@ -2051,12 +2051,20 @@ def validate_launch_test_registration(
             )
 
     properties_calls = cmake_call_bodies(source, "set_tests_properties")
+
+    def property_targets(arguments: list[str]) -> list[str]:
+        try:
+            properties_index = arguments.index("PROPERTIES")
+        except ValueError:
+            return []
+        return arguments[:properties_index]
+
     for path in expected_paths:
         generated_test_name = f"test_{Path(path).name}"
         matching_properties = [
             cmake_arguments(body)
             for body in properties_calls
-            if cmake_arguments(body)[:1] == [generated_test_name]
+            if generated_test_name in property_targets(cmake_arguments(body))
         ]
         if any(
             forbidden in properties
@@ -2105,12 +2113,17 @@ def validate_launch_test_registration(
             if "ENVIRONMENT_MODIFICATION" in properties
         ]
         expected_isolation_properties = [
-            generated_test_name,
             "PROPERTIES",
             "ENVIRONMENT_MODIFICATION",
             "ROS_DOMAIN_ID=unset:;DISABLE_ROS_ISOLATION=unset:",
         ]
-        if isolation_properties != [expected_isolation_properties]:
+        normalized_isolation_properties = []
+        for properties in isolation_properties:
+            property_index = properties.index("PROPERTIES")
+            normalized_isolation_properties.append(
+                properties[property_index:]
+            )
+        if normalized_isolation_properties != [expected_isolation_properties]:
             raise MotionGateContractError(
                 f"{package_name} launch test {generated_test_name} must keep "
                 "one exact process-scoped Domain isolation reset"
@@ -2254,15 +2267,13 @@ def validate_mission_cmake(path: Path) -> None:
             "voice_nav_mission must use rosidl_get_typesupport_target instead "
             "of deprecated rosidl_target_interfaces"
         )
-    if "test/test_mission_runtime_node.py" in source:
-        launch_test_paths = (
-            "test/test_motion_gate_node.py",
-            "test/test_mission_runtime_node.py",
-        )
-        launch_test_timeouts = (60, 60)
-    else:
-        launch_test_paths = "test/test_motion_gate_node.py"
-        launch_test_timeouts = 60
+    launch_test_paths = (
+        "test/test_motion_gate_node.py",
+        "test/test_mission_runtime_node.py",
+        "test/test_mission_runtime_node_active_shutdown.py",
+        "test/test_mission_runtime_node_restart.py",
+    )
+    launch_test_timeouts = (60, 60, 60, 60)
     validate_launch_test_registration(
         source,
         "voice_nav_mission",
