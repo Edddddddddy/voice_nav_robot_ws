@@ -1816,7 +1816,7 @@ private:
       state_ = MotionConditioningState::Failed;
       auto result = make_result(
           state_,
-          zero_proven ? failure : MotionConditioningFailure::SafetyFault,
+          MotionConditioningFailure::SafetyFault,
           false, zero_proven,
           collision_stop_, lease_id_, candidate_topic_,
           zero_proven ?
