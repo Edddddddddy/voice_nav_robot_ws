@@ -85,6 +85,9 @@ def generated_mission_payload():
                     ),
                     "/tmp/result.xunit.xml",
                     "--command",
+                    "/usr/bin/python3",
+                    "-m",
+                    "launch_testing.launch_test",
                     (
                         "/workspace/src/voice_nav_mission/test/"
                         "test_motion_gate_node.py"
@@ -125,6 +128,9 @@ def generated_mission_payload():
                     ),
                     "/tmp/result.xunit.xml",
                     "--command",
+                    "/usr/bin/python3",
+                    "-m",
+                    "launch_testing.launch_test",
                     (
                         "/workspace/src/voice_nav_mission/test/"
                         "test_mission_runtime_node.py"
@@ -165,6 +171,9 @@ def generated_mission_payload():
                     ),
                     "/tmp/result.xunit.xml",
                     "--command",
+                    "/usr/bin/python3",
+                    "-m",
+                    "launch_testing.launch_test",
                     (
                         "/workspace/src/voice_nav_mission/test/"
                         "test_mission_runtime_node_active_shutdown.py"
@@ -205,6 +214,9 @@ def generated_mission_payload():
                     ),
                     "/tmp/result.xunit.xml",
                     "--command",
+                    "/usr/bin/python3",
+                    "-m",
+                    "launch_testing.launch_test",
                     (
                         "/workspace/src/voice_nav_mission/test/"
                         "test_mission_runtime_node_restart.py"
@@ -568,7 +580,7 @@ class CiReadinessContractTest(unittest.TestCase):
         checker = load_generated_checker()
 
         def replace_source(payload):
-            payload["tests"][0]["command"][-1] = (
+            payload["tests"][0]["command"][8] = (
                 "/workspace/src/voice_nav_mission/test/unapproved.py"
             )
 
@@ -646,7 +658,7 @@ class CiReadinessContractTest(unittest.TestCase):
 
         def wrong_source_with_decoy(payload):
             command = payload["tests"][0]["command"]
-            command[5] = (
+            command[8] = (
                 "/workspace/src/voice_nav_mission/test/unapproved.py"
             )
             command.append(
@@ -660,10 +672,14 @@ class CiReadinessContractTest(unittest.TestCase):
         def missing_source(payload):
             payload["tests"][0]["command"].pop()
 
+        def wrong_module(payload):
+            payload["tests"][0]["command"][7] = "launch_testing.wrong"
+
         mutations = (
             ("wrong source with decoy", wrong_source_with_decoy),
             ("duplicate command", duplicate_command),
             ("missing source", missing_source),
+            ("wrong module", wrong_module),
         )
         for name, mutate in mutations:
             with self.subTest(command=name):
