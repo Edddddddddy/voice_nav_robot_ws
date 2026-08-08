@@ -349,8 +349,18 @@ public:
         request_emergency_fence(std::move(detail));
       });
     shutdown_coordinator_ = std::make_unique<RuntimeShutdownCoordinator>(
+      [this]() {
+        return admission_gate_.close_generation(action_admission_tracker_);
+      },
       [this](const RuntimeShutdownCoordinator::TimePoint deadline) {
-        return admission_gate_.begin_quiesce(action_admission_tracker_, deadline);
+        timer_.reset();
+        stop_service_.reset();
+        if (relative_motion_) {
+          detail::begin_relative_motion_shutdown(*relative_motion_, deadline);
+        }
+      },
+      [this](const RuntimeShutdownCoordinator::TimePoint deadline) {
+        return wait_for_shutdown_conditions(deadline);
       },
       [this]() {request_independent_emergency();},
       [this](std::string detail) {request_emergency_fence(std::move(detail));},
@@ -474,8 +484,6 @@ private:
     if (!shutdown_outcome.transaction_drained) {
       action_shutdown_fail_closed_ = true;
     }
-    timer_.reset();
-    stop_service_.reset();
     if (action_callback_lifetime_) {
       action_callback_lifetime_->deactivate();
     }
@@ -493,10 +501,6 @@ private:
         get_logger(),
         "Action callback drain deadline expired; closing without fabricating a "
         "no-handle Result and retaining fail-closed state");
-    }
-    if (relative_motion_) {
-      relative_motion_->begin_shutdown();
-      relative_motion_->wait_for_internal_completion();
     }
     event_queue_.close();
     if (runtime_worker_.joinable()) {
@@ -526,6 +530,53 @@ private:
       shutdown_barrier_complete_ = true;
     }
     shutdown_condition_.notify_all();
+  }
+
+  [[nodiscard]] bool wait_for_shutdown_conditions(
+    const RuntimeShutdownCoordinator::TimePoint deadline) noexcept
+  {
+    bool internal_complete = false;
+    try {
+      internal_complete = relative_motion_ &&
+        detail::wait_for_relative_motion_internal_completion(
+        *relative_motion_, deadline);
+    } catch (...) {
+      internal_complete = false;
+    }
+
+    const auto transaction_drained = admission_gate_.wait_for_transaction_drain(
+      deadline);
+    bool gate_safe = false;
+    try {
+      const auto snapshot = authority_ ? authority_->snapshot() : GateSnapshot{};
+      gate_safe = relative_motion_ && relative_motion_->zero_proven() &&
+        snapshot.state == GateState::Inhibited && snapshot.motion_inhibited &&
+        snapshot.zero_selected && snapshot.zero_published;
+    } catch (...) {
+      gate_safe = false;
+    }
+    return internal_complete && transaction_drained && gate_safe &&
+           wait_for_runtime_terminal_until(deadline);
+  }
+
+  [[nodiscard]] bool wait_for_runtime_terminal_until(
+    const RuntimeShutdownCoordinator::TimePoint deadline) noexcept
+  {
+    std::unique_lock<std::mutex> lock(shutdown_completion_mutex_);
+    return runtime_terminal_condition_.wait_until(lock, deadline, [this]() {
+               bool goals_empty = false;
+               {
+                 std::lock_guard<std::recursive_mutex> goal_lock(mutex_);
+                 goals_empty = goals_.empty();
+               }
+               bool core_idle = true;
+               if (execution_plane_ && execution_plane_->core()) {
+                 std::lock_guard<std::recursive_mutex> core_lock(
+          execution_plane_->core_serial_mutex());
+                 core_idle = !execution_plane_->core()->has_active_mission();
+               }
+               return goals_empty && core_idle;
+    });
   }
 
   RuntimeConfig load_config()
@@ -930,6 +981,7 @@ private:
       found->second->abort(action_result);
     }
     goals_.erase(found);
+    runtime_terminal_condition_.notify_all();
   }
 
   static void fill_result(
@@ -1009,7 +1061,9 @@ private:
   std::shared_ptr<rclcpp::Context> shutdown_context_;
   rclcpp::PreShutdownCallbackHandle shutdown_callback_handle_;
   std::mutex shutdown_mutex_;
+  std::mutex shutdown_completion_mutex_;
   std::condition_variable shutdown_condition_;
+  std::condition_variable runtime_terminal_condition_;
   std::thread::id shutdown_barrier_owner_{};
   bool shutdown_barrier_started_{false};
   bool shutdown_barrier_complete_{false};

@@ -85,32 +85,61 @@ public:
     ActionAdmissionTracker & tracker,
     const TimePoint deadline)
   {
-    std::uint64_t next_generation = 0U;
-    bool should_quiesce = false;
+    if (!close_generation(tracker)) {
+      return false;
+    }
+    return wait_for_transaction_drain(deadline);
+  }
+
+  // First shutdown phase: reject new admission and rotate the generation.
+  // This operation does not wait for a transaction or any ROS operation.
+  [[nodiscard]] bool close_generation(ActionAdmissionTracker & tracker) noexcept
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (quiescing_) {
+      return true;
+    }
+    quiescing_ = true;
+    if (generation_ != std::numeric_limits<std::uint64_t>::max()) {
+      ++generation_;
+    }
+    const auto next_generation = generation_;
+    tracker.begin_quiesce();
+    try {
+      // This is a non-blocking linearization step.  Keep it under the same
+      // gate mutex so no second caller can observe the admission generation
+      // closed while the transaction plane still accepts the old generation.
+      if (transaction_plane_) {
+        transaction_plane_->close_generation(next_generation);
+      }
+    } catch (...) {
+      quiesce_complete_ = true;
+      quiesce_succeeded_ = false;
+      return false;
+    }
+    return true;
+  }
+
+  // Second shutdown phase: wait without holding the gate mutex, authority
+  // mutex, or any Node-owned transaction lock.
+  [[nodiscard]] bool wait_for_transaction_drain(const TimePoint deadline) noexcept
+  {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!quiescing_) {
-        quiescing_ = true;
-        if (generation_ != std::numeric_limits<std::uint64_t>::max()) {
-          ++generation_;
-        }
-        next_generation = generation_;
-        tracker.begin_quiesce();
-        should_quiesce = true;
-      } else {
-        return quiesce_complete_ && quiesce_succeeded_;
+        return false;
+      }
+      if (quiesce_complete_) {
+        return quiesce_succeeded_;
       }
     }
     bool succeeded = true;
-    if (should_quiesce && transaction_plane_) {
-      try {
-        // The transaction plane waits without holding this gate mutex or any
-        // authority mutex.  A timeout leaves admission fenced and is reported
-        // to the owner so it can retain Gate zero/fail-closed handling.
-        succeeded = transaction_plane_->quiesce(next_generation, deadline);
-      } catch (...) {
-        succeeded = false;
+    try {
+      if (transaction_plane_) {
+        succeeded = transaction_plane_->wait_for_drain_until(deadline);
       }
+    } catch (...) {
+      succeeded = false;
     }
     {
       std::lock_guard<std::mutex> lock(mutex_);

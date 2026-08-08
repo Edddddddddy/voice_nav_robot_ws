@@ -15,6 +15,7 @@
 #ifndef VOICE_NAV_MISSION__RELATIVE_MOTION_ROS_ADAPTER_HPP_
 #define VOICE_NAV_MISSION__RELATIVE_MOTION_ROS_ADAPTER_HPP_
 
+#include <chrono>
 #include <memory>
 #include <string>
 
@@ -27,9 +28,17 @@
 namespace voice_nav_mission
 {
 
+class RelativeMotionRosAdapter;
+
 namespace detail
 {
 class RelativeMotionRosAdapterTestAccess;
+void begin_relative_motion_shutdown(
+  RelativeMotionRosAdapter & adapter,
+  SteadyClockPort::TimePoint deadline) noexcept;
+[[nodiscard]] bool wait_for_relative_motion_internal_completion(
+  RelativeMotionRosAdapter & adapter,
+  SteadyClockPort::TimePoint deadline) noexcept;
 }
 
 // ROS Adapter for the production RelativeMotionPort. The ROS-free controller
@@ -75,7 +84,14 @@ public:
 
 private:
   friend class detail::RelativeMotionRosAdapterTestAccess;
+  friend void detail::begin_relative_motion_shutdown(
+    RelativeMotionRosAdapter &, SteadyClockPort::TimePoint) noexcept;
+  friend bool detail::wait_for_relative_motion_internal_completion(
+    RelativeMotionRosAdapter &, SteadyClockPort::TimePoint) noexcept;
   class Impl;
+  void begin_shutdown_until(SteadyClockPort::TimePoint deadline) noexcept;
+  [[nodiscard]] bool wait_for_internal_completion_until(
+    SteadyClockPort::TimePoint deadline) noexcept;
   std::shared_ptr<Impl> impl_;
 };
 
