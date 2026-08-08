@@ -70,6 +70,22 @@ struct MotionConditioningCorrelationToken
   std::string request_id;
 };
 
+// A terminal result crosses the RelativeMotion Adapter's worker seam as a
+// record.  The delivery callback is carried as data so an unowned relay can
+// execute it later; the Adapter worker never invokes it itself.
+struct RelativeMotionCompletionRecord
+{
+  MotionToken token;
+  ChildResult result;
+  RelativeMotionPort::ResultCallback delivery;
+};
+
+using RelativeMotionCompletionRecordPtr =
+  std::shared_ptr<const RelativeMotionCompletionRecord>;
+
+using RelativeMotionCompletionRelay =
+  std::function<bool(RelativeMotionCompletionRecordPtr)>;
+
 struct MotionConditioningConfig
 {
   std::chrono::milliseconds component_rpc_timeout{2000};
@@ -110,6 +126,7 @@ struct MotionConditioningConfig
   std::function<void()> before_adapter_command_supplier;
   std::function<void()> before_adapter_ingress_wait;
   std::function<bool(std::uint64_t)> admission_fence_check;
+  RelativeMotionCompletionRelay completion_relay;
 };
 
 class MotionProducerPort

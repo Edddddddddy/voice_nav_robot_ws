@@ -418,6 +418,10 @@ public:
     if (!authority_) {
       throw std::invalid_argument("RelativeMotionRosAdapter requires a Gate port");
     }
+    if (!conditioning_config_.completion_relay) {
+      throw std::invalid_argument(
+        "RelativeMotionRosAdapter requires an external completion relay");
+    }
   }
 
   void initialize()
@@ -536,7 +540,7 @@ public:
                transaction_kind_ == TransactionKind::Idle &&
                !transaction_in_progress_ &&
                !emergency_stop_in_progress_ &&
-               !completion_delivery_in_progress_;
+               !completion_record_in_progress_;
       });
   }
 
@@ -1234,6 +1238,34 @@ private:
     }
   }
 
+  void publish_completion(RelativeMotionCompletionRecordPtr record)
+  {
+    RelativeMotionCompletionRelay relay;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      relay = conditioning_config_.completion_relay;
+      completion_record_in_progress_ = true;
+    }
+
+    bool accepted = false;
+    try {
+      accepted = relay && relay(std::move(record));
+    } catch (...) {
+      accepted = false;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      completion_record_in_progress_ = false;
+      condition_variable_.notify_all();
+    }
+    if (!accepted) {
+      RCLCPP_ERROR(
+        node_.get_logger(),
+        "Relative motion completion relay rejected a terminal record");
+    }
+  }
+
   void finish_start_failure(
     const MotionToken & token,
     const MotionConditioningResult & conditioning_result)
@@ -1246,7 +1278,8 @@ private:
     {
       code = ChildResultCode::SafetyFault;
     }
-    ResultCallback result_callback;
+    RelativeMotionCompletionRecordPtr completion;
+    bool deliver_result = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!active_ || !same_token(active_token_, token) ||
@@ -1262,32 +1295,25 @@ private:
       teardown_complete_ = true;
       teardown_safe_ = zero_proven &&
         conditioning_result.failure != MotionConditioningFailure::SafetyFault;
-      result_callback = std::move(result_callback_);
-      completion_delivery_in_progress_ = static_cast<bool>(result_callback);
+      completion = std::make_shared<const RelativeMotionCompletionRecord>(
+        RelativeMotionCompletionRecord{
+          token,
+          ChildResult{
+            code,
+            conditioning_result.detail.empty() ?
+            "conditioning generation could not start" : conditioning_result.detail},
+          std::move(result_callback_)});
+      deliver_result = static_cast<bool>(completion->delivery);
       condition_variable_.notify_all();
     }
-    if (result_callback) {
+    if (deliver_result) {
       RCLCPP_ERROR(
         node_.get_logger(),
         "Relative motion start failed: conditioning_failure=%u zero=%d detail=%s",
         static_cast<unsigned int>(conditioning_result.failure),
         zero_proven ? 1 : 0,
         conditioning_result.detail.c_str());
-      try {
-        result_callback(
-          token,
-          ChildResult{
-            code,
-            conditioning_result.detail.empty() ?
-            "conditioning generation could not start" : conditioning_result.detail});
-      } catch (...) {
-        fail_transaction("relative-motion start result delivery raised");
-      }
-    }
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      completion_delivery_in_progress_ = false;
-      condition_variable_.notify_all();
+      publish_completion(std::move(completion));
     }
   }
 
@@ -1394,9 +1420,8 @@ private:
     std::string{"odometry did not prove stationarity after Gate zero"} :
     (conditioning_result.detail.empty() ? request.detail : conditioning_result.detail));
 
-    ResultCallback result_callback;
+    RelativeMotionCompletionRecordPtr completion;
     bool deliver_result = false;
-    bool completion_delivery_started = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       deliver_result = request.deliver_result ||
@@ -1412,29 +1437,19 @@ private:
         teardown_safe_ = zero && stationary &&
           conditioning_result.failure != MotionConditioningFailure::SafetyFault;
         if (deliver_result) {
-          result_callback = std::move(result_callback_);
-          completion_delivery_started = static_cast<bool>(result_callback);
-          completion_delivery_in_progress_ = completion_delivery_started;
+          completion = std::make_shared<const RelativeMotionCompletionRecord>(
+            RelativeMotionCompletionRecord{
+              request.token,
+              ChildResult{final_code, final_detail},
+              std::move(result_callback_)});
         } else {
           result_callback_ = {};
-          completion_delivery_in_progress_ = false;
         }
         condition_variable_.notify_all();
       }
     }
-    if (deliver_result && result_callback) {
-      try {
-        result_callback(request.token, ChildResult{final_code, final_detail});
-      } catch (...) {
-        RCLCPP_ERROR(
-          node_.get_logger(),
-          "Relative motion teardown result delivery raised");
-      }
-    }
-    if (completion_delivery_started) {
-      std::lock_guard<std::mutex> lock(mutex_);
-      completion_delivery_in_progress_ = false;
-      condition_variable_.notify_all();
+    if (deliver_result && completion && completion->delivery) {
+      publish_completion(std::move(completion));
     }
     const bool safe = zero && (!mission_active || stationary) &&
       conditioning_result.failure != MotionConditioningFailure::SafetyFault;
@@ -1477,7 +1492,7 @@ private:
   bool shutting_down_{false};
   bool shutdown_delivery_requested_{false};
   bool shutdown_complete_{false};
-  bool completion_delivery_in_progress_{false};
+  bool completion_record_in_progress_{false};
   bool emergency_stop_in_progress_{false};
   std::atomic<bool> cancel_requested_{false};
   bool active_{false};
