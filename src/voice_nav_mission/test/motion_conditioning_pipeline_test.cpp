@@ -480,6 +480,12 @@ public:
     return calls_;
   }
 
+  std::size_t renew_count() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return renew_count_;
+  }
+
 private:
   mutable std::mutex mutex_;
   GateSnapshot snapshot_{
@@ -1290,7 +1296,9 @@ TEST_F(
   ASSERT_TRUE(quiesce->result().has_value());
   EXPECT_TRUE(*quiesce->result());
   ASSERT_TRUE(result.has_value());
-  EXPECT_TRUE(result->ok);
+  EXPECT_FALSE(result->ok);
+  EXPECT_EQ(result->state, MotionConditioningState::Failed);
+  EXPECT_EQ(result->failure, MotionConditioningFailure::SafetyFault);
   const auto calls = authority->calls();
   EXPECT_EQ(
     std::count(calls.cbegin(), calls.cend(), AuthorityOperationKind::Prepare), 1);
@@ -1413,10 +1421,82 @@ TEST_F(
   ASSERT_TRUE(quiesce->result().has_value());
   EXPECT_TRUE(*quiesce->result());
   ASSERT_TRUE(result.has_value());
-  EXPECT_TRUE(result->ok);
+  EXPECT_FALSE(result->ok);
+  EXPECT_EQ(result->state, MotionConditioningState::Failed);
+  EXPECT_EQ(result->failure, MotionConditioningFailure::SafetyFault);
   EXPECT_EQ(producer->start_count, 1U);
   const auto stopped = pipeline.stop();
   EXPECT_TRUE(stopped.zero_proven);
+  const auto snapshot = authority->snapshot();
+  EXPECT_EQ(snapshot.state, GateState::Inhibited);
+  EXPECT_TRUE(snapshot.motion_inhibited);
+  EXPECT_TRUE(snapshot.zero_published);
+}
+
+TEST_F(
+  MotionConditioningPipelineTest,
+  TransactionQuiesceAfterOpenReturnBlocksFinalRunningCommit)
+{
+  auto finish = std::make_shared<TransactionOperationBarrier>(
+    RuntimeTransactionSideEffect::Open);
+  auto quiesce = std::make_shared<TransactionQuiesceBarrier>();
+  auto health_ready = std::make_shared<CallbackCounter>();
+  auto pipeline_config = config();
+  pipeline_config.transaction_plane = std::make_shared<RuntimeTransactionPlane>(
+    1U,
+    RuntimeTransactionPlane::BeforeCommit{},
+    RuntimeTransactionPlane::BeforeOperation{},
+    [quiesce](const std::uint64_t generation) {
+      (*quiesce)(generation);
+    },
+    [finish](const RuntimeTransactionSideEffect side_effect) {
+      (*finish)(side_effect);
+    });
+  pipeline_config.transaction_generation_provider = []() {return 1U;};
+  pipeline_config.prepare_open_deadline = 4s;
+  pipeline_config.after_health_callback = [health_ready]() {
+      (*health_ready)();
+    };
+  MotionConditioningPipeline pipeline(
+    *client, authority, producer, pipeline_config);
+  ASSERT_TRUE(pipeline.prepare().ok);
+  health_ready->expect(4U);
+  graph->publish_health_once();
+  ASSERT_TRUE(health_ready->wait_for_target());
+
+  const auto renew_before_start = authority->renew_count();
+  std::optional<MotionConditioningResult> result;
+  std::thread start_thread([&]() {result = pipeline.start();});
+  const auto entered = finish->wait_for_entry(5s);
+  if (!entered) {
+    finish->release();
+    start_thread.join();
+  }
+  ASSERT_TRUE(entered);
+  EXPECT_EQ(producer->start_count, 1U);
+
+  std::thread quiesce_thread([&]() {
+      quiesce->complete(pipeline_config.transaction_plane->quiesce(
+        2U, std::chrono::steady_clock::now() + 1s));
+    });
+  ASSERT_TRUE(quiesce->wait_for_entry());
+  EXPECT_FALSE(quiesce->wait_for_completion(100ms));
+  const auto renew_at_barrier = authority->renew_count();
+
+  finish->release();
+  start_thread.join();
+  quiesce_thread.join();
+
+  ASSERT_TRUE(result.has_value());
+  EXPECT_FALSE(result->ok);
+  EXPECT_EQ(result->state, MotionConditioningState::Failed);
+  EXPECT_EQ(result->failure, MotionConditioningFailure::SafetyFault);
+  EXPECT_GE(producer->stop_count, 1U);
+  ASSERT_TRUE(quiesce->result().has_value());
+  EXPECT_TRUE(*quiesce->result());
+  EXPECT_EQ(authority->renew_count(), renew_at_barrier);
+  EXPECT_GE(renew_at_barrier, renew_before_start + 2U);
+  EXPECT_EQ(pipeline.state(), MotionConditioningState::Failed);
   const auto snapshot = authority->snapshot();
   EXPECT_EQ(snapshot.state, GateState::Inhibited);
   EXPECT_TRUE(snapshot.motion_inhibited);

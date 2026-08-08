@@ -328,6 +328,8 @@ private:
     authority_(std::move(authority)),
     producer_(std::move(producer)),
     config_(std::move(config)),
+    local_transaction_plane_(config_.transaction_plane ?
+      config_.transaction_plane : std::make_shared<RuntimeTransactionPlane>(0U)),
     scan_freshness_(config_.dependency_liveness_timeout),
     odom_freshness_(config_.dependency_liveness_timeout),
     clock_freshness_(config_.dependency_liveness_timeout),
@@ -563,11 +565,15 @@ private:
         "conditioning PREPARE was cancelled before the Gate request");
     }
 
+    std::optional<TransactionLease> prepare_lease;
     std::optional<AuthorityResult> gate_prepare_result;
     try {
-      gate_prepare_result = submit_side_effect(
-        RuntimeTransactionSideEffect::Prepare,
-        [this]() {return authority_->prepare(make_operation());});
+      prepare_lease = begin_side_effect(RuntimeTransactionSideEffect::Prepare);
+      if (prepare_lease.has_value()) {
+        gate_prepare_result = prepare_lease->invoke(
+          RuntimeTransactionSideEffect::Prepare,
+          [this]() {return authority_->prepare(make_operation());});
+      }
     } catch (const std::exception & error) {
       if (prepare_cancel_requested_.load()) {
         return finish_cancelled_prepare(
@@ -647,6 +653,13 @@ private:
       return finish_cancelled_prepare(
         "conditioning PREPARE was cancelled before component setup");
     }
+    if (!prepare_lease->current()) {
+      const auto failed = fail_owned(
+        MotionConditioningFailure::SafetyFault,
+        "generation permit was revoked before component setup", true);
+      finish_teardown(failed, TeardownIntent::Failure);
+      return failed;
+    }
 
     setup_failure_detail_.clear();
     if (!load_and_configure_components()) {
@@ -664,6 +677,13 @@ private:
       return finish_cancelled_prepare(
         "conditioning PREPARE was cancelled after component setup");
     }
+    if (!prepare_lease->current()) {
+      const auto failed = fail_owned(
+        MotionConditioningFailure::SafetyFault,
+        "generation permit was revoked after component setup", true);
+      finish_teardown(failed, TeardownIntent::Failure);
+      return failed;
+    }
     if (std::chrono::steady_clock::now() >= prepare_open_deadline_) {
       const auto result = fail_owned(
         MotionConditioningFailure::SafetyFault,
@@ -671,29 +691,42 @@ private:
       finish_teardown(result, TeardownIntent::Failure);
       return result;
     }
+    if (prepare_cancel_requested_.load()) {
+      return finish_cancelled_prepare(
+        "conditioning PREPARE was cancelled before final transaction commit");
+    }
     MotionConditioningResult result;
-    bool prepare_cancelled = false;
-    {
-      std::lock_guard<std::recursive_mutex> lock(mutex_);
-      prepare_cancelled = prepare_cancel_requested_.load();
-      if (prepare_cancelled) {
-        state_ = MotionConditioningState::Stopped;
-        result = remember(make_result(
-            state_, MotionConditioningFailure::ExecutionFailed, false, false,
-            collision_stop_, lease_id_, candidate_topic_,
-            "conditioning PREPARE was cancelled before commit"));
-      } else {
-        state_ = MotionConditioningState::Prepared;
-        result = remember(make_result(
+    const bool prepare_committed = prepare_lease.has_value() &&
+      prepare_lease->commit([&]() {
+          std::lock_guard<std::recursive_mutex> lock(mutex_);
+          if (prepare_cancel_requested_.load() || generation_ != prepared_generation ||
+          (lease_id_ != gate_prepare.lease_id &&
+          lease_id_ != gate_prepare.snapshot.lease_id))
+          {
+            return false;
+          }
+          state_ = MotionConditioningState::Prepared;
+          result = remember(make_result(
             state_, MotionConditioningFailure::None,
             gate_prepare.zero_proven && gate_prepare.snapshot.zero_published,
             true, false, lease_id_, candidate_topic_,
             "conditioning generation prepared"));
-        if (result.zero_proven) {
-          result.zero_proven_at = std::chrono::steady_clock::now();
-          last_result_.zero_proven_at = result.zero_proven_at;
-        }
+          if (result.zero_proven) {
+            result.zero_proven_at = std::chrono::steady_clock::now();
+            last_result_.zero_proven_at = result.zero_proven_at;
+          }
+          return true;
+      });
+    if (!prepare_committed) {
+      if (prepare_cancel_requested_.load()) {
+        return finish_cancelled_prepare(
+          "conditioning PREPARE was cancelled at its final transaction commit");
       }
+      const auto failed = fail_owned(
+        MotionConditioningFailure::SafetyFault,
+        "generation or identity permit was revoked before PREPARE commit", true);
+      finish_teardown(failed, TeardownIntent::Failure);
+      return failed;
     }
     finish_prepare(result);
     return result;
@@ -750,6 +783,7 @@ private:
       return start_busy_result();
     }
 
+    std::optional<TransactionLease> open_lease;
     std::optional<AuthorityResult> gate_open_result;
     AuthorityOperation open_operation;
     bool activation_ready = false;
@@ -837,17 +871,20 @@ private:
     bool producer_started = false;
     std::unique_lock<std::mutex> producer_lock;
     try {
-      gate_open_result = submit_side_effect(
-        RuntimeTransactionSideEffect::Open,
-        [this, &open_operation]() {
-          std::lock_guard<std::mutex> authority_lock(authority_call_mutex_);
-          auto result = authority_->open(open_operation);
-          if (result.snapshot.gate_instance_id != open_operation.gate_instance_id) {
-            result.applied = false;
-            result.detail = "MotionGate OPEN returned a stale gate identity";
-          }
-          return result;
-        });
+      open_lease = begin_side_effect(RuntimeTransactionSideEffect::Open);
+      if (open_lease.has_value()) {
+        gate_open_result = open_lease->invoke(
+          RuntimeTransactionSideEffect::Open,
+          [this, &open_operation]() {
+            std::lock_guard<std::mutex> authority_lock(authority_call_mutex_);
+            auto result = authority_->open(open_operation);
+            if (result.snapshot.gate_instance_id != open_operation.gate_instance_id) {
+              result.applied = false;
+              result.detail = "MotionGate OPEN returned a stale gate identity";
+            }
+            return result;
+          });
+      }
     } catch (const std::exception & error) {
       return abort_activation(
         generation,
@@ -866,7 +903,7 @@ private:
         "generation permit was revoked before MotionGate OPEN");
     }
     const auto gate_open = std::move(*gate_open_result);
-    if (!activation_token_current(generation) ||
+    if (!open_lease->current() || !activation_token_current(generation) ||
       !gate_open.applied || !gate_open.snapshot.authority_live ||
       gate_open.snapshot.motion_inhibited ||
       !gate_open.snapshot.writer_bound ||
@@ -919,13 +956,15 @@ private:
         std::move(timer_error));
     }
 
-    if (!renew_for_activation(generation, expected_lease, open_operation.gate_instance_id)) {
+    if (!renew_for_activation(
+        generation, expected_lease, open_operation.gate_instance_id, &*open_lease))
+    {
       return abort_activation(
         generation,
         MotionConditioningFailure::SafetyFault,
         activation_failure_detail());
     }
-    if (!activation_token_current(generation)) {
+    if (!open_lease->current() || !activation_token_current(generation)) {
       return abort_activation(
         generation,
         MotionConditioningFailure::SafetyFault,
@@ -935,7 +974,7 @@ private:
         kCollisionMonitorFqn,
         lifecycle_msgs::msg::Transition::TRANSITION_ACTIVATE,
         handover_deadline) ||
-      !activation_token_current(generation) ||
+      !open_lease->current() || !activation_token_current(generation) ||
       std::chrono::steady_clock::now() >= handover_deadline)
     {
       return abort_activation(
@@ -947,7 +986,7 @@ private:
         kVelocitySmootherFqn,
         lifecycle_msgs::msg::Transition::TRANSITION_ACTIVATE,
         handover_deadline) ||
-      !activation_token_current(generation) ||
+      !open_lease->current() || !activation_token_current(generation) ||
       std::chrono::steady_clock::now() >= handover_deadline)
     {
       return abort_activation(
@@ -956,13 +995,15 @@ private:
         "Velocity Smoother activation failed after MotionGate OPEN");
     }
     const auto second_renew_ok = renew_for_activation(
-      generation, expected_lease, open_operation.gate_instance_id);
+      generation, expected_lease, open_operation.gate_instance_id, &*open_lease);
     const auto graph_health = second_renew_ok ?
       runtime_graph_health(handover_deadline, expected_candidate) :
       RuntimeHealthAssessment{
       RuntimeHealthReason::ComponentUnavailable,
       "MotionGate RENEW failed during activation"};
-    if (!graph_health.healthy() || !activation_token_current(generation)) {
+    if (!open_lease->current() || !graph_health.healthy() ||
+      !activation_token_current(generation))
+    {
       return abort_activation(
         generation,
         failure_for_health(graph_health.reason),
@@ -991,9 +1032,11 @@ private:
         producer_health.detail);
     }
     bool activation_fence_valid = false;
+    const bool open_lease_current = open_lease->current();
     {
       std::lock_guard<std::recursive_mutex> lock(mutex_);
       activation_fence_valid =
+        open_lease_current &&
         activation_current_locked(generation, expected_lease, expected_candidate) &&
         std::chrono::steady_clock::now() < handover_deadline;
     }
@@ -1021,7 +1064,8 @@ private:
       !final_snapshot.authority_live || final_snapshot.motion_inhibited ||
       !final_snapshot.writer_bound ||
       final_snapshot.candidate_topic != expected_candidate ||
-      !timer_enabled_.load() || activation_failed_.load())
+      !timer_enabled_.load() || activation_failed_.load() ||
+      !open_lease->current())
     {
       producer_lock.unlock();
       return abort_activation(
@@ -1032,7 +1076,7 @@ private:
 
     if (!producer_started) {
       try {
-        const auto producer_result = submit_side_effect(
+        const auto producer_result = open_lease->invoke(
           RuntimeTransactionSideEffect::ControllerStart,
           [this]() {return producer_ && producer_->start(config_.raw_topic);});
         if (!producer_result.has_value()) {
@@ -1065,21 +1109,21 @@ private:
       }
     }
     MotionConditioningResult result;
-    bool activation_committed = false;
-    {
-      std::lock_guard<std::recursive_mutex> lock(mutex_);
-      if (activation_current_locked(generation, expected_lease, expected_candidate) &&
-        std::chrono::steady_clock::now() < handover_deadline &&
-        !activation_failed_.load())
-      {
-        activation_in_progress_.store(false);
-        state_ = MotionConditioningState::Running;
-        result = remember(make_result(
+    const bool activation_committed = open_lease->commit([&]() {
+          std::lock_guard<std::recursive_mutex> lock(mutex_);
+          if (!activation_current_locked(generation, expected_lease, expected_candidate) ||
+          std::chrono::steady_clock::now() >= handover_deadline ||
+          activation_failed_.load())
+          {
+            return false;
+          }
+          activation_in_progress_.store(false);
+          state_ = MotionConditioningState::Running;
+          result = remember(make_result(
             state_, MotionConditioningFailure::None, true, false, false,
             lease_id_, candidate_topic_, "conditioning generation running"));
-        activation_committed = true;
-      }
-    }
+          return true;
+      });
     if (activation_committed) {
       producer_lock.unlock();
       return result;
@@ -1167,20 +1211,21 @@ private:
   }
 
 private:
-  template<typename Operation>
-  [[nodiscard]] auto submit_side_effect(
-    const RuntimeTransactionSideEffect side_effect,
-    Operation && operation)
-  -> std::optional<std::invoke_result_t<Operation>>
+  using TransactionLease = RuntimeTransactionPlane::Lease;
+
+  [[nodiscard]] std::shared_ptr<RuntimeTransactionPlane> transaction_plane() const
   {
-    if (!config_.transaction_plane) {
-      return std::forward<Operation>(operation)();
-    }
+    return config_.transaction_plane ? config_.transaction_plane :
+           local_transaction_plane_;
+  }
+
+  [[nodiscard]] std::optional<TransactionLease> begin_side_effect(
+    const RuntimeTransactionSideEffect side_effect)
+  {
+    const auto plane = transaction_plane();
     const auto generation = config_.transaction_generation_provider ?
-      config_.transaction_generation_provider() :
-      config_.transaction_plane->generation();
-    return config_.transaction_plane->submit(
-      generation, side_effect, std::forward<Operation>(operation));
+      config_.transaction_generation_provider() : plane->generation();
+    return plane->begin(generation, side_effect);
   }
 
   static std::chrono::milliseconds remaining_until(
@@ -3037,9 +3082,18 @@ private:
   [[nodiscard]] bool renew_for_activation(
     std::uint64_t generation,
     const std::string & expected_lease,
-    const std::string & expected_gate_instance)
+    const std::string & expected_gate_instance,
+    TransactionLease * transaction_lease = nullptr)
   {
-    if (!activation_token_current(generation)) {
+    std::optional<TransactionLease> owned_renew_lease;
+    if (transaction_lease == nullptr) {
+      owned_renew_lease = begin_side_effect(RuntimeTransactionSideEffect::Renew);
+      if (!owned_renew_lease.has_value()) {
+        return false;
+      }
+      transaction_lease = &*owned_renew_lease;
+    }
+    if (!transaction_lease->current() || !activation_token_current(generation)) {
       return false;
     }
     try {
@@ -3049,21 +3103,34 @@ private:
           "diff_drive_controller is not active during activation");
         return false;
       }
-      if (!activation_token_current(generation)) {
+      if (!transaction_lease->current() || !activation_token_current(generation)) {
         return false;
       }
       AuthorityResult result;
-      {
-        std::lock_guard<std::mutex> authority_lock(authority_call_mutex_);
-        result = authority_->renew(make_operation(expected_lease));
+      const auto renewed = transaction_lease->invoke(
+        RuntimeTransactionSideEffect::Renew,
+        [this, &expected_lease]() {
+          std::lock_guard<std::mutex> authority_lock(authority_call_mutex_);
+          return authority_->renew(make_operation(expected_lease));
+        });
+      if (!renewed.has_value()) {
+        set_activation_failure("generation permit was revoked during activation RENEW");
+        return false;
       }
-      if (!activation_token_current(generation) ||
+      result = std::move(*renewed);
+      if (!transaction_lease->current() || !activation_token_current(generation) ||
         !result.applied || !result.snapshot.authority_live ||
         result.snapshot.gate_instance_id != expected_gate_instance ||
         result.snapshot.lease_id != expected_lease ||
         result.snapshot.motion_inhibited)
       {
         set_activation_failure("MotionGate RENEW failed during activation");
+        return false;
+      }
+      if (owned_renew_lease.has_value() &&
+        !owned_renew_lease->commit([]() {return true;}))
+      {
+        set_activation_failure("generation permit was revoked after activation RENEW");
         return false;
       }
       return true;
@@ -3079,6 +3146,7 @@ private:
   void on_renew()
   {
     MotionConditioningCorrelationToken callback_token;
+    std::optional<TransactionLease> renew_lease;
     try {
       RenewCallbackGuard callback_guard(*this);
       if (!callback_guard.active_) {
@@ -3087,7 +3155,6 @@ private:
       if (config_.before_renew_callback) {
         config_.before_renew_callback();
       }
-      std::string activation_gate_instance;
       bool activation = false;
       bool collision_stop = false;
       bool running = false;
@@ -3110,52 +3177,16 @@ private:
       if (activation) {
         return;
       }
-      try {
-        std::lock_guard<std::mutex> authority_lock(authority_call_mutex_);
-        activation_gate_instance = authority_->snapshot().gate_instance_id;
-      } catch (const std::exception & error) {
-        const auto detail =
-          std::string{"MotionGate snapshot raised during RENEW: "} + error.what();
-        if (activation) {
-          set_activation_failure(detail);
-        } else if (running_generation_current(callback_token.generation)) {
-          fail_from_renew_callback(
-            callback_token,
-            MotionConditioningFailure::SafetyFault,
-            detail);
-        }
-        return;
-      } catch (...) {
-        const std::string detail =
-          "MotionGate snapshot raised during RENEW";
-        if (activation) {
-          set_activation_failure(detail);
-        } else if (running_generation_current(callback_token.generation)) {
-          fail_from_renew_callback(
-            callback_token,
-            MotionConditioningFailure::SafetyFault,
-            detail);
-        }
-        return;
-      }
-      if (activation) {
-        if (!renew_for_activation(
-            callback_token.generation, callback_token.lease_id,
-            activation_gate_instance) &&
-          activation_generation_current(callback_token.generation))
-        {
-          fail_from_renew_callback(
-            callback_token,
-            MotionConditioningFailure::SafetyFault,
-            activation_failure_detail());
-        }
-        return;
-      }
-      if (!running_generation_current(callback_token.generation)) {
+      renew_lease = begin_side_effect(RuntimeTransactionSideEffect::Renew);
+      if (!renew_lease.has_value() || !renew_lease->current() ||
+        !running_generation_current(callback_token.generation))
+      {
         return;
       }
       if (collision_stop) {
-        if (!running_generation_current(callback_token.generation)) {
+        if (!renew_lease->current() ||
+          !running_generation_current(callback_token.generation))
+        {
           return;
         }
         fail_from_renew_callback(
@@ -3168,7 +3199,9 @@ private:
         std::chrono::steady_clock::now() + config_.health_rpc_timeout,
         {}, false);
       if (!health.healthy()) {
-        if (!running_generation_current(callback_token.generation)) {
+        if (!renew_lease->current() ||
+          !running_generation_current(callback_token.generation))
+        {
           return;
         }
         fail_from_renew_callback(
@@ -3179,41 +3212,54 @@ private:
           health.detail);
         return;
       }
-      if (!running_generation_current(callback_token.generation)) {
+      if (!renew_lease->current() ||
+        !running_generation_current(callback_token.generation))
+      {
         return;
       }
       AuthorityResult result;
       AuthorityOperation renew_operation;
-      {
-        std::lock_guard<std::mutex> authority_lock(authority_call_mutex_);
-        if (!running_generation_current(callback_token.generation)) {
-          return;
-        }
-        renew_operation = make_operation(callback_token.lease_id);
-        result = authority_->renew(renew_operation);
+      const auto renewed = renew_lease->invoke(
+        RuntimeTransactionSideEffect::Renew,
+        [this, &callback_token, &renew_operation]() {
+          std::lock_guard<std::mutex> authority_lock(authority_call_mutex_);
+          renew_operation = make_operation(callback_token.lease_id);
+          return authority_->renew(renew_operation);
+        });
+      if (!renewed.has_value()) {
+        return;
       }
+      result = std::move(*renewed);
       if (!result.applied || !result.snapshot.authority_live ||
         result.snapshot.gate_instance_id != renew_operation.gate_instance_id ||
         result.snapshot.lease_id != callback_token.lease_id ||
         result.snapshot.motion_inhibited)
       {
-        if (!running_generation_current(callback_token.generation)) {
+        if (!renew_lease->current() ||
+          !running_generation_current(callback_token.generation))
+        {
           return;
         }
         fail_from_renew_callback(
           callback_token,
           MotionConditioningFailure::SafetyFault,
           "MotionGate RENEW failed closed");
+        return;
       }
+      (void)renew_lease->commit([]() {return true;});
     } catch (const std::exception & error) {
-      if (running_generation_current(callback_token.generation)) {
+      if (renew_lease.has_value() && renew_lease->current() &&
+        running_generation_current(callback_token.generation))
+      {
         fail_from_renew_callback(
           callback_token,
           MotionConditioningFailure::SafetyFault,
           std::string{"MotionGate RENEW raised: "} + error.what());
       }
     } catch (...) {
-      if (running_generation_current(callback_token.generation)) {
+      if (renew_lease.has_value() && renew_lease->current() &&
+        running_generation_current(callback_token.generation))
+      {
         fail_from_renew_callback(
           callback_token,
           MotionConditioningFailure::SafetyFault,
@@ -3440,6 +3486,7 @@ private:
   std::shared_ptr<MotionAuthorityPort> authority_;
   std::shared_ptr<MotionProducerPort> producer_;
   MotionConditioningConfig config_;
+  std::shared_ptr<RuntimeTransactionPlane> local_transaction_plane_;
   SteadySourceFreshness scan_freshness_;
   SteadySourceFreshness odom_freshness_;
   SteadySourceFreshness clock_freshness_;

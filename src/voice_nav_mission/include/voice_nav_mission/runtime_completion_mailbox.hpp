@@ -243,6 +243,11 @@ public:
     }
   }
 
+  [[nodiscard]] std::thread::id thread_id() const noexcept
+  {
+    return thread_.get_id();
+  }
+
 private:
   void run() noexcept
   {

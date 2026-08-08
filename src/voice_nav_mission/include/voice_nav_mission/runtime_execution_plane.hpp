@@ -123,6 +123,11 @@ public:
     return terminal_handoff_lane_;
   }
 
+  [[nodiscard]] std::thread::id completion_reaper_thread_id() const noexcept
+  {
+    return completion_reaper_.thread_id();
+  }
+
   void shutdown() noexcept
   {
     if (shutdown_complete_) {

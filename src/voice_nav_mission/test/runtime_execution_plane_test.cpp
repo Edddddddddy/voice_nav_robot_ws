@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -30,6 +31,7 @@
 #include "voice_nav_mission/runtime_event_ingress.hpp"
 #include "voice_nav_mission/runtime_event_queue.hpp"
 #include "voice_nav_mission/runtime_execution_plane.hpp"
+#include "voice_nav_mission/runtime_shutdown_coordinator.hpp"
 
 namespace voice_nav_mission
 {
@@ -135,6 +137,36 @@ private:
   std::vector<MissionResult> results_;
 };
 
+class OwnerReleaseProbe final
+{
+public:
+  void record()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    release_thread_ = std::this_thread::get_id();
+    condition_.notify_all();
+  }
+
+  [[nodiscard]] bool wait_for_release()
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, 1s, [this]() {
+               return release_thread_.has_value();
+           });
+  }
+
+  [[nodiscard]] std::thread::id release_thread() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return release_thread_.value_or(std::thread::id{});
+  }
+
+private:
+  mutable std::mutex mutex_;
+  std::condition_variable condition_;
+  std::optional<std::thread::id> release_thread_;
+};
+
 struct CompletionEvent
 {
   MotionToken token;
@@ -207,6 +239,10 @@ public:
   using Queue = RuntimeEventQueue<CompletionEvent>;
 
   [[nodiscard]] RuntimeExecutionPlane & plane() noexcept {return *plane_;}
+  [[nodiscard]] ScriptedMotionAuthorityPort & authority() noexcept
+  {
+    return *authority_;
+  }
   [[nodiscard]] ExternalRelativeMotionPort & relative() noexcept
   {
     return *relative_;
@@ -357,6 +393,64 @@ TEST(RuntimeExecutionPlaneTest, QuiescedQueuedPermitCannotStartOrDuplicateGoal)
   EXPECT_FALSE(fixture.plane().core()->has_active_mission());
 }
 
+TEST(RuntimeExecutionPlaneTest, ShutdownDeadlineFailsClosedThroughProductionCoordinator)
+{
+  RuntimeExecutionPlaneFixture fixture;
+  start_active_mission(fixture);
+  fixture.authority().set_snapshot(GateSnapshot{
+        kGateId, 3U, std::string(32U, 'l'), GateState::Armed,
+        true, false, false, false, {}, true, true});
+
+  ActionAdmissionTracker tracker([]() {return std::chrono::steady_clock::now();});
+  RuntimeAdmissionGate gate;
+  auto transaction_lease = gate.transaction_plane()->begin(
+    1U, RuntimeTransactionSideEffect::Open);
+  ASSERT_TRUE(transaction_lease.has_value());
+
+  std::size_t emergency_calls = 0U;
+  std::size_t fence_calls = 0U;
+  RuntimeShutdownCoordinator coordinator(
+    [&gate, &tracker](const RuntimeShutdownCoordinator::TimePoint deadline) {
+      return gate.begin_quiesce(tracker, deadline);
+    },
+    [&]() {
+      ++emergency_calls;
+      (void)fixture.authority().inhibit(AuthorityOperation{
+          "shutdown-emergency", kGateId, 3U, std::string(32U, 'l')});
+    },
+    [&](std::string detail) {
+      ++fence_calls;
+      (void)fixture.fence().raise(std::move(detail));
+    },
+    [&](std::string detail) {
+      std::lock_guard<std::recursive_mutex> lock(
+        fixture.plane().core_serial_mutex());
+      fixture.plane().core()->fail_closed_at_epoch(
+        fixture.fence().admission_epoch(), std::move(detail));
+    });
+
+  const auto outcome = coordinator.run(
+    std::chrono::steady_clock::now() - 1ms);
+  EXPECT_FALSE(outcome.transaction_drained);
+  EXPECT_TRUE(outcome.fail_closed);
+  EXPECT_EQ(emergency_calls, 1U);
+  EXPECT_EQ(fence_calls, 1U);
+  const auto snapshot = fixture.authority().snapshot();
+  EXPECT_EQ(snapshot.state, GateState::Inhibited);
+  EXPECT_TRUE(snapshot.motion_inhibited);
+  EXPECT_TRUE(snapshot.zero_selected);
+  EXPECT_TRUE(snapshot.zero_published);
+  ASSERT_TRUE(fixture.terminal().wait_for_count(1U));
+  const auto results = fixture.terminal().results();
+  ASSERT_EQ(results.size(), 1U);
+  EXPECT_EQ(results.front().code, MissionResultCode::SafetyFault);
+  EXPECT_FALSE(fixture.plane().core()->has_active_mission());
+
+  transaction_lease->reject();
+  fixture.stop_worker();
+  EXPECT_TRUE(fixture.worker_joined());
+}
+
 TEST_P(
   RelayRejectionTest,
   RelayRejectionFailsClosedThroughCoreGoal)
@@ -391,10 +485,19 @@ TEST_P(
       RuntimeExecutionPlaneFixture::Queue::PushResult::ControlFull);
   }
 
-  const auto record = std::make_shared<const RelativeMotionCompletionRecord>(
-    RelativeMotionCompletionRecord{
-        token, ChildResult{ChildResultCode::SafetyFault, "relay rejection"}});
-  EXPECT_FALSE(fixture.mailbox().relay(record));
+  auto release_probe = std::make_shared<OwnerReleaseProbe>();
+  auto record = RelativeMotionCompletionRecordPtr(
+    new RelativeMotionCompletionRecord{
+        token, ChildResult{ChildResultCode::SafetyFault, "relay rejection"}},
+    [release_probe](const RelativeMotionCompletionRecord * value) {
+      delete value;
+      release_probe->record();
+    });
+  EXPECT_FALSE(fixture.mailbox().relay(std::move(record)));
+  ASSERT_TRUE(release_probe->wait_for_release());
+  EXPECT_EQ(
+    release_probe->release_thread(), fixture.plane().completion_reaper_thread_id());
+  EXPECT_NE(release_probe->release_thread(), std::this_thread::get_id());
   ASSERT_TRUE(fixture.terminal().wait_for_count(1U));
   const auto results = fixture.terminal().results();
   ASSERT_EQ(results.size(), 1U);
