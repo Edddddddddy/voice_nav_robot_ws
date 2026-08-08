@@ -435,15 +435,21 @@ above. Every Goal receives exactly one terminal result.
   safety fault. The residual safety fault remains latched against later
   admission.
 - Node shutdown stops ingress, drains accepted internal completion events, and
-  waits for the saved active-goal callback to be delivered exactly once before
-  closing the queue and destroying Runtime state. Terminal records are
-  bounded to eight recent generations.
+  waits for the saved GoalHandle/CallbackLease from production `on_accepted`
+  to receive its one graceful-shutdown terminal before closing the queue and
+  destroying Runtime state. A provisional/no-handle ticket is revoked at its
+  fixed bound and never receives a fabricated Result. Once the ROS context or
+  process is closing, transport delivery is not claimed to be distributed
+  exactly-once. Terminal records are bounded to eight recent generations.
 - Action admission is linearized by one Node-owned gate shared by the
   on-goal/on-accepted handoff, AdmitEvent dispatch, start permits, and
   quiesce. A generation-bound permit is invalid after quiesce, so an event
   already in the queue cannot start Core, PREPARE, OPEN, or the producer.
-  Revoked callback tombstones remain part of the bounded second drain until
-  their trusted handoff retention expires.
+  Provisional revoked tickets are bounded shutdown state, not a promise to
+  retain a late transport handoff. Only an already-entered production
+  `on_accepted` callback with a GoalHandle/CallbackLease participates in the
+  graceful second drain; MotionGate inhibited+zero remains the independent
+  safety guarantee.
 - The production Node uses a package-private RuntimeExecutionPlane that owns
   RuntimeCore and the NodeCompletionMailbox together. Transaction, start
   failure, and emergency relay rejection all converge through this plane to a

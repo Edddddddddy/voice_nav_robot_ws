@@ -50,6 +50,7 @@
 #include "voice_nav_mission/runtime_execution_plane.hpp"
 #include "voice_nav_mission/runtime_event_ingress.hpp"
 #include "voice_nav_mission/runtime_event_queue.hpp"
+#include "voice_nav_mission/runtime_shutdown_coordinator.hpp"
 
 namespace voice_nav_mission
 {
@@ -347,6 +348,20 @@ public:
       [this](std::string detail) {
         request_emergency_fence(std::move(detail));
       });
+    shutdown_coordinator_ = std::make_unique<RuntimeShutdownCoordinator>(
+      [this](const RuntimeShutdownCoordinator::TimePoint deadline) {
+        return admission_gate_.begin_quiesce(action_admission_tracker_, deadline);
+      },
+      [this]() {request_independent_emergency();},
+      [this](std::string detail) {request_emergency_fence(std::move(detail));},
+      [this](std::string detail) {
+        if (execution_plane_ && execution_plane_->core()) {
+          std::lock_guard<std::recursive_mutex> lock(
+            execution_plane_->core_serial_mutex());
+          execution_plane_->core()->fail_closed_at_epoch(
+            emergency_fence_.admission_epoch(), std::move(detail));
+        }
+      });
     runtime_worker_ = std::thread([this]() {run_runtime_events();});
     (void)enqueue_event(RuntimeEvent{
         0U, GateSnapshotEvent{initial_gate_snapshot}});
@@ -452,14 +467,12 @@ private:
       shutdown_barrier_owner_ = std::this_thread::get_id();
     }
 
-    const bool transaction_drained = admission_gate_.begin_quiesce(
-      action_admission_tracker_,
-      std::chrono::steady_clock::now() + config_.stop_barrier);
-    if (!transaction_drained) {
+    const auto shutdown_outcome = shutdown_coordinator_ ?
+      shutdown_coordinator_->run(
+        std::chrono::steady_clock::now() + config_.stop_barrier) :
+      RuntimeShutdownCoordinator::Outcome{false, true};
+    if (!shutdown_outcome.transaction_drained) {
       action_shutdown_fail_closed_ = true;
-      request_independent_emergency();
-      request_emergency_fence(
-        "transaction quiesce deadline expired; SAFETY_FAULT");
     }
     timer_.reset();
     stop_service_.reset();
@@ -988,6 +1001,7 @@ private:
   RuntimeEmergencyFence emergency_fence_{1U};
   RuntimeEventIngress<RuntimeEvent> event_ingress_;
   std::thread runtime_worker_;
+  std::unique_ptr<RuntimeShutdownCoordinator> shutdown_coordinator_;
   std::recursive_mutex mutex_;
   std::unordered_set<const GoalHandle *> pending_goal_cancels_;
   RuntimeState cached_state_{};

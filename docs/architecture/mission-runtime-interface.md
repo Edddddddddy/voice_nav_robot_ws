@@ -205,18 +205,21 @@ physically stopped; odometry proves stationarity separately.
   lease.
 - Timeout, cancel, STOP, dependency loss, exception, and success all pass
   through one serial terminal-intent linearization point.
-- Every Goal produces exactly one Result. The private Action Adapter keeps a
-  provisional GoalHandle delivery window across Core admission so a
-  synchronous child result is registered and delivered exactly once.
+- Every Goal that has entered production `on_accepted` and acquired its
+  GoalHandle/CallbackLease receives one graceful-shutdown terminal Result.
+  The private Action Adapter keeps that accepted handoff alive until Core
+  admission and the bounded shutdown drain have delivered it exactly once.
 - Action admission submission, queued dispatch, and the worker's start permit
   share a Node-owned generation gate. Quiesce closes that gate atomically;
   queued admissions return one structured safety result without entering
   PREPARE or OPEN, and a permit is rechecked immediately before Core and
   RelativeMotion side effects.
-- A provisional response timeout creates a bounded revoked tombstone. The
-  second shutdown drain includes that tombstone: a missing GoalHandle produces
-  no fabricated result, while a late accepted callback remains attached to the
-  live Action Server long enough to deliver exactly one structured terminal.
+- A provisional response timeout creates a bounded revoked ticket. It is
+  withdrawn at the fixed deadline and, when no GoalHandle/CallbackLease was
+  acquired, produces no fabricated Result. A callback already in production
+  `on_accepted` is the only late case covered by graceful shutdown; after the
+  ROS context or process starts closing, the transport provides no claim of
+  distributed exactly-once delivery.
 - Immutable RelativeMotion completion records are transferred to a Node-owned
   RuntimeExecutionPlane. Delivery callbacks and Goal/Core state never execute
   on the Adapter transaction thread; rejected records are reclaimed by the
