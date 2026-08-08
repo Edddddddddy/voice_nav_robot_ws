@@ -108,10 +108,55 @@ public:
       return true;
     }
     std::lock_guard<std::mutex> lock(mutex_);
-    if (rejected_records_.size() >= kRejectedCapacity) {
+    if (rejected_count_locked() >= kRejectedCapacity) {
       return false;
     }
     rejected_records_.push_back(std::move(record));
+    return true;
+  }
+
+  // Move a rejected record and any still-unclaimed delivery owner to the
+  // Node-owned rejection mailbox. The Adapter relay never destroys either
+  // side of this handoff.
+  [[nodiscard]] bool reject(
+    const MotionToken & token,
+    RelativeMotionCompletionRecordPtr record)
+  {
+    if (!record) {
+      return true;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (rejected_count_locked() >= kRejectedCapacity) {
+      return false;
+    }
+    const auto found = entries_.find(completion_token_key(token));
+    if (found != entries_.end() && !found->second.record) {
+      rejected_entries_.push_back(
+        RejectedEntry{std::move(record), std::move(found->second.delivery)});
+      entries_.erase(found);
+    } else {
+      rejected_records_.push_back(std::move(record));
+    }
+    return true;
+  }
+
+  // The token was accepted into the registry but could not be admitted to the
+  // Runtime queue. Move its record and delivery owner to the same bounded
+  // rejection mailbox before waking the non-Adapter reaper.
+  [[nodiscard]] bool reject_accepted(const MotionToken & token)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (rejected_count_locked() >= kRejectedCapacity) {
+      return false;
+    }
+    const auto found = entries_.find(completion_token_key(token));
+    if (found == entries_.end() || !found->second.record) {
+      return false;
+    }
+    rejected_entries_.push_back(
+      RejectedEntry{
+        std::move(found->second.record), std::move(found->second.delivery)});
+    entries_.erase(found);
     return true;
   }
 
@@ -144,10 +189,23 @@ public:
   void reap_all() noexcept
   {
     std::unordered_map<std::string, Entry> entries;
+    std::deque<RejectedEntry> rejected_entries;
     std::deque<RelativeMotionCompletionRecordPtr> rejected_records;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       entries.swap(entries_);
+      rejected_entries.swap(rejected_entries_);
+      rejected_records.swap(rejected_records_);
+    }
+  }
+
+  void reap_rejected() noexcept
+  {
+    std::deque<RejectedEntry> rejected_entries;
+    std::deque<RelativeMotionCompletionRecordPtr> rejected_records;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      rejected_entries.swap(rejected_entries_);
       rejected_records.swap(rejected_records_);
     }
   }
@@ -161,7 +219,7 @@ public:
   [[nodiscard]] std::size_t rejected_count() const noexcept
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    return rejected_records_.size();
+    return rejected_count_locked();
   }
 
 private:
@@ -172,8 +230,20 @@ private:
     RuntimeCore::ChildResultDelivery delivery;
   };
 
+  struct RejectedEntry
+  {
+    RelativeMotionCompletionRecordPtr record;
+    RuntimeCore::ChildResultDelivery delivery;
+  };
+
+  [[nodiscard]] std::size_t rejected_count_locked() const noexcept
+  {
+    return rejected_entries_.size() + rejected_records_.size();
+  }
+
   mutable std::mutex mutex_;
   std::unordered_map<std::string, Entry> entries_;
+  std::deque<RejectedEntry> rejected_entries_;
   std::deque<RelativeMotionCompletionRecordPtr> rejected_records_;
   bool closed_{false};
 };

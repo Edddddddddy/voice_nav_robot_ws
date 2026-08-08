@@ -263,7 +263,7 @@ class MissionRuntimeNodeTest(unittest.TestCase):
                 return value
         self.fail('等待 Runtime Interface 超时')
 
-    def test_late_state_and_business_rejection_without_gate(self):
+    def test_01_late_state_and_business_rejection_without_gate(self):
         state = self.spin_until(lambda: self.states[-1] if self.states else None)
         self.assertRegex(state.runtime_instance_id, r'^[0-9a-f]{32}$')
         self.assertEqual(state.admission_epoch, 1)
@@ -297,7 +297,7 @@ class MissionRuntimeNodeTest(unittest.TestCase):
         )
         self.assertEqual(wrapped.result.failed_step, -1)
 
-    def test_invalid_goal_is_aborted_with_structured_result(self):
+    def test_02_invalid_goal_is_aborted_with_structured_result(self):
         state = self.spin_until(lambda: self.states[-1] if self.states else None)
         self.assertTrue(self.action_client.wait_for_server(timeout_sec=5.0))
         goal = ExecuteMission.Goal()
@@ -320,7 +320,7 @@ class MissionRuntimeNodeTest(unittest.TestCase):
         )
         self.assertEqual(wrapped.result.failed_step, -1)
 
-    def test_active_goal_gets_one_result_before_quiesced_node_restarts(
+    def test_03_active_goal_gets_one_result_before_quiesced_node_restarts(
         self, launch_service, proc_info, runtime
     ):
         self.active_dependencies = ActiveShutdownDependencies()
@@ -397,7 +397,7 @@ class MissionRuntimeNodeTest(unittest.TestCase):
         )
         proc_info.assertWaitForStartup(runtime, timeout=10.0)
 
-    def test_runtime_restart_rotates_identity_and_restarts_at_epoch_one(
+    def test_04_runtime_restart_rotates_identity_and_restarts_at_epoch_one(
         self, launch_service, proc_info, runtime
     ):
         first = self.spin_until(lambda: self.states[-1] if self.states else None)

@@ -242,6 +242,38 @@ if(BUILD_TESTING)
   )
 
   ament_add_gtest(
+    runtime_completion_mailbox_test
+    test/runtime_completion_mailbox_test.cpp
+  )
+  target_compile_features(runtime_completion_mailbox_test PUBLIC cxx_std_17)
+  target_include_directories(
+    runtime_completion_mailbox_test
+    PRIVATE include
+  )
+  ament_target_dependencies(
+    runtime_completion_mailbox_test
+    geometry_msgs
+    nav_msgs
+    rclcpp
+    rosgraph_msgs
+    sensor_msgs
+  )
+  target_link_libraries(
+    runtime_completion_mailbox_test
+    mission_runtime_core
+  )
+
+  ament_add_gtest(
+    action_admission_tracker_test
+    test/action_admission_tracker_test.cpp
+  )
+  target_compile_features(action_admission_tracker_test PUBLIC cxx_std_17)
+  target_include_directories(
+    action_admission_tracker_test
+    PRIVATE include
+  )
+
+  ament_add_gtest(
     relative_motion_ros_adapter_test
     test/relative_motion_ros_adapter_test.cpp
   )
@@ -403,11 +435,6 @@ if(BUILD_TESTING)
     TIMEOUT 60
     RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
   )
-  add_launch_test(
-    test/test_mission_runtime_admission_barrier.py
-    TIMEOUT 60
-    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
-  )
   set_tests_properties(
     test_test_motion_gate_node.py
     PROPERTIES
@@ -423,13 +450,6 @@ if(BUILD_TESTING)
       RUN_SERIAL TRUE
   )
   set_tests_properties(
-    test_test_mission_runtime_admission_barrier.py
-    PROPERTIES
-      ENVIRONMENT
-        "RMW_IMPLEMENTATION=rmw_fastrtps_cpp;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
-      RUN_SERIAL TRUE
-  )
-  set_tests_properties(
     test_test_motion_gate_node.py
     PROPERTIES
       ENVIRONMENT_MODIFICATION
@@ -437,12 +457,6 @@ if(BUILD_TESTING)
   )
   set_tests_properties(
     test_test_mission_runtime_node.py
-    PROPERTIES
-      ENVIRONMENT_MODIFICATION
-        "ROS_DOMAIN_ID=unset:;DISABLE_ROS_ISOLATION=unset:"
-  )
-  set_tests_properties(
-    test_test_mission_runtime_admission_barrier.py
     PROPERTIES
       ENVIRONMENT_MODIFICATION
         "ROS_DOMAIN_ID=unset:;DISABLE_ROS_ISOLATION=unset:"

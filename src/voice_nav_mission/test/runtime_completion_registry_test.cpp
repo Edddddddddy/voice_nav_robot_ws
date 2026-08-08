@@ -138,6 +138,45 @@ TEST(RuntimeCompletionRegistryTest, EmergencyRecordSurvivesClosedRelayUntilNodeR
   EXPECT_TRUE(weak_record.expired());
 }
 
+TEST(RuntimeCompletionRegistryTest, ReaperOnlyReleasesRejectedEntries)
+{
+  NodeCompletionRegistry registry;
+  const auto live_token = token_for(350U);
+  const auto rejected_token = token_for(351U);
+  auto live_owner = std::make_shared<int>(11);
+  auto rejected_owner = std::make_shared<int>(12);
+  std::weak_ptr<int> weak_live_owner = live_owner;
+  std::weak_ptr<int> weak_rejected_owner = rejected_owner;
+  ASSERT_TRUE(registry.register_delivery(
+    live_token,
+      [live_owner](const MotionToken &, const ChildResult &) {}));
+  ASSERT_TRUE(registry.register_delivery(
+    rejected_token,
+      [rejected_owner](const MotionToken &, const ChildResult &) {}));
+  live_owner.reset();
+  rejected_owner.reset();
+
+  auto live_record = record_for(live_token);
+  auto rejected_record = record_for(rejected_token);
+  std::weak_ptr<const RelativeMotionCompletionRecord> weak_live_record = live_record;
+  std::weak_ptr<const RelativeMotionCompletionRecord> weak_rejected_record =
+    rejected_record;
+  ASSERT_TRUE(registry.accept(live_record));
+  ASSERT_TRUE(registry.reject(rejected_token, std::move(rejected_record)));
+
+  registry.reap_rejected();
+  EXPECT_EQ(registry.entry_count(), 1U);
+  EXPECT_EQ(registry.rejected_count(), 0U);
+  EXPECT_FALSE(weak_live_owner.expired());
+  EXPECT_FALSE(weak_live_record.expired());
+  EXPECT_TRUE(weak_rejected_owner.expired());
+  EXPECT_TRUE(weak_rejected_record.expired());
+
+  registry.reap_all();
+  EXPECT_TRUE(weak_live_owner.expired());
+  EXPECT_TRUE(weak_live_record.expired());
+}
+
 TEST(RuntimeCompletionRegistryTest, TransactionRecordSurvivesFullIngressUntilFenceReaper)
 {
   NodeCompletionRegistry registry;
