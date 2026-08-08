@@ -80,6 +80,13 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ingress, resets subscriptions and producer resources, and drains queued or
   in-flight callbacks before releasing Adapter state; MultiThreadedExecutor
   CV/latch tests cover each callback family.
+- Added the production Node admission gate and RuntimeExecutionPlane seam:
+  callback handoff, queued dispatch, start permits, and quiesce now share a
+  generation fence; revoked Action callback tombstones participate in the
+  bounded second drain; immutable completion records and Core/Goal terminals
+  converge through one joinable Node mailbox. Focused CV/latch tests cover
+  queue-before-dispatch, callback gaps, relay rejection, start failure, and
+  repeated mailbox construction/stop.
 - Finalized the pre-1.0 Mission V1 public Interface migration: bounded
   `MissionStep`, fenced `ExecuteMission`, `MissionState`, and `StopMission`
   types now generate successfully for C++ and Python, with public contract

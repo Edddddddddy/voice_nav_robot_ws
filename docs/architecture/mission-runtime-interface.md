@@ -208,6 +208,19 @@ physically stopped; odometry proves stationarity separately.
 - Every Goal produces exactly one Result. The private Action Adapter keeps a
   provisional GoalHandle delivery window across Core admission so a
   synchronous child result is registered and delivered exactly once.
+- Action admission submission, queued dispatch, and the worker's start permit
+  share a Node-owned generation gate. Quiesce closes that gate atomically;
+  queued admissions return one structured safety result without entering
+  PREPARE or OPEN, and a permit is rechecked immediately before Core and
+  RelativeMotion side effects.
+- A provisional response timeout creates a bounded revoked tombstone. The
+  second shutdown drain includes that tombstone: a missing GoalHandle produces
+  no fabricated result, while a late accepted callback remains attached to the
+  live Action Server long enough to deliver exactly one structured terminal.
+- Immutable RelativeMotion completion records are transferred to a Node-owned
+  RuntimeExecutionPlane. Delivery callbacks and Goal/Core state never execute
+  on the Adapter transaction thread; rejected records are reclaimed by the
+  independently joinable Node mailbox reaper.
 
 ## Terminal ordering and races
 
