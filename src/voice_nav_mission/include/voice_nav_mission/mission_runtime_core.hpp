@@ -258,6 +258,14 @@ public:
     return false;
   }
 
+  // Production adapters publish a pure-data completion record to a
+  // Node-owned registry.  Deterministic package-private ports retain the
+  // legacy callback path so the ROS-free Core tests remain small.
+  [[nodiscard]] virtual bool uses_external_completion_registry() const noexcept
+  {
+    return false;
+  }
+
   [[nodiscard]] virtual bool zero_proven() const noexcept
   {
     return true;
@@ -304,6 +312,11 @@ public:
   using ChildFeedbackDispatcher = std::function<bool(const MotionToken &, double)>;
   using ChildResultDispatcher = std::function<bool(
         const MotionToken &, const ChildResult &)>;
+  using ChildResultDelivery = std::function<void(
+        const MotionToken &, const ChildResult &)>;
+  using ChildResultRegistrar = std::function<bool(
+        const MotionToken &, ChildResultDelivery)>;
+  using ChildResultUnregistrar = std::function<void(const MotionToken &)>;
   using AdmissionFenceCheck = std::function<bool(std::uint64_t)>;
 
   RuntimeCore(
@@ -316,7 +329,9 @@ public:
     ResultCallback result_callback = {},
     ChildFeedbackDispatcher child_feedback_dispatcher = {},
     ChildResultDispatcher child_result_dispatcher = {},
-    AdmissionFenceCheck admission_fence_check = {});
+    AdmissionFenceCheck admission_fence_check = {},
+    ChildResultRegistrar child_result_registrar = {},
+    ChildResultUnregistrar child_result_unregistrar = {});
 
   [[nodiscard]] AdmissionResult admit(const MissionGoal & goal);
   void cancel(std::uint64_t mission_id);
@@ -416,6 +431,8 @@ private:
   ChildFeedbackDispatcher child_feedback_dispatcher_;
   ChildResultDispatcher child_result_dispatcher_;
   AdmissionFenceCheck admission_fence_check_;
+  ChildResultRegistrar child_result_registrar_;
+  ChildResultUnregistrar child_result_unregistrar_;
   RuntimeState state_;
   GateSnapshot gate_snapshot_;
   bool gate_bound_{false};

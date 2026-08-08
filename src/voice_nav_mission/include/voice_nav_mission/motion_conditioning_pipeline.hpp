@@ -70,14 +70,13 @@ struct MotionConditioningCorrelationToken
   std::string request_id;
 };
 
-// A terminal result crosses the RelativeMotion Adapter's worker seam as a
-// record.  The delivery callback is carried as data so an unowned relay can
-// execute it later; the Adapter worker never invokes it itself.
+// A terminal result crosses the RelativeMotion Adapter's worker seam as pure
+// data.  Delivery ownership stays in the Node-owned completion registry; an
+// Adapter worker must never carry or destroy a user callback.
 struct RelativeMotionCompletionRecord
 {
   MotionToken token;
   ChildResult result;
-  RelativeMotionPort::ResultCallback delivery;
 };
 
 using RelativeMotionCompletionRecordPtr =

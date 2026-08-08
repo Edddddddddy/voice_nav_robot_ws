@@ -19,13 +19,13 @@ import time
 import unittest
 
 from action_msgs.msg import GoalStatus
-from nav_msgs.msg import Odometry
 import launch
 from launch import LaunchDescription
 from launch_ros.actions import Node
 import launch_testing
 import launch_testing.actions
 from launch_testing.asserts import assertExitCodes
+from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup

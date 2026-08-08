@@ -50,6 +50,7 @@ public:
   RelativeMotionRosAdapter & operator=(const RelativeMotionRosAdapter &) = delete;
 
   [[nodiscard]] bool healthy() const override;
+  [[nodiscard]] bool uses_external_completion_registry() const noexcept override;
   void start(
     const MotionToken & token,
     const MissionStep & step,

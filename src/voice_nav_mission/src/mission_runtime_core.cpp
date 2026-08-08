@@ -96,7 +96,9 @@ RuntimeCore::RuntimeCore(
   ResultCallback result_callback,
   ChildFeedbackDispatcher child_feedback_dispatcher,
   ChildResultDispatcher child_result_dispatcher,
-  AdmissionFenceCheck admission_fence_check)
+  AdmissionFenceCheck admission_fence_check,
+  ChildResultRegistrar child_result_registrar,
+  ChildResultUnregistrar child_result_unregistrar)
 : config_(std::move(config)),
   clock_(std::move(clock)),
   authority_(std::move(authority)),
@@ -106,7 +108,9 @@ RuntimeCore::RuntimeCore(
   result_callback_(std::move(result_callback)),
   child_feedback_dispatcher_(std::move(child_feedback_dispatcher)),
   child_result_dispatcher_(std::move(child_result_dispatcher)),
-  admission_fence_check_(std::move(admission_fence_check))
+  admission_fence_check_(std::move(admission_fence_check)),
+  child_result_registrar_(std::move(child_result_registrar)),
+  child_result_unregistrar_(std::move(child_result_unregistrar))
 {
   if (!clock_ || !authority_ || !relative_motion_) {
     throw std::invalid_argument("Runtime Core requires clock and all ports");
@@ -806,8 +810,34 @@ void RuntimeCore::start_step()
       "Runtime admission fence raised before RelativeMotionPort start");
     return;
   }
-  active_->child_started = true;
+  bool completion_registered = false;
   try {
+    if (relative_motion_->uses_external_completion_registry()) {
+      if (!child_result_registrar_ || !child_result_registrar_(
+          token,
+          [this](const MotionToken & callback_token, const ChildResult & result) {
+            on_child_result(callback_token, result);
+          }))
+      {
+        select_terminal_and_stop(
+          MissionResultCode::SafetyFault,
+          "Node completion registry rejected RelativeMotionPort start");
+        return;
+      }
+      completion_registered = true;
+    }
+    active_->child_started = true;
+    RelativeMotionPort::ResultCallback result_callback;
+    if (!relative_motion_->uses_external_completion_registry()) {
+      result_callback = [this](
+        const MotionToken & callback_token, const ChildResult & result) {
+          if (child_result_dispatcher_) {
+            (void)child_result_dispatcher_(callback_token, result);
+          } else {
+            on_child_result(callback_token, result);
+          }
+        };
+    }
     relative_motion_->start(
       token,
       active_->steps[active_->step_index],
@@ -818,13 +848,7 @@ void RuntimeCore::start_step()
           on_child_feedback(callback_token, progress);
         }
       },
-      [this](const MotionToken & callback_token, const ChildResult & result) {
-        if (child_result_dispatcher_) {
-          (void)child_result_dispatcher_(callback_token, result);
-        } else {
-          on_child_result(callback_token, result);
-        }
-      });
+      std::move(result_callback));
     if (
       active_.has_value() && active_->id == token.mission_id &&
       active_->generation == token.mission_generation &&
@@ -834,6 +858,9 @@ void RuntimeCore::start_step()
       publish_state();
     }
   } catch (const std::exception & error) {
+    if (completion_registered && child_result_unregistrar_) {
+      child_result_unregistrar_(token);
+    }
     if (active_.has_value() && active_->id == token.mission_id) {
       active_->child_started = false;
     }
@@ -841,6 +868,9 @@ void RuntimeCore::start_step()
       MissionResultCode::InternalError,
       std::string{"child start threw: "} + error.what());
   } catch (...) {
+    if (completion_registered && child_result_unregistrar_) {
+      child_result_unregistrar_(token);
+    }
     if (active_.has_value() && active_->id == token.mission_id) {
       active_->child_started = false;
     }

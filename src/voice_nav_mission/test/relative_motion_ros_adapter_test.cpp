@@ -125,6 +125,12 @@ public:
     return true;
   }
 
+  void register_delivery(RelativeMotionPort::ResultCallback delivery)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    delivery_ = std::move(delivery);
+  }
+
   [[nodiscard]] bool wait_for_deliveries(const std::size_t count)
   {
     std::unique_lock<std::mutex> lock(mutex_);
@@ -161,13 +167,22 @@ private:
         record = std::move(records_.front());
         records_.pop_front();
       }
-      if (record && record->delivery) {
+      RelativeMotionPort::ResultCallback delivery;
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        delivery = std::move(delivery_);
+      }
+      if (record && delivery) {
         try {
-          record->delivery(record->token, record->result);
+          delivery(record->token, record->result);
         } catch (...) {
           // The relay remains available for the next immutable record.
         }
       }
+      // Release the Node-owned delivery capture before publishing the
+      // delivery latch, so a callback that drops the last Adapter owner is
+      // observable without racing the relay worker's next loop.
+      delivery = {};
       {
         std::lock_guard<std::mutex> lock(mutex_);
         ++delivered_;
@@ -181,6 +196,7 @@ private:
   std::condition_variable condition_;
   std::deque<RelativeMotionCompletionRecordPtr> records_;
   std::thread worker_;
+  RelativeMotionPort::ResultCallback delivery_;
   std::size_t delivered_{0U};
   std::thread::id last_delivery_thread_{};
   bool stopped_{false};
@@ -376,7 +392,7 @@ void run_source_shutdown_barrier(
   conditioning_config.component_rpc_timeout = 100ms;
   conditioning_config.prepare_open_deadline = 1s;
   conditioning_config.stop_barrier = 100ms;
-  install_completion_relay(conditioning_config);
+  auto relay = install_completion_relay(conditioning_config);
   CallbackBarrier callback_barrier;
   configure(conditioning_config, callback_barrier);
   RelativeMotionRosAdapter adapter(*node, authority, {}, conditioning_config);
@@ -439,19 +455,20 @@ TEST_F(
   conditioning_config.component_rpc_timeout = std::chrono::milliseconds(100);
   conditioning_config.prepare_open_deadline = std::chrono::seconds(1);
   conditioning_config.stop_barrier = std::chrono::milliseconds(100);
-  install_completion_relay(conditioning_config);
+  auto relay = install_completion_relay(conditioning_config);
   RelativeMotionRosAdapter adapter(*node, authority, {}, conditioning_config);
 
   std::atomic<std::size_t> result_count{0U};
   const MotionToken token{17U, 3U, 5U, 1U};
+  relay->register_delivery([&result_count](const MotionToken &, const ChildResult &) {
+      result_count.fetch_add(1U);
+    });
   adapter.start(
     token,
     MissionStep{
         static_cast<std::uint8_t>(MissionStepKind::MoveDistance), 0.1F, 0.0F, {}},
     {},
-    [&result_count](const MotionToken &, const ChildResult &) {
-      result_count.fetch_add(1U);
-    });
+    {});
   ASSERT_TRUE(authority->wait_for_prepare());
 
   adapter.request_emergency_stop();
@@ -477,19 +494,20 @@ TEST_F(
   conditioning_config.component_rpc_timeout = std::chrono::milliseconds(100);
   conditioning_config.prepare_open_deadline = std::chrono::seconds(1);
   conditioning_config.stop_barrier = std::chrono::milliseconds(100);
-  install_completion_relay(conditioning_config);
+  auto relay = install_completion_relay(conditioning_config);
   RelativeMotionRosAdapter adapter(*node, authority, {}, conditioning_config);
 
   std::atomic<std::size_t> result_count{0U};
   const MotionToken token{18U, 3U, 6U, 1U};
+  relay->register_delivery([&result_count](const MotionToken &, const ChildResult &) {
+      result_count.fetch_add(1U);
+    });
   adapter.start(
     token,
     MissionStep{
         static_cast<std::uint8_t>(MissionStepKind::MoveDistance), 0.1F, 0.0F, {}},
     {},
-    [&result_count](const MotionToken &, const ChildResult &) {
-      result_count.fetch_add(1U);
-    });
+    {});
   ASSERT_TRUE(authority->wait_for_prepare());
 
   std::atomic<bool> shutdown_finished{false};
@@ -518,21 +536,23 @@ TEST_F(
   conditioning_config.component_rpc_timeout = 100ms;
   conditioning_config.prepare_open_deadline = 1s;
   conditioning_config.stop_barrier = 100ms;
-  install_completion_relay(conditioning_config);
+  auto relay = install_completion_relay(conditioning_config);
   RelativeMotionRosAdapter adapter(*node, authority, {}, conditioning_config);
 
   CallbackBarrier result_barrier;
   std::atomic<std::size_t> result_count{0U};
   const MotionToken token{19U, 3U, 7U, 1U};
+  relay->register_delivery([&result_count, &result_barrier](const MotionToken &,
+    const ChildResult &) {
+      result_count.fetch_add(1U);
+      result_barrier.enter();
+    });
   adapter.start(
     token,
     MissionStep{
         static_cast<std::uint8_t>(MissionStepKind::MoveDistance), 0.1F, 0.0F, {}},
     {},
-    [&result_count, &result_barrier](const MotionToken &, const ChildResult &) {
-      result_count.fetch_add(1U);
-      result_barrier.enter();
-    });
+    {});
   ASSERT_TRUE(authority->wait_for_prepare());
 
   adapter.begin_shutdown();
@@ -568,23 +588,27 @@ TEST_F(
   conditioning_config.component_rpc_timeout = 100ms;
   conditioning_config.prepare_open_deadline = 1s;
   conditioning_config.stop_barrier = 100ms;
-  install_completion_relay(conditioning_config);
+  auto relay = install_completion_relay(conditioning_config);
   RelativeMotionRosAdapter adapter(*node, authority, {}, conditioning_config);
 
   adapter.begin_shutdown();
   EXPECT_FALSE(adapter.healthy());
   std::atomic<std::size_t> result_count{0U};
   std::atomic<ChildResultCode> result_code{ChildResultCode::Failed};
-  adapter.start(
-    MotionToken{20U, 3U, 8U, 1U},
-    MissionStep{
-        static_cast<std::uint8_t>(MissionStepKind::MoveDistance), 0.1F, 0.0F, {}},
-    {},
-    [&result_count, &result_code](const MotionToken &, const ChildResult & result) {
+  const MotionToken token{20U, 3U, 8U, 1U};
+  relay->register_delivery([&result_count, &result_code](const MotionToken &,
+    const ChildResult & result) {
       result_code.store(result.code);
       result_count.fetch_add(1U);
     });
+  adapter.start(
+    token,
+    MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::MoveDistance), 0.1F, 0.0F, {}},
+    {},
+    {});
 
+  ASSERT_TRUE(relay->wait_for_deliveries(1U));
   EXPECT_EQ(result_count.load(), 1U);
   EXPECT_EQ(result_code.load(), ChildResultCode::SafetyFault);
   adapter.finalize_shutdown();
@@ -598,21 +622,25 @@ TEST_F(RelativeMotionRosAdapterTest, PortStartRejectsRotatedAdmissionEpoch)
   conditioning_config.admission_fence_check = [](const std::uint64_t) {
       return false;
     };
-  install_completion_relay(conditioning_config);
+  auto relay = install_completion_relay(conditioning_config);
   RelativeMotionRosAdapter adapter(*node, authority, {}, conditioning_config);
 
   std::atomic<std::size_t> result_count{0U};
   std::atomic<ChildResultCode> result_code{ChildResultCode::Failed};
-  adapter.start(
-    MotionToken{22U, 4U, 10U, 1U},
-    MissionStep{
-        static_cast<std::uint8_t>(MissionStepKind::MoveDistance), 0.1F, 0.0F, {}},
-    {},
-    [&result_count, &result_code](const MotionToken &, const ChildResult & result) {
+  const MotionToken token{22U, 4U, 10U, 1U};
+  relay->register_delivery([&result_count, &result_code](const MotionToken &,
+    const ChildResult & result) {
       result_code.store(result.code);
       result_count.fetch_add(1U);
     });
+  adapter.start(
+    token,
+    MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::MoveDistance), 0.1F, 0.0F, {}},
+    {},
+    {});
 
+  ASSERT_TRUE(relay->wait_for_deliveries(1U));
   EXPECT_EQ(result_count.load(), 1U);
   EXPECT_EQ(result_code.load(), ChildResultCode::SafetyFault);
   EXPECT_EQ(authority->inhibit_count(), 0U);
@@ -634,15 +662,17 @@ TEST_F(
     *node, authority, RelativeMotionPolicy{}, conditioning_config);
   const auto weak_adapter = std::weak_ptr<RelativeMotionRosAdapter>(adapter);
   std::atomic<std::size_t> terminal_count{0U};
+  relay->register_delivery(
+    [held = adapter, &terminal_count](const MotionToken &, const ChildResult &) mutable {
+      ++terminal_count;
+      held.reset();
+    });
   adapter->start(
     MotionToken{23U, 5U, 11U, 1U},
     MissionStep{
         static_cast<std::uint8_t>(MissionStepKind::MoveDistance), 0.1F, 0.0F, {}},
     {},
-    [held = adapter, &terminal_count](const MotionToken &, const ChildResult &) mutable {
-      ++terminal_count;
-      held.reset();
-    });
+    {});
   ASSERT_TRUE(authority->wait_for_prepare());
   authority->release_prepare();
   adapter.reset();
@@ -670,15 +700,17 @@ TEST_F(
     *node, authority, RelativeMotionPolicy{}, conditioning_config);
   const auto weak_adapter = std::weak_ptr<RelativeMotionRosAdapter>(adapter);
   std::atomic<std::size_t> terminal_count{0U};
+  relay->register_delivery(
+    [held = adapter, &terminal_count](const MotionToken &, const ChildResult &) mutable {
+      ++terminal_count;
+      held.reset();
+    });
   adapter->start(
     MotionToken{24U, 5U, 12U, 1U},
     MissionStep{
         static_cast<std::uint8_t>(MissionStepKind::MoveDistance), 0.1F, 0.0F, {}},
     {},
-    [held = adapter, &terminal_count](const MotionToken &, const ChildResult &) mutable {
-      ++terminal_count;
-      held.reset();
-    });
+    {});
   ASSERT_TRUE(authority->wait_for_prepare());
 
   adapter->begin_shutdown();
@@ -754,7 +786,7 @@ TEST_F(
   conditioning_config.before_adapter_ingress_wait = [&command_barrier]() {
       command_barrier.mark_shutdown_wait();
     };
-  install_completion_relay(conditioning_config);
+  auto relay = install_completion_relay(conditioning_config);
   RelativeMotionRosAdapter adapter(*node, authority, {}, conditioning_config);
 
   rclcpp::executors::MultiThreadedExecutor executor(
@@ -815,7 +847,7 @@ TEST_F(
   conditioning_config.before_adapter_ingress_wait = [&ingress_barrier]() {
       ingress_barrier.mark_shutdown_wait();
     };
-  install_completion_relay(conditioning_config);
+  auto relay = install_completion_relay(conditioning_config);
 
   auto adapter = std::make_unique<RelativeMotionRosAdapter>(
     *node, authority, RelativeMotionPolicy{}, conditioning_config);
@@ -838,16 +870,17 @@ TEST_F(
   std::condition_variable result_condition;
   std::size_t result_count = 0U;
   const MotionToken token{21U, 3U, 9U, 1U};
+  relay->register_delivery([&](const MotionToken &, const ChildResult &) {
+      std::lock_guard<std::mutex> lock(result_mutex);
+      ++result_count;
+      result_condition.notify_all();
+    });
   adapter->start(
     token,
     MissionStep{
         static_cast<std::uint8_t>(MissionStepKind::MoveDistance), 0.1F, 0.0F, {}},
     {},
-    [&](const MotionToken &, const ChildResult &) {
-      std::lock_guard<std::mutex> lock(result_mutex);
-      ++result_count;
-      result_condition.notify_all();
-    });
+    {});
   ASSERT_TRUE(authority->wait_for_prepare());
 
   OdomPublisher{}.send(*odom_publisher);
