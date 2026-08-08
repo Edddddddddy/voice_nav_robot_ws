@@ -15,6 +15,7 @@
 #ifndef VOICE_NAV_MISSION__RUNTIME_EXECUTION_PLANE_HPP_
 #define VOICE_NAV_MISSION__RUNTIME_EXECUTION_PLANE_HPP_
 
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -34,6 +35,11 @@ namespace voice_nav_mission
 class RuntimeExecutionPlane final
 {
 public:
+  // Package-private production seam: tests may decorate the real Core
+  // delivery callback without replacing the Node registry or relay.
+  using ChildResultDeliveryDecorator = std::function<
+    RuntimeCore::ChildResultDelivery(RuntimeCore::ChildResultDelivery)>;
+
   RuntimeExecutionPlane(
     RuntimeConfig config,
     std::shared_ptr<SteadyClockPort> clock,
@@ -45,7 +51,8 @@ public:
     RuntimeCore::ChildFeedbackDispatcher child_feedback_dispatcher,
     RuntimeCore::AdmissionFenceCheck admission_fence_check,
     NodeCompletionMailbox::TokenEnqueue token_enqueue,
-    NodeCompletionMailbox::EmergencyRequest emergency_request)
+    NodeCompletionMailbox::EmergencyRequest emergency_request,
+    ChildResultDeliveryDecorator delivery_decorator = {})
   : emergency_request_(std::move(emergency_request)),
     terminal_handoff_lane_(
       [this](const MotionToken & token, const ChildResult & result) {
@@ -81,7 +88,11 @@ public:
       std::move(child_feedback_dispatcher),
       RuntimeCore::ChildResultDispatcher{},
       std::move(admission_fence_check),
-        [this](const MotionToken & token, RuntimeCore::ChildResultDelivery delivery) {
+        [this, decorator = std::move(delivery_decorator)](
+          const MotionToken & token, RuntimeCore::ChildResultDelivery delivery) mutable {
+          if (decorator) {
+            delivery = decorator(std::move(delivery));
+          }
           return completion_mailbox_.register_delivery(token, std::move(delivery));
       },
         [this](const MotionToken & token) {

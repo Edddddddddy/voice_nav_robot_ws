@@ -46,6 +46,7 @@
 
 #include "voice_nav_mission/mission_authority_convergence.hpp"
 #include "voice_nav_mission/motion_conditioning_pipeline.hpp"
+#include "voice_nav_mission/runtime_shutdown_coordinator.hpp"
 #include "voice_nav_mission/runtime_transaction_plane.hpp"
 
 namespace voice_nav_mission
@@ -2864,6 +2865,162 @@ TEST_F(MotionConditioningPipelineTest, RenewAuthorityLossFailsClosed)
   EXPECT_NE(
     std::find(calls.cbegin(), calls.cend(), AuthorityOperationKind::Renew),
     calls.cend());
+}
+
+TEST_F(
+  MotionConditioningPipelineTest,
+  ShutdownCoordinatorFreezesRunningGenerationAtBarrierReturn)
+{
+  auto health_ready = std::make_shared<CallbackCounter>();
+  auto renew_count = std::make_shared<std::atomic<std::size_t>>(0U);
+  auto transaction_plane = std::make_shared<RuntimeTransactionPlane>(1U);
+  auto pipeline_config = config();
+  pipeline_config.renew_period = 1s;
+  pipeline_config.after_health_callback = [health_ready]() {
+      (*health_ready)();
+    };
+  pipeline_config.before_renew_callback = [renew_count]() {
+      renew_count->fetch_add(1U, std::memory_order_relaxed);
+    };
+  pipeline_config.transaction_plane = transaction_plane;
+  pipeline_config.transaction_generation_provider = [transaction_plane]() {
+      return transaction_plane->generation();
+    };
+  MotionConditioningPipeline pipeline(
+    *client, authority, producer, pipeline_config);
+  ASSERT_TRUE(pipeline.prepare().ok);
+  health_ready->expect(4U);
+  graph->publish_health_once();
+  ASSERT_TRUE(health_ready->wait_for_target());
+  ASSERT_TRUE(pipeline.start().ok);
+  ASSERT_EQ(pipeline.state(), MotionConditioningState::Running);
+
+  std::vector<std::string> order;
+  std::mutex order_mutex;
+  std::optional<MotionConditioningResult> stop_result;
+  RuntimeShutdownCoordinator coordinator(
+    [&]() {
+      {
+        std::lock_guard<std::mutex> lock(order_mutex);
+        order.push_back("close-generation");
+      }
+      transaction_plane->close_generation(2U);
+      return true;
+    },
+    [&](const RuntimeShutdownCoordinator::TimePoint) {
+      {
+        std::lock_guard<std::mutex> lock(order_mutex);
+        order.push_back("begin-running-shutdown");
+      }
+      stop_result = pipeline.stop();
+    },
+    [&](const RuntimeShutdownCoordinator::TimePoint deadline) {
+      {
+        std::lock_guard<std::mutex> lock(order_mutex);
+        order.push_back("wait-joint-conditions");
+      }
+      const auto snapshot = authority->snapshot();
+      return transaction_plane->wait_for_drain_until(deadline) &&
+             pipeline.state() != MotionConditioningState::Running &&
+             producer->stop_count >= 1U &&
+             snapshot.state == GateState::Inhibited &&
+             snapshot.motion_inhibited && snapshot.zero_selected &&
+             snapshot.zero_published;
+    },
+    []() {},
+    [](std::string) {},
+    [](std::string) {});
+
+  const auto outcome = coordinator.run(
+    std::chrono::steady_clock::now() + 1s);
+  ASSERT_TRUE(outcome.transaction_drained);
+  ASSERT_FALSE(outcome.fail_closed);
+  ASSERT_TRUE(stop_result.has_value());
+  ASSERT_TRUE(stop_result->zero_proven);
+  ASSERT_EQ(pipeline.state(), MotionConditioningState::Stopped);
+  ASSERT_EQ(order.size(), 3U);
+  EXPECT_EQ(order[0], "close-generation");
+  EXPECT_EQ(order[1], "begin-running-shutdown");
+  EXPECT_EQ(order[2], "wait-joint-conditions");
+
+  const auto frozen_renew_count = renew_count->load(std::memory_order_relaxed);
+  const auto frozen_stop_count = producer->stop_count;
+  EXPECT_EQ(renew_count->load(std::memory_order_relaxed), frozen_renew_count);
+  EXPECT_EQ(producer->stop_count, frozen_stop_count);
+  EXPECT_EQ(pipeline.state(), MotionConditioningState::Stopped);
+}
+
+TEST_F(
+  MotionConditioningPipelineTest,
+  RenewReturnedBeforeCommitIsCleanedInsideTheInFlightLease)
+{
+  auto health_ready = std::make_shared<CallbackCounter>();
+  auto renew_commit_barrier = std::make_shared<TransactionOperationBarrier>(
+    RuntimeTransactionSideEffect::Renew);
+  auto transaction_plane = std::make_shared<RuntimeTransactionPlane>(
+    1U, RuntimeTransactionPlane::BeforeCommit{},
+    RuntimeTransactionPlane::BeforeOperation{},
+    RuntimeTransactionPlane::QuiesceObserver{},
+    [renew_commit_barrier](const RuntimeTransactionSideEffect side_effect) {
+      (*renew_commit_barrier)(side_effect);
+    });
+  auto pipeline_config = config();
+  pipeline_config.after_health_callback = [health_ready]() {
+      (*health_ready)();
+    };
+  pipeline_config.transaction_plane = transaction_plane;
+  pipeline_config.transaction_generation_provider = [transaction_plane]() {
+      return transaction_plane->generation();
+    };
+  MotionConditioningPipeline pipeline(
+    *client, authority, producer, pipeline_config);
+  ASSERT_TRUE(pipeline.prepare().ok);
+  health_ready->expect(4U);
+  graph->publish_health_once();
+  ASSERT_TRUE(health_ready->wait_for_target());
+  ASSERT_TRUE(pipeline.start().ok);
+  ASSERT_EQ(pipeline.state(), MotionConditioningState::Running);
+  ASSERT_TRUE(renew_commit_barrier->wait_for_entry());
+
+  std::promise<void> drain_waiting_promise;
+  auto drain_waiting_future = drain_waiting_promise.get_future();
+  std::promise<void> drain_completed_promise;
+  auto drain_completed_future = drain_completed_promise.get_future();
+  std::optional<bool> drain_result;
+  std::thread quiescer([&]() {
+      transaction_plane->close_generation(2U);
+      drain_waiting_promise.set_value();
+      drain_result = transaction_plane->wait_for_drain_until(
+        std::chrono::steady_clock::now() + 1s);
+      drain_completed_promise.set_value();
+    });
+  ASSERT_EQ(
+    drain_waiting_future.wait_for(1s),
+    std::future_status::ready);
+  EXPECT_EQ(
+    drain_completed_future.wait_for(0ms),
+    std::future_status::timeout);
+  renew_commit_barrier->release();
+  quiescer.join();
+
+  ASSERT_TRUE(drain_result.has_value());
+  EXPECT_TRUE(*drain_result);
+  EXPECT_EQ(pipeline.state(), MotionConditioningState::Failed);
+  EXPECT_GE(producer->stop_count, 1U);
+  const auto snapshot = authority->snapshot();
+  EXPECT_EQ(snapshot.state, GateState::Inhibited);
+  EXPECT_TRUE(snapshot.motion_inhibited);
+  EXPECT_TRUE(snapshot.zero_selected);
+  EXPECT_TRUE(snapshot.zero_published);
+  EXPECT_NE(
+    pipeline.last_result().zero_proven_at,
+    std::chrono::steady_clock::time_point{});
+
+  const auto renew_calls = authority->renew_count();
+  const auto stop_count = producer->stop_count;
+  EXPECT_EQ(authority->renew_count(), renew_calls);
+  EXPECT_EQ(producer->stop_count, stop_count);
+  EXPECT_EQ(pipeline.state(), MotionConditioningState::Failed);
 }
 
 }  // namespace
