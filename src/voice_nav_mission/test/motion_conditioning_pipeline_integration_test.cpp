@@ -170,6 +170,8 @@ public:
           odom.header.stamp = stamp;
           odom.header.frame_id = "odom";
           odom.child_frame_id = "base_footprint";
+          odom.twist.twist.linear.x =
+          nonstationary_odom_.load() ? 1.0 : 0.0;
           odom_publisher_->publish(odom);
     });
   }
@@ -177,6 +179,11 @@ public:
   void set_collision_stop(const bool enabled)
   {
     collision_stop_.store(enabled);
+  }
+
+  void set_nonstationary_odom(const bool enabled)
+  {
+    nonstationary_odom_.store(enabled);
   }
 
 private:
@@ -188,6 +195,7 @@ private:
   rclcpp::TimerBase::SharedPtr clock_timer_;
   rclcpp::TimerBase::SharedPtr sensor_timer_;
   std::atomic<bool> collision_stop_{false};
+  std::atomic<bool> nonstationary_odom_{false};
 };
 
 class ControllerObservationNode final : public rclcpp::Node
@@ -317,6 +325,11 @@ public:
 
   ~RuntimeCompletionWorker()
   {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      delivery_paused_ = false;
+      condition_.notify_all();
+    }
     queue_.close();
     if (thread_.joinable()) {
       thread_.join();
@@ -329,9 +342,22 @@ public:
     thread_ = std::thread([this]() {
           RuntimeCompletionEvent event{};
           while (queue_.wait_pop_result(event) == Queue::WaitResult::Item) {
+            {
+              std::unique_lock<std::mutex> lock(mutex_);
+              ++pending_delivery_;
+              condition_.notify_all();
+              condition_.wait(lock, [this]() {
+                return !delivery_paused_;
+                });
+            }
             const auto dispatch = plane_->completion_mailbox().take(event.token);
             if (dispatch.has_value() && dispatch->delivery) {
               dispatch->delivery(dispatch->record->token, dispatch->record->result);
+            }
+            {
+              std::lock_guard<std::mutex> lock(mutex_);
+              --pending_delivery_;
+              condition_.notify_all();
             }
           }
       });
@@ -344,10 +370,36 @@ public:
            Queue::PushResult::Accepted;
   }
 
+  void pause_delivery()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    delivery_paused_ = true;
+  }
+
+  void release_delivery()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    delivery_paused_ = false;
+    condition_.notify_all();
+  }
+
+  [[nodiscard]] bool wait_for_pending(
+    const std::chrono::steady_clock::time_point deadline)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_until(lock, deadline, [this]() {
+               return pending_delivery_ != 0U;
+           });
+  }
+
 private:
   Queue queue_;
   std::shared_ptr<RuntimeExecutionPlane> plane_;
   std::thread thread_;
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  std::size_t pending_delivery_{0U};
+  bool delivery_paused_{false};
 };
 
 class RclcppGuard final
@@ -615,6 +667,7 @@ TEST(
   RuntimeCompletionWorker completion_worker;
   std::shared_ptr<RuntimeExecutionPlane> plane;
   std::atomic<std::size_t> emergency_count{0U};
+  std::atomic<std::size_t> open_attempts{0U};
 
   auto admission_check = [&admission_gate](const std::uint64_t epoch) {
       return admission_gate.admission_allowed(epoch);
@@ -637,6 +690,9 @@ TEST(
     };
   conditioning_config.before_renew_callback = [&renew_callbacks]() {
       renew_callbacks.observe();
+    };
+  conditioning_config.before_open_callback = [&open_attempts]() {
+      open_attempts.fetch_add(1U);
     };
   conditioning_config.completion_relay = [&plane](
     RelativeMotionCompletionRecordPtr record) {
@@ -708,12 +764,13 @@ TEST(
       goal.source_instance_id = "production-adapter-generations";
       goal.source_seq = sequence;
       goal.runtime_instance_id = kIntegrationRuntimeId;
-      goal.admission_epoch = 1U;
       goal.steps.push_back(MissionStep{
           static_cast<std::uint8_t>(MissionStepKind::MoveDistance),
           0.5F, 0.0F, {}});
-      const auto permit = admission_gate.claim_start(goal.admission_epoch);
       std::lock_guard<std::recursive_mutex> lock(plane->core_serial_mutex());
+      goal.admission_epoch = sequence == 5U ?
+        plane->core()->state().admission_epoch : 1U;
+      const auto permit = admission_gate.claim_start(goal.admission_epoch);
       return plane->core()->admit(
         goal,
         [&admission_gate, permit]() {
@@ -741,7 +798,9 @@ TEST(
   ASSERT_TRUE(terminal.wait_for_count(
     first_terminal_baseline + 1U,
     std::chrono::steady_clock::now() + 2s));
-  ASSERT_EQ(terminal.results().at(first_terminal_baseline).code,
+  const auto first_results = terminal.results();
+  ASSERT_EQ(first_results.size(), first_terminal_baseline + 1U);
+  ASSERT_EQ(first_results.at(first_terminal_baseline).code,
     MissionResultCode::Canceled);
   const auto renew_after_first_stop = renew_callbacks.value();
 
@@ -763,8 +822,14 @@ TEST(
   ASSERT_TRUE(terminal.wait_for_count(
     second_terminal_baseline + 1U,
     std::chrono::steady_clock::now() + 3s));
-  ASSERT_EQ(terminal.results().at(second_terminal_baseline).code,
+  const auto second_results = terminal.results();
+  ASSERT_EQ(second_results.size(), second_terminal_baseline + 1U);
+  ASSERT_EQ(second_results.at(second_terminal_baseline).code,
     MissionResultCode::ExecutionFailed);
+  EXPECT_NE(
+    second_results.at(second_terminal_baseline).detail.find(
+      "Collision Monitor reported STOP for stop_zone"),
+    std::string::npos);
 
   graph->set_collision_stop(false);
   const auto third_admission = admit_generation(3U);
@@ -786,9 +851,62 @@ TEST(
   ASSERT_TRUE(terminal.wait_for_count(
     third_terminal_baseline + 1U,
     std::chrono::steady_clock::now() + 2s));
-  EXPECT_EQ(terminal.results().at(third_terminal_baseline).code,
+  const auto third_results = terminal.results();
+  ASSERT_EQ(third_results.size(), third_terminal_baseline + 1U);
+  EXPECT_EQ(third_results.at(third_terminal_baseline).code,
     MissionResultCode::Canceled);
   EXPECT_EQ(emergency_count.load(), 0U);
+
+  completion_worker.pause_delivery();
+  graph->set_nonstationary_odom(true);
+  const auto fourth_admission = admit_generation(4U);
+  ASSERT_TRUE(fourth_admission.accepted) << fourth_admission.result.detail;
+  ASSERT_TRUE(core_running.wait_for_at_least(4U));
+  graph->set_collision_stop(true);
+  ASSERT_TRUE(completion_worker.wait_for_pending(
+    std::chrono::steady_clock::now() + 3s));
+  ASSERT_TRUE(detail::wait_for_relative_motion_internal_completion(
+    *adapter,
+    std::chrono::steady_clock::now() + 3s));
+  EXPECT_FALSE(adapter->healthy());
+  const auto fourth_terminal_baseline = terminal.results().size();
+  completion_worker.release_delivery();
+
+  ASSERT_TRUE(terminal.wait_for_count(
+    fourth_terminal_baseline + 1U,
+    std::chrono::steady_clock::now() + 2s));
+  const auto fourth_results = terminal.results();
+  ASSERT_EQ(fourth_results.size(), fourth_terminal_baseline + 1U);
+  ASSERT_EQ(fourth_results.at(fourth_terminal_baseline).code,
+    MissionResultCode::SafetyFault);
+  EXPECT_NE(
+    fourth_results.at(fourth_terminal_baseline).detail.find(
+      "odometry did not prove stationarity"),
+    std::string::npos);
+
+  graph->set_collision_stop(false);
+  graph->set_nonstationary_odom(false);
+  {
+    std::lock_guard<std::recursive_mutex> lock(plane->core_serial_mutex());
+    plane->core()->on_tick();
+  }
+  EXPECT_EQ(
+    plane->core()->state().availability,
+    RuntimeAvailability::Faulted);
+  const auto running_at_safety_fault = core_running.value();
+  const auto open_at_safety_fault = open_attempts.load();
+  const auto raw_at_safety_fault = raw_output.value();
+  const auto renew_at_safety_fault = renew_callbacks.value();
+  const auto rejected_after_safety_fault = admit_generation(5U);
+  EXPECT_FALSE(rejected_after_safety_fault.accepted);
+  EXPECT_EQ(
+    rejected_after_safety_fault.result.code,
+    MissionResultCode::SafetyFault);
+  EXPECT_FALSE(adapter->healthy());
+  EXPECT_EQ(core_running.value(), running_at_safety_fault);
+  EXPECT_EQ(open_attempts.load(), open_at_safety_fault);
+  EXPECT_EQ(raw_output.value(), raw_at_safety_fault);
+  EXPECT_EQ(renew_callbacks.value(), renew_at_safety_fault);
   plane->shutdown();
 }
 

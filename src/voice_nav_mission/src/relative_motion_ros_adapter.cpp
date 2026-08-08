@@ -652,7 +652,7 @@ public:
     MotionConditioningState conditioning_state = MotionConditioningState::Failed;
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (shutting_down_ || !conditioning_) {
+      if (shutting_down_ || !conditioning_ || sticky_admission_fault_) {
         return false;
       }
       active = active_;
@@ -666,6 +666,7 @@ public:
       if (conditioning_state == MotionConditioningState::Failed) {
         const auto result = conditioning_->last_result();
         const auto reusable_failure =
+          teardown_safe_ && zero_proven_ &&
           result.zero_proven && result.zero_proven_at != TimePoint{} &&
         (result.failure == MotionConditioningFailure::DependencyUnavailable ||
         result.failure == MotionConditioningFailure::ExecutionFailed ||
@@ -697,10 +698,18 @@ public:
       };
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      const bool fenced = !admission_allowed();
-      if (fenced || shutting_down_ || active_ || transaction_kind_ != TransactionKind::Idle) {
+      const bool sticky_fault = sticky_admission_fault_;
+      const bool fenced = !sticky_fault && !admission_allowed();
+      if (sticky_fault || fenced || shutting_down_ || active_ ||
+        transaction_kind_ != TransactionKind::Idle)
+      {
         rejected = true;
-        if (fenced) {
+        if (sticky_fault) {
+          rejection_code = ChildResultCode::SafetyFault;
+          rejection_detail = sticky_admission_fault_detail_.empty() ?
+            "relative-motion admission is permanently safety-faulted" :
+            sticky_admission_fault_detail_;
+        } else if (fenced) {
           rejection_code = ChildResultCode::SafetyFault;
           rejection_detail =
             "relative-motion start rejected by the active admission fence";
@@ -960,6 +969,16 @@ private:
       return {};
     }
     return command_;
+  }
+
+  void latch_admission_fault_locked(const std::string & detail)
+  {
+    if (sticky_admission_fault_) {
+      return;
+    }
+    sticky_admission_fault_ = true;
+    sticky_admission_fault_detail_ = detail.empty() ?
+      "relative-motion adapter entered a permanent safety fault" : detail;
   }
 
   void join_emergency_thread()
@@ -1369,6 +1388,10 @@ private:
     {
       std::lock_guard<std::mutex> lock(mutex_);
       completion_record_in_progress_ = false;
+      if (!accepted) {
+        latch_admission_fault_locked(
+          "relative-motion completion relay rejected a terminal record");
+      }
       condition_variable_.notify_all();
     }
     if (!accepted) {
@@ -1390,6 +1413,9 @@ private:
     {
       code = ChildResultCode::SafetyFault;
     }
+    const auto failure_detail = conditioning_result.detail.empty() ?
+      std::string{"conditioning generation could not start"} :
+    conditioning_result.detail;
     RelativeMotionCompletionRecordPtr completion;
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -1406,14 +1432,14 @@ private:
       teardown_complete_ = true;
       teardown_safe_ = zero_proven &&
         conditioning_result.failure != MotionConditioningFailure::SafetyFault;
+      if (code == ChildResultCode::SafetyFault) {
+        latch_admission_fault_locked(failure_detail);
+      }
       completion_record_sent_ = true;
       completion = std::make_shared<const RelativeMotionCompletionRecord>(
         RelativeMotionCompletionRecord{
           token,
-          ChildResult{
-            code,
-            conditioning_result.detail.empty() ?
-            "conditioning generation could not start" : conditioning_result.detail}});
+          ChildResult{code, failure_detail}});
       condition_variable_.notify_all();
     }
     RCLCPP_ERROR(
@@ -1456,6 +1482,40 @@ private:
     return false;
   }
 
+  [[nodiscard]] bool wait_for_raw_stationarity(
+    const MotionToken & token,
+    const TimePoint zero_proven_at,
+    const TimePoint deadline)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    TimePoint stationary_since{};
+    while (active_ && same_token(active_token_, token)) {
+      const auto now = std::chrono::steady_clock::now();
+      if (now >= deadline) {
+        return false;
+      }
+      const bool fresh_odom = latest_odom_.has_value() &&
+        last_odom_at_ != TimePoint{} && last_odom_at_ >= zero_proven_at &&
+      now - last_odom_at_ <= policy_.dependency_liveness_timeout;
+      const bool stationary_odom = fresh_odom &&
+        std::abs(latest_odom_->linear_x_mps) <=
+        policy_.stationarity_linear_tolerance_mps &&
+        std::abs(latest_odom_->angular_z_rps) <=
+        policy_.stationarity_angular_tolerance_rps;
+      if (!stationary_odom) {
+        stationary_since = TimePoint{};
+      } else if (stationary_since == TimePoint{}) {
+        stationary_since = last_odom_at_;
+      } else if (now - stationary_since >= policy_.stationarity_window) {
+        return true;
+      }
+      const auto wake_deadline = stationary_since == TimePoint{} ?
+      deadline : std::min(deadline, stationary_since + policy_.stationarity_window);
+      condition_variable_.wait_until(lock, wake_deadline);
+    }
+    return false;
+  }
+
   [[nodiscard]] bool run_teardown(
     const TeardownRequest & request)
   {
@@ -1483,10 +1543,15 @@ private:
       zero_proven_at != TimePoint{};
     bool stationary = false;
     bool mission_active = false;
+    bool controller_can_prove_stationarity = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      const bool conditioning_failure_requires_stationarity =
+        request.kind == TeardownKind::Failure &&
+        request.conditioning_failure != MotionConditioningFailure::None;
       mission_active = active_ && same_token(active_token_, request.token) &&
-        controller_.active();
+        (controller_.active() || conditioning_failure_requires_stationarity);
+      controller_can_prove_stationarity = mission_active && controller_.active();
     }
     stationary = !mission_active;
     if (zero && mission_active) {
@@ -1511,7 +1576,10 @@ private:
       if (confirmation.kind != RelativeMotionEventKind::Failed) {
         const auto stationarity_deadline =
           zero_proven_at + policy_.stationarity_deadline;
-        stationary = wait_for_stationarity(
+        stationary = controller_can_prove_stationarity ?
+          wait_for_stationarity(
+          request.token, zero_proven_at, stationarity_deadline) :
+          wait_for_raw_stationarity(
           request.token, zero_proven_at, stationarity_deadline);
       }
     }
@@ -1545,6 +1613,9 @@ private:
         teardown_complete_ = true;
         teardown_safe_ = zero && stationary &&
           conditioning_result.failure != MotionConditioningFailure::SafetyFault;
+        if (final_code == ChildResultCode::SafetyFault) {
+          latch_admission_fault_locked(final_detail);
+        }
         if (deliver_result) {
           completion_record_sent_ = true;
           completion = std::make_shared<const RelativeMotionCompletionRecord>(
@@ -1610,6 +1681,8 @@ private:
   bool stationarity_waiting_{false};
   bool teardown_complete_{true};
   bool teardown_safe_{true};
+  bool sticky_admission_fault_{false};
+  std::string sticky_admission_fault_detail_;
   MotionToken active_token_{};
   MissionStep active_step_{};
   MotionConditioningCorrelationToken conditioning_token_{};
