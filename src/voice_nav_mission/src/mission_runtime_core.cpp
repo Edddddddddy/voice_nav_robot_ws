@@ -95,7 +95,8 @@ RuntimeCore::RuntimeCore(
   FeedbackCallback feedback_callback,
   ResultCallback result_callback,
   ChildFeedbackDispatcher child_feedback_dispatcher,
-  ChildResultDispatcher child_result_dispatcher)
+  ChildResultDispatcher child_result_dispatcher,
+  AdmissionFenceCheck admission_fence_check)
 : config_(std::move(config)),
   clock_(std::move(clock)),
   authority_(std::move(authority)),
@@ -104,7 +105,8 @@ RuntimeCore::RuntimeCore(
   feedback_callback_(std::move(feedback_callback)),
   result_callback_(std::move(result_callback)),
   child_feedback_dispatcher_(std::move(child_feedback_dispatcher)),
-  child_result_dispatcher_(std::move(child_result_dispatcher))
+  child_result_dispatcher_(std::move(child_result_dispatcher)),
+  admission_fence_check_(std::move(admission_fence_check))
 {
   if (!clock_ || !authority_ || !relative_motion_) {
     throw std::invalid_argument("Runtime Core requires clock and all ports");
@@ -176,6 +178,13 @@ AdmissionResult RuntimeCore::admit(const MissionGoal & goal)
       MissionResultCode::StaleRequest,
       "Runtime instance or admission epoch is stale")};
   }
+  if (!admission_allowed(state_.admission_epoch)) {
+    state_.availability = RuntimeAvailability::Faulted;
+    publish_state();
+    return AdmissionResult{0U, false, reject(
+      MissionResultCode::SafetyFault,
+      "Runtime admission fence is active")};
+  }
   if (!consume_source_sequence(goal, result)) {
     return AdmissionResult{0U, false, result};
   }
@@ -240,6 +249,15 @@ AdmissionResult RuntimeCore::admit(const MissionGoal & goal)
     }
     gate_snapshot_ = prepare.snapshot;
     current_lease_id_ = prepare.lease_id;
+    if (!admission_allowed(state_.admission_epoch)) {
+      const bool cleanup = inhibit_and_prove_zero();
+      state_.availability = RuntimeAvailability::Faulted;
+      publish_state();
+      return AdmissionResult{0U, false, reject(
+        MissionResultCode::SafetyFault,
+        cleanup ? "Runtime admission fence raised after MotionGate PREPARE" :
+        "Runtime admission fence raised after PREPARE and zero cleanup failed")};
+    }
     const auto open = authority_->open(make_operation(current_lease_id_));
     if (!open.applied) {
       const bool cleanup = inhibit_and_prove_zero();
@@ -534,6 +552,11 @@ bool RuntimeCore::has_active_mission() const noexcept
   return active_.has_value();
 }
 
+bool RuntimeCore::admission_allowed(const std::uint64_t admission_epoch) const
+{
+  return !admission_fence_check_ || admission_fence_check_(admission_epoch);
+}
+
 MissionResult RuntimeCore::reject(
   MissionResultCode code,
   std::string detail) const
@@ -764,6 +787,12 @@ void RuntimeCore::start_step()
   if (!active_.has_value()) {
     return;
   }
+  if (!admission_allowed(active_->admission_epoch)) {
+    select_terminal_and_stop(
+      MissionResultCode::SafetyFault,
+      "Runtime admission fence raised before RelativeMotionPort start");
+    return;
+  }
   publish_feedback(FeedbackPhase::Validating, active_->step_index, 0.0);
   const MotionToken token{
     active_->id,
@@ -771,6 +800,12 @@ void RuntimeCore::start_step()
     active_->generation,
     active_->step_generation};
   active_->child_token = token;
+  if (!admission_allowed(token.admission_epoch)) {
+    select_terminal_and_stop(
+      MissionResultCode::SafetyFault,
+      "Runtime admission fence raised before RelativeMotionPort start");
+    return;
+  }
   active_->child_started = true;
   try {
     relative_motion_->start(

@@ -1469,11 +1469,18 @@ TEST_F(MotionConditioningPipelineTest, ProducerThrowFailsClosedAndCleansUp)
   EXPECT_EQ(graph->loaded_count(), 0U);
 }
 
-TEST_F(MotionConditioningPipelineTest, CleanupResidualDoesNotOverwriteBusinessFailure)
+TEST_F(MotionConditioningPipelineTest, CleanupResidualEscalatesCollisionFailure)
 {
-  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+  auto health_ready = std::make_shared<CallbackCounter>();
+  auto pipeline_config = config();
+  pipeline_config.after_health_callback = [health_ready]() {
+      (*health_ready)();
+    };
+  MotionConditioningPipeline pipeline(*client, authority, producer, pipeline_config);
   ASSERT_TRUE(pipeline.prepare().ok);
-  std::this_thread::sleep_for(50ms);
+  health_ready->expect(4U);
+  graph->publish_health_once();
+  ASSERT_TRUE(health_ready->wait_for_target());
   ASSERT_TRUE(pipeline.start().ok);
   graph->set_unload_delay(500ms);
   const auto token = pipeline.correlation_token();
@@ -1485,12 +1492,68 @@ TEST_F(MotionConditioningPipelineTest, CleanupResidualDoesNotOverwriteBusinessFa
 
   EXPECT_FALSE(result.ok);
   EXPECT_EQ(result.state, MotionConditioningState::Failed);
-  EXPECT_EQ(result.failure, MotionConditioningFailure::ExecutionFailed);
+  EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
   EXPECT_FALSE(result.detail.empty());
+  EXPECT_NE(result.detail.find("collision execution failed"), std::string::npos);
+  EXPECT_NE(result.detail.find("cleanup phase="), std::string::npos);
   EXPECT_TRUE(result.zero_proven);
   EXPECT_NE(result.zero_proven_at, std::chrono::steady_clock::time_point{});
   EXPECT_FALSE(graph->unload_requests().empty());
   EXPECT_FALSE(pipeline.prepare().ok);
+}
+
+TEST_F(MotionConditioningPipelineTest, CleanupResidualEscalatesSourceLoss)
+{
+  auto health_ready = std::make_shared<CallbackCounter>();
+  auto pipeline_config = config();
+  pipeline_config.after_health_callback = [health_ready]() {
+      (*health_ready)();
+    };
+  MotionConditioningPipeline pipeline(*client, authority, producer, pipeline_config);
+  ASSERT_TRUE(pipeline.prepare().ok);
+  health_ready->expect(4U);
+  graph->publish_health_once();
+  ASSERT_TRUE(health_ready->wait_for_target());
+  ASSERT_TRUE(pipeline.start().ok);
+  graph->set_unload_delay(500ms);
+
+  const auto result = pipeline.fail(
+    pipeline.correlation_token(),
+    MotionConditioningFailure::DependencyUnavailable,
+    "source loss while conditioning was active");
+
+  EXPECT_FALSE(result.ok);
+  EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
+  EXPECT_NE(result.detail.find("source loss"), std::string::npos);
+  EXPECT_NE(result.detail.find("cleanup phase="), std::string::npos);
+  EXPECT_TRUE(result.zero_proven);
+}
+
+TEST_F(MotionConditioningPipelineTest, CleanupResidualEscalatesDeadlineFailure)
+{
+  auto health_ready = std::make_shared<CallbackCounter>();
+  auto pipeline_config = config();
+  pipeline_config.after_health_callback = [health_ready]() {
+      (*health_ready)();
+    };
+  MotionConditioningPipeline pipeline(*client, authority, producer, pipeline_config);
+  ASSERT_TRUE(pipeline.prepare().ok);
+  health_ready->expect(4U);
+  graph->publish_health_once();
+  ASSERT_TRUE(health_ready->wait_for_target());
+  ASSERT_TRUE(pipeline.start().ok);
+  graph->set_unload_delay(500ms);
+
+  const auto result = pipeline.fail(
+    pipeline.correlation_token(),
+    MotionConditioningFailure::Timeout,
+    "step deadline elapsed while conditioning was active");
+
+  EXPECT_FALSE(result.ok);
+  EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
+  EXPECT_NE(result.detail.find("step deadline"), std::string::npos);
+  EXPECT_NE(result.detail.find("cleanup phase="), std::string::npos);
+  EXPECT_TRUE(result.zero_proven);
 }
 
 TEST_F(MotionConditioningPipelineTest, BusinessFailureAndCachedTerminalShareZeroProof)

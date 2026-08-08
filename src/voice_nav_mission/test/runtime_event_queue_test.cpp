@@ -14,6 +14,7 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <cstddef>
 #include <algorithm>
 #include <chrono>
@@ -396,6 +397,236 @@ TEST(RuntimeEventIngressTest, ProductionWorkerFencePreemptsChildResult)
   new_mission.source_seq = 1U;
   new_mission.admission_epoch = 2U;
   EXPECT_FALSE(core.admit(new_mission).accepted);
+}
+
+TEST(RuntimeEventIngressTest, PopBeforeDispatchFenceSkipsCoreSideEffect)
+{
+  using Queue = RuntimeEventQueue<WorkerEvent>;
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>("pop-gate");
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  std::vector<MissionResult> results;
+  RuntimeEmergencyFence fence(1U);
+  RuntimeCore core(
+    worker_config(),
+    clock,
+    authority,
+    relative,
+    {},
+    {},
+    [&results](std::uint64_t, const MissionResult & result) {
+      results.push_back(result);
+    },
+    {},
+    {},
+    [&fence](const std::uint64_t epoch) {return fence.admission_allowed(epoch);});
+  core.observe_gate(authority->snapshot());
+  const MissionGoal mission{
+    "pop-source",
+    1U,
+    kWorkerRuntimeId,
+    1U,
+    {
+      MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::MoveDistance), 0.5F, 0.0F, ""},
+      MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::RotateAngle), 0.0F, 1.0F, ""},
+    }};
+  ASSERT_TRUE(core.admit(mission).accepted);
+  ASSERT_EQ(relative->started_tokens().size(), 1U);
+  const auto token = relative->started_tokens().front();
+
+  Queue queue([] {return WorkerEvent{WorkerEvent::Kind::QueueFault};});
+  std::mutex mutex;
+  std::condition_variable condition;
+  bool popped = false;
+  bool release_dispatch = false;
+  bool fence_processed = false;
+  std::size_t direct_zero_calls = 0U;
+  std::size_t dispatch_count = 0U;
+  RuntimeEventIngress<WorkerEvent> ingress(
+    queue,
+    fence,
+    [](const WorkerEvent & event) {
+      return event.kind == WorkerEvent::Kind::Normal ?
+             Queue::Lane::Normal : Queue::Lane::Control;
+    },
+    [&]() {
+      std::lock_guard<std::mutex> lock(mutex);
+      ++direct_zero_calls;
+      condition.notify_all();
+    },
+    [&](const RuntimeEmergencyFenceSnapshot & snapshot) {
+      core.fail_closed_at_epoch(snapshot.admission_epoch, snapshot.detail);
+      std::lock_guard<std::mutex> lock(mutex);
+      fence_processed = true;
+      condition.notify_all();
+    },
+    [](const WorkerEvent & event) {
+      return event.kind == WorkerEvent::Kind::Stop;
+    },
+    [&](WorkerEvent &) {
+      std::unique_lock<std::mutex> lock(mutex);
+      popped = true;
+      condition.notify_all();
+      condition.wait(lock, [&]() {return release_dispatch;});
+    });
+
+  ASSERT_TRUE(ingress.enqueue(
+    WorkerEvent{WorkerEvent::Kind::ChildResult, token,
+      ChildResult{ChildResultCode::Succeeded, "must be fenced"}}));
+  std::thread worker([&]() {
+      ingress.run(
+        [&](WorkerEvent & event) {
+          ++dispatch_count;
+          if (event.kind == WorkerEvent::Kind::ChildResult) {
+            core.on_child_result(event.token, event.child_result);
+          }
+        },
+        [&](std::string detail) {ingress.request_emergency(std::move(detail));});
+    });
+
+  {
+    std::unique_lock<std::mutex> lock(mutex);
+    ASSERT_TRUE(condition.wait_for(lock, std::chrono::seconds(1), [&]() {
+        return popped;
+      }));
+  }
+  ingress.request_emergency("fence raised after queue pop");
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    release_dispatch = true;
+  }
+  condition.notify_all();
+  {
+    std::unique_lock<std::mutex> lock(mutex);
+    ASSERT_TRUE(condition.wait_for(lock, std::chrono::seconds(1), [&]() {
+        return fence_processed;
+      }));
+  }
+  queue.close();
+  worker.join();
+
+  EXPECT_EQ(dispatch_count, 0U);
+  EXPECT_EQ(direct_zero_calls, 1U);
+  EXPECT_EQ(relative->started_steps().size(), 1U);
+  ASSERT_EQ(results.size(), 1U);
+  EXPECT_EQ(results.front().code, MissionResultCode::SafetyFault);
+  EXPECT_EQ(core.state().admission_epoch, 2U);
+  EXPECT_TRUE(authority->snapshot().motion_inhibited);
+  EXPECT_TRUE(authority->snapshot().zero_published);
+}
+
+TEST(RuntimeEventIngressTest, CoreBeforePortStartFenceRejectsNextStep)
+{
+  using Queue = RuntimeEventQueue<WorkerEvent>;
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>("start-gate");
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  RuntimeEmergencyFence fence(1U);
+  std::vector<MissionResult> results;
+  std::mutex mutex;
+  std::condition_variable condition;
+  bool check_entered = false;
+  bool release_check = false;
+  bool fence_processed = false;
+  std::atomic<bool> arm_check{false};
+  RuntimeCore core(
+    worker_config(),
+    clock,
+    authority,
+    relative,
+    {},
+    {},
+    [&results](std::uint64_t, const MissionResult & result) {
+      results.push_back(result);
+    },
+    {},
+    {},
+    [&](const std::uint64_t epoch) {
+      if (arm_check.load()) {
+        std::unique_lock<std::mutex> lock(mutex);
+        check_entered = true;
+        condition.notify_all();
+        condition.wait(lock, [&]() {return release_check;});
+      }
+      return fence.admission_allowed(epoch);
+    });
+  core.observe_gate(authority->snapshot());
+  const MissionGoal mission{
+    "start-source",
+    1U,
+    kWorkerRuntimeId,
+    1U,
+    {
+      MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::MoveDistance), 0.5F, 0.0F, ""},
+      MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::RotateAngle), 0.0F, 1.0F, ""},
+    }};
+  ASSERT_TRUE(core.admit(mission).accepted);
+  ASSERT_EQ(relative->started_tokens().size(), 1U);
+  const auto token = relative->started_tokens().front();
+  arm_check.store(true);
+
+  Queue queue([] {return WorkerEvent{WorkerEvent::Kind::QueueFault};});
+  RuntimeEventIngress<WorkerEvent> ingress(
+    queue,
+    fence,
+    [](const WorkerEvent & event) {
+      return event.kind == WorkerEvent::Kind::Normal ?
+             Queue::Lane::Normal : Queue::Lane::Control;
+    },
+    [&]() {
+      std::lock_guard<std::mutex> lock(mutex);
+      condition.notify_all();
+    },
+    [&](const RuntimeEmergencyFenceSnapshot & snapshot) {
+      core.fail_closed_at_epoch(snapshot.admission_epoch, snapshot.detail);
+      std::lock_guard<std::mutex> lock(mutex);
+      fence_processed = true;
+      condition.notify_all();
+    },
+    [](const WorkerEvent & event) {
+      return event.kind == WorkerEvent::Kind::Stop;
+    });
+
+  ASSERT_TRUE(ingress.enqueue(
+    WorkerEvent{WorkerEvent::Kind::ChildResult, token,
+      ChildResult{ChildResultCode::Succeeded, "next step must be fenced"}}));
+  std::thread worker([&]() {
+      ingress.run(
+        [&](WorkerEvent & event) {core.on_child_result(event.token, event.child_result);},
+        [&](std::string detail) {ingress.request_emergency(std::move(detail));});
+    });
+
+  {
+    std::unique_lock<std::mutex> lock(mutex);
+    ASSERT_TRUE(condition.wait_for(lock, std::chrono::seconds(1), [&]() {
+        return check_entered;
+      }));
+  }
+  ingress.request_emergency("fence raised before RelativeMotionPort start");
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    release_check = true;
+  }
+  condition.notify_all();
+  {
+    std::unique_lock<std::mutex> lock(mutex);
+    ASSERT_TRUE(condition.wait_for(lock, std::chrono::seconds(1), [&]() {
+        return fence_processed;
+      }));
+  }
+  queue.close();
+  worker.join();
+
+  EXPECT_EQ(relative->started_steps().size(), 1U);
+  ASSERT_EQ(results.size(), 1U);
+  EXPECT_EQ(results.front().code, MissionResultCode::SafetyFault);
+  EXPECT_EQ(core.state().admission_epoch, 2U);
+  EXPECT_TRUE(authority->snapshot().motion_inhibited);
+  EXPECT_TRUE(authority->snapshot().zero_published);
 }
 
 }  // namespace
