@@ -474,7 +474,7 @@ TEST(RuntimeEventIngressTest, PopBeforeDispatchFenceSkipsCoreSideEffect)
 
   ASSERT_TRUE(ingress.enqueue(
     WorkerEvent{WorkerEvent::Kind::ChildResult, token,
-      ChildResult{ChildResultCode::Succeeded, "must be fenced"}}));
+        ChildResult{ChildResultCode::Succeeded, "must be fenced"}}));
   std::thread worker([&]() {
       ingress.run(
         [&](WorkerEvent & event) {
@@ -593,7 +593,7 @@ TEST(RuntimeEventIngressTest, CoreBeforePortStartFenceRejectsNextStep)
 
   ASSERT_TRUE(ingress.enqueue(
     WorkerEvent{WorkerEvent::Kind::ChildResult, token,
-      ChildResult{ChildResultCode::Succeeded, "next step must be fenced"}}));
+        ChildResult{ChildResultCode::Succeeded, "next step must be fenced"}}));
   std::thread worker([&]() {
       ingress.run(
         [&](WorkerEvent & event) {core.on_child_result(event.token, event.child_result);},
