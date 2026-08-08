@@ -1055,7 +1055,7 @@ TEST_F(MotionConditioningPipelineTest, GateCandidateAndWriterBindingAreRequired)
   EXPECT_FALSE(started.ok);
   EXPECT_EQ(started.state, MotionConditioningState::Failed);
   EXPECT_EQ(producer->start_count, 0U);
-  EXPECT_EQ(started.failure, MotionConditioningFailure::DependencyUnavailable);
+  EXPECT_EQ(started.failure, MotionConditioningFailure::SafetyFault);
   EXPECT_TRUE(started.zero_proven);
   EXPECT_NE(started.zero_proven_at, std::chrono::steady_clock::time_point{});
 
@@ -1447,15 +1447,14 @@ TEST_F(MotionConditioningPipelineTest, ProducerThrowFailsClosedAndCleansUp)
 {
   producer->throw_on_start = true;
   MotionConditioningPipeline pipeline(*client, authority, producer, config());
+  graph->publish_health_once();
 
   ASSERT_TRUE(pipeline.prepare().ok);
   MotionConditioningResult result;
   EXPECT_NO_THROW(result = pipeline.start());
 
   EXPECT_FALSE(result.ok);
-  EXPECT_TRUE(
-    result.failure == MotionConditioningFailure::InternalError ||
-    result.failure == MotionConditioningFailure::SafetyFault);
+  EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
   EXPECT_TRUE(result.zero_proven);
   EXPECT_NE(result.zero_proven_at, std::chrono::steady_clock::time_point{});
   EXPECT_GE(producer->stop_count, 1U);
@@ -1578,7 +1577,7 @@ TEST_F(MotionConditioningPipelineTest, OpenThrowFailsClosedAndCleansUp)
   EXPECT_NO_THROW(result = pipeline.start());
 
   EXPECT_FALSE(result.ok);
-  EXPECT_EQ(result.failure, MotionConditioningFailure::InternalError);
+  EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
   EXPECT_TRUE(result.zero_proven);
   EXPECT_EQ(graph->loaded_count(), 0U);
 }
@@ -1598,7 +1597,7 @@ TEST_F(MotionConditioningPipelineTest, StartAfterPrepareOpenDeadlineFailsClosed)
 
   EXPECT_FALSE(result.ok);
   EXPECT_EQ(result.state, MotionConditioningState::Failed);
-  EXPECT_EQ(result.failure, MotionConditioningFailure::Timeout);
+  EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
   EXPECT_TRUE(result.zero_proven);
   EXPECT_EQ(producer->start_count, 0U);
   EXPECT_EQ(graph->loaded_count(), 0U);
@@ -1862,7 +1861,7 @@ TEST_F(MotionConditioningPipelineTest, InactiveControllerFailsClosed)
   EXPECT_EQ(pipeline.state(), MotionConditioningState::Failed);
   EXPECT_EQ(
     pipeline.last_result().failure,
-    MotionConditioningFailure::DependencyUnavailable);
+    MotionConditioningFailure::SafetyFault);
   EXPECT_TRUE(pipeline.last_result().zero_proven);
   EXPECT_GE(producer->stop_count, 1U);
 }

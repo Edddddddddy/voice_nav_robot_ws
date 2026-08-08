@@ -424,15 +424,26 @@ above. Every Goal receives exactly one terminal result.
   continuation. It is not dependent on destruction, and producer stop,
   component cleanup, generation reclaim, and terminal publication are each
   performed at most once.
-- Runtime health keeps source loss, deadline expiry, and execution failure
-  typed. A dependency or graph resource failure remains
-  `DEPENDENCY_UNAVAILABLE` when Gate inhibit+zero is proven; only failure to
-  prove that safety state selects `SAFETY_FAULT`. The residual fault remains
-  latched against later admission.
+- Runtime health and teardown keep the frozen failure-code taxonomy typed:
+  source-only odom/scan/clock liveness loss is
+  `DEPENDENCY_UNAVAILABLE`; a RelativeMotion step deadline is `TIMEOUT`; and
+  stall, collision, or other motion execution failure is `EXECUTION_FAILED`.
+  Gate, controller, container, component, candidate-writer, zero-proof,
+  handover, and stationarity failures are `SAFETY_FAULT`. An original
+  business failure is upgraded to `SAFETY_FAULT` only when teardown cannot
+  prove Gate inhibited+zero; proving zero does not rewrite an infrastructure
+  safety fault. The residual safety fault remains latched against later
+  admission.
 - Node shutdown stops ingress, drains accepted internal completion events, and
   waits for the saved active-goal callback to be delivered exactly once before
   closing the queue and destroying Runtime state. Terminal records are
   bounded to eight recent generations.
+- Reentrant RelativeMotion ROS callbacks use a shared lifetime ingress with a
+  weak Impl/producer capture and an in-flight guard. Shutdown disables new
+  ingress before resetting subscriptions, the raw timer, and producer, then
+  waits for queued and active callbacks before releasing the state. The
+  production seam tests this barrier on a real MultiThreadedExecutor for
+  odom, scan, clock, raw timer, and command-supplier callbacks.
 
 ## Failure behavior
 
@@ -451,6 +462,16 @@ above. Every Goal receives exactly one terminal result.
 | Map save partial failure | publish no completed logical map directory |
 | Late callback after cancel | discard callback by epoch/generation; discard velocity through the inhibited handover barrier |
 | Gate health or zero proof unavailable | report `SAFETY_FAULT` and remain fail-closed |
+
+The corresponding terminal codes are deliberately not inferred from the
+presence of a later zero proof:
+
+| Typed cause | Terminal code |
+| --- | --- |
+| Odom/scan/clock source liveness only | `DEPENDENCY_UNAVAILABLE` |
+| RelativeMotion step deadline only | `TIMEOUT` |
+| Stall, collision, or motion execution failure | `EXECUTION_FAILED` |
+| Gate/controller/container/component/writer/zero/handover/stationarity | `SAFETY_FAULT` |
 
 ## Verification obligations
 

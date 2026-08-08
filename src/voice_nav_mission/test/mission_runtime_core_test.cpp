@@ -423,6 +423,36 @@ TEST(RuntimeCore, ChildFailureReportsTheStartedStepAndSkipsTheRest)
   EXPECT_EQ(fixture.relative->started_steps().size(), 1U);
 }
 
+TEST(RuntimeCore, ChildFailureCodesRemainTypedAtTheMissionBoundary)
+{
+  const auto mission_code_for = [](const ChildResultCode child_code) {
+      Fixture fixture;
+      const auto admission = fixture.core.admit(goal(1U));
+      if (!admission.accepted) {
+        return MissionResultCode::InternalError;
+      }
+      const auto token = fixture.relative->started_tokens().front();
+      fixture.core.on_child_result(token, ChildResult{child_code, "typed"});
+      if (fixture.results.empty()) {
+        return MissionResultCode::InternalError;
+      }
+      return fixture.results.front().code;
+    };
+
+  EXPECT_EQ(
+    mission_code_for(ChildResultCode::DependencyUnavailable),
+    MissionResultCode::DependencyUnavailable);
+  EXPECT_EQ(
+    mission_code_for(ChildResultCode::Timeout),
+    MissionResultCode::Timeout);
+  EXPECT_EQ(
+    mission_code_for(ChildResultCode::Failed),
+    MissionResultCode::ExecutionFailed);
+  EXPECT_EQ(
+    mission_code_for(ChildResultCode::SafetyFault),
+    MissionResultCode::SafetyFault);
+}
+
 TEST(RuntimeCore, TerminalCancelUsesTheManualSteadyClockGraceDeadline)
 {
   Fixture fixture;
