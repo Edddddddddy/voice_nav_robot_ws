@@ -43,6 +43,7 @@ enum class MotionConditioningFailure : std::uint8_t
   SafetyFault = 2,
   ExecutionFailed = 3,
   InternalError = 4,
+  Timeout = 5,
 };
 
 struct MotionConditioningResult
@@ -97,6 +98,7 @@ struct MotionConditioningConfig
   std::function<void(const MotionConditioningCorrelationToken &)> before_token_claim;
   std::function<void()> before_health_callback;
   std::function<void()> after_health_callback;
+  std::function<void()> before_open_callback;
   std::function<void()> before_renew_callback;
   std::function<void()> before_callback_wait;
   std::function<void()> before_renew_wait;
