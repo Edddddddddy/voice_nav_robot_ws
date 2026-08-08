@@ -48,6 +48,7 @@
 #include "voice_nav_mission/motion_conditioning_pipeline.hpp"
 #include "voice_nav_mission/srv/internal_motion_gate_control.hpp"
 #include "voice_nav_mission/relative_motion_ros_adapter.hpp"
+#include "voice_nav_mission/runtime_admission_gate.hpp"
 #include "voice_nav_mission/runtime_event_queue.hpp"
 #include "voice_nav_mission/runtime_execution_plane.hpp"
 #include "voice_nav_mission/runtime_shutdown_coordinator.hpp"
@@ -161,7 +162,8 @@ public:
           scan.angle_increment = 1.0F;
           scan.range_min = 0.05F;
           scan.range_max = 10.0F;
-          scan.ranges = {10.0F, 10.0F, 10.0F};
+          const auto range = collision_stop_.load() ? 0.10F : 10.0F;
+          scan.ranges = {range, range, range};
           scan_publisher_->publish(scan);
 
           nav_msgs::msg::Odometry odom;
@@ -172,6 +174,11 @@ public:
     });
   }
 
+  void set_collision_stop(const bool enabled)
+  {
+    collision_stop_.store(enabled);
+  }
+
 private:
   rclcpp::Publisher<rosgraph_msgs::msg::Clock>::SharedPtr clock_publisher_;
   rclcpp::Publisher<sensor_msgs::msg::LaserScan>::SharedPtr scan_publisher_;
@@ -180,6 +187,7 @@ private:
   rclcpp::Service<ListControllers>::SharedPtr controller_service_;
   rclcpp::TimerBase::SharedPtr clock_timer_;
   rclcpp::TimerBase::SharedPtr sensor_timer_;
+  std::atomic<bool> collision_stop_{false};
 };
 
 class ControllerObservationNode final : public rclcpp::Node
@@ -258,6 +266,16 @@ public:
     std::unique_lock<std::mutex> lock(mutex_);
     return condition_.wait_until(lock, deadline, [this]() {
                return !results_.empty();
+           });
+  }
+
+  [[nodiscard]] bool wait_for_count(
+    const std::size_t expected,
+    const std::chrono::steady_clock::time_point deadline)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_until(lock, deadline, [this, expected]() {
+               return results_.size() >= expected;
            });
   }
 
@@ -464,6 +482,16 @@ TEST(MotionConditioningPipelineIntegration, RealComponentsHandoverTwoLeases)
   config.writer_graph_timeout = 1s;
   config.prepare_open_deadline = 4s;
   config.renew_period = 100ms;
+  std::mutex renew_mutex;
+  std::condition_variable renew_condition;
+  std::size_t renew_callbacks = 0U;
+  config.before_renew_callback = [&renew_mutex, &renew_condition, &renew_callbacks]() {
+      {
+        std::lock_guard<std::mutex> lock(renew_mutex);
+        ++renew_callbacks;
+      }
+      renew_condition.notify_all();
+    };
   MotionConditioningPipeline pipeline(
     *pipeline_node, authority, producer, config);
 
@@ -510,6 +538,23 @@ TEST(MotionConditioningPipelineIntegration, RealComponentsHandoverTwoLeases)
   EXPECT_EQ(
     pipeline_node->get_subscriptions_info_by_topic(first_topic).size(), 0U);
 
+  const auto second_window_start = std::chrono::steady_clock::now();
+  const auto second_window_deadline = second_window_start + 500ms;
+  const auto second_window_minimum = second_window_start + 250ms;
+  const auto renew_baseline = [&renew_mutex, &renew_callbacks]() {
+      std::lock_guard<std::mutex> lock(renew_mutex);
+      return renew_callbacks;
+    }();
+  {
+    std::unique_lock<std::mutex> lock(renew_mutex);
+    ASSERT_TRUE(renew_condition.wait_until(
+        lock, second_window_deadline, [&]() {
+          return renew_callbacks >= renew_baseline + 2U &&
+                 std::chrono::steady_clock::now() >= second_window_minimum &&
+                 pipeline.state() == MotionConditioningState::Running;
+        })) << "second generation did not remain Running through a fresh-input window";
+  }
+
   auto late_old_publisher = pipeline_node->create_publisher<TwistStamped>(
     first_topic,
     rclcpp::QoS(rclcpp::KeepLast(1)).reliable().durability_volatile());
@@ -532,6 +577,219 @@ TEST(MotionConditioningPipelineIntegration, RealComponentsHandoverTwoLeases)
         return pipeline_node->get_publishers_info_by_topic(
           prepared_two.candidate_topic).empty();
       }, 2s));
+}
+
+TEST(
+  MotionConditioningPipelineIntegration,
+  ProductionAdapterReusesIngressAcrossStopAndCollisionGenerations)
+{
+  RclcppGuard rclcpp_guard;
+  rclcpp::NodeOptions gate_options;
+  gate_options.append_parameter_override("use_sim_time", true);
+  gate_options.append_parameter_override("prepare_timeout_ms", 6000);
+  gate_options.append_parameter_override("writer_graph_timeout_ms", 1000);
+  gate_options.append_parameter_override(
+    "expected_candidate_writer_fqn", "/collision_monitor");
+
+  auto executor = std::make_shared<rclcpp::executors::MultiThreadedExecutor>(
+    rclcpp::ExecutorOptions{}, 16U);
+  auto gate = std::make_shared<MotionGateNode>(gate_options);
+  auto container = std::make_shared<rclcpp_components::ComponentManager>(
+    executor, "motion_conditioning_container",
+    rclcpp::NodeOptions().use_intra_process_comms(false));
+  auto graph = std::make_shared<ConditioningGraphNode>();
+  auto controller = std::make_shared<ControllerObservationNode>();
+  auto pipeline_node = std::make_shared<rclcpp::Node>(
+    "production_adapter_generation_test",
+    rclcpp::NodeOptions().append_parameter_override("use_sim_time", true));
+
+  RuntimeAdmissionGate admission_gate;
+  CountLatch gate_updates;
+  CountLatch adapter_odom;
+  CountLatch adapter_scan;
+  CountLatch adapter_clock;
+  CountLatch renew_callbacks;
+  CountLatch raw_output;
+  CountLatch core_running;
+  TerminalProbe terminal;
+  RuntimeCompletionWorker completion_worker;
+  std::shared_ptr<RuntimeExecutionPlane> plane;
+  std::atomic<std::size_t> emergency_count{0U};
+
+  auto admission_check = [&admission_gate](const std::uint64_t epoch) {
+      return admission_gate.admission_allowed(epoch);
+    };
+  MotionConditioningConfig conditioning_config;
+  conditioning_config.component_rpc_timeout = 2s;
+  conditioning_config.writer_graph_timeout = 1s;
+  conditioning_config.prepare_open_deadline = 4s;
+  conditioning_config.stop_barrier = 250ms;
+  conditioning_config.transaction_plane = admission_gate.transaction_plane();
+  conditioning_config.admission_fence_check = admission_check;
+  conditioning_config.before_adapter_odom_callback = [&adapter_odom]() {
+      adapter_odom.observe();
+    };
+  conditioning_config.before_adapter_scan_callback = [&adapter_scan]() {
+      adapter_scan.observe();
+    };
+  conditioning_config.before_adapter_clock_callback = [&adapter_clock]() {
+      adapter_clock.observe();
+    };
+  conditioning_config.before_renew_callback = [&renew_callbacks]() {
+      renew_callbacks.observe();
+    };
+  conditioning_config.completion_relay = [&plane](
+    RelativeMotionCompletionRecordPtr record) {
+      return plane && plane->completion_mailbox().relay(std::move(record));
+    };
+
+  auto authority = std::make_shared<RosMotionAuthorityPort>(
+    *pipeline_node, 100ms, 250ms,
+    [&gate_updates](const GateSnapshot &) {gate_updates.observe();});
+  auto adapter = std::make_shared<RelativeMotionRosAdapter>(
+    *pipeline_node, authority, RelativeMotionPolicy{}, conditioning_config);
+  auto raw_subscription = pipeline_node->create_subscription<TwistStamped>(
+    conditioning_config.raw_topic,
+    rclcpp::QoS(rclcpp::KeepLast(10)).reliable(),
+    [&raw_output](const TwistStamped::ConstSharedPtr message) {
+      if (std::abs(message->twist.linear.x) > 0.001 ||
+      std::abs(message->twist.angular.z) > 0.001)
+      {
+        raw_output.observe();
+      }
+    });
+
+  RuntimeConfig runtime_config;
+  runtime_config.runtime_instance_id = kIntegrationRuntimeId;
+  runtime_config.initial_admission_epoch = 1U;
+  plane = std::shared_ptr<RuntimeExecutionPlane>(new RuntimeExecutionPlane(
+    runtime_config,
+    std::make_shared<IntegrationSteadyClock>(),
+    authority,
+    adapter,
+        [&core_running](const RuntimeState & state) {
+          if (state.active_step != kNoActiveMissionStep) {
+            core_running.observe();
+          }
+        },
+        {},
+        [&terminal](std::uint64_t, const MissionResult & result) {
+          terminal.record(result);
+        },
+        {},
+    admission_check,
+        [&completion_worker](const MotionToken & token) {
+          return completion_worker.enqueue(token);
+        },
+        [&emergency_count](std::string) {
+          emergency_count.fetch_add(1U);
+        }));
+  completion_worker.start(plane);
+
+  executor->add_node(gate);
+  executor->add_node(container);
+  executor->add_node(graph);
+  executor->add_node(controller);
+  executor->add_node(pipeline_node);
+  SpinGuard spin_guard(executor);
+
+  ASSERT_TRUE(gate_updates.wait_for_at_least(1U));
+  ASSERT_TRUE(adapter_odom.wait_for_at_least(1U));
+  ASSERT_TRUE(adapter_scan.wait_for_at_least(1U));
+  ASSERT_TRUE(adapter_clock.wait_for_at_least(1U));
+  {
+    std::lock_guard<std::recursive_mutex> lock(plane->core_serial_mutex());
+    plane->core()->on_tick();
+  }
+
+  const auto admit_generation = [&admission_gate, &plane](
+    const std::uint64_t sequence) {
+      MissionGoal goal;
+      goal.source_instance_id = "production-adapter-generations";
+      goal.source_seq = sequence;
+      goal.runtime_instance_id = kIntegrationRuntimeId;
+      goal.admission_epoch = 1U;
+      goal.steps.push_back(MissionStep{
+          static_cast<std::uint8_t>(MissionStepKind::MoveDistance),
+          0.5F, 0.0F, {}});
+      const auto permit = admission_gate.claim_start(goal.admission_epoch);
+      std::lock_guard<std::recursive_mutex> lock(plane->core_serial_mutex());
+      return plane->core()->admit(
+        goal,
+        [&admission_gate, permit]() {
+          return admission_gate.start_allowed(permit);
+        },
+        permit.generation);
+    };
+
+  const auto first_admission = admit_generation(1U);
+  ASSERT_TRUE(first_admission.accepted) << first_admission.result.detail;
+  ASSERT_TRUE(core_running.wait_for_at_least(1U));
+  ASSERT_TRUE(raw_output.wait_for_at_least(1U));
+  const auto first_renew_start = std::chrono::steady_clock::now();
+  const auto first_renew_baseline = renew_callbacks.value();
+  ASSERT_TRUE(renew_callbacks.wait_for_at_least(first_renew_baseline + 3U, 2s));
+  EXPECT_GE(
+    std::chrono::steady_clock::now() - first_renew_start,
+    200ms);
+
+  const auto first_terminal_baseline = terminal.results().size();
+  {
+    std::lock_guard<std::recursive_mutex> lock(plane->core_serial_mutex());
+    plane->core()->cancel(first_admission.mission_id);
+  }
+  ASSERT_TRUE(terminal.wait_for_count(
+    first_terminal_baseline + 1U,
+    std::chrono::steady_clock::now() + 2s));
+  ASSERT_EQ(terminal.results().at(first_terminal_baseline).code,
+    MissionResultCode::Canceled);
+  const auto renew_after_first_stop = renew_callbacks.value();
+
+  const auto second_admission = admit_generation(2U);
+  ASSERT_TRUE(second_admission.accepted) << second_admission.result.detail;
+  ASSERT_TRUE(core_running.wait_for_at_least(2U));
+  const auto second_renew_start = std::chrono::steady_clock::now();
+  const auto second_renew_baseline = renew_callbacks.value();
+  ASSERT_TRUE(renew_callbacks.wait_for_at_least(second_renew_baseline + 3U, 2s));
+  EXPECT_GE(
+    std::chrono::steady_clock::now() - second_renew_start,
+    200ms);
+  EXPECT_GT(raw_output.value(), 1U);
+  EXPECT_TRUE(adapter->healthy());
+  EXPECT_GE(renew_callbacks.value(), renew_after_first_stop + 3U);
+
+  graph->set_collision_stop(true);
+  const auto second_terminal_baseline = terminal.results().size();
+  ASSERT_TRUE(terminal.wait_for_count(
+    second_terminal_baseline + 1U,
+    std::chrono::steady_clock::now() + 3s));
+  ASSERT_EQ(terminal.results().at(second_terminal_baseline).code,
+    MissionResultCode::ExecutionFailed);
+
+  graph->set_collision_stop(false);
+  const auto third_admission = admit_generation(3U);
+  ASSERT_TRUE(third_admission.accepted) << third_admission.result.detail;
+  ASSERT_TRUE(core_running.wait_for_at_least(3U));
+  const auto third_renew_start = std::chrono::steady_clock::now();
+  const auto third_renew_baseline = renew_callbacks.value();
+  ASSERT_TRUE(renew_callbacks.wait_for_at_least(third_renew_baseline + 3U, 2s));
+  EXPECT_GE(
+    std::chrono::steady_clock::now() - third_renew_start,
+    200ms);
+  EXPECT_TRUE(adapter->healthy());
+
+  const auto third_terminal_baseline = terminal.results().size();
+  {
+    std::lock_guard<std::recursive_mutex> lock(plane->core_serial_mutex());
+    plane->core()->cancel(third_admission.mission_id);
+  }
+  ASSERT_TRUE(terminal.wait_for_count(
+    third_terminal_baseline + 1U,
+    std::chrono::steady_clock::now() + 2s));
+  EXPECT_EQ(terminal.results().at(third_terminal_baseline).code,
+    MissionResultCode::Canceled);
+  EXPECT_EQ(emergency_count.load(), 0U);
+  plane->shutdown();
 }
 
 TEST(

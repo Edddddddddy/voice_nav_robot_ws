@@ -516,6 +516,7 @@ private:
   ~Impl()
   {
     destroying_.store(true);
+    shutdown_ingress_requested_.store(true, std::memory_order_release);
     disable_ingress_callbacks();
     (void)stop();
     drain_start_operations();
@@ -1180,6 +1181,7 @@ private:
 
   void begin_shutdown_ingress() noexcept
   {
+    shutdown_ingress_requested_.store(true, std::memory_order_release);
     disable_ingress_callbacks();
   }
 
@@ -1656,6 +1658,20 @@ private:
     bool & cleanup_needed)
   {
     std::unique_lock<std::mutex> teardown_lock(teardown_mutex_);
+    const auto terminal_failure_reusable = [this]() {
+        return terminal_record_ &&
+               terminal_record_->result.zero_proven &&
+               terminal_record_->result.zero_proven_at !=
+               std::chrono::steady_clock::time_point{} &&
+               (terminal_record_->result.failure ==
+               MotionConditioningFailure::DependencyUnavailable ||
+               terminal_record_->result.failure ==
+               MotionConditioningFailure::ExecutionFailed ||
+               terminal_record_->result.failure ==
+               MotionConditioningFailure::Timeout) &&
+               !cleanup_blocked_ && !cleanup_identity_fault_ &&
+               !cleanup_failure_.has_value();
+      };
     if (cleanup_continuation_running_) {
       teardown_cv_.wait(teardown_lock, [this]() {
           return !cleanup_continuation_running_;
@@ -1665,7 +1681,9 @@ private:
       teardown_cv_.wait(teardown_lock, [this]() {
           return !teardown_in_progress_.load();
         });
-      if (terminal_record_ && !terminal_record_->result.ok) {
+      if (terminal_record_ && !terminal_record_->result.ok &&
+        !terminal_failure_reusable())
+      {
         existing = terminal_record_->result;
         return false;
       }
@@ -1681,7 +1699,9 @@ private:
             "MotionConditioningPipeline already owns an active generation"));
         return false;
       }
-      if (terminal_record_ && !terminal_record_->result.ok) {
+      if (terminal_record_ && !terminal_record_->result.ok &&
+        !terminal_failure_reusable())
+      {
         existing = terminal_record_->result;
         return false;
       }
@@ -1833,11 +1853,12 @@ private:
 
   [[nodiscard]] MotionConditioningResult stop_owned()
   {
-    // Close health, collision, and renew ingress before the independent Gate
-    // zero operation.  The RelativeMotion ROS Adapter owns a separate odom
-    // ingress for the post-zero stationarity proof; this Module's odom is
-    // only dependency health and must not keep running during teardown.
-    disable_ingress_callbacks();
+    // A normal generation handover closes only this generation's renew and
+    // producer side effects.  Health/collision subscriptions stay alive so a
+    // subsequent prepare() on the same Adapter can prove fresh dependencies.
+    // Explicit shutdown/destroy sets shutdown_ingress_requested_ and closes
+    // all source ingress through begin_shutdown_ingress().
+    disable_renew_callbacks();
     bool zero_proven = false;
     std::chrono::steady_clock::time_point zero_proven_at{};
     // Invalidation in begin_teardown() is the cancellation fence.  Prove
@@ -1856,8 +1877,9 @@ private:
     if (!zero_proven) {
       zero_proven = inhibit_gate(true, &zero_proven_at);
     }
-    wait_for_ingress_callbacks();
-    disable_renew_callbacks();
+    if (shutdown_ingress_requested_.load(std::memory_order_acquire)) {
+      wait_for_ingress_callbacks();
+    }
     wait_for_renew_callbacks();
     // The emergency zero proof above is independent and immediate.  The
     // unique cleanup owner waits on the start-operation CV until every
@@ -1942,9 +1964,10 @@ private:
     std::string detail,
     bool wait_for_callbacks)
   {
-    // A failed generation cannot keep renewing or observing runtime health
-    // while its immutable zero/terminal cleanup is in flight.
-    disable_ingress_callbacks();
+    // A failed generation cannot keep renewing or producing output while its
+    // immutable zero/terminal cleanup is in flight.  Shared health/collision
+    // ingress remains available for the next generation unless shutdown has
+    // explicitly closed it.
     disable_renew_callbacks();
     if (wait_for_callbacks) {
       wait_for_renew_callbacks();
@@ -1955,7 +1978,9 @@ private:
     bool zero_proven = false;
     std::chrono::steady_clock::time_point zero_proven_at{};
     zero_proven = inhibit_gate(true, &zero_proven_at);
-    wait_for_ingress_callbacks();
+    if (shutdown_ingress_requested_.load(std::memory_order_acquire)) {
+      wait_for_ingress_callbacks();
+    }
     if (!destroying_.load() && !wait_for_start_operations()) {
       cleanup_blocked_ = true;
       schedule_cleanup_continuation();
@@ -3579,6 +3604,7 @@ private:
   std::atomic<bool> activation_in_progress_{false};
   std::atomic<bool> activation_failed_{false};
   std::atomic<bool> destroying_{false};
+  std::atomic<bool> shutdown_ingress_requested_{false};
   std::atomic<bool> cleanup_complete_{true};
   std::atomic<bool> destruction_cleanup_claimed_{false};
   std::atomic<bool> teardown_in_progress_{false};

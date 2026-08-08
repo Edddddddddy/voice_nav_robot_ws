@@ -663,6 +663,15 @@ public:
         return false;
       }
       conditioning_state = conditioning_->state();
+      if (conditioning_state == MotionConditioningState::Failed) {
+        const auto result = conditioning_->last_result();
+        const auto reusable_failure =
+          result.zero_proven && result.zero_proven_at != TimePoint{} &&
+        (result.failure == MotionConditioningFailure::DependencyUnavailable ||
+        result.failure == MotionConditioningFailure::ExecutionFailed ||
+        result.failure == MotionConditioningFailure::Timeout);
+        return reusable_failure;
+      }
     }
     return conditioning_state != MotionConditioningState::Failed;
   }
