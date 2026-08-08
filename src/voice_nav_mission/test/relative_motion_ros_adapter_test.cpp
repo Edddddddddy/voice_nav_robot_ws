@@ -23,6 +23,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 
@@ -31,6 +32,10 @@
 #include <sensor_msgs/msg/laser_scan.hpp>
 
 #include "voice_nav_mission/relative_motion_ros_adapter.hpp"
+#include "voice_nav_mission/runtime_completion_registry.hpp"
+#include "voice_nav_mission/runtime_emergency_fence.hpp"
+#include "voice_nav_mission/runtime_event_ingress.hpp"
+#include "voice_nav_mission/runtime_event_queue.hpp"
 
 namespace voice_nav_mission
 {
@@ -202,10 +207,192 @@ private:
   bool stopped_{false};
 };
 
+enum class RelayRejectionMode
+{
+  FenceBlocked,
+  ControlFull,
+  QueueClosed
+};
+
+struct RelayCompletionEvent
+{
+  MotionToken token{};
+};
+
+class NodeRejectionCompletionRelay final
+{
+public:
+  explicit NodeRejectionCompletionRelay(const RelayRejectionMode mode)
+  : mode_(mode),
+    queue_([]() {return RelayCompletionEvent{};}),
+    fence_(1U),
+    registry_(),
+    ingress_(
+      queue_,
+      fence_,
+      [](const RelayCompletionEvent &) {return Queue::Lane::Control;},
+      [this]() {notify_reaper();},
+      [this](const RuntimeEmergencyFenceSnapshot &) {
+        registry_.reap_all();
+      }),
+    reaper_thread_([this]() {run_reaper();})
+  {
+    if (mode_ == RelayRejectionMode::FenceBlocked) {
+      if (!fence_.raise("test relay fence blocked")) {
+        throw std::runtime_error("test relay fence did not raise");
+      }
+    } else if (mode_ == RelayRejectionMode::ControlFull) {
+      for (std::size_t index = 0U; index < Queue::kControlReserve; ++index) {
+        if (queue_.push(
+            RelayCompletionEvent{MotionToken{index + 900U, 1U, 1U, 1U}},
+            Queue::Lane::Control) != Queue::PushResult::Accepted)
+        {
+          throw std::runtime_error("test relay control lane did not fill");
+        }
+      }
+    } else {
+      queue_.close();
+    }
+  }
+
+  ~NodeRejectionCompletionRelay()
+  {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      stopped_ = true;
+    }
+    condition_.notify_all();
+    if (reaper_thread_.joinable()) {
+      reaper_thread_.join();
+    }
+    registry_.reap_all();
+  }
+
+  [[nodiscard]] bool register_delivery(
+    const MotionToken & token,
+    RuntimeCore::ChildResultDelivery delivery)
+  {
+    return registry_.register_delivery(token, std::move(delivery));
+  }
+
+  [[nodiscard]] bool publish(RelativeMotionCompletionRecordPtr record)
+  {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      ++published_records_;
+      publish_thread_ = std::this_thread::get_id();
+    }
+    if (!record) {
+      return false;
+    }
+    const auto token = record->token;
+    if (!registry_.accept(record)) {
+      (void)registry_.retain_rejected(std::move(record));
+      ingress_.request_emergency("Node registry rejected completion record");
+      notify_reaper();
+      return false;
+    }
+    if (ingress_.enqueue(RelayCompletionEvent{token})) {
+      return true;
+    }
+    // The production Node invokes this same independent fence after a
+    // blocked/full/closed token enqueue.  The token is intentionally never
+    // dispatched in this rejection seam; the reaper owns the record/callback.
+    ingress_.request_emergency("completion token relay rejected");
+    notify_reaper();
+    return false;
+  }
+
+  [[nodiscard]] bool wait_for_reap()
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, 2s, [this]() {return reaped_;});
+  }
+
+  [[nodiscard]] std::size_t published_records() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return published_records_;
+  }
+
+  [[nodiscard]] std::thread::id publish_thread() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return publish_thread_;
+  }
+
+  [[nodiscard]] std::thread::id reap_thread() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return reap_thread_;
+  }
+
+private:
+  using Queue = RuntimeEventQueue<RelayCompletionEvent>;
+
+  void notify_reaper()
+  {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      reap_requested_ = true;
+    }
+    condition_.notify_all();
+  }
+
+  void run_reaper()
+  {
+    for (;; ) {
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        condition_.wait(lock, [this]() {
+            return stopped_ || reap_requested_;
+          });
+        if (stopped_) {
+          return;
+        }
+        reap_requested_ = false;
+      }
+      (void)ingress_.process_pending_fence();
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        reaped_ = true;
+        reap_thread_ = std::this_thread::get_id();
+      }
+      condition_.notify_all();
+    }
+  }
+
+  RelayRejectionMode mode_;
+  Queue queue_;
+  RuntimeEmergencyFence fence_;
+  NodeCompletionRegistry registry_;
+  RuntimeEventIngress<RelayCompletionEvent> ingress_;
+  std::thread reaper_thread_;
+  mutable std::mutex mutex_;
+  std::condition_variable condition_;
+  bool reap_requested_{false};
+  bool reaped_{false};
+  bool stopped_{false};
+  std::size_t published_records_{0U};
+  std::thread::id publish_thread_{};
+  std::thread::id reap_thread_{};
+};
+
 std::shared_ptr<ExternalCompletionRelay> install_completion_relay(
   MotionConditioningConfig & config)
 {
   auto relay = std::make_shared<ExternalCompletionRelay>();
+  config.completion_relay = [relay](RelativeMotionCompletionRecordPtr record) {
+      return relay->publish(std::move(record));
+    };
+  return relay;
+}
+
+std::shared_ptr<NodeRejectionCompletionRelay> install_rejection_relay(
+  MotionConditioningConfig & config,
+  const RelayRejectionMode mode)
+{
+  auto relay = std::make_shared<NodeRejectionCompletionRelay>(mode);
   config.completion_relay = [relay](RelativeMotionCompletionRecordPtr record) {
       return relay->publish(std::move(record));
     };
@@ -721,6 +908,136 @@ TEST_F(
   EXPECT_EQ(terminal_count.load(), 1U);
   EXPECT_EQ(relay->deliveries(), 1U);
   EXPECT_NE(relay->last_delivery_thread(), std::this_thread::get_id());
+  EXPECT_TRUE(weak_adapter.expired());
+}
+
+TEST_F(
+  RelativeMotionRosAdapterTest,
+  NodeRelayControlFullRejectsStartFailureAndReapsOffAdapterThread)
+{
+  auto node = std::make_shared<rclcpp::Node>(
+    "relative_motion_adapter_relay_start_rejection");
+  auto authority = std::make_shared<BlockingAuthority>();
+  MotionConditioningConfig conditioning_config;
+  conditioning_config.component_rpc_timeout = 100ms;
+  conditioning_config.prepare_open_deadline = 1s;
+  conditioning_config.stop_barrier = 100ms;
+  auto relay = install_rejection_relay(
+    conditioning_config, RelayRejectionMode::ControlFull);
+  auto adapter = std::make_shared<RelativeMotionRosAdapter>(
+    *node, authority, RelativeMotionPolicy{}, conditioning_config);
+  const auto weak_adapter = std::weak_ptr<RelativeMotionRosAdapter>(adapter);
+  const MotionToken token{25U, 5U, 13U, 1U};
+  std::atomic<std::size_t> callback_count{0U};
+  ASSERT_TRUE(relay->register_delivery(
+    token,
+      [held = adapter, &callback_count](const MotionToken &, const ChildResult &) mutable {
+        ++callback_count;
+        held.reset();
+      }));
+
+  adapter->begin_shutdown();
+  adapter->start(
+    token,
+    MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::MoveDistance), 0.1F, 0.0F, {}},
+    {},
+    {});
+
+  ASSERT_TRUE(relay->wait_for_reap());
+  EXPECT_EQ(relay->published_records(), 1U);
+  EXPECT_EQ(callback_count.load(), 0U);
+  EXPECT_NE(relay->publish_thread(), relay->reap_thread());
+  adapter->finalize_shutdown();
+  adapter.reset();
+  EXPECT_TRUE(weak_adapter.expired());
+}
+
+TEST_F(
+  RelativeMotionRosAdapterTest,
+  NodeRelayFenceBlockedRejectsTransactionAndReapsOffAdapterThread)
+{
+  auto node = std::make_shared<rclcpp::Node>(
+    "relative_motion_adapter_relay_transaction_rejection");
+  auto authority = std::make_shared<BlockingAuthority>();
+  MotionConditioningConfig conditioning_config;
+  conditioning_config.component_rpc_timeout = 100ms;
+  conditioning_config.prepare_open_deadline = 1s;
+  conditioning_config.stop_barrier = 100ms;
+  auto relay = install_rejection_relay(
+    conditioning_config, RelayRejectionMode::FenceBlocked);
+  auto adapter = std::make_shared<RelativeMotionRosAdapter>(
+    *node, authority, RelativeMotionPolicy{}, conditioning_config);
+  const auto weak_adapter = std::weak_ptr<RelativeMotionRosAdapter>(adapter);
+  const MotionToken token{26U, 5U, 14U, 1U};
+  std::atomic<std::size_t> callback_count{0U};
+  ASSERT_TRUE(relay->register_delivery(
+    token,
+      [held = adapter, &callback_count](const MotionToken &, const ChildResult &) mutable {
+        ++callback_count;
+        held.reset();
+      }));
+
+  adapter->start(
+    token,
+    MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::MoveDistance), 0.1F, 0.0F, {}},
+    {},
+    {});
+  ASSERT_TRUE(authority->wait_for_prepare());
+  authority->release_prepare();
+
+  ASSERT_TRUE(relay->wait_for_reap());
+  EXPECT_EQ(relay->published_records(), 1U);
+  EXPECT_EQ(callback_count.load(), 0U);
+  EXPECT_NE(relay->publish_thread(), relay->reap_thread());
+  adapter->begin_shutdown();
+  adapter->finalize_shutdown();
+  adapter.reset();
+  EXPECT_TRUE(weak_adapter.expired());
+}
+
+TEST_F(
+  RelativeMotionRosAdapterTest,
+  NodeRelayQueueClosedRejectsEmergencyAndReapsOffAdapterThread)
+{
+  auto node = std::make_shared<rclcpp::Node>(
+    "relative_motion_adapter_relay_emergency_rejection");
+  auto authority = std::make_shared<BlockingAuthority>();
+  MotionConditioningConfig conditioning_config;
+  conditioning_config.component_rpc_timeout = 100ms;
+  conditioning_config.prepare_open_deadline = 1s;
+  conditioning_config.stop_barrier = 100ms;
+  auto relay = install_rejection_relay(
+    conditioning_config, RelayRejectionMode::QueueClosed);
+  auto adapter = std::make_shared<RelativeMotionRosAdapter>(
+    *node, authority, RelativeMotionPolicy{}, conditioning_config);
+  const auto weak_adapter = std::weak_ptr<RelativeMotionRosAdapter>(adapter);
+  const MotionToken token{27U, 5U, 15U, 1U};
+  std::atomic<std::size_t> callback_count{0U};
+  ASSERT_TRUE(relay->register_delivery(
+    token,
+      [held = adapter, &callback_count](const MotionToken &, const ChildResult &) mutable {
+        ++callback_count;
+        held.reset();
+      }));
+
+  adapter->start(
+    token,
+    MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::MoveDistance), 0.1F, 0.0F, {}},
+    {},
+    {});
+  ASSERT_TRUE(authority->wait_for_prepare());
+  adapter->begin_shutdown();
+  authority->release_prepare();
+
+  ASSERT_TRUE(relay->wait_for_reap());
+  EXPECT_EQ(relay->published_records(), 1U);
+  EXPECT_EQ(callback_count.load(), 0U);
+  EXPECT_NE(relay->publish_thread(), relay->reap_thread());
+  adapter->finalize_shutdown();
+  adapter.reset();
   EXPECT_TRUE(weak_adapter.expired());
 }
 
