@@ -16,6 +16,7 @@
 #define VOICE_NAV_MISSION__RELATIVE_MOTION_ROS_ADAPTER_HPP_
 
 #include <memory>
+#include <string>
 
 #include <rclcpp/rclcpp.hpp>
 
@@ -25,6 +26,11 @@
 
 namespace voice_nav_mission
 {
+
+namespace detail
+{
+class RelativeMotionRosAdapterTestAccess;
+}
 
 // ROS Adapter for the production RelativeMotionPort. The ROS-free controller
 // remains the deep policy Module; this Adapter owns only odometry ingress,
@@ -64,9 +70,25 @@ public:
   [[nodiscard]] bool zero_proven() const noexcept override;
 
 private:
+  friend class detail::RelativeMotionRosAdapterTestAccess;
   class Impl;
-  std::unique_ptr<Impl> impl_;
+  std::shared_ptr<Impl> impl_;
 };
+
+namespace detail
+{
+
+// Package-private production seam used only by deterministic Adapter tests;
+// it does not add a ROS endpoint or a public ROS IDL.
+class RelativeMotionRosAdapterTestAccess final
+{
+public:
+  static bool start_raw_producer(
+    RelativeMotionRosAdapter & adapter,
+    const std::string & raw_topic);
+};
+
+}  // namespace detail
 
 }  // namespace voice_nav_mission
 

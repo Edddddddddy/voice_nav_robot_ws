@@ -15,12 +15,18 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+
+#include <nav_msgs/msg/odometry.hpp>
+#include <rosgraph_msgs/msg/clock.hpp>
+#include <sensor_msgs/msg/laser_scan.hpp>
 
 #include "voice_nav_mission/relative_motion_ros_adapter.hpp"
 
@@ -28,6 +34,135 @@ namespace voice_nav_mission
 {
 namespace
 {
+
+using namespace std::chrono_literals;
+
+class CallbackBarrier final
+{
+public:
+  void enter()
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    ++entered_;
+    condition_.notify_all();
+    condition_.wait(lock, [this]() {return released_;});
+  }
+
+  void release()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    released_ = true;
+    condition_.notify_all();
+  }
+
+  void mark_shutdown_wait()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    shutdown_waiting_ = true;
+    condition_.notify_all();
+  }
+
+  bool wait_for_entries(const std::size_t count)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, 1s, [this, count]() {
+               return entered_ >= count;
+             });
+  }
+
+  bool wait_for_shutdown_wait()
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, 1s, [this]() {return shutdown_waiting_;});
+  }
+
+  std::size_t entries() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return entered_;
+  }
+
+private:
+  mutable std::mutex mutex_;
+  std::condition_variable condition_;
+  std::size_t entered_{0U};
+  bool released_{false};
+  bool shutdown_waiting_{false};
+};
+
+template<typename PublisherT>
+bool wait_for_subscription(
+  rclcpp::Node & node,
+  const PublisherT & publisher)
+{
+  const auto graph_event = node.get_graph_event();
+  const auto deadline = std::chrono::steady_clock::now() + 1s;
+  while (publisher->get_subscription_count() == 0U &&
+    std::chrono::steady_clock::now() < deadline)
+  {
+    node.wait_for_graph_change(
+      graph_event,
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+        deadline - std::chrono::steady_clock::now()));
+    graph_event->check_and_clear();
+  }
+  return publisher->get_subscription_count() != 0U;
+}
+
+struct OdomPublisher
+{
+  using Message = nav_msgs::msg::Odometry;
+  using Publisher = rclcpp::Publisher<Message>;
+
+  auto create_publisher(rclcpp::Node & node, const MotionConditioningConfig & config)
+  {
+    return node.create_publisher<Message>(config.odom_topic, rclcpp::SensorDataQoS());
+  }
+
+  void send(Publisher & publisher)
+  {
+    Message message;
+    message.pose.pose.orientation.w = 1.0;
+    publisher.publish(message);
+  }
+};
+
+struct ScanPublisher
+{
+  using Message = sensor_msgs::msg::LaserScan;
+  using Publisher = rclcpp::Publisher<Message>;
+
+  auto create_publisher(rclcpp::Node & node, const MotionConditioningConfig & config)
+  {
+    auto qos = rclcpp::SensorDataQoS();
+    qos.keep_last(1);
+    return node.create_publisher<Message>(config.scan_topic, qos);
+  }
+
+  void send(Publisher & publisher)
+  {
+    publisher.publish(Message{});
+  }
+};
+
+struct ClockPublisher
+{
+  using Message = rosgraph_msgs::msg::Clock;
+  using Publisher = rclcpp::Publisher<Message>;
+
+  auto create_publisher(rclcpp::Node & node, const MotionConditioningConfig & config)
+  {
+    return node.create_publisher<Message>(config.clock_topic, rclcpp::ClockQoS());
+  }
+
+  void send(Publisher & publisher)
+  {
+    static std::int32_t stamp = 1;
+    Message message;
+    message.clock.sec = stamp++;
+    publisher.publish(message);
+  }
+};
 
 class BlockingAuthority final : public MotionAuthorityPort
 {
@@ -119,6 +254,55 @@ private:
   bool release_prepare_{false};
   std::size_t inhibit_count_{0U};
 };
+
+template<typename Publish>
+void run_source_shutdown_barrier(
+  const std::string & suffix,
+  std::function<void(MotionConditioningConfig &, CallbackBarrier &)> configure,
+  Publish publish)
+{
+  auto node = std::make_shared<rclcpp::Node>("relative_motion_adapter_" + suffix);
+  auto authority = std::make_shared<BlockingAuthority>();
+  MotionConditioningConfig conditioning_config;
+  conditioning_config.odom_topic = "/adapter_barrier/" + suffix + "/odom";
+  conditioning_config.scan_topic = "/adapter_barrier/" + suffix + "/scan";
+  conditioning_config.clock_topic = "/adapter_barrier/" + suffix + "/clock";
+  conditioning_config.component_rpc_timeout = 100ms;
+  conditioning_config.prepare_open_deadline = 1s;
+  conditioning_config.stop_barrier = 100ms;
+  CallbackBarrier callback_barrier;
+  configure(conditioning_config, callback_barrier);
+  RelativeMotionRosAdapter adapter(*node, authority, {}, conditioning_config);
+
+  rclcpp::executors::MultiThreadedExecutor executor(
+    rclcpp::ExecutorOptions(), 1U);
+  executor.add_node(node);
+  std::thread spin_thread([&executor]() {executor.spin();});
+
+  auto publisher = publish.create_publisher(*node, conditioning_config);
+  ASSERT_TRUE(wait_for_subscription(*node, publisher));
+  publish.send(*publisher);
+  ASSERT_TRUE(callback_barrier.wait_for_entries(1U));
+
+  // The single executor thread leaves the second message queued behind the
+  // blocked callback. Shutdown closes ingress before that queued callback can
+  // reach the Impl handler.
+  publish.send(*publisher);
+
+  std::atomic<bool> shutdown_finished{false};
+  std::thread shutdown_thread([&]() {
+      adapter.shutdown();
+      shutdown_finished.store(true);
+    });
+  ASSERT_TRUE(callback_barrier.wait_for_shutdown_wait());
+  EXPECT_FALSE(shutdown_finished.load());
+  callback_barrier.release();
+  shutdown_thread.join();
+
+  EXPECT_EQ(callback_barrier.entries(), 1U);
+  executor.cancel();
+  spin_thread.join();
+}
 
 class RelativeMotionRosAdapterTest : public ::testing::Test
 {
@@ -213,6 +397,94 @@ TEST_F(
   EXPECT_EQ(result_count.load(), 1U);
   adapter.shutdown();
   EXPECT_EQ(result_count.load(), 1U);
+}
+
+TEST_F(
+  RelativeMotionRosAdapterTest,
+  MultiThreadedExecutorDrainsQueuedAndInflightOdomIngress)
+{
+  run_source_shutdown_barrier(
+    "odom",
+    [](MotionConditioningConfig & config, CallbackBarrier & barrier) {
+      config.before_adapter_odom_callback = [&barrier]() {barrier.enter();};
+      config.before_adapter_ingress_wait = [&barrier]() {
+        barrier.mark_shutdown_wait();
+      };
+    },
+    OdomPublisher{});
+}
+
+TEST_F(
+  RelativeMotionRosAdapterTest,
+  MultiThreadedExecutorDrainsQueuedAndInflightScanIngress)
+{
+  run_source_shutdown_barrier(
+    "scan",
+    [](MotionConditioningConfig & config, CallbackBarrier & barrier) {
+      config.before_adapter_scan_callback = [&barrier]() {barrier.enter();};
+      config.before_adapter_ingress_wait = [&barrier]() {
+        barrier.mark_shutdown_wait();
+      };
+    },
+    ScanPublisher{});
+}
+
+TEST_F(
+  RelativeMotionRosAdapterTest,
+  MultiThreadedExecutorDrainsQueuedAndInflightClockIngress)
+{
+  run_source_shutdown_barrier(
+    "clock",
+    [](MotionConditioningConfig & config, CallbackBarrier & barrier) {
+      config.before_adapter_clock_callback = [&barrier]() {barrier.enter();};
+      config.before_adapter_ingress_wait = [&barrier]() {
+        barrier.mark_shutdown_wait();
+      };
+    },
+    ClockPublisher{});
+}
+
+TEST_F(
+  RelativeMotionRosAdapterTest,
+  MultiThreadedExecutorDrainsRawTimerAndCommandSupplier)
+{
+  auto node = std::make_shared<rclcpp::Node>("relative_motion_adapter_raw_barrier");
+  auto authority = std::make_shared<BlockingAuthority>();
+  MotionConditioningConfig conditioning_config;
+  conditioning_config.component_rpc_timeout = 100ms;
+  conditioning_config.prepare_open_deadline = 1s;
+  conditioning_config.stop_barrier = 100ms;
+  CallbackBarrier command_barrier;
+  conditioning_config.before_adapter_command_supplier = [&command_barrier]() {
+      command_barrier.enter();
+    };
+  conditioning_config.before_adapter_ingress_wait = [&command_barrier]() {
+      command_barrier.mark_shutdown_wait();
+    };
+  RelativeMotionRosAdapter adapter(*node, authority, {}, conditioning_config);
+
+  rclcpp::executors::MultiThreadedExecutor executor(
+    rclcpp::ExecutorOptions(), 2U);
+  executor.add_node(node);
+  std::thread spin_thread([&executor]() {executor.spin();});
+
+  ASSERT_TRUE(detail::RelativeMotionRosAdapterTestAccess::start_raw_producer(
+    adapter, "/adapter_barrier/raw_command"));
+  ASSERT_TRUE(command_barrier.wait_for_entries(1U));
+
+  std::atomic<bool> shutdown_finished{false};
+  std::thread shutdown_thread([&]() {
+      adapter.shutdown();
+      shutdown_finished.store(true);
+    });
+  ASSERT_TRUE(command_barrier.wait_for_shutdown_wait());
+  EXPECT_FALSE(shutdown_finished.load());
+  command_barrier.release();
+  shutdown_thread.join();
+
+  EXPECT_EQ(command_barrier.entries(), 1U);
+  executor.cancel();
+  spin_thread.join();
 }
 
 }  // namespace
