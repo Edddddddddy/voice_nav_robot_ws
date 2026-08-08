@@ -2805,6 +2805,9 @@ TEST_F(MotionConditioningPipelineTest, DestructorDrainsQueuedRenewCallback)
   pipeline_config.before_renew_wait = [renew_wait_barrier]() {
       (*renew_wait_barrier)();
     };
+  pipeline_config.before_callback_wait = [renew_wait_barrier]() {
+      (*renew_wait_barrier)();
+    };
 
   auto pipeline = std::make_unique<MotionConditioningPipeline>(
     *client, authority, producer, pipeline_config);
@@ -2831,13 +2834,15 @@ TEST_F(MotionConditioningPipelineTest, DestructorDrainsQueuedRenewCallback)
       destructor_promise.set_value();
     });
 
-  ASSERT_TRUE(renew_wait_barrier->wait_for_entry());
+  const bool renew_wait_entered = renew_wait_barrier->wait_for_entry(5s);
   renew_wait_barrier->release();
   renew_barrier->release();
-  ASSERT_EQ(
-    destructor_future.wait_for(2s),
-    std::future_status::ready);
+  const bool destructor_ready =
+    destructor_future.wait_for(2s) ==
+    std::future_status::ready;
   destructor_thread.join();
+  EXPECT_TRUE(renew_wait_entered);
+  EXPECT_TRUE(destructor_ready);
 }
 
 TEST_F(MotionConditioningPipelineTest, RenewAuthorityLossFailsClosed)
