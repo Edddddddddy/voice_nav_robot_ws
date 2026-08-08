@@ -15,6 +15,8 @@
 #ifndef VOICE_NAV_MISSION__RUNTIME_TRANSACTION_PLANE_HPP_
 #define VOICE_NAV_MISSION__RUNTIME_TRANSACTION_PLANE_HPP_
 
+#include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -35,18 +37,24 @@ enum class RuntimeTransactionSideEffect : std::uint8_t
 // A package-private transaction Module.  A side effect gets a two-phase
 // generation permit: the transaction worker may be paused before commit, but
 // the final permit check and operation admission execute under this Module's
-// short lock.  An already-committed RPC is tracked independently so quiesce
-// never waits on its bounded call and never holds the Node admission mutex.
+// short lock.  Quiesce closes the generation before waiting for the operation
+// state to become idle; the wait never holds the Node or authority mutex.
 class RuntimeTransactionPlane final
 {
 public:
   using BeforeCommit = std::function<void(RuntimeTransactionSideEffect)>;
+  using BeforeOperation = std::function<void(RuntimeTransactionSideEffect)>;
+  using QuiesceObserver = std::function<void(std::uint64_t)>;
 
   explicit RuntimeTransactionPlane(
     const std::uint64_t initial_generation = 0U,
-    BeforeCommit before_commit = {})
+    BeforeCommit before_commit = {},
+    BeforeOperation before_operation = {},
+    QuiesceObserver quiesce_observer = {})
   : generation_(initial_generation),
-    before_commit_(std::move(before_commit))
+    before_commit_(std::move(before_commit)),
+    before_operation_(std::move(before_operation)),
+    quiesce_observer_(std::move(quiesce_observer))
   {
   }
 
@@ -62,10 +70,12 @@ public:
   {
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (quiescing_ || permit_generation != generation_ || pending_) {
+      if (quiescing_ || permit_generation != generation_ ||
+        phase_ == Phase::Pending || phase_ == Phase::InFlight)
+      {
         return std::nullopt;
       }
-      pending_ = true;
+      phase_ = Phase::Pending;
     }
 
     try {
@@ -73,38 +83,51 @@ public:
         before_commit_(side_effect);
       }
     } catch (...) {
-      clear_pending();
+      set_phase(Phase::Rejected);
       throw;
     }
 
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (quiescing_ || permit_generation != generation_) {
-        pending_ = false;
+        phase_ = Phase::Rejected;
+        condition_.notify_all();
         return std::nullopt;
       }
-      pending_ = false;
-      in_flight_ = true;
+      phase_ = Phase::InFlight;
     }
     try {
+      if (before_operation_) {
+        before_operation_(side_effect);
+      }
       auto result = std::forward<Operation>(operation)();
-      clear_in_flight();
+      set_phase(Phase::Finished);
       return result;
     } catch (...) {
-      clear_in_flight();
+      set_phase(Phase::Rejected);
       throw;
     }
   }
 
   // The caller first closes admission in its own short critical section, then
-  // calls this method.  An already-committed RPC remains fenced by its
-  // generation/request checks, while this barrier closes new side effects
-  // without waiting for the bounded RPC.
-  void quiesce(const std::uint64_t next_generation) noexcept
+  // calls this method.  A pending permit is rejected at its final check and an
+  // admitted operation is allowed to return before a successful barrier.
+  [[nodiscard]] bool quiesce(
+    const std::uint64_t next_generation,
+    const std::chrono::steady_clock::time_point deadline)
   {
-    std::lock_guard<std::mutex> lock(mutex_);
-    quiescing_ = true;
-    generation_ = next_generation;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      quiescing_ = true;
+      generation_ = next_generation;
+    }
+    if (quiesce_observer_) {
+      quiesce_observer_(next_generation);
+    }
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_until(lock, deadline, [this]() {
+               return phase_ != Phase::Pending && phase_ != Phase::InFlight;
+    });
   }
 
   [[nodiscard]] bool quiescing() const noexcept
@@ -120,24 +143,32 @@ public:
   }
 
 private:
-  void clear_pending() noexcept
+  enum class Phase : std::uint8_t
   {
-    std::lock_guard<std::mutex> lock(mutex_);
-    pending_ = false;
-  }
+    Idle = 0,
+    Pending = 1,
+    InFlight = 2,
+    Finished = 3,
+    Rejected = 4,
+  };
 
-  void clear_in_flight() noexcept
+  void set_phase(const Phase phase) noexcept
   {
-    std::lock_guard<std::mutex> lock(mutex_);
-    in_flight_ = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      phase_ = phase;
+    }
+    condition_.notify_all();
   }
 
   mutable std::mutex mutex_;
+  std::condition_variable condition_;
   std::uint64_t generation_{0U};
   bool quiescing_{false};
-  bool pending_{false};
-  bool in_flight_{false};
+  Phase phase_{Phase::Idle};
   BeforeCommit before_commit_;
+  BeforeOperation before_operation_;
+  QuiesceObserver quiesce_observer_;
 };
 
 }  // namespace voice_nav_mission

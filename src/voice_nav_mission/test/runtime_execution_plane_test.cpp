@@ -160,7 +160,11 @@ public:
             plane_->core()->fail_closed_at_epoch(
             snapshot.admission_epoch, snapshot.detail);
           }
-      })),
+      },
+        RuntimeEventIngress<CompletionEvent>::EmergencyControlSelector{},
+        [this](CompletionEvent & event) {
+          before_dispatch(event);
+        })),
     plane_(std::make_unique<RuntimeExecutionPlane>(
       make_config(), clock_, authority_, relative_,
         [](const RuntimeState &) {},
@@ -196,10 +200,7 @@ public:
 
   ~RuntimeExecutionPlaneFixture()
   {
-    queue_.close();
-    if (worker_.joinable()) {
-      worker_.join();
-    }
+    stop_worker();
     plane_->shutdown();
   }
 
@@ -218,12 +219,71 @@ public:
     return plane_->completion_mailbox();
   }
 
+  [[nodiscard]] bool pause_consumer()
+  {
+    {
+      std::lock_guard<std::mutex> lock(dispatch_mutex_);
+      consumer_paused_ = true;
+      dispatch_entered_ = false;
+      release_dispatch_ = false;
+    }
+    const auto pushed = queue_.push(
+      CompletionEvent{MotionToken{9000U, 1U, 1U, 1U}}, Queue::Lane::Control);
+    if (pushed != Queue::PushResult::Accepted) {
+      return false;
+    }
+    std::unique_lock<std::mutex> lock(dispatch_mutex_);
+    return dispatch_condition_.wait_for(lock, 1s, [this]() {
+               return dispatch_entered_;
+           });
+  }
+
+  void release_consumer() noexcept
+  {
+    {
+      std::lock_guard<std::mutex> lock(dispatch_mutex_);
+      release_dispatch_ = true;
+      consumer_paused_ = false;
+    }
+    dispatch_condition_.notify_all();
+  }
+
+  void stop_worker() noexcept
+  {
+    release_consumer();
+    queue_.close();
+    if (worker_.joinable()) {
+      worker_.join();
+    }
+  }
+
+  [[nodiscard]] bool worker_joined() const noexcept
+  {
+    return !worker_.joinable();
+  }
+
 private:
+  void before_dispatch(CompletionEvent &)
+  {
+    std::unique_lock<std::mutex> lock(dispatch_mutex_);
+    if (!consumer_paused_) {
+      return;
+    }
+    dispatch_entered_ = true;
+    dispatch_condition_.notify_all();
+    dispatch_condition_.wait(lock, [this]() {return release_dispatch_;});
+  }
+
   std::shared_ptr<ScriptedSteadyClock> clock_;
   std::shared_ptr<ScriptedMotionAuthorityPort> authority_;
   std::shared_ptr<ExternalRelativeMotionPort> relative_;
   Queue queue_;
   RuntimeEmergencyFence fence_;
+  mutable std::mutex dispatch_mutex_;
+  std::condition_variable dispatch_condition_;
+  bool consumer_paused_{false};
+  bool dispatch_entered_{false};
+  bool release_dispatch_{false};
   std::unique_ptr<RuntimeEventIngress<CompletionEvent>> ingress_;
   std::unique_ptr<RuntimeExecutionPlane> plane_;
   TerminalProbe terminal_;
@@ -272,7 +332,8 @@ TEST(RuntimeExecutionPlaneTest, QuiescedQueuedPermitCannotStartOrDuplicateGoal)
   RuntimeAdmissionGate gate;
   const auto permit = gate.claim_start(1U);
   ASSERT_TRUE(permit.issued);
-  gate.begin_quiesce(tracker);
+  ASSERT_TRUE(gate.begin_quiesce(
+    tracker, std::chrono::steady_clock::now() + 1s));
 
   MissionActionAdapterBoundary adapter;
   adapter.on_accepted(
@@ -305,10 +366,15 @@ TEST_P(
   const auto token = fixture.relative().started_tokens().front();
 
   if (GetParam() == RejectionMode::QueueClosed) {
-    fixture.queue().close();
+    fixture.stop_worker();
+    ASSERT_TRUE(fixture.worker_joined());
   } else if (GetParam() == RejectionMode::FenceBlocked) {
     ASSERT_TRUE(fixture.fence().raise("pre-existing emergency"));
+    const auto pending_fence = fixture.fence().take();
+    ASSERT_TRUE(pending_fence.has_value());
+    EXPECT_FALSE(fixture.fence().pending());
   } else {
+    ASSERT_TRUE(fixture.pause_consumer());
     for (std::size_t index = 0U;
       index < RuntimeExecutionPlaneFixture::Queue::kControlReserve; ++index)
     {
@@ -318,6 +384,11 @@ TEST_P(
           RuntimeExecutionPlaneFixture::Queue::Lane::Control),
         RuntimeExecutionPlaneFixture::Queue::PushResult::Accepted);
     }
+    EXPECT_EQ(
+      fixture.queue().push(
+        CompletionEvent{MotionToken{999U, 1U, 1U, 1U}},
+        RuntimeExecutionPlaneFixture::Queue::Lane::Control),
+      RuntimeExecutionPlaneFixture::Queue::PushResult::ControlFull);
   }
 
   const auto record = std::make_shared<const RelativeMotionCompletionRecord>(
@@ -328,8 +399,14 @@ TEST_P(
   const auto results = fixture.terminal().results();
   ASSERT_EQ(results.size(), 1U);
   EXPECT_EQ(results.front().code, MissionResultCode::SafetyFault);
+  EXPECT_EQ(results.size(), 1U);
   EXPECT_FALSE(fixture.plane().core()->has_active_mission());
   EXPECT_GE(fixture.relative().cancel_count(), 1U);
+  if (GetParam() == RejectionMode::ControlFull) {
+    fixture.release_consumer();
+  }
+  fixture.stop_worker();
+  EXPECT_TRUE(fixture.worker_joined());
 }
 
 INSTANTIATE_TEST_SUITE_P(

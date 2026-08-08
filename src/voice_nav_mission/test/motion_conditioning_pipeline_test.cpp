@@ -105,10 +105,10 @@ private:
   bool released_{false};
 };
 
-class TransactionCommitBarrier final
+class TransactionOperationBarrier final
 {
 public:
-  explicit TransactionCommitBarrier(const RuntimeTransactionSideEffect target)
+  explicit TransactionOperationBarrier(const RuntimeTransactionSideEffect target)
   : target_(target)
   {
   }
@@ -143,6 +143,58 @@ private:
   std::condition_variable condition_;
   bool entered_{false};
   bool released_{false};
+};
+
+class TransactionQuiesceBarrier final
+{
+public:
+  void operator()(const std::uint64_t generation)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    generation_ = generation;
+    entered_ = true;
+    condition_.notify_all();
+  }
+
+  bool wait_for_entry(std::chrono::milliseconds timeout = 1s)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, timeout, [this]() {return entered_;});
+  }
+
+  void complete(const bool result)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    result_ = result;
+    completed_ = true;
+    condition_.notify_all();
+  }
+
+  bool wait_for_completion(std::chrono::milliseconds timeout)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, timeout, [this]() {return completed_;});
+  }
+
+  std::optional<bool> result() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return result_;
+  }
+
+  std::uint64_t generation() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return generation_;
+  }
+
+private:
+  mutable std::mutex mutex_;
+  std::condition_variable condition_;
+  std::uint64_t generation_{0U};
+  bool entered_{false};
+  bool completed_{false};
+  std::optional<bool> result_;
 };
 
 class CallbackCounter final
@@ -1202,15 +1254,20 @@ TEST_F(MotionConditioningPipelineTest, LeaseLossDuringActivationNeverStartsProdu
 
 TEST_F(
   MotionConditioningPipelineTest,
-  TransactionQuiesceAtPrepareCommitPreventsAllStartSideEffects)
+  TransactionQuiesceAtPrepareOperationWaitsForCompletion)
 {
-  auto commit = std::make_shared<TransactionCommitBarrier>(
+  auto operation = std::make_shared<TransactionOperationBarrier>(
     RuntimeTransactionSideEffect::Prepare);
+  auto quiesce = std::make_shared<TransactionQuiesceBarrier>();
   auto pipeline_config = config();
   pipeline_config.transaction_plane = std::make_shared<RuntimeTransactionPlane>(
     1U,
-    [commit](const RuntimeTransactionSideEffect side_effect) {
-      (*commit)(side_effect);
+    RuntimeTransactionPlane::BeforeCommit{},
+    [operation](const RuntimeTransactionSideEffect side_effect) {
+      (*operation)(side_effect);
+    },
+    [quiesce](const std::uint64_t generation) {
+      (*quiesce)(generation);
     });
   pipeline_config.transaction_generation_provider = []() {return 1U;};
   MotionConditioningPipeline pipeline(
@@ -1218,19 +1275,30 @@ TEST_F(
 
   std::optional<MotionConditioningResult> result;
   std::thread prepare_thread([&]() {result = pipeline.prepare();});
-  ASSERT_TRUE(commit->wait_for_entry());
-  pipeline_config.transaction_plane->quiesce(2U);
-  commit->release();
+  ASSERT_TRUE(operation->wait_for_entry());
+  std::thread quiesce_thread([&]() {
+      quiesce->complete(pipeline_config.transaction_plane->quiesce(
+        2U, std::chrono::steady_clock::now() + 1s));
+    });
+  ASSERT_TRUE(quiesce->wait_for_entry());
+  EXPECT_EQ(quiesce->generation(), 2U);
+  EXPECT_FALSE(quiesce->wait_for_completion(100ms));
+  operation->release();
   prepare_thread.join();
+  quiesce_thread.join();
 
+  ASSERT_TRUE(quiesce->result().has_value());
+  EXPECT_TRUE(*quiesce->result());
   ASSERT_TRUE(result.has_value());
-  EXPECT_FALSE(result->ok);
+  EXPECT_TRUE(result->ok);
   const auto calls = authority->calls();
   EXPECT_EQ(
-    std::count(calls.cbegin(), calls.cend(), AuthorityOperationKind::Prepare), 0);
+    std::count(calls.cbegin(), calls.cend(), AuthorityOperationKind::Prepare), 1);
   EXPECT_EQ(
     std::count(calls.cbegin(), calls.cend(), AuthorityOperationKind::Open), 0);
   EXPECT_EQ(producer->start_count, 0U);
+  const auto stopped = pipeline.stop();
+  EXPECT_TRUE(stopped.zero_proven);
   const auto snapshot = authority->snapshot();
   EXPECT_EQ(snapshot.state, GateState::Inhibited);
   EXPECT_TRUE(snapshot.motion_inhibited);
@@ -1239,15 +1307,20 @@ TEST_F(
 
 TEST_F(
   MotionConditioningPipelineTest,
-  TransactionQuiesceAtOpenCommitPreventsOpenAndControllerStart)
+  TransactionQuiesceAtOpenOperationWaitsAndFencesControllerStart)
 {
-  auto commit = std::make_shared<TransactionCommitBarrier>(
+  auto operation = std::make_shared<TransactionOperationBarrier>(
     RuntimeTransactionSideEffect::Open);
+  auto quiesce = std::make_shared<TransactionQuiesceBarrier>();
   auto pipeline_config = config();
   pipeline_config.transaction_plane = std::make_shared<RuntimeTransactionPlane>(
     1U,
-    [commit](const RuntimeTransactionSideEffect side_effect) {
-      (*commit)(side_effect);
+    RuntimeTransactionPlane::BeforeCommit{},
+    [operation](const RuntimeTransactionSideEffect side_effect) {
+      (*operation)(side_effect);
+    },
+    [quiesce](const std::uint64_t generation) {
+      (*quiesce)(generation);
     });
   pipeline_config.transaction_generation_provider = []() {return 1U;};
   MotionConditioningPipeline pipeline(
@@ -1256,21 +1329,30 @@ TEST_F(
 
   std::optional<MotionConditioningResult> result;
   std::thread start_thread([&]() {result = pipeline.start();});
-  const auto entered = commit->wait_for_entry(2s);
+  const auto entered = operation->wait_for_entry(2s);
   if (!entered) {
-    commit->release();
+    operation->release();
     start_thread.join();
   }
   ASSERT_TRUE(entered);
-  pipeline_config.transaction_plane->quiesce(2U);
-  commit->release();
+  std::thread quiesce_thread([&]() {
+      quiesce->complete(pipeline_config.transaction_plane->quiesce(
+        2U, std::chrono::steady_clock::now() + 1s));
+    });
+  ASSERT_TRUE(quiesce->wait_for_entry());
+  EXPECT_EQ(quiesce->generation(), 2U);
+  EXPECT_FALSE(quiesce->wait_for_completion(100ms));
+  operation->release();
   start_thread.join();
+  quiesce_thread.join();
 
+  ASSERT_TRUE(quiesce->result().has_value());
+  EXPECT_TRUE(*quiesce->result());
   ASSERT_TRUE(result.has_value());
   EXPECT_FALSE(result->ok);
   const auto calls = authority->calls();
   EXPECT_EQ(
-    std::count(calls.cbegin(), calls.cend(), AuthorityOperationKind::Open), 0);
+    std::count(calls.cbegin(), calls.cend(), AuthorityOperationKind::Open), 1);
   EXPECT_EQ(producer->start_count, 0U);
   const auto snapshot = authority->snapshot();
   EXPECT_EQ(snapshot.state, GateState::Inhibited);
@@ -1280,16 +1362,21 @@ TEST_F(
 
 TEST_F(
   MotionConditioningPipelineTest,
-  TransactionQuiesceAtControllerStartPreventsProducerStart)
+  TransactionQuiesceAtControllerStartWaitsForProducerStart)
 {
-  auto commit = std::make_shared<TransactionCommitBarrier>(
+  auto operation = std::make_shared<TransactionOperationBarrier>(
     RuntimeTransactionSideEffect::ControllerStart);
+  auto quiesce = std::make_shared<TransactionQuiesceBarrier>();
   auto pipeline_config = config();
   auto health_ready = std::make_shared<CallbackCounter>();
   pipeline_config.transaction_plane = std::make_shared<RuntimeTransactionPlane>(
     1U,
-    [commit](const RuntimeTransactionSideEffect side_effect) {
-      (*commit)(side_effect);
+    RuntimeTransactionPlane::BeforeCommit{},
+    [operation](const RuntimeTransactionSideEffect side_effect) {
+      (*operation)(side_effect);
+    },
+    [quiesce](const std::uint64_t generation) {
+      (*quiesce)(generation);
     });
   pipeline_config.transaction_generation_provider = []() {return 1U;};
   pipeline_config.prepare_open_deadline = 4s;
@@ -1305,20 +1392,31 @@ TEST_F(
 
   std::optional<MotionConditioningResult> result;
   std::thread start_thread([&]() {result = pipeline.start();});
-  const auto entered = commit->wait_for_entry(5s);
+  const auto entered = operation->wait_for_entry(5s);
   if (!entered) {
-    commit->release();
+    operation->release();
     start_thread.join();
   }
   ASSERT_TRUE(entered) <<
     (result.has_value() ? result->detail : "controller start did not return");
-  pipeline_config.transaction_plane->quiesce(2U);
-  commit->release();
+  std::thread quiesce_thread([&]() {
+      quiesce->complete(pipeline_config.transaction_plane->quiesce(
+        2U, std::chrono::steady_clock::now() + 1s));
+    });
+  ASSERT_TRUE(quiesce->wait_for_entry());
+  EXPECT_EQ(quiesce->generation(), 2U);
+  EXPECT_FALSE(quiesce->wait_for_completion(100ms));
+  operation->release();
   start_thread.join();
+  quiesce_thread.join();
 
+  ASSERT_TRUE(quiesce->result().has_value());
+  EXPECT_TRUE(*quiesce->result());
   ASSERT_TRUE(result.has_value());
-  EXPECT_FALSE(result->ok);
-  EXPECT_EQ(producer->start_count, 0U);
+  EXPECT_TRUE(result->ok);
+  EXPECT_EQ(producer->start_count, 1U);
+  const auto stopped = pipeline.stop();
+  EXPECT_TRUE(stopped.zero_proven);
   const auto snapshot = authority->snapshot();
   EXPECT_EQ(snapshot.state, GateState::Inhibited);
   EXPECT_TRUE(snapshot.motion_inhibited);

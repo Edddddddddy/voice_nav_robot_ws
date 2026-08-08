@@ -15,6 +15,7 @@
 #ifndef VOICE_NAV_MISSION__RUNTIME_ADMISSION_GATE_HPP_
 #define VOICE_NAV_MISSION__RUNTIME_ADMISSION_GATE_HPP_
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -43,6 +44,7 @@ public:
   };
 
   using AdmissionCheck = std::function<bool(std::uint64_t)>;
+  using TimePoint = std::chrono::steady_clock::time_point;
 
   RuntimeAdmissionGate()
   : transaction_plane_(std::make_shared<RuntimeTransactionPlane>(1U))
@@ -79,7 +81,9 @@ public:
     }
   }
 
-  void begin_quiesce(ActionAdmissionTracker & tracker) noexcept
+  [[nodiscard]] bool begin_quiesce(
+    ActionAdmissionTracker & tracker,
+    const TimePoint deadline)
   {
     std::uint64_t next_generation = 0U;
     bool should_quiesce = false;
@@ -93,13 +97,27 @@ public:
         next_generation = generation_;
         tracker.begin_quiesce();
         should_quiesce = true;
+      } else {
+        return quiesce_complete_ && quiesce_succeeded_;
       }
     }
-    // The transaction plane fences new side effects without waiting for an
-    // already-committed RPC, and the Node admission mutex is not held here.
+    bool succeeded = true;
     if (should_quiesce && transaction_plane_) {
-      transaction_plane_->quiesce(next_generation);
+      try {
+        // The transaction plane waits without holding this gate mutex or any
+        // authority mutex.  A timeout leaves admission fenced and is reported
+        // to the owner so it can retain Gate zero/fail-closed handling.
+        succeeded = transaction_plane_->quiesce(next_generation, deadline);
+      } catch (...) {
+        succeeded = false;
+      }
     }
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      quiesce_complete_ = true;
+      quiesce_succeeded_ = succeeded;
+    }
+    return succeeded;
   }
 
   [[nodiscard]] StartPermit claim_start(
@@ -145,6 +163,8 @@ private:
   mutable std::mutex mutex_;
   std::uint64_t generation_{1U};
   bool quiescing_{false};
+  bool quiesce_complete_{false};
+  bool quiesce_succeeded_{true};
   std::shared_ptr<RuntimeTransactionPlane> transaction_plane_;
 };
 
