@@ -277,11 +277,15 @@ public:
     stop_service_.reset();
     action_server_.reset();
     if (relative_motion_) {
-      relative_motion_->shutdown();
+      relative_motion_->begin_shutdown();
+      relative_motion_->wait_for_internal_completion();
     }
     event_queue_.close();
     if (runtime_worker_.joinable()) {
       runtime_worker_.join();
+    }
+    if (relative_motion_) {
+      relative_motion_->finalize_shutdown();
     }
     core_.reset();
     relative_motion_.reset();

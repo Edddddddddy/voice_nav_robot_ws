@@ -62,6 +62,9 @@ public:
   // cannot accept/serialize a control event.  It never calls RuntimeCore.
   void request_emergency_stop() noexcept;
   [[nodiscard]] bool emergency_stop(SteadyClockPort::TimePoint deadline);
+  void begin_shutdown() noexcept;
+  void wait_for_internal_completion() noexcept;
+  void finalize_shutdown() noexcept;
   // Explicitly drains all adapter transactions before its owned resources are
   // released by the Mission Runtime Node.
   void shutdown() noexcept;
