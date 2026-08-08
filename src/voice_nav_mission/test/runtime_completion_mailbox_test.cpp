@@ -110,5 +110,19 @@ TEST(RuntimeCompletionMailboxTest, RepeatedRejectedRecordsWakeOneReaper)
   EXPECT_NE(last_reap_thread, adapter_thread);
 }
 
+TEST(RuntimeCompletionMailboxTest, RepeatedConstructionAndStopAreJoinSafe)
+{
+  for (std::size_t iteration = 0U; iteration < 8U; ++iteration) {
+    NodeCompletionMailbox mailbox(
+      [](const MotionToken &) {return false;},
+      [](std::string) {});
+    mailbox.request_reap();
+    mailbox.stop();
+    mailbox.stop();
+    EXPECT_EQ(mailbox.entry_count(), 0U);
+    EXPECT_EQ(mailbox.rejected_count(), 0U);
+  }
+}
+
 }  // namespace
 }  // namespace voice_nav_mission

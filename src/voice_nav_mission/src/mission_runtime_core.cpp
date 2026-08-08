@@ -164,7 +164,9 @@ RuntimeCore::RuntimeCore(
   publish_state();
 }
 
-AdmissionResult RuntimeCore::admit(const MissionGoal & goal)
+AdmissionResult RuntimeCore::admit(
+  const MissionGoal & goal,
+  StartPermitCheck start_permit_check)
 {
   MissionResult result;
   if (!valid_bounded_id(
@@ -235,6 +237,15 @@ AdmissionResult RuntimeCore::admit(const MissionGoal & goal)
       "MotionGate endpoint is unavailable")};
   }
 
+  // The Node-owned start permit is checked again immediately before any
+  // authority transaction.  A queued AdmitEvent that loses the quiesce
+  // generation cannot enter PREPARE, even if it passed validation earlier.
+  if (start_permit_check && !start_permit_check()) {
+    return AdmissionResult{0U, false, reject(
+      MissionResultCode::SafetyFault,
+      "Runtime start permit was revoked before MotionGate PREPARE")};
+  }
+
   const auto mission_id = next_mission_id_++;
   if (mission_id == 0U || next_generation_ == 0U) {
     state_.availability = RuntimeAvailability::Faulted;
@@ -253,7 +264,9 @@ AdmissionResult RuntimeCore::admit(const MissionGoal & goal)
     }
     gate_snapshot_ = prepare.snapshot;
     current_lease_id_ = prepare.lease_id;
-    if (!admission_allowed(state_.admission_epoch)) {
+    if (!admission_allowed(state_.admission_epoch) ||
+      (start_permit_check && !start_permit_check()))
+    {
       const bool cleanup = inhibit_and_prove_zero();
       state_.availability = RuntimeAvailability::Faulted;
       publish_state();
@@ -261,6 +274,15 @@ AdmissionResult RuntimeCore::admit(const MissionGoal & goal)
         MissionResultCode::SafetyFault,
         cleanup ? "Runtime admission fence raised after MotionGate PREPARE" :
         "Runtime admission fence raised after PREPARE and zero cleanup failed")};
+    }
+    if (start_permit_check && !start_permit_check()) {
+      const bool cleanup = inhibit_and_prove_zero();
+      state_.availability = RuntimeAvailability::Faulted;
+      publish_state();
+      return AdmissionResult{0U, false, reject(
+        MissionResultCode::SafetyFault,
+        cleanup ? "Runtime start permit was revoked before MotionGate OPEN" :
+        "Runtime start permit was revoked and zero cleanup failed")};
     }
     const auto open = authority_->open(make_operation(current_lease_id_));
     if (!open.applied) {
@@ -279,6 +301,16 @@ AdmissionResult RuntimeCore::admit(const MissionGoal & goal)
     gate_snapshot_ = open.snapshot;
   }
 
+  if (start_permit_check && !start_permit_check()) {
+    const bool cleanup = inhibit_and_prove_zero();
+    state_.availability = RuntimeAvailability::Faulted;
+    publish_state();
+    return AdmissionResult{0U, false, reject(
+      MissionResultCode::SafetyFault,
+      cleanup ? "Runtime start permit was revoked after MotionGate OPEN" :
+      "Runtime start permit was revoked and zero cleanup failed")};
+  }
+
   active_ = ActiveMission{
     mission_id,
     next_generation_++,
@@ -289,6 +321,7 @@ AdmissionResult RuntimeCore::admit(const MissionGoal & goal)
     goal.steps,
     clock_->now() + config_.mission_deadline,
     {},
+    std::move(start_permit_check),
     false,
     false};
   last_feedback_progress_ = 0.0;
@@ -795,6 +828,12 @@ void RuntimeCore::start_step()
     select_terminal_and_stop(
       MissionResultCode::SafetyFault,
       "Runtime admission fence raised before RelativeMotionPort start");
+    return;
+  }
+  if (active_->start_permit_check && !active_->start_permit_check()) {
+    select_terminal_and_stop(
+      MissionResultCode::SafetyFault,
+      "Runtime start permit was revoked before RelativeMotionPort start");
     return;
   }
   publish_feedback(FeedbackPhase::Validating, active_->step_index, 0.0);

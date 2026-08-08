@@ -264,12 +264,44 @@ if(BUILD_TESTING)
   )
 
   ament_add_gtest(
+    runtime_execution_plane_test
+    test/runtime_execution_plane_test.cpp
+  )
+  target_compile_features(runtime_execution_plane_test PUBLIC cxx_std_17)
+  target_include_directories(
+    runtime_execution_plane_test
+    PRIVATE include
+  )
+  ament_target_dependencies(
+    runtime_execution_plane_test
+    geometry_msgs
+    nav_msgs
+    rclcpp
+    rosgraph_msgs
+    sensor_msgs
+  )
+  target_link_libraries(
+    runtime_execution_plane_test
+    mission_runtime_core
+  )
+
+  ament_add_gtest(
     action_admission_tracker_test
     test/action_admission_tracker_test.cpp
   )
   target_compile_features(action_admission_tracker_test PUBLIC cxx_std_17)
   target_include_directories(
     action_admission_tracker_test
+    PRIVATE include
+  )
+
+  ament_add_gtest(
+    runtime_admission_gate_test
+    test/runtime_admission_gate_test.cpp
+  )
+  target_compile_features(runtime_admission_gate_test PUBLIC cxx_std_17)
+  target_include_directories(
+    runtime_admission_gate_test
     PRIVATE include
   )
 

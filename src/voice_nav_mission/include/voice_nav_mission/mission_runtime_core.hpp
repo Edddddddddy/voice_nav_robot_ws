@@ -318,6 +318,7 @@ public:
         const MotionToken &, ChildResultDelivery)>;
   using ChildResultUnregistrar = std::function<void(const MotionToken &)>;
   using AdmissionFenceCheck = std::function<bool(std::uint64_t)>;
+  using StartPermitCheck = std::function<bool()>;
 
   RuntimeCore(
     RuntimeConfig config,
@@ -333,7 +334,9 @@ public:
     ChildResultRegistrar child_result_registrar = {},
     ChildResultUnregistrar child_result_unregistrar = {});
 
-  [[nodiscard]] AdmissionResult admit(const MissionGoal & goal);
+  [[nodiscard]] AdmissionResult admit(
+    const MissionGoal & goal,
+    StartPermitCheck start_permit_check = {});
   void cancel(std::uint64_t mission_id);
   [[nodiscard]] StopResponse stop(const StopRequest & request);
   void observe_gate(const GateSnapshot & snapshot);
@@ -360,6 +363,7 @@ private:
     std::vector<MissionStep> steps;
     SteadyClockPort::TimePoint deadline{};
     MotionToken child_token;
+    StartPermitCheck start_permit_check;
     bool child_started{false};
     bool terminal_selected{false};
   };

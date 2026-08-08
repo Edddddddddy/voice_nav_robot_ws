@@ -214,15 +214,18 @@ private:
   [[nodiscard]] bool drained() const noexcept
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    return provisional_ == 0U && in_flight_ == 0U && callbacks_inflight_ == 0U;
+    return provisional_ == 0U && revoked_ == 0U && in_flight_ == 0U &&
+           callbacks_inflight_ == 0U;
   }
 
   [[nodiscard]] bool wait_for_drain_until(
     const std::chrono::steady_clock::time_point deadline)
   {
     std::unique_lock<std::mutex> lock(mutex_);
+    prune_revoked_locked(clock_());
     return condition_.wait_until(lock, deadline, [this]() {
-               return provisional_ == 0U && in_flight_ == 0U && callbacks_inflight_ == 0U;
+               return provisional_ == 0U && revoked_ == 0U &&
+                      in_flight_ == 0U && callbacks_inflight_ == 0U;
       });
   }
 

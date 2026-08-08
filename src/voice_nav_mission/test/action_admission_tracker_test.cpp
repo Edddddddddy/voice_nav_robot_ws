@@ -79,9 +79,27 @@ TEST(ActionAdmissionTrackerTest, ExpiredUnacceptedTicketIsRevokedWithoutResult)
   EXPECT_EQ(snapshot.provisional, 0U);
   EXPECT_EQ(snapshot.in_flight, 0U);
   EXPECT_EQ(snapshot.revoked, 1U);
-  EXPECT_TRUE(tracker.drained());
+  EXPECT_FALSE(tracker.drained());
   // No on_accepted lease exists, so this path has no application Result.
   EXPECT_EQ(snapshot.callbacks_inflight, 0U);
+}
+
+TEST(ActionAdmissionTrackerTest, RevokedTombstoneParticipatesInSecondDrain)
+{
+  ManualSteadyClock clock;
+  ActionAdmissionTracker tracker(
+    [&clock]() {return clock.now();}, 100ms);
+
+  ASSERT_TRUE(tracker.try_provision("second-drain"));
+  clock.advance(101ms);
+  ASSERT_EQ(tracker.revoke_expired(clock.now()), 1U);
+  EXPECT_FALSE(tracker.wait_for_drain_until(std::chrono::steady_clock::now()));
+
+  auto late_lease = tracker.enter_accepted("second-drain");
+  ASSERT_TRUE(late_lease.has_ticket());
+  EXPECT_TRUE(late_lease.was_revoked());
+  late_lease = {};
+  EXPECT_TRUE(tracker.drained());
 }
 
 TEST(ActionAdmissionTrackerTest, QuiesceDoesNotLoseTheCallbackGap)
@@ -134,6 +152,9 @@ TEST(ActionAdmissionTrackerTest, QuiesceRevokesProvisionalTicketsAtBound)
   EXPECT_EQ(tracker.revoke_all_provisional(clock.now()), 1U);
   EXPECT_EQ(tracker.snapshot().provisional, 0U);
   EXPECT_EQ(tracker.snapshot().in_flight, 0U);
+  EXPECT_FALSE(tracker.drained());
+  clock.advance(400ms);
+  EXPECT_EQ(tracker.revoke_expired(clock.now()), 0U);
   EXPECT_TRUE(tracker.drained());
 }
 
