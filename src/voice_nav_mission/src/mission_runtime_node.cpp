@@ -119,6 +119,10 @@ struct ChildResultEvent
 {
   MotionToken token;
   ChildResult result;
+  // Keep the immutable record alive until this Node-owned worker has
+  // consumed the terminal boundary.  In particular, destruction of a
+  // user-supplied callback capture cannot happen on the Adapter worker.
+  RelativeMotionCompletionRecordPtr completion_record;
 };
 
 struct QueueFaultEvent
@@ -214,6 +218,15 @@ public:
     conditioning_config.admission_fence_check = [this](const std::uint64_t epoch) {
         return event_ingress_.admission_allowed(epoch);
       };
+    conditioning_config.completion_relay = [this](RelativeMotionCompletionRecordPtr record) {
+        if (!record) {
+          return false;
+        }
+        return enqueue_internal_event(RuntimeEvent{
+          record->token.mission_generation,
+          ChildResultEvent{
+            record->token, record->result, std::move(record)}});
+      };
     relative_motion_ = std::make_shared<RelativeMotionRosAdapter>(
       *this, authority_, motion_policy, conditioning_config);
     core_ = std::make_unique<RuntimeCore>(
@@ -234,7 +247,7 @@ public:
       },
       [this](const MotionToken & token, const ChildResult & result) {
         return enqueue_internal_event(RuntimeEvent{
-          token.mission_generation, ChildResultEvent{token, result}});
+          token.mission_generation, ChildResultEvent{token, result, {}}});
       },
       [this](const std::uint64_t epoch) {
         return event_ingress_.admission_allowed(epoch);
@@ -268,14 +281,45 @@ public:
         const auto now = clock_->now();
         (void)enqueue_event(RuntimeEvent{0U, TickEvent{now}});
       });
+    shutdown_context_ = get_node_base_interface()->get_context();
+    shutdown_callback_handle_ = shutdown_context_->add_pre_shutdown_callback(
+      [this]() {shutdown_barrier();});
   }
 
   ~MissionRuntimeNode() override
   {
+    shutdown_barrier();
+    if (shutdown_context_) {
+      (void)shutdown_context_->remove_pre_shutdown_callback(
+        shutdown_callback_handle_);
+      shutdown_context_.reset();
+    }
+  }
+
+private:
+  void shutdown_barrier() noexcept
+  {
+    {
+      std::unique_lock<std::mutex> lock(shutdown_mutex_);
+      if (shutdown_barrier_complete_) {
+        return;
+      }
+      if (shutdown_barrier_started_) {
+        if (shutdown_barrier_owner_ != std::this_thread::get_id()) {
+          shutdown_condition_.wait(lock, [this]() {
+              return shutdown_barrier_complete_;
+            });
+        }
+        return;
+      }
+      shutdown_barrier_started_ = true;
+      shutdown_barrier_owner_ = std::this_thread::get_id();
+    }
+
+    quiescing_.store(true);
     ingress_stopped_.store(true);
     timer_.reset();
     stop_service_.reset();
-    action_server_.reset();
     if (relative_motion_) {
       relative_motion_->begin_shutdown();
       relative_motion_->wait_for_internal_completion();
@@ -284,15 +328,25 @@ public:
     if (runtime_worker_.joinable()) {
       runtime_worker_.join();
     }
+    // Keep the Action Server and its GoalHandles alive until the runtime
+    // worker has executed finish_goal and published each client-visible
+    // terminal result.
+    action_server_.reset();
     if (relative_motion_) {
       relative_motion_->finalize_shutdown();
     }
     core_.reset();
     relative_motion_.reset();
     authority_.reset();
+
+    {
+      std::lock_guard<std::mutex> lock(shutdown_mutex_);
+      shutdown_barrier_owner_ = std::thread::id{};
+      shutdown_barrier_complete_ = true;
+    }
+    shutdown_condition_.notify_all();
   }
 
-private:
   RuntimeConfig load_config()
   {
     rcl_interfaces::msg::ParameterDescriptor descriptor;
@@ -376,9 +430,11 @@ private:
   }
 
   rclcpp_action::GoalResponse on_goal(
-    const std::shared_ptr<const ExecuteMission::Goal> &) const
+    const std::shared_ptr<const ExecuteMission::Goal> & goal) const
   {
-    if (!rclcpp::ok() || event_ingress_.blocked()) {
+    if (!rclcpp::ok() || quiescing_.load() || event_ingress_.blocked() ||
+      !event_ingress_.admission_allowed(goal->admission_epoch))
+    {
       return rclcpp_action::GoalResponse::REJECT;
     }
     // Every wire-valid Goal reaches Core. Business rejection is returned as
@@ -410,13 +466,16 @@ private:
 
   void on_accepted(const std::shared_ptr<GoalHandle> & goal_handle)
   {
-    if (event_ingress_.blocked()) {
+    const auto goal_message = goal_handle->get_goal();
+    if (quiescing_.load() || event_ingress_.blocked() ||
+      !event_ingress_.admission_allowed(goal_message->admission_epoch))
+    {
       abort_goal(goal_handle, MissionResult{
           MissionResultCode::SafetyFault, -1,
-          "Runtime emergency fence is active"});
+          quiescing_.load() ? "Runtime is quiescing" :
+          "Runtime admission epoch is fenced"});
       return;
     }
-    const auto goal_message = goal_handle->get_goal();
     MissionGoal goal;
     goal.source_instance_id = goal_message->source_instance_id;
     goal.source_seq = goal_message->source_seq;
@@ -555,6 +614,10 @@ private:
 
   void process_event(ChildResultEvent & event)
   {
+    // Completion records are already immutable terminal boundaries.  The
+    // Node-owned worker invokes the Core boundary directly and owns the
+    // record lifetime until this dispatch returns; the Adapter worker only
+    // transferred it into the relay queue.
     core_->on_child_result(event.token, event.result);
   }
 
@@ -720,6 +783,14 @@ private:
   RuntimeState cached_state_{};
   bool cached_state_valid_{false};
   std::atomic<bool> ingress_stopped_{false};
+  std::atomic<bool> quiescing_{false};
+  std::shared_ptr<rclcpp::Context> shutdown_context_;
+  rclcpp::PreShutdownCallbackHandle shutdown_callback_handle_;
+  std::mutex shutdown_mutex_;
+  std::condition_variable shutdown_condition_;
+  std::thread::id shutdown_barrier_owner_{};
+  bool shutdown_barrier_started_{false};
+  bool shutdown_barrier_complete_{false};
   rclcpp::Publisher<MissionStateMessage>::SharedPtr state_publisher_;
   rclcpp_action::Server<ExecuteMission>::SharedPtr action_server_;
   rclcpp::Service<StopMission>::SharedPtr stop_service_;
