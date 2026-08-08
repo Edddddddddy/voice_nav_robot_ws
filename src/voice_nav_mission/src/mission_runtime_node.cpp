@@ -44,6 +44,7 @@
 #include "voice_nav_mission/mission_action_result_router.hpp"
 #include "voice_nav_mission/motion_authority_ros_adapter.hpp"
 #include "voice_nav_mission/relative_motion_ros_adapter.hpp"
+#include "voice_nav_mission/runtime_completion_registry.hpp"
 #include "voice_nav_mission/runtime_emergency_fence.hpp"
 #include "voice_nav_mission/runtime_event_ingress.hpp"
 #include "voice_nav_mission/runtime_event_queue.hpp"
@@ -58,6 +59,7 @@ using StopMission = voice_nav_interfaces::srv::StopMission;
 using MissionStateMessage = voice_nav_interfaces::msg::MissionState;
 using MissionStepMessage = voice_nav_interfaces::msg::MissionStep;
 using GoalHandle = rclcpp_action::ServerGoalHandle<ExecuteMission>;
+using GoalUUID = rclcpp_action::GoalUUID;
 
 constexpr char kExecuteAction[] = "/mission/execute";
 constexpr char kStopService[] = "/mission/stop";
@@ -118,11 +120,6 @@ struct ChildFeedbackEvent
 struct ChildResultEvent
 {
   MotionToken token;
-  ChildResult result;
-  // Keep the immutable record alive until this Node-owned worker has
-  // consumed the terminal boundary.  In particular, destruction of a
-  // user-supplied callback capture cannot happen on the Adapter worker.
-  RelativeMotionCompletionRecordPtr completion_record;
 };
 
 struct QueueFaultEvent
@@ -188,6 +185,11 @@ public:
         if (core_) {
           core_->fail_closed_at_epoch(snapshot.admission_epoch, snapshot.detail);
         }
+        // Queue rejection may leave a pure-data completion token pending in
+        // the Node registry.  The fence callback is the runtime worker's
+        // bounded reaper; it runs after Core has selected its fail-closed
+        // terminal boundary and never on the Adapter transaction worker.
+        completion_registry_.reap_all();
       },
       [](const RuntimeEvent & event) {
         return std::holds_alternative<CancelEvent>(event.payload) ||
@@ -222,10 +224,21 @@ public:
         if (!record) {
           return false;
         }
-        return enqueue_internal_event(RuntimeEvent{
-          record->token.mission_generation,
-          ChildResultEvent{
-            record->token, record->result, std::move(record)}});
+        const auto token = record->token;
+        if (!completion_registry_.accept(record)) {
+          const auto retained = completion_registry_.retain_rejected(std::move(record));
+          request_emergency_fence(
+            retained ? "Node completion registry rejected a terminal record" :
+            "Node completion registry rejected and could not retain a terminal record");
+          return false;
+        }
+        const auto accepted = enqueue_internal_event(RuntimeEvent{
+          token.mission_generation, ChildResultEvent{token}});
+        if (!accepted) {
+          request_emergency_fence(
+            "Runtime event ingress rejected a terminal completion token");
+        }
+        return accepted;
       };
     relative_motion_ = std::make_shared<RelativeMotionRosAdapter>(
       *this, authority_, motion_policy, conditioning_config);
@@ -245,30 +258,37 @@ public:
         return enqueue_internal_event(RuntimeEvent{
           token.mission_generation, ChildFeedbackEvent{token, progress}});
       },
-      [this](const MotionToken & token, const ChildResult & result) {
-        return enqueue_internal_event(RuntimeEvent{
-          token.mission_generation, ChildResultEvent{token, result, {}}});
-      },
+      RuntimeCore::ChildResultDispatcher{},
       [this](const std::uint64_t epoch) {
         return event_ingress_.admission_allowed(epoch);
+      },
+      [this](const MotionToken & token, RuntimeCore::ChildResultDelivery delivery) {
+        return completion_registry_.register_delivery(token, std::move(delivery));
+      },
+      [this](const MotionToken & token) {
+        completion_registry_.discard(token);
       });
     runtime_worker_ = std::thread([this]() {run_runtime_events();});
     (void)enqueue_event(RuntimeEvent{
         0U, GateSnapshotEvent{initial_gate_snapshot}});
 
+    action_callback_group_ = create_callback_group(
+      rclcpp::CallbackGroupType::Reentrant);
     action_server_ = rclcpp_action::create_server<ExecuteMission>(
       this,
       kExecuteAction,
-      [this](const rclcpp_action::GoalUUID &,
+      [this](const rclcpp_action::GoalUUID & uuid,
       std::shared_ptr<const ExecuteMission::Goal> goal) {
-        return on_goal(goal);
+        return on_goal(uuid, goal);
       },
       [this](const std::shared_ptr<GoalHandle> goal_handle) {
         return on_cancel(goal_handle);
       },
       [this](const std::shared_ptr<GoalHandle> goal_handle) {
         on_accepted(goal_handle);
-      });
+      },
+      rcl_action_server_get_default_options(),
+      action_callback_group_);
     stop_service_ = create_service<StopMission>(
       kStopService,
       [this](
@@ -297,6 +317,71 @@ public:
   }
 
 private:
+  class ActionAdmissionCallbackGuard final
+  {
+public:
+    ActionAdmissionCallbackGuard(
+      MissionRuntimeNode & node,
+      std::string uuid_key)
+    : node_(node), uuid_key_(std::move(uuid_key))
+    {
+      admitted_handoff_ = node_.enter_action_callback(uuid_key_);
+    }
+
+    ~ActionAdmissionCallbackGuard()
+    {
+      node_.leave_action_callback(uuid_key_);
+    }
+
+    ActionAdmissionCallbackGuard(const ActionAdmissionCallbackGuard &) = delete;
+    ActionAdmissionCallbackGuard & operator=(const ActionAdmissionCallbackGuard &) = delete;
+
+    [[nodiscard]] bool admitted_handoff() const noexcept
+    {
+      return admitted_handoff_;
+    }
+
+private:
+    MissionRuntimeNode & node_;
+    std::string uuid_key_;
+    bool admitted_handoff_{false};
+  };
+
+  [[nodiscard]] static std::string goal_uuid_key(const GoalUUID & uuid)
+  {
+    return std::string(
+      reinterpret_cast<const char *>(uuid.data()), uuid.size());
+  }
+
+  [[nodiscard]] bool enter_action_callback(const std::string & uuid_key)
+  {
+    std::lock_guard<std::mutex> lock(action_admission_mutex_);
+    ++action_callbacks_inflight_;
+    return accepted_handoff_pending_.find(uuid_key) !=
+           accepted_handoff_pending_.end();
+  }
+
+  void leave_action_callback(const std::string & uuid_key) noexcept
+  {
+    {
+      std::lock_guard<std::mutex> lock(action_admission_mutex_);
+      accepted_handoff_pending_.erase(uuid_key);
+      if (action_callbacks_inflight_ > 0U) {
+        --action_callbacks_inflight_;
+      }
+    }
+    action_admission_condition_.notify_all();
+  }
+
+  void wait_for_action_admission_drain() noexcept
+  {
+    std::unique_lock<std::mutex> lock(action_admission_mutex_);
+    action_admission_condition_.wait(lock, [this]() {
+        return accepted_handoff_pending_.empty() &&
+               action_callbacks_inflight_ == 0U;
+      });
+  }
+
   void shutdown_barrier() noexcept
   {
     {
@@ -317,9 +402,22 @@ private:
     }
 
     quiescing_.store(true);
+    {
+      std::lock_guard<std::mutex> lock(action_admission_mutex_);
+      action_admission_quiescing_ = true;
+      // The deterministic admission seam is released by the same
+      // linearization point as production quiesce.  It never participates in
+      // the default runtime path.
+      action_admission_test_release_ = true;
+    }
+    action_admission_condition_.notify_all();
     ingress_stopped_.store(true);
     timer_.reset();
     stop_service_.reset();
+    // Keep the Action Server alive while a goal accepted by on_goal is still
+    // waiting for on_accepted, and while any Action callback is aborting or
+    // handing the goal to the runtime queue.
+    wait_for_action_admission_drain();
     if (relative_motion_) {
       relative_motion_->begin_shutdown();
       relative_motion_->wait_for_internal_completion();
@@ -335,6 +433,8 @@ private:
     if (relative_motion_) {
       relative_motion_->finalize_shutdown();
     }
+    completion_registry_.close();
+    completion_registry_.reap_all();
     core_.reset();
     relative_motion_.reset();
     authority_.reset();
@@ -382,6 +482,8 @@ private:
       "rotate_angle_max_rad", kTrustedRotateAngleMaxRad, descriptor);
     const auto named_place_ids = declare_parameter<std::vector<std::string>>(
       "named_place_ids", {}, descriptor);
+    test_pause_action_admission_ = declare_parameter<bool>(
+      "test_pause_action_admission", false, descriptor);
     if (mode != "mapping" && mode != "navigation") {
       throw std::invalid_argument("operating_mode must be mapping or navigation");
     }
@@ -430,13 +532,21 @@ private:
   }
 
   rclcpp_action::GoalResponse on_goal(
-    const std::shared_ptr<const ExecuteMission::Goal> & goal) const
+    const GoalUUID & uuid,
+    const std::shared_ptr<const ExecuteMission::Goal> & goal)
   {
-    if (!rclcpp::ok() || quiescing_.load() || event_ingress_.blocked() ||
-      !event_ingress_.admission_allowed(goal->admission_epoch))
+    const auto uuid_key = goal_uuid_key(uuid);
     {
-      return rclcpp_action::GoalResponse::REJECT;
+      std::lock_guard<std::mutex> lock(action_admission_mutex_);
+      if (!rclcpp::ok() || action_admission_quiescing_ ||
+        quiescing_.load() || event_ingress_.blocked() ||
+        !event_ingress_.admission_allowed(goal->admission_epoch) ||
+        !accepted_handoff_pending_.insert(uuid_key).second)
+      {
+        return rclcpp_action::GoalResponse::REJECT;
+      }
     }
+    action_admission_condition_.notify_all();
     // Every wire-valid Goal reaches Core. Business rejection is returned as
     // a structured Result with an ABORTED outer Action status.
     return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
@@ -466,8 +576,20 @@ private:
 
   void on_accepted(const std::shared_ptr<GoalHandle> & goal_handle)
   {
+    const auto uuid_key = goal_uuid_key(goal_handle->get_goal_id());
+    ActionAdmissionCallbackGuard admission_guard(*this, uuid_key);
+    if (test_pause_action_admission_) {
+      RCLCPP_INFO(
+        get_logger(),
+        "R73_TEST_ACTION_ADMISSION_PENDING");
+      std::unique_lock<std::mutex> lock(action_admission_mutex_);
+      action_admission_condition_.wait(lock, [this]() {
+          return action_admission_test_release_ || action_admission_quiescing_;
+        });
+    }
     const auto goal_message = goal_handle->get_goal();
-    if (quiescing_.load() || event_ingress_.blocked() ||
+    if (!admission_guard.admitted_handoff() || quiescing_.load() ||
+      event_ingress_.blocked() ||
       !event_ingress_.admission_allowed(goal_message->admission_epoch))
     {
       abort_goal(goal_handle, MissionResult{
@@ -614,11 +736,17 @@ private:
 
   void process_event(ChildResultEvent & event)
   {
-    // Completion records are already immutable terminal boundaries.  The
-    // Node-owned worker invokes the Core boundary directly and owns the
-    // record lifetime until this dispatch returns; the Adapter worker only
-    // transferred it into the relay queue.
-    core_->on_child_result(event.token, event.result);
+    const auto dispatch = completion_registry_.take(event.token);
+    if (!dispatch.has_value()) {
+      return;
+    }
+    try {
+      if (dispatch->delivery) {
+        dispatch->delivery(dispatch->record->token, dispatch->record->result);
+      }
+    } catch (...) {
+      request_emergency_fence("Node completion delivery raised");
+    }
   }
 
   void process_event(QueueFaultEvent & event)
@@ -774,11 +902,19 @@ private:
   std::shared_ptr<RosMotionAuthorityPort> authority_;
   std::shared_ptr<RelativeMotionRosAdapter> relative_motion_;
   std::unique_ptr<RuntimeCore> core_;
+  NodeCompletionRegistry completion_registry_;
   RuntimeEventQueueType event_queue_;
   RuntimeEmergencyFence emergency_fence_{1U};
   RuntimeEventIngress<RuntimeEvent> event_ingress_;
   std::thread runtime_worker_;
   std::recursive_mutex mutex_;
+  std::mutex action_admission_mutex_;
+  std::condition_variable action_admission_condition_;
+  std::unordered_set<std::string> accepted_handoff_pending_;
+  std::size_t action_callbacks_inflight_{0U};
+  bool action_admission_quiescing_{false};
+  bool action_admission_test_release_{false};
+  bool test_pause_action_admission_{false};
   std::unordered_set<const GoalHandle *> pending_goal_cancels_;
   RuntimeState cached_state_{};
   bool cached_state_valid_{false};
@@ -792,6 +928,7 @@ private:
   bool shutdown_barrier_started_{false};
   bool shutdown_barrier_complete_{false};
   rclcpp::Publisher<MissionStateMessage>::SharedPtr state_publisher_;
+  rclcpp::CallbackGroup::SharedPtr action_callback_group_;
   rclcpp_action::Server<ExecuteMission>::SharedPtr action_server_;
   rclcpp::Service<StopMission>::SharedPtr stop_service_;
   rclcpp::TimerBase::SharedPtr timer_;
