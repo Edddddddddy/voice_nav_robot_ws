@@ -239,15 +239,26 @@ def validate_package_payload(
                 f"{package_name}:{test_name} must have one unambiguous "
                 "--command separator"
             )
-        source_index = command_markers[0] + 1
-        if source_index >= len(command):
+        child_command = command[command_markers[0] + 1 :]
+        if (
+            len(child_command) < 4
+            or not child_command[0]
+            or child_command[1:3]
+            != ["-m", "launch_testing.launch_test"]
+        ):
+            raise GeneratedLaunchTestContractError(
+                f"{package_name}:{test_name} has an invalid "
+                "launch_testing child command"
+            )
+        source = child_command[3]
+        if not source:
             raise GeneratedLaunchTestContractError(
                 f"{package_name}:{test_name} has no command source"
             )
         expected_source_suffix = (
             f"/src/{package_name}/test/{expected_test['source']}"
         )
-        if not command[source_index].endswith(expected_source_suffix):
+        if not source.endswith(expected_source_suffix):
             raise GeneratedLaunchTestContractError(
                 f"{package_name}:{test_name} runs the wrong source test"
             )
