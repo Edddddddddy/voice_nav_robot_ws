@@ -154,6 +154,86 @@ def generated_mission_payload():
                     },
                 ],
             },
+            {
+                "name": "test_test_mission_runtime_node_active_shutdown.py",
+                "command": [
+                    "/usr/bin/python3",
+                    "-u",
+                    (
+                        "/opt/ros/jazzy/share/ament_cmake_ros/cmake/"
+                        "run_test_isolated.py"
+                    ),
+                    "/tmp/result.xunit.xml",
+                    "--command",
+                    (
+                        "/workspace/src/voice_nav_mission/test/"
+                        "test_mission_runtime_node_active_shutdown.py"
+                    ),
+                ],
+                "properties": [
+                    {
+                        "name": "ENVIRONMENT",
+                        "value": [
+                            "RMW_IMPLEMENTATION=rmw_fastrtps_cpp",
+                            "ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST",
+                        ],
+                    },
+                    {
+                        "name": "ENVIRONMENT_MODIFICATION",
+                        "value": [
+                            "ROS_DOMAIN_ID=unset:",
+                            "DISABLE_ROS_ISOLATION=unset:",
+                        ],
+                    },
+                    {"name": "LABELS", "value": ["launch_test"]},
+                    {"name": "RUN_SERIAL", "value": True},
+                    {"name": "TIMEOUT", "value": 60.0},
+                    {
+                        "name": "WORKING_DIRECTORY",
+                        "value": GENERATED_MISSION_WORKING_DIRECTORY,
+                    },
+                ],
+            },
+            {
+                "name": "test_test_mission_runtime_node_restart.py",
+                "command": [
+                    "/usr/bin/python3",
+                    "-u",
+                    (
+                        "/opt/ros/jazzy/share/ament_cmake_ros/cmake/"
+                        "run_test_isolated.py"
+                    ),
+                    "/tmp/result.xunit.xml",
+                    "--command",
+                    (
+                        "/workspace/src/voice_nav_mission/test/"
+                        "test_mission_runtime_node_restart.py"
+                    ),
+                ],
+                "properties": [
+                    {
+                        "name": "ENVIRONMENT",
+                        "value": [
+                            "RMW_IMPLEMENTATION=rmw_fastrtps_cpp",
+                            "ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST",
+                        ],
+                    },
+                    {
+                        "name": "ENVIRONMENT_MODIFICATION",
+                        "value": [
+                            "ROS_DOMAIN_ID=unset:",
+                            "DISABLE_ROS_ISOLATION=unset:",
+                        ],
+                    },
+                    {"name": "LABELS", "value": ["launch_test"]},
+                    {"name": "RUN_SERIAL", "value": True},
+                    {"name": "TIMEOUT", "value": 60.0},
+                    {
+                        "name": "WORKING_DIRECTORY",
+                        "value": GENERATED_MISSION_WORKING_DIRECTORY,
+                    },
+                ],
+            },
         ],
     }
 
@@ -449,6 +529,72 @@ class CiReadinessContractTest(unittest.TestCase):
                 GENERATED_MISSION_WORKING_DIRECTORY
             ),
         )
+
+    def test_generated_metadata_rejects_inventory_shape_drift(self):
+        checker = load_generated_checker()
+
+        def remove_test(payload):
+            payload["tests"].pop()
+
+        def add_extra_test(payload):
+            extra = payload["tests"][0].copy()
+            extra["name"] = "test_test_unapproved.py"
+            payload["tests"].append(extra)
+
+        def add_duplicate_test(payload):
+            payload["tests"].append(payload["tests"][0])
+
+        mutations = (
+            ("missing", remove_test),
+            ("extra", add_extra_test),
+            ("duplicate", add_duplicate_test),
+        )
+        for name, mutate in mutations:
+            with self.subTest(inventory=name):
+                payload = generated_mission_payload()
+                mutate(payload)
+                with self.assertRaises(
+                    checker.GeneratedLaunchTestContractError,
+                ):
+                    checker.validate_package_payload(
+                        "voice_nav_mission",
+                        payload,
+                        expected_working_directory=(
+                            GENERATED_MISSION_WORKING_DIRECTORY
+                        ),
+                    )
+
+    def test_generated_metadata_rejects_source_and_runner_drift(self):
+        checker = load_generated_checker()
+
+        def replace_source(payload):
+            payload["tests"][0]["command"][-1] = (
+                "/workspace/src/voice_nav_mission/test/unapproved.py"
+            )
+
+        def replace_runner(payload):
+            payload["tests"][0]["command"][2] = (
+                "/opt/ros/jazzy/share/ament_cmake_ros/cmake/run_test.py"
+            )
+
+        mutations = (
+            ("source", replace_source),
+            ("runner", replace_runner),
+        )
+        for name, mutate in mutations:
+            with self.subTest(field=name):
+                payload = generated_mission_payload()
+                mutate(payload)
+                with self.assertRaises(
+                    checker.GeneratedLaunchTestContractError,
+                ):
+                    checker.validate_package_payload(
+                        "voice_nav_mission",
+                        payload,
+                        expected_working_directory=(
+                            GENERATED_MISSION_WORKING_DIRECTORY
+                        ),
+                    )
 
     def test_generated_metadata_rejects_isolation_override(self):
         checker = load_generated_checker()
