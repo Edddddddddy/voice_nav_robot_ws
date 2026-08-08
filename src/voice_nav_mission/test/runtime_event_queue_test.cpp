@@ -19,10 +19,14 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <thread>
 #include <vector>
 
 #include "voice_nav_mission/runtime_event_queue.hpp"
+#include "voice_nav_mission/runtime_emergency_fence.hpp"
+#include "voice_nav_mission/runtime_event_ingress.hpp"
 
 namespace voice_nav_mission
 {
@@ -161,6 +165,123 @@ TEST(RuntimeEventQueueTest, ConcurrentControlSaturationKeepsEveryControlIntent)
   EXPECT_NE(
     std::find(control_values.cbegin(), control_values.cend(), 9999),
     control_values.cend());
+}
+
+TEST(RuntimeEventQueueTest, ControlFullUsesExternalEmergencyFenceBeforeNormalWork)
+{
+  RuntimeEventQueue<int> queue([] {return 9999;});
+  for (std::size_t index = 0U;
+    index < RuntimeEventQueue<int>::kControlReserve; ++index)
+  {
+    ASSERT_EQ(
+      queue.push(static_cast<int>(index), RuntimeEventQueue<int>::Lane::Control),
+      RuntimeEventQueue<int>::PushResult::Accepted);
+  }
+  ASSERT_EQ(
+    queue.push(1000, RuntimeEventQueue<int>::Lane::Control),
+    RuntimeEventQueue<int>::PushResult::ControlFull);
+
+  RuntimeEmergencyFence fence(1U);
+  ASSERT_TRUE(fence.raise("control lane admission failed"));
+  ASSERT_FALSE(fence.raise("duplicate fence"));
+
+  int event = 0;
+  EXPECT_EQ(
+    queue.wait_pop_with_wakeup(event, [&fence]() {return fence.pending();}),
+    RuntimeEventQueue<int>::WaitResult::Item);
+  EXPECT_EQ(event, 0);
+
+  for (std::size_t index = 1U;
+    index < RuntimeEventQueue<int>::kControlReserve; ++index)
+  {
+    ASSERT_EQ(
+      queue.wait_pop_with_wakeup(event, [&fence]() {return fence.pending();}),
+      RuntimeEventQueue<int>::WaitResult::Item);
+  }
+  EXPECT_EQ(
+    queue.wait_pop_with_wakeup(event, [&fence]() {return fence.pending();}),
+    RuntimeEventQueue<int>::WaitResult::ExternalWake);
+  const auto snapshot = fence.take();
+  ASSERT_TRUE(snapshot.has_value());
+  EXPECT_EQ(snapshot->admission_epoch, 2U);
+  EXPECT_TRUE(fence.blocked());
+  EXPECT_FALSE(fence.pending());
+}
+
+TEST(RuntimeEventQueueTest, CloseDrainsAcceptedCompletionBeforeWorkerExit)
+{
+  RuntimeEventQueue<int> queue([] {return 9999;});
+  ASSERT_EQ(
+    queue.push(1, RuntimeEventQueue<int>::Lane::Normal),
+    RuntimeEventQueue<int>::PushResult::Accepted);
+  ASSERT_EQ(
+    queue.push(2, RuntimeEventQueue<int>::Lane::Control),
+    RuntimeEventQueue<int>::PushResult::Accepted);
+
+  queue.close();
+
+  int event = 0;
+  EXPECT_EQ(queue.wait_pop_result(event), RuntimeEventQueue<int>::WaitResult::Item);
+  EXPECT_EQ(event, 2);
+  EXPECT_EQ(queue.wait_pop_result(event), RuntimeEventQueue<int>::WaitResult::Item);
+  EXPECT_EQ(event, 1);
+  EXPECT_EQ(queue.wait_pop_result(event), RuntimeEventQueue<int>::WaitResult::Closed);
+  EXPECT_EQ(
+    queue.push(3, RuntimeEventQueue<int>::Lane::Control),
+    RuntimeEventQueue<int>::PushResult::Closed);
+}
+
+TEST(RuntimeEventIngressTest, ControlSaturationUsesProductionEmergencySeam)
+{
+  using Queue = RuntimeEventQueue<int>;
+  Queue queue([] {return -1;});
+  RuntimeEmergencyFence fence(1U);
+  std::mutex zero_mutex;
+  std::condition_variable zero_condition;
+  std::size_t direct_zero_calls = 0U;
+  bool zero_requested = false;
+  std::optional<RuntimeEmergencyFenceSnapshot> failed;
+  RuntimeEventIngress<int> ingress(
+    queue,
+    fence,
+    [](const int &) {return Queue::Lane::Control;},
+    [&]() {
+      {
+        std::lock_guard<std::mutex> lock(zero_mutex);
+        ++direct_zero_calls;
+        zero_requested = true;
+      }
+      zero_condition.notify_all();
+    },
+    [&failed](const RuntimeEmergencyFenceSnapshot & snapshot) {
+      failed = snapshot;
+    });
+
+  for (int value = 0; value < static_cast<int>(Queue::kControlReserve); ++value) {
+    EXPECT_TRUE(ingress.enqueue(value));
+  }
+  EXPECT_FALSE(ingress.enqueue(99));
+  {
+    std::unique_lock<std::mutex> lock(zero_mutex);
+    ASSERT_TRUE(zero_condition.wait_for(lock, std::chrono::seconds(1), [&]() {
+        return zero_requested;
+    }));
+  }
+  EXPECT_GE(direct_zero_calls, 1U);
+  EXPECT_TRUE(fence.blocked());
+  EXPECT_EQ(fence.admission_epoch(), 2U);
+
+  ASSERT_TRUE(ingress.process_pending_fence());
+  ASSERT_TRUE(failed.has_value());
+  EXPECT_EQ(failed->admission_epoch, 2U);
+  EXPECT_NE(failed->detail.find("control lane"), std::string::npos);
+  EXPECT_GE(direct_zero_calls, 2U);
+
+  int accepted_before_fence = 0;
+  ASSERT_EQ(
+    queue.wait_pop_result(accepted_before_fence),
+    Queue::WaitResult::Item);
+  EXPECT_FALSE(ingress.enqueue(100));
 }
 
 }  // namespace

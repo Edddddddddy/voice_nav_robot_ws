@@ -886,6 +886,21 @@ void RuntimeCore::fail_closed(std::string detail)
   publish_state();
 }
 
+void RuntimeCore::fail_closed_at_epoch(
+  const std::uint64_t admission_epoch,
+  std::string detail)
+{
+  if (admission_epoch > state_.admission_epoch) {
+    state_.admission_epoch = admission_epoch;
+  }
+  if (active_.has_value()) {
+    (void)select_terminal_and_stop(
+      MissionResultCode::SafetyFault, std::move(detail));
+  }
+  state_.availability = RuntimeAvailability::Faulted;
+  publish_state();
+}
+
 RuntimeCore::TerminalOutcome RuntimeCore::select_terminal_and_stop(
   MissionResultCode code,
   std::string detail,

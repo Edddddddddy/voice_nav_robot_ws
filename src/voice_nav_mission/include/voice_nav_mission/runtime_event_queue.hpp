@@ -47,6 +47,13 @@ public:
     Closed
   };
 
+  enum class WaitResult
+  {
+    Item,
+    Closed,
+    ExternalWake,
+  };
+
   static constexpr std::size_t kCapacity = 128U;
   static constexpr std::size_t kNormalCapacity = 120U;
   static constexpr std::size_t kControlReserve = kCapacity - kNormalCapacity;
@@ -94,27 +101,48 @@ public:
 
   [[nodiscard]] bool wait_pop(Event & event)
   {
+    return wait_pop_result(event) == WaitResult::Item;
+  }
+
+  [[nodiscard]] WaitResult wait_pop_result(Event & event)
+  {
+    return wait_pop_with_wakeup(event, []() {return false;});
+  }
+
+  template<typename ExternalWakePredicate>
+  [[nodiscard]] WaitResult wait_pop_with_wakeup(
+    Event & event,
+    ExternalWakePredicate && external_wake_pending)
+  {
     std::unique_lock<std::mutex> lock(mutex_);
-    condition_.wait(lock, [this]() {
+    condition_.wait(lock, [this, &external_wake_pending]() {
         return closed_ || !control_events_.empty() || pending_fault_.has_value() ||
-               !normal_events_.empty();
+               !normal_events_.empty() || external_wake_pending();
       });
     if (!control_events_.empty()) {
       event = std::move(control_events_.front());
       control_events_.pop_front();
-      return true;
+      return WaitResult::Item;
     }
     if (pending_fault_.has_value()) {
       event = std::move(*pending_fault_);
       pending_fault_.reset();
-      return true;
+      return WaitResult::Item;
+    }
+    if (external_wake_pending()) {
+      return WaitResult::ExternalWake;
     }
     if (normal_events_.empty()) {
-      return false;
+      return WaitResult::Closed;
     }
     event = std::move(normal_events_.front());
     normal_events_.pop_front();
-    return true;
+    return WaitResult::Item;
+  }
+
+  void wake() noexcept
+  {
+    condition_.notify_all();
   }
 
   [[nodiscard]] PushResult request_fault(Event event) noexcept
@@ -147,9 +175,6 @@ public:
     {
       std::lock_guard<std::mutex> lock(mutex_);
       closed_ = true;
-      control_events_.clear();
-      normal_events_.clear();
-      pending_fault_.reset();
     }
     condition_.notify_all();
   }

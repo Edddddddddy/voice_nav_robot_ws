@@ -325,6 +325,7 @@ public:
   void on_child_feedback(const MotionToken & token, double progress);
   void on_child_result(const MotionToken & token, const ChildResult & result);
   void fail_closed(std::string detail);
+  void fail_closed_at_epoch(std::uint64_t admission_epoch, std::string detail);
 
   [[nodiscard]] RuntimeState state() const;
   [[nodiscard]] bool usable() const noexcept;
