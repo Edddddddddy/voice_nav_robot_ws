@@ -114,11 +114,35 @@ public:
     Event & event,
     ExternalWakePredicate && external_wake_pending)
   {
+    return wait_pop_with_wakeup(
+      event,
+      std::forward<ExternalWakePredicate>(external_wake_pending),
+      [](const Event &) {return true;});
+  }
+
+  template<typename ExternalWakePredicate, typename EmergencyControlPredicate>
+  [[nodiscard]] WaitResult wait_pop_with_wakeup(
+    Event & event,
+    ExternalWakePredicate && external_wake_pending,
+    EmergencyControlPredicate && emergency_control_pending)
+  {
     std::unique_lock<std::mutex> lock(mutex_);
     condition_.wait(lock, [this, &external_wake_pending]() {
         return closed_ || !control_events_.empty() || pending_fault_.has_value() ||
                !normal_events_.empty() || external_wake_pending();
       });
+    if (external_wake_pending()) {
+      for (auto iterator = control_events_.begin();
+        iterator != control_events_.end(); ++iterator)
+      {
+        if (emergency_control_pending(*iterator)) {
+          event = std::move(*iterator);
+          control_events_.erase(iterator);
+          return WaitResult::Item;
+        }
+      }
+      return WaitResult::ExternalWake;
+    }
     if (!control_events_.empty()) {
       event = std::move(control_events_.front());
       control_events_.pop_front();
@@ -128,9 +152,6 @@ public:
       event = std::move(*pending_fault_);
       pending_fault_.reset();
       return WaitResult::Item;
-    }
-    if (external_wake_pending()) {
-      return WaitResult::ExternalWake;
     }
     if (normal_events_.empty()) {
       return WaitResult::Closed;

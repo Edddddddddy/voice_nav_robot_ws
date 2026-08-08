@@ -15,6 +15,7 @@
 #ifndef VOICE_NAV_MISSION__RUNTIME_EVENT_INGRESS_HPP_
 #define VOICE_NAV_MISSION__RUNTIME_EVENT_INGRESS_HPP_
 
+#include <exception>
 #include <functional>
 #include <string>
 #include <utility>
@@ -38,18 +39,21 @@ public:
   using EmergencyCallback = std::function<void()>;
   using FenceCallback =
     std::function<void(const RuntimeEmergencyFenceSnapshot &)>;
+  using EmergencyControlSelector = std::function<bool(const Event &)>;
 
   RuntimeEventIngress(
     Queue & queue,
     RuntimeEmergencyFence & fence,
     LaneSelector lane_selector,
     EmergencyCallback emergency_callback,
-    FenceCallback fence_callback)
+    FenceCallback fence_callback,
+    EmergencyControlSelector emergency_control_selector = {})
   : queue_(queue),
     fence_(fence),
     lane_selector_(std::move(lane_selector)),
     emergency_callback_(std::move(emergency_callback)),
-    fence_callback_(std::move(fence_callback))
+    fence_callback_(std::move(fence_callback)),
+    emergency_control_selector_(std::move(emergency_control_selector))
   {
   }
 
@@ -95,7 +99,42 @@ public:
   [[nodiscard]] typename Queue::WaitResult wait_pop(Event & event)
   {
     return queue_.wait_pop_with_wakeup(
-      event, [this]() {return fence_.pending();});
+      event,
+      [this]() {return fence_.pending();},
+      [this](const Event & value) {
+        return emergency_control_selector_ && emergency_control_selector_(value);
+      });
+  }
+
+  template<typename Dispatch, typename FaultHandler>
+  void run(Dispatch && dispatch, FaultHandler && fault_handler) noexcept
+  {
+    Event event;
+    while (true) {
+      const auto wait_result = wait_pop(event);
+      if (wait_result == Queue::WaitResult::Closed) {
+        return;
+      }
+      if (wait_result == Queue::WaitResult::ExternalWake) {
+        (void)process_pending_fence();
+        continue;
+      }
+      try {
+        dispatch(event);
+      } catch (const std::exception & error) {
+        try {
+          fault_handler(std::string{"Runtime event worker raised: "} + error.what());
+        } catch (...) {
+          request_emergency("Runtime event worker fault handler raised");
+        }
+      } catch (...) {
+        try {
+          fault_handler("Runtime event worker raised an unknown exception");
+        } catch (...) {
+          request_emergency("Runtime event worker fault handler raised");
+        }
+      }
+    }
   }
 
   [[nodiscard]] bool process_pending_fence() noexcept
@@ -132,6 +171,7 @@ private:
   LaneSelector lane_selector_;
   EmergencyCallback emergency_callback_;
   FenceCallback fence_callback_;
+  EmergencyControlSelector emergency_control_selector_;
 };
 
 }  // namespace voice_nav_mission
