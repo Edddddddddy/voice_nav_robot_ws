@@ -70,6 +70,16 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `DEPENDENCY_UNAVAILABLE` and unproven Gate inhibit/zero
   (`SAFETY_FAULT`), active shutdown delivers completion once, and recent
   terminal records remain bounded.
+- Restored the frozen RelativeMotion failure taxonomy: source-only liveness is
+  `DEPENDENCY_UNAVAILABLE`, step deadline is `TIMEOUT`, stall/collision/
+  execution failure is `EXECUTION_FAILED`, and Gate/controller/component/
+  writer/zero/handover/stationarity faults are `SAFETY_FAULT`; a later zero
+  proof no longer rewrites infrastructure safety faults.
+- Added a shared weak-owner ingress barrier for Reentrant RelativeMotion ROS
+  callbacks and the raw producer timer/command supplier. Shutdown now closes
+  ingress, resets subscriptions and producer resources, and drains queued or
+  in-flight callbacks before releasing Adapter state; MultiThreadedExecutor
+  CV/latch tests cover each callback family.
 - Finalized the pre-1.0 Mission V1 public Interface migration: bounded
   `MissionStep`, fenced `ExecuteMission`, `MissionState`, and `StopMission`
   types now generate successfully for C++ and Python, with public contract

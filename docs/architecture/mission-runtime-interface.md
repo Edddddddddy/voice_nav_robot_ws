@@ -282,13 +282,25 @@ responses, and explicit shutdown drains ingress, Adapter transactions, and
 completion callbacks before the queue, worker, and Core are released. The #35
 conditioning Module retains its `2000 ms` component RPC bound, `4000 ms`
 PREPARE-to-OPEN handover deadline, and
-`OPEN -> Collision Monitor -> Velocity Smoother -> producer` order.
+`OPEN -> Collision Monitor -> Velocity Smoother -> producer` order. Reentrant
+odom/scan/clock callbacks and the raw producer timer use shared lifetime
+ingress with weak owner captures and an in-flight drain before Adapter state
+is released.
 
 ## Motion and map semantics
 
 `MOVE_DISTANCE` closes a feedback loop on signed odometry projection along the
 initial heading. `ROTATE_ANGLE` unwraps yaw before closed-loop control. Both use
 trusted slowdown, tolerance, stall, and deadline policies.
+
+RelativeMotion terminal codes are frozen by cause: source-only odom/scan/clock
+liveness loss is `DEPENDENCY_UNAVAILABLE`; a RelativeMotion step deadline is
+`TIMEOUT`; stall, collision, and execution failure are `EXECUTION_FAILED`; and
+Gate, controller, container, component, candidate-writer, zero-proof,
+handover, and stationarity failures are `SAFETY_FAULT`. An original business
+failure changes to `SAFETY_FAULT` only when teardown cannot prove Gate
+inhibited+zero. A later zero proof never rewrites an infrastructure safety
+fault.
 
 `NAVIGATE_TO` resolves a Named Place inside the trusted navigation Adapter.
 `SAVE_MAP` writes occupancy YAML, image, and posegraph into a temporary

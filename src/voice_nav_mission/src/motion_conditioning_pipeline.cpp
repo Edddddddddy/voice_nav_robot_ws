@@ -639,7 +639,7 @@ private:
           "conditioning PREPARE was cancelled while component setup drained");
       }
       const auto result = fail_owned(
-        MotionConditioningFailure::DependencyUnavailable,
+        MotionConditioningFailure::SafetyFault,
         "Nav2 component load/configure failed: " + setup_failure_detail_, true);
       finish_teardown(result, TeardownIntent::Failure);
       return result;
@@ -650,7 +650,7 @@ private:
     }
     if (std::chrono::steady_clock::now() >= prepare_open_deadline_) {
       const auto result = fail_owned(
-        MotionConditioningFailure::Timeout,
+        MotionConditioningFailure::SafetyFault,
         "PREPARE to OPEN deadline expired during component setup", true);
       finish_teardown(result, TeardownIntent::Failure);
       return result;
@@ -718,7 +718,7 @@ private:
     if (!invalid_detail.empty()) {
       if (prepare_open_deadline_expired) {
         return fail_synchronously(
-          MotionConditioningFailure::Timeout, std::move(invalid_detail));
+          MotionConditioningFailure::SafetyFault, std::move(invalid_detail));
       }
       std::lock_guard<std::recursive_mutex> lock(mutex_);
       auto result = make_result(
@@ -758,11 +758,11 @@ private:
       }
     } catch (const std::exception & error) {
       return fail_synchronously(
-        MotionConditioningFailure::InternalError,
+        MotionConditioningFailure::SafetyFault,
         std::string{"MotionGate OPEN operation could not be created: "} + error.what());
     } catch (...) {
       return fail_synchronously(
-        MotionConditioningFailure::InternalError,
+        MotionConditioningFailure::SafetyFault,
         "MotionGate OPEN operation could not be created");
     }
     if (!activation_ready) {
@@ -785,7 +785,7 @@ private:
     if (!controller_is_active(handover_deadline)) {
       return abort_activation(
         generation,
-        MotionConditioningFailure::DependencyUnavailable,
+        MotionConditioningFailure::SafetyFault,
         "diff_drive_controller is not active before MotionGate OPEN");
     }
     if (!activation_token_current(generation)) {
@@ -797,7 +797,7 @@ private:
     if (!candidate_writer_is_visible(expected_candidate, handover_deadline, generation)) {
       return abort_activation(
         generation,
-        MotionConditioningFailure::DependencyUnavailable,
+        MotionConditioningFailure::SafetyFault,
         "candidate writer was not visible before MotionGate OPEN");
     }
 
@@ -807,7 +807,7 @@ private:
       } catch (...) {
         return abort_activation(
           generation,
-          MotionConditioningFailure::InternalError,
+          MotionConditioningFailure::SafetyFault,
           "OPEN cancellation fence raised an exception");
       }
     }
@@ -830,12 +830,12 @@ private:
     } catch (const std::exception & error) {
       return abort_activation(
         generation,
-        MotionConditioningFailure::InternalError,
+        MotionConditioningFailure::SafetyFault,
         std::string{"MotionGate OPEN raised: "} + error.what());
     } catch (...) {
       return abort_activation(
         generation,
-        MotionConditioningFailure::InternalError,
+        MotionConditioningFailure::SafetyFault,
         "MotionGate OPEN raised an unknown exception");
     }
     if (!activation_token_current(generation) ||
@@ -847,7 +847,7 @@ private:
     {
       return abort_activation(
         generation,
-        MotionConditioningFailure::DependencyUnavailable,
+        MotionConditioningFailure::SafetyFault,
         "MotionGate OPEN did not bind the current candidate writer: " +
         gate_open.detail);
     }
@@ -887,7 +887,7 @@ private:
     if (!timer_error.empty()) {
       return abort_activation(
         generation,
-        MotionConditioningFailure::InternalError,
+        MotionConditioningFailure::SafetyFault,
         std::move(timer_error));
     }
 
@@ -912,9 +912,7 @@ private:
     {
       return abort_activation(
         generation,
-        std::chrono::steady_clock::now() >= handover_deadline ?
-        MotionConditioningFailure::Timeout :
-        MotionConditioningFailure::DependencyUnavailable,
+        MotionConditioningFailure::SafetyFault,
         "Collision Monitor activation failed after MotionGate OPEN");
     }
     if (!change_state(
@@ -926,9 +924,7 @@ private:
     {
       return abort_activation(
         generation,
-        std::chrono::steady_clock::now() >= handover_deadline ?
-        MotionConditioningFailure::Timeout :
-        MotionConditioningFailure::DependencyUnavailable,
+        MotionConditioningFailure::SafetyFault,
         "Velocity Smoother activation failed after MotionGate OPEN");
     }
     const auto second_renew_ok = renew_for_activation(
@@ -950,7 +946,7 @@ private:
     if (std::chrono::steady_clock::now() >= handover_deadline) {
       return abort_activation(
         generation,
-        MotionConditioningFailure::Timeout,
+        MotionConditioningFailure::SafetyFault,
         "PREPARE to OPEN deadline expired during activation");
     }
 
@@ -989,7 +985,7 @@ private:
       producer_lock.unlock();
       return abort_activation(
         generation,
-        MotionConditioningFailure::InternalError,
+        MotionConditioningFailure::SafetyFault,
         "MotionGate snapshot raised before producer start");
     }
     if (final_snapshot.gate_instance_id != open_operation.gate_instance_id ||
@@ -1013,20 +1009,20 @@ private:
         producer_lock.unlock();
         return abort_activation(
           generation,
-          MotionConditioningFailure::InternalError,
+          MotionConditioningFailure::SafetyFault,
           std::string{"conditioning producer raised: "} + error.what());
       } catch (...) {
         producer_lock.unlock();
         return abort_activation(
           generation,
-          MotionConditioningFailure::InternalError,
+          MotionConditioningFailure::SafetyFault,
           "conditioning producer raised an unknown exception");
       }
       if (!producer_started) {
         producer_lock.unlock();
         return abort_activation(
           generation,
-          MotionConditioningFailure::InternalError,
+          MotionConditioningFailure::SafetyFault,
           "conditioning producer could not start");
       }
     }
@@ -3270,13 +3266,13 @@ private:
       case RuntimeHealthReason::ClockNotAdvancing:
         return MotionConditioningFailure::DependencyUnavailable;
       case RuntimeHealthReason::Deadline:
-        return MotionConditioningFailure::Timeout;
+        return MotionConditioningFailure::SafetyFault;
       case RuntimeHealthReason::Healthy:
       case RuntimeHealthReason::ComponentUnavailable:
       case RuntimeHealthReason::CandidateWriterUnavailable:
       case RuntimeHealthReason::ControllerUnavailable:
       default:
-        return MotionConditioningFailure::DependencyUnavailable;
+        return MotionConditioningFailure::SafetyFault;
     }
   }
 
