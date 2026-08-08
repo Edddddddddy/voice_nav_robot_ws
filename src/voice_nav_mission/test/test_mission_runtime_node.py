@@ -263,8 +263,13 @@ class MissionRuntimeNodeTest(unittest.TestCase):
                 return value
         self.fail('等待 Runtime Interface 超时')
 
-    def test_01_late_state_and_business_rejection_without_gate(self):
-        state = self.spin_until(lambda: self.states[-1] if self.states else None)
+    def fresh_runtime_state(self):
+        self.assertTrue(self.action_client.wait_for_server(timeout_sec=10.0))
+        self.states.clear()
+        return self.spin_until(lambda: self.states[-1] if self.states else None)
+
+    def test_late_state_and_business_rejection_without_gate(self):
+        state = self.fresh_runtime_state()
         self.assertRegex(state.runtime_instance_id, r'^[0-9a-f]{32}$')
         self.assertEqual(state.admission_epoch, 1)
         self.assertEqual(state.operating_mode, MissionState.MAPPING)
@@ -275,7 +280,6 @@ class MissionRuntimeNodeTest(unittest.TestCase):
         self.assertEqual(state.supported_step_mask, 3)
         self.assertEqual(state.max_steps, 3)
 
-        self.assertTrue(self.action_client.wait_for_server(timeout_sec=5.0))
         goal = ExecuteMission.Goal()
         goal.source_instance_id = 'source-test'
         goal.source_seq = 1
@@ -297,9 +301,8 @@ class MissionRuntimeNodeTest(unittest.TestCase):
         )
         self.assertEqual(wrapped.result.failed_step, -1)
 
-    def test_02_invalid_goal_is_aborted_with_structured_result(self):
-        state = self.spin_until(lambda: self.states[-1] if self.states else None)
-        self.assertTrue(self.action_client.wait_for_server(timeout_sec=5.0))
+    def test_invalid_goal_is_aborted_with_structured_result(self):
+        state = self.fresh_runtime_state()
         goal = ExecuteMission.Goal()
         goal.source_instance_id = 'source-invalid'
         goal.source_seq = 1
@@ -320,12 +323,14 @@ class MissionRuntimeNodeTest(unittest.TestCase):
         )
         self.assertEqual(wrapped.result.failed_step, -1)
 
-    def test_03_active_goal_gets_one_result_before_quiesced_node_restarts(
+    def test_active_goal_gets_one_result_before_quiesced_node_restarts(
         self, launch_service, proc_info, runtime
     ):
         self.active_dependencies = ActiveShutdownDependencies()
         self.executor.add_node(self.active_dependencies.node)
         try:
+            self.assertTrue(self.action_client.wait_for_server(timeout_sec=10.0))
+            self.states.clear()
             state = self.spin_until(
                 lambda: next(
                     (
@@ -344,7 +349,6 @@ class MissionRuntimeNodeTest(unittest.TestCase):
                 for sample in self.states
             ]
             self.fail(f'未获得可用 Gate 状态，已观测={samples}')
-        self.assertTrue(self.action_client.wait_for_server(timeout_sec=5.0))
         goal = ExecuteMission.Goal()
         goal.source_instance_id = 'source-shutdown-active'
         goal.source_seq = 1
@@ -397,11 +401,12 @@ class MissionRuntimeNodeTest(unittest.TestCase):
         )
         proc_info.assertWaitForStartup(runtime, timeout=10.0)
 
-    def test_04_runtime_restart_rotates_identity_and_restarts_at_epoch_one(
+    def test_runtime_restart_rotates_identity_and_restarts_at_epoch_one(
         self, launch_service, proc_info, runtime
     ):
-        first = self.spin_until(lambda: self.states[-1] if self.states else None)
+        first = self.fresh_runtime_state()
         first_id = first.runtime_instance_id
+        self.states.clear()
         launch_service.emit_event(
             launch.events.process.SignalProcess(
                 signal_number=signal.SIGINT,
@@ -422,7 +427,7 @@ class MissionRuntimeNodeTest(unittest.TestCase):
         self.assertEqual(second.admission_epoch, 1)
         self.assertEqual(second.availability, MissionState.UNAVAILABLE)
         self.assertEqual(second.gate_state, MissionState.GATE_FAULTED)
-        self.assertEqual(self.runtime_ids - {first_id}, {second.runtime_instance_id})
+        self.assertEqual(self.runtime_ids, {first_id, second.runtime_instance_id})
         proc_info.assertWaitForStartup(runtime, timeout=10.0)
 
 

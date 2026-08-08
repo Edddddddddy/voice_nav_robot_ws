@@ -438,6 +438,17 @@ above. Every Goal receives exactly one terminal result.
   waits for the saved active-goal callback to be delivered exactly once before
   closing the queue and destroying Runtime state. Terminal records are
   bounded to eight recent generations.
+- Action admission is linearized by one Node-owned gate shared by the
+  on-goal/on-accepted handoff, AdmitEvent dispatch, start permits, and
+  quiesce. A generation-bound permit is invalid after quiesce, so an event
+  already in the queue cannot start Core, PREPARE, OPEN, or the producer.
+  Revoked callback tombstones remain part of the bounded second drain until
+  their trusted handoff retention expires.
+- The production Node uses a package-private RuntimeExecutionPlane that owns
+  RuntimeCore and the NodeCompletionMailbox together. Transaction, start
+  failure, and emergency relay rejection all converge through this plane to a
+  single structured Goal terminal; mailbox shutdown is idempotent and joins
+  its reaper after all synchronization state has been constructed.
 - Reentrant RelativeMotion ROS callbacks use a shared lifetime ingress with a
   weak Impl/producer capture and an in-flight guard. Shutdown disables new
   ingress before resetting subscriptions, the raw timer, and producer, then
