@@ -21,6 +21,14 @@ EXPECTED_TESTS = {
             "source": "test_mission_runtime_node.py",
             "timeout": 60.0,
         },
+        "test_test_mission_runtime_node_active_shutdown.py": {
+            "source": "test_mission_runtime_node_active_shutdown.py",
+            "timeout": 60.0,
+        },
+        "test_test_mission_runtime_node_restart.py": {
+            "source": "test_mission_runtime_node_restart.py",
+            "timeout": 60.0,
+        },
     },
     "voice_nav_sim": {
         "test_test_simulation_control.py": {
