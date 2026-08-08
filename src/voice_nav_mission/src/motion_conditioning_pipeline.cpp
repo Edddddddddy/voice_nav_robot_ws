@@ -1716,8 +1716,26 @@ private:
     MotionConditioningFailure failure,
     std::string detail)
   {
+    {
+      std::lock_guard<std::recursive_mutex> lock(mutex_);
+      const bool token_matches =
+        !destroying_.load() && token.generation != 0U &&
+        token.generation == correlation_token_.generation &&
+        token.lease_id == correlation_token_.lease_id &&
+        token.request_id == correlation_token_.request_id &&
+        (state_ == MotionConditioningState::Prepared ||
+        state_ == MotionConditioningState::Running);
+      if (!token_matches) {
+        return;
+      }
+    }
     MotionConditioningResult existing;
-    if (!begin_token_teardown(token, existing, false)) {
+    // The transaction lease may already be non-current because the
+    // generation fence closed after authority_->renew() returned.  The
+    // pipeline token is still the identity fence for this Running generation;
+    // use the normal cleanup owner so the same lease remains InFlight until
+    // zero/producer/component cleanup is complete.
+    if (!begin_teardown(existing, false)) {
       return;
     }
     MotionConditioningResult result;
@@ -3193,6 +3211,7 @@ private:
           collision_token.value_or(callback_token),
           MotionConditioningFailure::ExecutionFailed,
           "Collision Monitor reported STOP for stop_zone");
+        renew_lease->reject();
         return;
       }
       const auto health = runtime_graph_health(
@@ -3210,6 +3229,7 @@ private:
           health.detail.empty() ?
           "conditioning component or dependency graph is unhealthy" :
           health.detail);
+        renew_lease->reject();
         return;
       }
       if (!renew_lease->current() ||
@@ -3227,6 +3247,13 @@ private:
           return authority_->renew(renew_operation);
         });
       if (!renewed.has_value()) {
+        if (renew_lease->side_effect_executed()) {
+          fail_from_renew_callback(
+            callback_token,
+            MotionConditioningFailure::SafetyFault,
+            "MotionGate RENEW returned without a guarded outcome");
+          renew_lease->reject();
+        }
         return;
       }
       result = std::move(*renewed);
@@ -3235,35 +3262,38 @@ private:
         result.snapshot.lease_id != callback_token.lease_id ||
         result.snapshot.motion_inhibited)
       {
-        if (!renew_lease->current() ||
-          !running_generation_current(callback_token.generation))
-        {
-          return;
+        if (renew_lease->side_effect_executed()) {
+          fail_from_renew_callback(
+            callback_token,
+            MotionConditioningFailure::SafetyFault,
+            "MotionGate RENEW failed closed");
+          renew_lease->reject();
         }
+        return;
+      }
+      const bool committed = renew_lease->commit([]() {return true;});
+      if (!committed && renew_lease->side_effect_executed()) {
         fail_from_renew_callback(
           callback_token,
           MotionConditioningFailure::SafetyFault,
-          "MotionGate RENEW failed closed");
-        return;
+          "MotionGate RENEW was rejected by the generation fence");
+        renew_lease->reject();
       }
-      (void)renew_lease->commit([]() {return true;});
     } catch (const std::exception & error) {
-      if (renew_lease.has_value() && renew_lease->current() &&
-        running_generation_current(callback_token.generation))
-      {
+      if (renew_lease.has_value() && renew_lease->side_effect_executed()) {
         fail_from_renew_callback(
           callback_token,
           MotionConditioningFailure::SafetyFault,
           std::string{"MotionGate RENEW raised: "} + error.what());
+        renew_lease->reject();
       }
     } catch (...) {
-      if (renew_lease.has_value() && renew_lease->current() &&
-        running_generation_current(callback_token.generation))
-      {
+      if (renew_lease.has_value() && renew_lease->side_effect_executed()) {
         fail_from_renew_callback(
           callback_token,
           MotionConditioningFailure::SafetyFault,
           "MotionGate RENEW raised an unknown exception");
+        renew_lease->reject();
       }
     }
   }

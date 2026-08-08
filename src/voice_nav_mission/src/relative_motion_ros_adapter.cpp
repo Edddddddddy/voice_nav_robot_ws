@@ -525,6 +525,12 @@ public:
 
   void begin_shutdown() noexcept
   {
+    begin_shutdown(
+      std::chrono::steady_clock::now() + policy_.stationarity_deadline);
+  }
+
+  void begin_shutdown(const TimePoint deadline) noexcept
+  {
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (shutdown_complete_) {
@@ -537,20 +543,30 @@ public:
     // conditioning Module until the internal terminal delivery has reached
     // the live Runtime queue/Core.
     ingress_->disable();
-    request_emergency_stop();
+    request_emergency_stop_until(deadline);
     transaction_condition_.notify_all();
   }
 
   void wait_for_internal_completion() noexcept
   {
-    std::unique_lock<std::mutex> lock(mutex_);
-    condition_variable_.wait(lock, [this]() {
-        return !active_ && teardown_complete_ &&
-               transaction_kind_ == TransactionKind::Idle &&
-               !transaction_in_progress_ &&
-               !emergency_stop_in_progress_ &&
-               !completion_record_in_progress_;
+    (void)wait_for_internal_completion_until(TimePoint::max());
+  }
+
+  [[nodiscard]] bool wait_for_internal_completion_until(
+    const TimePoint deadline) noexcept
+  {
+    try {
+      std::unique_lock<std::mutex> lock(mutex_);
+      return condition_variable_.wait_until(lock, deadline, [this]() {
+                 return !active_ && teardown_complete_ &&
+                        transaction_kind_ == TransactionKind::Idle &&
+                        !transaction_in_progress_ &&
+                        !emergency_stop_in_progress_ &&
+                        !completion_record_in_progress_;
       });
+    } catch (...) {
+      return false;
+    }
   }
 
   void finalize_shutdown() noexcept
@@ -683,7 +699,10 @@ public:
     transaction_condition_.notify_one();
   }
 
-  [[nodiscard]] bool cancel(const MotionToken & token, const TimePoint deadline)
+  [[nodiscard]] bool cancel(
+    const MotionToken & token,
+    const TimePoint deadline,
+    const bool wait_for_completion = true)
   {
     std::optional<TeardownRequest> emergency_request;
     {
@@ -765,6 +784,9 @@ public:
       launch_emergency_teardown(std::move(*emergency_request));
     }
     transaction_condition_.notify_one();
+    if (!wait_for_completion) {
+      return true;
+    }
     std::unique_lock<std::mutex> lock(mutex_);
     return condition_variable_.wait_until(
       lock, deadline, [this]() {return !active_ && teardown_complete_;}) &&
@@ -773,13 +795,19 @@ public:
 
   void request_emergency_stop() noexcept
   {
+    request_emergency_stop_until(
+      std::chrono::steady_clock::now() + policy_.stationarity_deadline);
+  }
+
+  void request_emergency_stop_until(const TimePoint deadline) noexcept
+  {
     MotionToken token;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       token = active_token_;
     }
     try {
-      (void)cancel(token, std::chrono::steady_clock::now());
+      (void)cancel(token, deadline, false);
     } catch (...) {
       // The caller that owns the independent path remains fail-closed even
       // when a best-effort transaction request cannot be materialized.
@@ -1598,11 +1626,25 @@ void RelativeMotionRosAdapter::begin_shutdown() noexcept
   }
 }
 
+void RelativeMotionRosAdapter::begin_shutdown_until(
+  const SteadyClockPort::TimePoint deadline) noexcept
+{
+  if (impl_) {
+    impl_->begin_shutdown(deadline);
+  }
+}
+
 void RelativeMotionRosAdapter::wait_for_internal_completion() noexcept
 {
   if (impl_) {
     impl_->wait_for_internal_completion();
   }
+}
+
+bool RelativeMotionRosAdapter::wait_for_internal_completion_until(
+  const SteadyClockPort::TimePoint deadline) noexcept
+{
+  return impl_ && impl_->wait_for_internal_completion_until(deadline);
 }
 
 void RelativeMotionRosAdapter::finalize_shutdown() noexcept
@@ -1639,6 +1681,20 @@ bool detail::RelativeMotionRosAdapterTestAccess::start_raw_producer(
   const std::string & raw_topic)
 {
   return adapter.impl_ && adapter.impl_->start_raw_producer_for_test(raw_topic);
+}
+
+void detail::begin_relative_motion_shutdown(
+  RelativeMotionRosAdapter & adapter,
+  const SteadyClockPort::TimePoint deadline) noexcept
+{
+  adapter.begin_shutdown_until(deadline);
+}
+
+bool detail::wait_for_relative_motion_internal_completion(
+  RelativeMotionRosAdapter & adapter,
+  const SteadyClockPort::TimePoint deadline) noexcept
+{
+  return adapter.wait_for_internal_completion_until(deadline);
 }
 
 }  // namespace voice_nav_mission

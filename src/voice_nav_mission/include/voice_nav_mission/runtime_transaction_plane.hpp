@@ -61,7 +61,8 @@ public:
       generation_(other.generation_),
       side_effect_(other.side_effect_),
       active_(other.active_),
-      finish_started_(other.finish_started_)
+      finish_started_(other.finish_started_),
+      side_effect_executed_(other.side_effect_executed_)
     {
       other.plane_ = nullptr;
       other.active_ = false;
@@ -76,6 +77,7 @@ public:
         side_effect_ = other.side_effect_;
         active_ = other.active_;
         finish_started_ = other.finish_started_;
+        side_effect_executed_ = other.side_effect_executed_;
         other.plane_ = nullptr;
         other.active_ = false;
       }
@@ -90,6 +92,11 @@ public:
     [[nodiscard]] bool current() const noexcept
     {
       return active_ && !finish_started_ && plane_ && plane_->lease_current(generation_);
+    }
+
+    [[nodiscard]] bool side_effect_executed() const noexcept
+    {
+      return side_effect_executed_;
     }
 
     template<typename Operation>
@@ -108,6 +115,7 @@ public:
       // operation is admitted.  It may return after quiesce closes the
       // generation; the caller still owns this lease and must perform its
       // guarded rollback or terminal handling before the lease is released.
+      side_effect_executed_ = true;
       return std::forward<Operation>(operation)();
     }
 
@@ -180,6 +188,7 @@ private:
     RuntimeTransactionSideEffect side_effect_{RuntimeTransactionSideEffect::Prepare};
     bool active_{false};
     bool finish_started_{false};
+    bool side_effect_executed_{false};
   };
 
   explicit RuntimeTransactionPlane(
@@ -261,22 +270,36 @@ private:
   // The caller first closes admission in its own short critical section, then
   // calls this method.  A pending permit is rejected at its final check and an
   // admitted operation is allowed to return before a successful barrier.
-  [[nodiscard]] bool quiesce(
-    const std::uint64_t next_generation,
-    const std::chrono::steady_clock::time_point deadline)
+  void close_generation(const std::uint64_t next_generation)
   {
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      if (quiescing_) {
+        return;
+      }
       quiescing_ = true;
       generation_ = next_generation;
     }
     if (quiesce_observer_) {
       quiesce_observer_(next_generation);
     }
+  }
+
+  [[nodiscard]] bool wait_for_drain_until(
+    const std::chrono::steady_clock::time_point deadline)
+  {
     std::unique_lock<std::mutex> lock(mutex_);
     return condition_.wait_until(lock, deadline, [this]() {
                return phase_ != Phase::Pending && phase_ != Phase::InFlight;
     });
+  }
+
+  [[nodiscard]] bool quiesce(
+    const std::uint64_t next_generation,
+    const std::chrono::steady_clock::time_point deadline)
+  {
+    close_generation(next_generation);
+    return wait_for_drain_until(deadline);
   }
 
   [[nodiscard]] bool quiescing() const noexcept
