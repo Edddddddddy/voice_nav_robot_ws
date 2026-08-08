@@ -369,7 +369,11 @@ All terminal intents use first-terminal-intent-wins:
 Late Nav2, relative-motion, map, and timer callbacks are discarded by Runtime
 instance, admission epoch, Mission generation, and step generation. Late
 velocity samples are isolated by the candidate handover barrier described
-above. Every Goal receives exactly one terminal result.
+above. Every Goal that has entered production `on_accepted` and acquired a
+`GoalHandle`/`CallbackLease` receives exactly one terminal result during
+graceful shutdown. A provisional goal without a handle is revoked within its
+bounded handoff window without fabricating a Result; after context or process
+closure the transport does not claim exactly-once delivery.
 
 ## Relative motion
 

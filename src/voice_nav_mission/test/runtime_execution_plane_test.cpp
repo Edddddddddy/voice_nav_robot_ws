@@ -137,7 +137,7 @@ private:
   std::vector<MissionResult> results_;
 };
 
-class OwnerReleaseProbe final
+class DeliveryOwnerObservation final
 {
 public:
   void record()
@@ -167,6 +167,26 @@ private:
   std::optional<std::thread::id> release_thread_;
 };
 
+class DeliveryOwnerProbe final
+{
+public:
+  explicit DeliveryOwnerProbe(
+    std::shared_ptr<DeliveryOwnerObservation> observation)
+  : observation_(std::move(observation))
+  {
+  }
+
+  ~DeliveryOwnerProbe()
+  {
+    if (observation_) {
+      observation_->record();
+    }
+  }
+
+private:
+  std::shared_ptr<DeliveryOwnerObservation> observation_;
+};
+
 struct CompletionEvent
 {
   MotionToken token;
@@ -175,7 +195,8 @@ struct CompletionEvent
 class RuntimeExecutionPlaneFixture final
 {
 public:
-  RuntimeExecutionPlaneFixture()
+  explicit RuntimeExecutionPlaneFixture(
+    RuntimeExecutionPlane::ChildResultDeliveryDecorator delivery_decorator = {})
   : clock_(std::make_shared<ScriptedSteadyClock>()),
     authority_(std::make_shared<ScriptedMotionAuthorityPort>(kGateId)),
     relative_(std::make_shared<ExternalRelativeMotionPort>()),
@@ -213,7 +234,8 @@ public:
       },
         [this](std::string detail) {
           ingress_->request_emergency(std::move(detail));
-      }))
+      },
+        std::move(delivery_decorator)))
   {
     plane_->core()->observe_gate(authority_->snapshot());
     worker_ = std::thread([this]() {
@@ -410,8 +432,12 @@ TEST(RuntimeExecutionPlaneTest, ShutdownDeadlineFailsClosedThroughProductionCoor
   std::size_t emergency_calls = 0U;
   std::size_t fence_calls = 0U;
   RuntimeShutdownCoordinator coordinator(
-    [&gate, &tracker](const RuntimeShutdownCoordinator::TimePoint deadline) {
-      return gate.begin_quiesce(tracker, deadline);
+    [&gate, &tracker]() {
+      return gate.close_generation(tracker);
+    },
+    [](const RuntimeShutdownCoordinator::TimePoint) {},
+    [&gate](const RuntimeShutdownCoordinator::TimePoint deadline) {
+      return gate.wait_for_transaction_drain(deadline);
     },
     [&]() {
       ++emergency_calls;
@@ -455,7 +481,17 @@ TEST_P(
   RelayRejectionTest,
   RelayRejectionFailsClosedThroughCoreGoal)
 {
-  RuntimeExecutionPlaneFixture fixture;
+  auto owner_observation = std::make_shared<DeliveryOwnerObservation>();
+  auto owner_probe = std::make_shared<DeliveryOwnerProbe>(owner_observation);
+  RuntimeExecutionPlaneFixture fixture(
+    [owner_probe = std::move(owner_probe)](
+      RuntimeCore::ChildResultDelivery delivery) mutable {
+      return [owner_probe = std::move(owner_probe),
+             delivery = std::move(delivery)](
+        const MotionToken & token, const ChildResult & result) mutable {
+               delivery(token, result);
+             };
+    });
   start_active_mission(fixture);
   const auto token = fixture.relative().started_tokens().front();
 
@@ -485,19 +521,15 @@ TEST_P(
       RuntimeExecutionPlaneFixture::Queue::PushResult::ControlFull);
   }
 
-  auto release_probe = std::make_shared<OwnerReleaseProbe>();
-  auto record = RelativeMotionCompletionRecordPtr(
-    new RelativeMotionCompletionRecord{
-        token, ChildResult{ChildResultCode::SafetyFault, "relay rejection"}},
-    [release_probe](const RelativeMotionCompletionRecord * value) {
-      delete value;
-      release_probe->record();
-    });
+  auto record = std::make_shared<const RelativeMotionCompletionRecord>(
+      RelativeMotionCompletionRecord{
+        token, ChildResult{ChildResultCode::SafetyFault, "relay rejection"}});
   EXPECT_FALSE(fixture.mailbox().relay(std::move(record)));
-  ASSERT_TRUE(release_probe->wait_for_release());
+  ASSERT_TRUE(owner_observation->wait_for_release());
   EXPECT_EQ(
-    release_probe->release_thread(), fixture.plane().completion_reaper_thread_id());
-  EXPECT_NE(release_probe->release_thread(), std::this_thread::get_id());
+    owner_observation->release_thread(),
+    fixture.plane().completion_reaper_thread_id());
+  EXPECT_NE(owner_observation->release_thread(), std::this_thread::get_id());
   ASSERT_TRUE(fixture.terminal().wait_for_count(1U));
   const auto results = fixture.terminal().results();
   ASSERT_EQ(results.size(), 1U);

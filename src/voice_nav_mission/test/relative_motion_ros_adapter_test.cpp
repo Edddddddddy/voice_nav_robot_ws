@@ -697,8 +697,19 @@ TEST_F(
     {});
   ASSERT_TRUE(authority->wait_for_prepare());
 
-  adapter.begin_shutdown();
+  std::promise<void> begin_promise;
+  auto begin_future = begin_promise.get_future();
+  std::thread begin_thread([&]() {
+      adapter.begin_shutdown();
+      begin_promise.set_value();
+    });
+  const auto begin_status = begin_future.wait_for(1s);
   authority->release_prepare();
+  if (begin_status != std::future_status::ready) {
+    begin_thread.join();
+    FAIL() << "begin_shutdown did not return before the running PREPARE drained";
+  }
+  begin_thread.join();
   ASSERT_TRUE(result_barrier.wait_for_entries(1U));
 
   std::promise<void> finalize_promise;
