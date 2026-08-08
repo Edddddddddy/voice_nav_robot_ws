@@ -13,8 +13,26 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `nav2_velocity_smoother` and `nav2_collision_monitor`, including bounded
   Gate handover, per-lease candidate topics, writer/GID proof, cleanup, and
   synthetic failure-injection seams. The trusted MotionGate PREPARE budget is
-  `6000 ms`; product Mission MOVE/ROTATE execution remains unavailable until
-  Task #64.
+  `6000 ms`.
+- Added the production odometry-closed-loop RelativeMotionPort, its deep
+  ROS-free MOVE/ROTATE controller, ROS source Adapter, steady-clock freshness
+  and generation-fencing tests, and Runtime integration without changing the
+  public ROS IDL. The implementation reuses Issue #35 conditioning and keeps
+  final velocity publication owned by MotionGate.
+- Added asynchronous RelativeMotion start/teardown fencing, Node-owned typed
+  Runtime event serialization with STOP/Cancel control priority, and a
+  serialized state snapshot for service deadline responses. STOP/Cancel proves
+  Gate inhibit/zero before waiting for an in-flight #35 start operation.
+- Hardened the RelativeMotion production seam with physically separate 120-slot
+  normal and 8-slot control queues, independent emergency inhibit/zero,
+  cancel-observable PREPARE/RPC handover, unique cleanup ownership, explicit
+  Adapter/Node shutdown ordering, and steady `zero_proven_at` evidence for
+  business failures and cached terminal results.
+- Added absolute stationarity evidence anchored at the steady-clock
+  `zero_proven_at`, with the exact `zero_proven_at + 1200 ms` deadline and no
+  cleanup-time extension. The #35 conditioning handover is restored to its
+  `2000 ms` component RPC / `4000 ms` PREPARE-to-OPEN policy and
+  `OPEN -> Collision Monitor -> Velocity Smoother -> producer` order.
 - Added the reviewed VN-0010 implementation for an independent,
   fail-closed MotionGate: package-private bounded ROS types, an internal
   non-installed static `MotionGateCore`, the installed `motion_gate_node`,
@@ -41,6 +59,34 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Changed simulation motion-source handling to preserve raw scan stamps and
+  frames, use direct `/scan` with a latest-only `SENSOR_DATA` consumer, and
+  keep 200 ms steady dependency liveness separate from the 300 ms raw
+  ROS-time Collision Monitor source-age limit. Headless raw-age / TF physical
+  acceptance is intentionally not claimed here and is tracked by Issue #72.
+- Recorded the RelativeMotion production seam contract: control saturation
+  raises an independent EmergencyFence, cancellation and start-drain cleanup
+  are generation-fenced, health failures preserve the distinction between
+  `DEPENDENCY_UNAVAILABLE` and unproven Gate inhibit/zero
+  (`SAFETY_FAULT`), active shutdown delivers completion once, and recent
+  terminal records remain bounded.
+- Restored the frozen RelativeMotion failure taxonomy: source-only liveness is
+  `DEPENDENCY_UNAVAILABLE`, step deadline is `TIMEOUT`, stall/collision/
+  execution failure is `EXECUTION_FAILED`, and Gate/controller/component/
+  writer/zero/handover/stationarity faults are `SAFETY_FAULT`; a later zero
+  proof no longer rewrites infrastructure safety faults.
+- Added a shared weak-owner ingress barrier for Reentrant RelativeMotion ROS
+  callbacks and the raw producer timer/command supplier. Shutdown now closes
+  ingress, resets subscriptions and producer resources, and drains queued or
+  in-flight callbacks before releasing Adapter state; MultiThreadedExecutor
+  CV/latch tests cover each callback family.
+- Added the production Node admission gate and RuntimeExecutionPlane seam:
+  callback handoff, queued dispatch, start permits, and quiesce now share a
+  generation fence; revoked Action callback tombstones participate in the
+  bounded second drain; immutable completion records and Core/Goal terminals
+  converge through one joinable Node mailbox. Focused CV/latch tests cover
+  queue-before-dispatch, callback gaps, relay rejection, start failure, and
+  repeated mailbox construction/stop.
 - Finalized the pre-1.0 Mission V1 public Interface migration: bounded
   `MissionStep`, fenced `ExecuteMission`, `MissionState`, and `StopMission`
   types now generate successfully for C++ and Python, with public contract

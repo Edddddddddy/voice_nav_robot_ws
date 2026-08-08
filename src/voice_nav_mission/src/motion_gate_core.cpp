@@ -269,6 +269,20 @@ ControlResult MotionGateCore::open(
   return result;
 }
 
+void MotionGateCore::start_armed_window(SteadyTimePoint now)
+{
+  if (state_ != State::Armed) {
+    return;
+  }
+  authority_deadline_ = now + config_.authority_lease;
+  candidate_deadline_ = now + config_.candidate_freshness;
+  candidate_fresh_ = false;
+  selected_ = zero_command();
+  reason_ = Reason::None;
+  detail_ = "lease armed; awaiting a fresh candidate";
+  advance_state_seq();
+}
+
 ControlResult MotionGateCore::renew(
   const ControlRequest & request,
   SteadyTimePoint now)

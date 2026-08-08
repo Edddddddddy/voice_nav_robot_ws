@@ -276,6 +276,19 @@ AuthorityResult RosMotionAuthorityPort::send_once(
     snapshot,
     response->lease_id,
     response->detail};
+  if (!applied ||
+    (operation_code_value == GateControl::Request::RENEW &&
+    (!response->authority_live || response->motion_inhibited)))
+  {
+    RCLCPP_WARN(
+      node_.get_logger(),
+      "MotionGate control rejected: operation=%u code=%u reason=%u state=%u detail=%s",
+      static_cast<unsigned int>(operation_code_value),
+      static_cast<unsigned int>(response->code),
+      static_cast<unsigned int>(response->reason),
+      static_cast<unsigned int>(response->state),
+      response->detail.c_str());
+  }
   result.tuple_stale = retryable;
   return result;
 }

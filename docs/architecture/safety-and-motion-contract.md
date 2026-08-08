@@ -373,17 +373,94 @@ above. Every Goal receives exactly one terminal result.
 
 ## Relative motion
 
+- `RelativeMotionController` is the deep ROS-free Module behind the production
+  `RelativeMotionPort`; its ROS Adapter observes odometry and source-health
+  signals without taking ownership of the final velocity writer.
 - MOVE projects odometry displacement onto the signed initial-heading axis.
 - ROTATE unwraps yaw before comparing signed angular displacement.
 - Both use trusted YAML for speed, acceleration, tolerance, stall thresholds,
   and a policy-computed deadline.
-- Both slow down near the target and publish zero before completing.
+- Both slow down near the target, publish zero before completing, and commit
+  exactly one first-terminal result.
+- Relative-motion samples are fenced by Runtime / admission / Mission / step
+  generations and the active Gate lease; late odometry, timer, or downstream
+  callbacks cannot publish a command or rewrite a terminal result.
 - Step deadlines, stall windows, lease expiry, and cancel grace use a steady
   clock. ROS time is used only to stamp simulation-time data, including the
   final `TwistStamped`, odometry, TF, and sensor messages; it never drives a
   deadline. MotionGate locks `use_sim_time=true` for the process lifetime. If
   that invariant or the active ROS clock is lost, it faults closed and emits
   only zero commands with a zero stamp.
+- Dependency steady liveness is 200 ms. In simulation, Collision Monitor's
+  raw ROS-time source-age limit is independently fixed at 300 ms; an old raw
+  measurement remains fail-closed even when callbacks continue arriving.
+  Original scan measurement stamps and frames are retained, Collision Monitor
+  consumes direct `/scan`, and the consumer uses `SENSOR_DATA` with
+  `KEEP_LAST(1)`; no conditioned-scan relay restamps or masks sensor backlog.
+  Headless raw-age and TF physical acceptance is tracked by Issue #72.
+- Runtime child callbacks are serialized through a Node-owned typed queue with
+  reserved control capacity and generation-tagged events. STOP/Cancel fences
+  the generation first, starts asynchronous teardown, and uses a serialized
+  state snapshot if the ROS service cannot enqueue or await its response.
+- Normal queue saturation rejects only the normal event and records one
+  QueueFault; the reserved STOP/Cancel lane remains usable. If queue admission
+  or the Runtime worker fails, the Adapter's independent emergency inhibit/
+  zero path still runs and remains idempotent.
+- Stationarity is measured only from odometry received at or after the actual
+  steady-clock Gate `zero_proven_at`; its deadline is absolute at
+  `zero_proven_at + 1200 ms`, with no cleanup-time extension.
+
+### RelativeMotion production seams
+
+- The Runtime event queue has separate normal and control capacity. A full
+  normal lane records a bounded queue fault; a full control lane raises an
+  independent EmergencyFence that advances the admission epoch, inhibits and
+  zeros the Gate, and prevents a later event from reopening the old generation.
+- Cancellation is fenced after every controller, writer, lifecycle, and
+  component boundary and again immediately before `OPEN`. A cancelled start
+  therefore cannot publish a producer command or enter `OPEN`, even when the
+  downstream call returns late.
+- Start-drain timeout cleanup is owned by an object-held asynchronous
+  continuation. It is not dependent on destruction, and producer stop,
+  component cleanup, generation reclaim, and terminal publication are each
+  performed at most once.
+- Runtime health and teardown keep the frozen failure-code taxonomy typed:
+  source-only odom/scan/clock liveness loss is
+  `DEPENDENCY_UNAVAILABLE`; a RelativeMotion step deadline is `TIMEOUT`; and
+  stall, collision, or other motion execution failure is `EXECUTION_FAILED`.
+  Gate, controller, container, component, candidate-writer, zero-proof,
+  handover, and stationarity failures are `SAFETY_FAULT`. An original
+  business failure is upgraded to `SAFETY_FAULT` only when teardown cannot
+  prove Gate inhibited+zero; proving zero does not rewrite an infrastructure
+  safety fault. The residual safety fault remains latched against later
+  admission.
+- Node shutdown stops ingress, drains accepted internal completion events, and
+  waits for the saved GoalHandle/CallbackLease from production `on_accepted`
+  to receive its one graceful-shutdown terminal before closing the queue and
+  destroying Runtime state. A provisional/no-handle ticket is revoked at its
+  fixed bound and never receives a fabricated Result. Once the ROS context or
+  process is closing, transport delivery is not claimed to be distributed
+  exactly-once. Terminal records are bounded to eight recent generations.
+- Action admission is linearized by one Node-owned gate shared by the
+  on-goal/on-accepted handoff, AdmitEvent dispatch, start permits, and
+  quiesce. A generation-bound permit is invalid after quiesce, so an event
+  already in the queue cannot start Core, PREPARE, OPEN, or the producer.
+  Provisional revoked tickets are bounded shutdown state, not a promise to
+  retain a late transport handoff. Only an already-entered production
+  `on_accepted` callback with a GoalHandle/CallbackLease participates in the
+  graceful second drain; MotionGate inhibited+zero remains the independent
+  safety guarantee.
+- The production Node uses a package-private RuntimeExecutionPlane that owns
+  RuntimeCore and the NodeCompletionMailbox together. Transaction, start
+  failure, and emergency relay rejection all converge through this plane to a
+  single structured Goal terminal; mailbox shutdown is idempotent and joins
+  its reaper after all synchronization state has been constructed.
+- Reentrant RelativeMotion ROS callbacks use a shared lifetime ingress with a
+  weak Impl/producer capture and an in-flight guard. Shutdown disables new
+  ingress before resetting subscriptions, the raw timer, and producer, then
+  waits for queued and active callbacks before releasing the state. The
+  production seam tests this barrier on a real MultiThreadedExecutor for
+  odom, scan, clock, raw timer, and command-supplier callbacks.
 
 ## Failure behavior
 
@@ -403,13 +480,25 @@ above. Every Goal receives exactly one terminal result.
 | Late callback after cancel | discard callback by epoch/generation; discard velocity through the inhibited handover barrier |
 | Gate health or zero proof unavailable | report `SAFETY_FAULT` and remain fail-closed |
 
+The corresponding terminal codes are deliberately not inferred from the
+presence of a later zero proof:
+
+| Typed cause | Terminal code |
+| --- | --- |
+| Odom/scan/clock source liveness only | `DEPENDENCY_UNAVAILABLE` |
+| RelativeMotion step deadline only | `TIMEOUT` |
+| Stall, collision, or motion execution failure | `EXECUTION_FAILED` |
+| Gate/controller/container/component/writer/zero/handover/stationarity | `SAFETY_FAULT` |
+
 ## Verification obligations
 
-- Current cumulative verification retains three executable layers: pure-Core
-  manual-clock GTest; a Fast-DDS-locked
-  Node launch test with neither Gazebo nor `/clock`; and a Fast-DDS-locked
-  headless Gazebo product launch test. Repository-static contract checks are a
-  prerequisite, not a substitute for any layer.
+- Current cumulative verification retains the pure-Core manual-clock GTest, the
+  deterministic conditioning/ROS-integration checks, a Fast-DDS-locked Node
+  launch test with neither Gazebo nor `/clock`, and the existing MotionGate /
+  perception headless product layer. Issue #64 does not claim a headless
+  physical RelativeMotion acceptance; raw-age and TF evidence belongs to
+  Issue #72. Repository-static contract checks are a prerequisite, not a
+  substitute for any layer.
 - Historical fixed-domain evidence is not current acceptance evidence. Current
   launch layers use the official
   `run_test_isolated.py` runner, clear inherited `ROS_DOMAIN_ID` and
@@ -443,5 +532,8 @@ above. Every Goal receives exactly one terminal result.
 - Unmanaged-pause tests prove that a missing or mismatched safe-pause token
   refuses in-place resume and selects the full-restart recovery path.
 - Odometry tests distinguish command-zero latency from physical stationarity.
+- RelativeMotion tests cover signed projection, yaw unwrap across `+/-pi`,
+  bounded command limits, progress monotonicity, stall/deadline edges, and
+  zero-proof stationarity fencing with a manual steady clock.
 - No test exits while either Gate or controller can retain an authorized
   non-zero command.

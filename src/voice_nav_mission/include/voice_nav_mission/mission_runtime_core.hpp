@@ -214,6 +214,7 @@ struct MotionToken
   std::uint64_t admission_epoch{0U};
   std::uint64_t mission_generation{0U};
   std::uint64_t step_generation{0U};
+  std::uint64_t admission_generation{0U};
 };
 
 enum class ChildResultCode : std::uint8_t
@@ -221,6 +222,9 @@ enum class ChildResultCode : std::uint8_t
   Succeeded = 0,
   Failed = 1,
   Timeout = 2,
+  DependencyUnavailable = 3,
+  SafetyFault = 4,
+  InternalError = 5,
 };
 
 struct ChildResult
@@ -246,6 +250,27 @@ public:
     const MotionToken & token,
     SteadyClockPort::TimePoint deadline) = 0;
   virtual void tick(SteadyClockPort::TimePoint now) = 0;
+
+  // The production ROS Adapter owns the #35 conditioning lifecycle. The
+  // default keeps deterministic package-private fakes compatible with the
+  // existing Core contract.
+  [[nodiscard]] virtual bool owns_authority_lifecycle() const noexcept
+  {
+    return false;
+  }
+
+  // Production adapters publish a pure-data completion record to a
+  // Node-owned registry.  Deterministic package-private ports retain the
+  // legacy callback path so the ROS-free Core tests remain small.
+  [[nodiscard]] virtual bool uses_external_completion_registry() const noexcept
+  {
+    return false;
+  }
+
+  [[nodiscard]] virtual bool zero_proven() const noexcept
+  {
+    return true;
+  }
 };
 
 struct RuntimeConfig
@@ -256,6 +281,7 @@ struct RuntimeConfig
   std::chrono::milliseconds control_response_deadline{100};
   std::chrono::milliseconds stop_barrier{250};
   std::chrono::milliseconds cancel_grace{250};
+  std::chrono::milliseconds stationarity_deadline{250};
   std::size_t source_cache_size{64U};
   std::size_t stop_cache_size{64U};
   std::uint8_t max_steps{3U};
@@ -284,6 +310,16 @@ public:
         std::uint64_t, const MissionFeedback &)>;
   using ResultCallback = std::function<void(
         std::uint64_t, const MissionResult &)>;
+  using ChildFeedbackDispatcher = std::function<bool(const MotionToken &, double)>;
+  using ChildResultDispatcher = std::function<bool(
+        const MotionToken &, const ChildResult &)>;
+  using ChildResultDelivery = std::function<void(
+        const MotionToken &, const ChildResult &)>;
+  using ChildResultRegistrar = std::function<bool(
+        const MotionToken &, ChildResultDelivery)>;
+  using ChildResultUnregistrar = std::function<void(const MotionToken &)>;
+  using AdmissionFenceCheck = std::function<bool(std::uint64_t)>;
+  using StartPermitCheck = std::function<bool()>;
 
   RuntimeCore(
     RuntimeConfig config,
@@ -292,14 +328,26 @@ public:
     std::shared_ptr<RelativeMotionPort> relative_motion,
     StateCallback state_callback = {},
     FeedbackCallback feedback_callback = {},
-    ResultCallback result_callback = {});
+    ResultCallback result_callback = {},
+    ChildFeedbackDispatcher child_feedback_dispatcher = {},
+    ChildResultDispatcher child_result_dispatcher = {},
+    AdmissionFenceCheck admission_fence_check = {},
+    ChildResultRegistrar child_result_registrar = {},
+    ChildResultUnregistrar child_result_unregistrar = {});
 
-  [[nodiscard]] AdmissionResult admit(const MissionGoal & goal);
+  [[nodiscard]] AdmissionResult admit(
+    const MissionGoal & goal,
+    StartPermitCheck start_permit_check = {},
+    std::uint64_t admission_generation = 0U);
   void cancel(std::uint64_t mission_id);
   [[nodiscard]] StopResponse stop(const StopRequest & request);
   void observe_gate(const GateSnapshot & snapshot);
   void observe_dependencies();
   void on_tick();
+  void on_child_feedback(const MotionToken & token, double progress);
+  void on_child_result(const MotionToken & token, const ChildResult & result);
+  void fail_closed(std::string detail);
+  void fail_closed_at_epoch(std::uint64_t admission_epoch, std::string detail);
 
   [[nodiscard]] RuntimeState state() const;
   [[nodiscard]] bool usable() const noexcept;
@@ -314,9 +362,11 @@ private:
     std::uint32_t step_index{0U};
     std::uint32_t completed_steps{0U};
     std::uint64_t admission_epoch{0U};
+    std::uint64_t admission_generation{0U};
     std::vector<MissionStep> steps;
     SteadyClockPort::TimePoint deadline{};
     MotionToken child_token;
+    StartPermitCheck start_permit_check;
     bool child_started{false};
     bool terminal_selected{false};
   };
@@ -352,6 +402,7 @@ private:
     const std::string & lease_id = {}) const;
   [[nodiscard]] std::string new_identifier() const;
   [[nodiscard]] bool rotate_epoch();
+  [[nodiscard]] bool admission_allowed(std::uint64_t admission_epoch) const;
   void set_availability_from_dependencies();
   void publish_state();
   void publish_feedback(
@@ -359,8 +410,6 @@ private:
     std::uint32_t step_index,
     double progress);
   void start_step();
-  void on_child_feedback(const MotionToken & token, double progress);
-  void on_child_result(const MotionToken & token, const ChildResult & result);
   TerminalOutcome select_terminal_and_stop(
     MissionResultCode code,
     std::string detail,
@@ -386,6 +435,11 @@ private:
   StateCallback state_callback_;
   FeedbackCallback feedback_callback_;
   ResultCallback result_callback_;
+  ChildFeedbackDispatcher child_feedback_dispatcher_;
+  ChildResultDispatcher child_result_dispatcher_;
+  AdmissionFenceCheck admission_fence_check_;
+  ChildResultRegistrar child_result_registrar_;
+  ChildResultUnregistrar child_result_unregistrar_;
   RuntimeState state_;
   GateSnapshot gate_snapshot_;
   bool gate_bound_{false};

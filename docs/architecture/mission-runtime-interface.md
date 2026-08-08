@@ -1,9 +1,10 @@
 # Mission Runtime Interface
 
 **Status:** Active pre-1.0 Mission V1 public Interface; Issue #34 implements the
-Mission Runtime control plane behind this stable public Interface. The
-production RelativeMotion Adapter intentionally remains unavailable until #64;
-the physical motion chain is a later Task.
+Mission Runtime control plane behind this stable public Interface. Issue #64
+adds the production odometry-closed-loop RelativeMotion Adapter for pure-control
+and ROS-integration acceptance. Headless physical raw-stamp-age and TF
+acceptance is intentionally tracked by Issue #72.
 
 Mission Runtime is a deep Module with two mutation operations and one read-only
 state projection:
@@ -204,9 +205,25 @@ physically stopped; odometry proves stationarity separately.
   lease.
 - Timeout, cancel, STOP, dependency loss, exception, and success all pass
   through one serial terminal-intent linearization point.
-- Every Goal produces exactly one Result. The private Action Adapter keeps a
-  provisional GoalHandle delivery window across Core admission so a
-  synchronous child result is registered and delivered exactly once.
+- Every Goal that has entered production `on_accepted` and acquired its
+  GoalHandle/CallbackLease receives one graceful-shutdown terminal Result.
+  The private Action Adapter keeps that accepted handoff alive until Core
+  admission and the bounded shutdown drain have delivered it exactly once.
+- Action admission submission, queued dispatch, and the worker's start permit
+  share a Node-owned generation gate. Quiesce closes that gate atomically;
+  queued admissions return one structured safety result without entering
+  PREPARE or OPEN, and a permit is rechecked immediately before Core and
+  RelativeMotion side effects.
+- A provisional response timeout creates a bounded revoked ticket. It is
+  withdrawn at the fixed deadline and, when no GoalHandle/CallbackLease was
+  acquired, produces no fabricated Result. A callback already in production
+  `on_accepted` is the only late case covered by graceful shutdown; after the
+  ROS context or process starts closing, the transport provides no claim of
+  distributed exactly-once delivery.
+- Immutable RelativeMotion completion records are transferred to a Node-owned
+  RuntimeExecutionPlane. Delivery callbacks and Goal/Core state never execute
+  on the Adapter transaction thread; rejected records are reclaimed by the
+  independently joinable Node mailbox reaper.
 
 ## Terminal ordering and races
 
@@ -260,6 +277,7 @@ the frozen values below; they are not additions to the public ROS IDL.
 | `max_steps` | `3` |
 | `move_distance_min_m` / `move_distance_max_m` | `0.05` / `2.0` |
 | `rotate_angle_min_rad` / `rotate_angle_max_rad` | `0.05` / `6.283185` |
+| `stationarity_deadline_ms` | `1200` |
 
 The MOVE and ROTATE union validators consume the same policy values rather
 than maintaining a second range definition. Gate discovery uses the bounded
@@ -267,11 +285,38 @@ steady-clock window while continuing event-driven observation; a missed
 startup window leaves Runtime `UNAVAILABLE` and fail-closed until a healthy
 Gate snapshot is observed.
 
+The production RelativeMotion Adapter keeps the public Core non-blocking: a
+start transaction and teardown run on bounded worker paths, while STOP/Cancel
+first fences the generation and starts the #35 Gate inhibit/zero path without
+holding the Node mutex. Runtime callbacks enter a Node-owned typed queue with
+control-event priority. The queue physically reserves eight control slots
+beside 120 normal slots; normal saturation records one QueueFault without
+closing STOP/Cancel. The Adapter also exposes an idempotent emergency
+inhibit/zero seam that does not depend on queue admission or the Runtime
+worker. A cached serialized state snapshot is used for service timeout
+responses, and explicit shutdown drains ingress, Adapter transactions, and
+completion callbacks before the queue, worker, and Core are released. The #35
+conditioning Module retains its `2000 ms` component RPC bound, `4000 ms`
+PREPARE-to-OPEN handover deadline, and
+`OPEN -> Collision Monitor -> Velocity Smoother -> producer` order. Reentrant
+odom/scan/clock callbacks and the raw producer timer use shared lifetime
+ingress with weak owner captures and an in-flight drain before Adapter state
+is released.
+
 ## Motion and map semantics
 
 `MOVE_DISTANCE` closes a feedback loop on signed odometry projection along the
 initial heading. `ROTATE_ANGLE` unwraps yaw before closed-loop control. Both use
 trusted slowdown, tolerance, stall, and deadline policies.
+
+RelativeMotion terminal codes are frozen by cause: source-only odom/scan/clock
+liveness loss is `DEPENDENCY_UNAVAILABLE`; a RelativeMotion step deadline is
+`TIMEOUT`; stall, collision, and execution failure are `EXECUTION_FAILED`; and
+Gate, controller, container, component, candidate-writer, zero-proof,
+handover, and stationarity failures are `SAFETY_FAULT`. An original business
+failure changes to `SAFETY_FAULT` only when teardown cannot prove Gate
+inhibited+zero. A later zero proof never rewrites an infrastructure safety
+fault.
 
 `NAVIGATE_TO` resolves a Named Place inside the trusted navigation Adapter.
 `SAVE_MAP` writes occupancy YAML, image, and posegraph into a temporary

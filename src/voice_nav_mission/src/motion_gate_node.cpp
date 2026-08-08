@@ -503,6 +503,11 @@ private:
   {
     const auto before = core_.snapshot();
     OpenBinding expected_binding;
+    // The candidate writer is created by the conditioning Module after
+    // PREPARE.  Start the bounded writer observation at OPEN so component
+    // setup time does not consume the Gate's independent graph budget.
+    writer_observation_session_.reset();
+    writer_observation_started_at_ = now;
 
     auto result =
       core_.open(
@@ -602,6 +607,7 @@ private:
       candidate_subscription_.reset();
       return fault_from_snapshot();
     }
+    core_.start_armed_window(std::chrono::steady_clock::now());
     return result;
   }
 

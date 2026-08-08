@@ -55,9 +55,21 @@ target_include_directories(
 )
 
 add_library(
+  relative_motion_controller STATIC
+  src/relative_motion_controller.cpp
+)
+target_compile_features(relative_motion_controller PUBLIC cxx_std_17)
+target_include_directories(
+  relative_motion_controller
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+)
+
+add_library(
   motion_conditioning_pipeline STATIC
   src/motion_authority_ros_adapter.cpp
   src/motion_conditioning_pipeline.cpp
+  src/motion_source_freshness.cpp
 )
 target_compile_features(motion_conditioning_pipeline PUBLIC cxx_std_17)
 target_include_directories(
@@ -82,6 +94,30 @@ ament_target_dependencies(
 target_link_libraries(
   motion_conditioning_pipeline
   "${motion_gate_typesupport}"
+)
+
+add_library(
+  relative_motion_ros_adapter STATIC
+  src/relative_motion_ros_adapter.cpp
+)
+target_compile_features(relative_motion_ros_adapter PUBLIC cxx_std_17)
+target_include_directories(
+  relative_motion_ros_adapter
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+)
+ament_target_dependencies(
+  relative_motion_ros_adapter
+  geometry_msgs
+  nav_msgs
+  rclcpp
+  rosgraph_msgs
+  sensor_msgs
+)
+target_link_libraries(
+  relative_motion_ros_adapter
+  motion_conditioning_pipeline
+  relative_motion_controller
 )
 
 add_executable(
@@ -132,7 +168,7 @@ target_link_libraries(
 target_link_libraries(
   mission_runtime_node
   mission_runtime_core
-  motion_conditioning_pipeline
+  relative_motion_ros_adapter
   "${motion_gate_typesupport}"
 )
 
@@ -171,6 +207,162 @@ if(BUILD_TESTING)
   target_link_libraries(
     mission_runtime_core_test
     mission_runtime_core
+  )
+
+  ament_add_gtest(
+    runtime_event_queue_test
+    test/runtime_event_queue_test.cpp
+  )
+  target_compile_features(runtime_event_queue_test PUBLIC cxx_std_17)
+  target_include_directories(
+    runtime_event_queue_test
+    PRIVATE include
+  )
+  target_link_libraries(
+    runtime_event_queue_test
+    mission_runtime_core
+  )
+
+  ament_add_gtest(
+    runtime_completion_registry_test
+    test/runtime_completion_registry_test.cpp
+  )
+  target_compile_features(runtime_completion_registry_test PUBLIC cxx_std_17)
+  target_include_directories(
+    runtime_completion_registry_test
+    PRIVATE include
+  )
+  ament_target_dependencies(
+    runtime_completion_registry_test
+    rclcpp
+  )
+  target_link_libraries(
+    runtime_completion_registry_test
+    mission_runtime_core
+  )
+
+  ament_add_gtest(
+    runtime_completion_mailbox_test
+    test/runtime_completion_mailbox_test.cpp
+  )
+  target_compile_features(runtime_completion_mailbox_test PUBLIC cxx_std_17)
+  target_include_directories(
+    runtime_completion_mailbox_test
+    PRIVATE include
+  )
+  ament_target_dependencies(
+    runtime_completion_mailbox_test
+    geometry_msgs
+    nav_msgs
+    rclcpp
+    rosgraph_msgs
+    sensor_msgs
+  )
+  target_link_libraries(
+    runtime_completion_mailbox_test
+    mission_runtime_core
+  )
+
+  ament_add_gtest(
+    runtime_execution_plane_test
+    test/runtime_execution_plane_test.cpp
+  )
+  target_compile_features(runtime_execution_plane_test PUBLIC cxx_std_17)
+  target_include_directories(
+    runtime_execution_plane_test
+    PRIVATE include
+  )
+  ament_target_dependencies(
+    runtime_execution_plane_test
+    geometry_msgs
+    nav_msgs
+    rclcpp
+    rosgraph_msgs
+    sensor_msgs
+  )
+  target_link_libraries(
+    runtime_execution_plane_test
+    mission_runtime_core
+  )
+
+  ament_add_gtest(
+    action_admission_tracker_test
+    test/action_admission_tracker_test.cpp
+  )
+  target_compile_features(action_admission_tracker_test PUBLIC cxx_std_17)
+  target_include_directories(
+    action_admission_tracker_test
+    PRIVATE include
+  )
+
+  ament_add_gtest(
+    runtime_admission_gate_test
+    test/runtime_admission_gate_test.cpp
+  )
+  target_compile_features(runtime_admission_gate_test PUBLIC cxx_std_17)
+  target_include_directories(
+    runtime_admission_gate_test
+    PRIVATE include
+  )
+
+  ament_add_gtest(
+    runtime_transaction_plane_test
+    test/runtime_transaction_plane_test.cpp
+  )
+  target_compile_features(runtime_transaction_plane_test PUBLIC cxx_std_17)
+  target_include_directories(
+    runtime_transaction_plane_test
+    PRIVATE include
+  )
+
+  ament_add_gtest(
+    relative_motion_ros_adapter_test
+    test/relative_motion_ros_adapter_test.cpp
+  )
+  target_compile_features(relative_motion_ros_adapter_test PUBLIC cxx_std_17)
+  target_include_directories(
+    relative_motion_ros_adapter_test
+    PRIVATE include
+  )
+  ament_target_dependencies(
+    relative_motion_ros_adapter_test
+    geometry_msgs
+    nav_msgs
+    rclcpp
+    rosgraph_msgs
+    sensor_msgs
+  )
+  target_link_libraries(
+    relative_motion_ros_adapter_test
+    relative_motion_ros_adapter
+  )
+
+  ament_add_gtest(
+    relative_motion_controller_test
+    test/relative_motion_controller_test.cpp
+  )
+  target_compile_features(relative_motion_controller_test PUBLIC cxx_std_17)
+  target_include_directories(
+    relative_motion_controller_test
+    PRIVATE include
+  )
+  target_link_libraries(
+    relative_motion_controller_test
+    relative_motion_controller
+  )
+
+  ament_add_gtest(
+    motion_source_freshness_test
+    test/motion_source_freshness_test.cpp
+  )
+  target_compile_features(motion_source_freshness_test PUBLIC cxx_std_17)
+  target_include_directories(
+    motion_source_freshness_test
+    PRIVATE include
+  )
+  target_link_libraries(
+    motion_source_freshness_test
+    motion_conditioning_pipeline
   )
 
   ament_add_gtest(
@@ -285,6 +477,16 @@ if(BUILD_TESTING)
     TIMEOUT 60
     RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
   )
+  add_launch_test(
+    test/test_mission_runtime_node_active_shutdown.py
+    TIMEOUT 60
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
+  )
+  add_launch_test(
+    test/test_mission_runtime_node_restart.py
+    TIMEOUT 60
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
+  )
   set_tests_properties(
     test_test_motion_gate_node.py
     PROPERTIES
@@ -307,6 +509,21 @@ if(BUILD_TESTING)
   )
   set_tests_properties(
     test_test_mission_runtime_node.py
+    PROPERTIES
+      ENVIRONMENT_MODIFICATION
+        "ROS_DOMAIN_ID=unset:;DISABLE_ROS_ISOLATION=unset:"
+  )
+  set_tests_properties(
+    test_test_mission_runtime_node_active_shutdown.py
+    test_test_mission_runtime_node_restart.py
+    PROPERTIES
+      ENVIRONMENT
+        "RMW_IMPLEMENTATION=rmw_fastrtps_cpp;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
+      RUN_SERIAL TRUE
+  )
+  set_tests_properties(
+    test_test_mission_runtime_node_active_shutdown.py
+    test_test_mission_runtime_node_restart.py
     PROPERTIES
       ENVIRONMENT_MODIFICATION
         "ROS_DOMAIN_ID=unset:;DISABLE_ROS_ISOLATION=unset:"

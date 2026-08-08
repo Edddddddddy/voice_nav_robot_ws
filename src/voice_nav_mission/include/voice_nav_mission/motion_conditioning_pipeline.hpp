@@ -24,6 +24,7 @@
 #include <rclcpp/rclcpp.hpp>
 
 #include "voice_nav_mission/mission_runtime_core.hpp"
+#include "voice_nav_mission/runtime_transaction_plane.hpp"
 
 namespace voice_nav_mission
 {
@@ -43,6 +44,7 @@ enum class MotionConditioningFailure : std::uint8_t
   SafetyFault = 2,
   ExecutionFailed = 3,
   InternalError = 4,
+  Timeout = 5,
 };
 
 struct MotionConditioningResult
@@ -55,6 +57,11 @@ struct MotionConditioningResult
   std::string lease_id;
   std::string candidate_topic;
   std::string detail;
+  // Steady-clock evidence for the Gate zero acknowledgement.  This remains
+  // package-internal; it lets the relative-motion adapter start its bounded
+  // stationarity window at the actual zero proof rather than after component
+  // cleanup has completed.
+  std::chrono::steady_clock::time_point zero_proven_at{};
 };
 
 struct MotionConditioningCorrelationToken
@@ -64,6 +71,21 @@ struct MotionConditioningCorrelationToken
   std::string request_id;
 };
 
+// A terminal result crosses the RelativeMotion Adapter's worker seam as pure
+// data.  Delivery ownership stays in the Node-owned completion registry; an
+// Adapter worker must never carry or destroy a user callback.
+struct RelativeMotionCompletionRecord
+{
+  MotionToken token;
+  ChildResult result;
+};
+
+using RelativeMotionCompletionRecordPtr =
+  std::shared_ptr<const RelativeMotionCompletionRecord>;
+
+using RelativeMotionCompletionRelay =
+  std::function<bool(RelativeMotionCompletionRecordPtr)>;
+
 struct MotionConditioningConfig
 {
   std::chrono::milliseconds component_rpc_timeout{2000};
@@ -71,6 +93,10 @@ struct MotionConditioningConfig
   std::chrono::milliseconds prepare_open_deadline{4000};
   std::chrono::milliseconds renew_period{100};
   std::chrono::milliseconds dependency_liveness_timeout{200};
+  // Collision Monitor compares sensor ROS timestamps with its simulation
+  // clock.  This skew budget is distinct from the steady-clock dependency
+  // liveness deadline above.
+  std::chrono::milliseconds collision_source_timeout{200};
   std::chrono::milliseconds health_rpc_timeout{100};
   std::chrono::milliseconds control_response_deadline{100};
   std::chrono::milliseconds stop_barrier{250};
@@ -88,9 +114,21 @@ struct MotionConditioningConfig
   std::function<void(const MotionConditioningCorrelationToken &)> before_token_claim;
   std::function<void()> before_health_callback;
   std::function<void()> after_health_callback;
+  std::function<void()> before_open_callback;
   std::function<void()> before_renew_callback;
   std::function<void()> before_callback_wait;
   std::function<void()> before_renew_wait;
+  // Package-private deterministic barriers used by the RelativeMotion ROS
+  // Adapter seam tests. Production configuration leaves these unset.
+  std::function<void()> before_adapter_odom_callback;
+  std::function<void()> before_adapter_scan_callback;
+  std::function<void()> before_adapter_clock_callback;
+  std::function<void()> before_adapter_command_supplier;
+  std::function<void()> before_adapter_ingress_wait;
+  std::function<bool(std::uint64_t)> admission_fence_check;
+  std::shared_ptr<RuntimeTransactionPlane> transaction_plane;
+  std::function<std::uint64_t()> transaction_generation_provider;
+  RelativeMotionCompletionRelay completion_relay;
 };
 
 class MotionProducerPort

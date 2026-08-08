@@ -42,13 +42,14 @@ Verified by repository, static, and headless-Gazebo gates:
   publisher GID, and fully qualified owner are exercised over a bounded
   observation window.
 
-SLAM, the physical Nav2 motion chain, Agent, and voice remain target claims.
-The Mission Runtime control plane and the package-private conditioning module
-are current slices described below; the production RelativeMotion Adapter and
-physical MOVE/ROTATE execution remain intentionally unavailable until Task
-#64. No `map → odom` owner exists yet. Controller timeout is configured
-but is not presented as Gate-death or physical-stop completion; process-death
-acceptance remains a separate target slice.
+SLAM, the full physical Nav2 motion chain, Agent, and voice remain target
+claims. The Mission Runtime control plane, production RelativeMotion Adapter,
+and package-private conditioning module are current slices described below.
+Relative-motion control is delivered as an odometry-closed-loop MOVE/ROTATE
+Module; headless physical raw-stamp-age and TF acceptance is a separate
+follow-up in Issue #72. No `map → odom` owner exists yet. Controller timeout is
+configured but is not presented as Gate-death or physical-stop completion;
+process-death acceptance remains a separate target slice.
 
 ## Current independent MotionGate slice
 
@@ -103,7 +104,9 @@ The Runtime-owned `MotionConditioningPipeline` is a package-private module in
 `/motion_conditioning_container` component container, drives their lifecycle,
 and hands their candidate writer to MotionGate only after bounded graph,
 health, controller, clock, lease, and zero-proof checks. The trusted bringup
-record keeps MotionGate PREPARE bounded to `6000 ms`.
+record keeps MotionGate PREPARE bounded to `6000 ms`; the conditioning Module
+separately keeps component RPCs bounded to `2000 ms` and the PREPARE-to-OPEN
+handover bounded to `4000 ms`.
 
 The current internal slice fixes the component FQNs `/collision_monitor` and
 `/velocity_smoother`; raw and smoothed traffic uses
@@ -118,9 +121,11 @@ candidate writer is pinned as
 `rclcpp::SystemDefaultsQoS()` and its writer/GID proof. These are private
 runtime seams and are not exported as public ROS IDL.
 
-Issue #35 does not execute product Mission MOVE/ROTATE odometry loops or
-Gazebo physical motion. Mission remains `DEPENDENCY_UNAVAILABLE` until Task
-#64 supplies the approved physical execution slice.
+Issue #64 now supplies the production pure-control and ROS-integration
+RelativeMotion execution slice. Its Adapter reuses this #35 Module and keeps
+the handover order `OPEN -> Collision Monitor -> Velocity Smoother -> producer`.
+Headless physical raw-stamp-age and TF acceptance is intentionally separate in
+Issue #72; this repository slice does not claim that physical gate.
 
 ## Target v1.0 topology
 
@@ -212,18 +217,28 @@ with package-private Core, MotionGate Adapter, and scripted seams. Admission,
 identity/epoch fencing, STOP linearization, state/feedback/result projection,
 and fail-closed Gate coordination are implemented in this slice.
 
-The production `RelativeMotionPort` is an intentional unavailable Adapter
-until Task #64. Issue #35 supplies the private conditioning and authority
-handover module, but this current slice still validates and fences Missions;
-it does not produce product candidate velocities or perform physical
-MOVE/ROTATE motion. Task #64 may add that private execution behavior without
-changing the frozen public ROS IDL or the Mission endpoints.
+The production `RelativeMotionPort` is backed by a deep ROS-free
+`RelativeMotionController` and a ROS Adapter. MOVE projects odometry onto the
+signed initial-heading axis; ROTATE compares unwrapped yaw. Both enforce
+steady-clock deadlines, progress and stall policy, source freshness, lease /
+generation fencing, and zero/stationarity before a terminal result. The
+Adapter reuses Issue #35's private conditioning and authority handover Module
+and does not add a conditioned-scan relay, writer handover, or public ROS IDL.
+Its start/teardown transactions are asynchronous and cancel-observable: the
+Node-owned Runtime event queue gives STOP/Cancel control priority, while the
+Adapter fences the generation and starts Gate inhibit/zero without holding the
+Node mutex. Stationarity starts at the actual steady-clock `zero_proven_at` and
+uses the absolute `zero_proven_at + 1200 ms` deadline. This Task proves the
+pure-control and ROS-integration layers; headless physical raw-stamp-age and TF
+acceptance is tracked independently by Issue #72.
 
 ### Simulation Module
 
 `voice_nav_sim` owns Xacro, Gazebo assets, `gz_ros2_control`, controller
 configuration, and the sensor bridge. Target `ros_gz_bridge` traffic is only
-`/clock` and `/scan`; Gazebo model-scoped names do not escape.
+`/clock` and `/scan`; raw scan stamps and frames remain unchanged, and
+Gazebo model-scoped names do not escape. The physical raw-age/TF gate belongs
+to Issue #72.
 
 ## Package and process boundaries
 

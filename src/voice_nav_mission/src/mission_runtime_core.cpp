@@ -93,14 +93,24 @@ RuntimeCore::RuntimeCore(
   std::shared_ptr<RelativeMotionPort> relative_motion,
   StateCallback state_callback,
   FeedbackCallback feedback_callback,
-  ResultCallback result_callback)
+  ResultCallback result_callback,
+  ChildFeedbackDispatcher child_feedback_dispatcher,
+  ChildResultDispatcher child_result_dispatcher,
+  AdmissionFenceCheck admission_fence_check,
+  ChildResultRegistrar child_result_registrar,
+  ChildResultUnregistrar child_result_unregistrar)
 : config_(std::move(config)),
   clock_(std::move(clock)),
   authority_(std::move(authority)),
   relative_motion_(std::move(relative_motion)),
   state_callback_(std::move(state_callback)),
   feedback_callback_(std::move(feedback_callback)),
-  result_callback_(std::move(result_callback))
+  result_callback_(std::move(result_callback)),
+  child_feedback_dispatcher_(std::move(child_feedback_dispatcher)),
+  child_result_dispatcher_(std::move(child_result_dispatcher)),
+  admission_fence_check_(std::move(admission_fence_check)),
+  child_result_registrar_(std::move(child_result_registrar)),
+  child_result_unregistrar_(std::move(child_result_unregistrar))
 {
   if (!clock_ || !authority_ || !relative_motion_) {
     throw std::invalid_argument("Runtime Core requires clock and all ports");
@@ -113,7 +123,8 @@ RuntimeCore::RuntimeCore(
     config_.mission_deadline.count() <= 0 ||
     config_.gate_discovery_deadline.count() <= 0 ||
     config_.control_response_deadline.count() <= 0 ||
-    config_.stop_barrier.count() <= 0 || config_.cancel_grace.count() <= 0)
+    config_.stop_barrier.count() <= 0 || config_.cancel_grace.count() <= 0 ||
+    config_.stationarity_deadline.count() <= 0)
   {
     throw std::invalid_argument("invalid trusted Runtime configuration");
   }
@@ -153,7 +164,10 @@ RuntimeCore::RuntimeCore(
   publish_state();
 }
 
-AdmissionResult RuntimeCore::admit(const MissionGoal & goal)
+AdmissionResult RuntimeCore::admit(
+  const MissionGoal & goal,
+  StartPermitCheck start_permit_check,
+  const std::uint64_t admission_generation)
 {
   MissionResult result;
   if (!valid_bounded_id(
@@ -170,6 +184,13 @@ AdmissionResult RuntimeCore::admit(const MissionGoal & goal)
     return AdmissionResult{0U, false, reject(
       MissionResultCode::StaleRequest,
       "Runtime instance or admission epoch is stale")};
+  }
+  if (!admission_allowed(state_.admission_epoch)) {
+    state_.availability = RuntimeAvailability::Faulted;
+    publish_state();
+    return AdmissionResult{0U, false, reject(
+      MissionResultCode::SafetyFault,
+      "Runtime admission fence is active")};
   }
   if (!consume_source_sequence(goal, result)) {
     return AdmissionResult{0U, false, result};
@@ -217,6 +238,15 @@ AdmissionResult RuntimeCore::admit(const MissionGoal & goal)
       "MotionGate endpoint is unavailable")};
   }
 
+  // The Node-owned start permit is checked again immediately before any
+  // authority transaction.  A queued AdmitEvent that loses the quiesce
+  // generation cannot enter PREPARE, even if it passed validation earlier.
+  if (start_permit_check && !start_permit_check()) {
+    return AdmissionResult{0U, false, reject(
+      MissionResultCode::SafetyFault,
+      "Runtime start permit was revoked before MotionGate PREPARE")};
+  }
+
   const auto mission_id = next_mission_id_++;
   if (mission_id == 0U || next_generation_ == 0U) {
     state_.availability = RuntimeAvailability::Faulted;
@@ -226,29 +256,61 @@ AdmissionResult RuntimeCore::admit(const MissionGoal & goal)
       "Mission generation exhausted")};
   }
 
-  const auto prepare = authority_->prepare(make_operation());
-  if (!prepare.applied) {
-    return AdmissionResult{0U, false, reject(
-      MissionResultCode::DependencyUnavailable,
-      prepare.detail.empty() ? "MotionGate PREPARE failed" : prepare.detail)};
-  }
-  gate_snapshot_ = prepare.snapshot;
-  current_lease_id_ = prepare.lease_id;
-  const auto open = authority_->open(make_operation(current_lease_id_));
-  if (!open.applied) {
-    const bool cleanup = inhibit_and_prove_zero();
-    if (!cleanup) {
+  if (!relative_motion_->owns_authority_lifecycle()) {
+    const auto prepare = authority_->prepare(make_operation());
+    if (!prepare.applied) {
+      return AdmissionResult{0U, false, reject(
+        MissionResultCode::DependencyUnavailable,
+        prepare.detail.empty() ? "MotionGate PREPARE failed" : prepare.detail)};
+    }
+    gate_snapshot_ = prepare.snapshot;
+    current_lease_id_ = prepare.lease_id;
+    if (!admission_allowed(state_.admission_epoch) ||
+      (start_permit_check && !start_permit_check()))
+    {
+      const bool cleanup = inhibit_and_prove_zero();
       state_.availability = RuntimeAvailability::Faulted;
       publish_state();
       return AdmissionResult{0U, false, reject(
         MissionResultCode::SafetyFault,
-        "MotionGate OPEN failed and zero cleanup could not be proven")};
+        cleanup ? "Runtime admission fence raised after MotionGate PREPARE" :
+        "Runtime admission fence raised after PREPARE and zero cleanup failed")};
     }
-    return AdmissionResult{0U, false, reject(
-      MissionResultCode::DependencyUnavailable,
-      open.detail.empty() ? "MotionGate OPEN failed" : open.detail)};
+    if (start_permit_check && !start_permit_check()) {
+      const bool cleanup = inhibit_and_prove_zero();
+      state_.availability = RuntimeAvailability::Faulted;
+      publish_state();
+      return AdmissionResult{0U, false, reject(
+        MissionResultCode::SafetyFault,
+        cleanup ? "Runtime start permit was revoked before MotionGate OPEN" :
+        "Runtime start permit was revoked and zero cleanup failed")};
+    }
+    const auto open = authority_->open(make_operation(current_lease_id_));
+    if (!open.applied) {
+      const bool cleanup = inhibit_and_prove_zero();
+      if (!cleanup) {
+        state_.availability = RuntimeAvailability::Faulted;
+        publish_state();
+        return AdmissionResult{0U, false, reject(
+          MissionResultCode::SafetyFault,
+          "MotionGate OPEN failed and zero cleanup could not be proven")};
+      }
+      return AdmissionResult{0U, false, reject(
+        MissionResultCode::DependencyUnavailable,
+        open.detail.empty() ? "MotionGate OPEN failed" : open.detail)};
+    }
+    gate_snapshot_ = open.snapshot;
   }
-  gate_snapshot_ = open.snapshot;
+
+  if (start_permit_check && !start_permit_check()) {
+    const bool cleanup = inhibit_and_prove_zero();
+    state_.availability = RuntimeAvailability::Faulted;
+    publish_state();
+    return AdmissionResult{0U, false, reject(
+      MissionResultCode::SafetyFault,
+      cleanup ? "Runtime start permit was revoked after MotionGate OPEN" :
+      "Runtime start permit was revoked and zero cleanup failed")};
+  }
 
   active_ = ActiveMission{
     mission_id,
@@ -257,9 +319,11 @@ AdmissionResult RuntimeCore::admit(const MissionGoal & goal)
     0U,
     0U,
     state_.admission_epoch,
+    admission_generation,
     goal.steps,
     clock_->now() + config_.mission_deadline,
     {},
+    std::move(start_permit_check),
     false,
     false};
   last_feedback_progress_ = 0.0;
@@ -293,8 +357,20 @@ StopResponse RuntimeCore::stop(const StopRequest & request)
       if (rotate_epoch) {
         epoch_ok = this->rotate_epoch();
       }
-      const bool zero = inhibit_and_prove_zero();
-      return TerminalOutcome{zero, true, epoch_ok};
+      bool zero = false;
+      bool canceled = true;
+      if (relative_motion_->owns_authority_lifecycle()) {
+        try {
+          canceled = relative_motion_->cancel(
+            MotionToken{}, clock_->now() + config_.stationarity_deadline);
+          zero = canceled && relative_motion_->zero_proven();
+        } catch (...) {
+          canceled = false;
+        }
+      } else {
+        zero = inhibit_and_prove_zero();
+      }
+      return TerminalOutcome{zero, canceled, epoch_ok};
     };
 
   if (!valid_bounded_id(request.request_id, kMaximumRuntimeIdLength, false)) {
@@ -490,11 +566,13 @@ void RuntimeCore::on_tick()
       "Mission deadline elapsed on the injected steady clock");
     return;
   }
-  const auto renewed = authority_->renew(make_operation(current_lease_id_));
-  if (!renewed.applied) {
-    select_terminal_and_stop(
-      MissionResultCode::SafetyFault,
-      renewed.detail.empty() ? "MotionGate authority renewal failed" : renewed.detail);
+  if (!relative_motion_->owns_authority_lifecycle()) {
+    const auto renewed = authority_->renew(make_operation(current_lease_id_));
+    if (!renewed.applied) {
+      select_terminal_and_stop(
+        MissionResultCode::SafetyFault,
+        renewed.detail.empty() ? "MotionGate authority renewal failed" : renewed.detail);
+    }
   }
 }
 
@@ -511,6 +589,11 @@ bool RuntimeCore::usable() const noexcept
 bool RuntimeCore::has_active_mission() const noexcept
 {
   return active_.has_value();
+}
+
+bool RuntimeCore::admission_allowed(const std::uint64_t admission_epoch) const
+{
+  return !admission_fence_check_ || admission_fence_check_(admission_epoch);
 }
 
 MissionResult RuntimeCore::reject(
@@ -743,24 +826,71 @@ void RuntimeCore::start_step()
   if (!active_.has_value()) {
     return;
   }
+  if (!admission_allowed(active_->admission_epoch)) {
+    select_terminal_and_stop(
+      MissionResultCode::SafetyFault,
+      "Runtime admission fence raised before RelativeMotionPort start");
+    return;
+  }
+  if (active_->start_permit_check && !active_->start_permit_check()) {
+    select_terminal_and_stop(
+      MissionResultCode::SafetyFault,
+      "Runtime start permit was revoked before RelativeMotionPort start");
+    return;
+  }
   publish_feedback(FeedbackPhase::Validating, active_->step_index, 0.0);
   const MotionToken token{
     active_->id,
     active_->admission_epoch,
     active_->generation,
-    active_->step_generation};
+    active_->step_generation,
+    active_->admission_generation};
   active_->child_token = token;
-  active_->child_started = true;
+  if (!admission_allowed(token.admission_epoch)) {
+    select_terminal_and_stop(
+      MissionResultCode::SafetyFault,
+      "Runtime admission fence raised before RelativeMotionPort start");
+    return;
+  }
+  bool completion_registered = false;
   try {
+    if (relative_motion_->uses_external_completion_registry()) {
+      if (!child_result_registrar_ || !child_result_registrar_(
+          token,
+          [this](const MotionToken & callback_token, const ChildResult & result) {
+            on_child_result(callback_token, result);
+          }))
+      {
+        select_terminal_and_stop(
+          MissionResultCode::SafetyFault,
+          "Node completion registry rejected RelativeMotionPort start");
+        return;
+      }
+      completion_registered = true;
+    }
+    active_->child_started = true;
+    RelativeMotionPort::ResultCallback result_callback;
+    if (!relative_motion_->uses_external_completion_registry()) {
+      result_callback = [this](
+        const MotionToken & callback_token, const ChildResult & result) {
+          if (child_result_dispatcher_) {
+            (void)child_result_dispatcher_(callback_token, result);
+          } else {
+            on_child_result(callback_token, result);
+          }
+        };
+    }
     relative_motion_->start(
       token,
       active_->steps[active_->step_index],
       [this](const MotionToken & callback_token, double progress) {
-        on_child_feedback(callback_token, progress);
+        if (child_feedback_dispatcher_) {
+          (void)child_feedback_dispatcher_(callback_token, progress);
+        } else {
+          on_child_feedback(callback_token, progress);
+        }
       },
-      [this](const MotionToken & callback_token, const ChildResult & result) {
-        on_child_result(callback_token, result);
-      });
+      std::move(result_callback));
     if (
       active_.has_value() && active_->id == token.mission_id &&
       active_->generation == token.mission_generation &&
@@ -770,6 +900,9 @@ void RuntimeCore::start_step()
       publish_state();
     }
   } catch (const std::exception & error) {
+    if (completion_registered && child_result_unregistrar_) {
+      child_result_unregistrar_(token);
+    }
     if (active_.has_value() && active_->id == token.mission_id) {
       active_->child_started = false;
     }
@@ -777,6 +910,9 @@ void RuntimeCore::start_step()
       MissionResultCode::InternalError,
       std::string{"child start threw: "} + error.what());
   } catch (...) {
+    if (completion_registered && child_result_unregistrar_) {
+      child_result_unregistrar_(token);
+    }
     if (active_.has_value() && active_->id == token.mission_id) {
       active_->child_started = false;
     }
@@ -814,9 +950,18 @@ void RuntimeCore::on_child_result(
     return;
   }
   if (result.code != ChildResultCode::Succeeded) {
+    MissionResultCode result_code = MissionResultCode::ExecutionFailed;
+    if (result.code == ChildResultCode::DependencyUnavailable) {
+      result_code = MissionResultCode::DependencyUnavailable;
+    } else if (result.code == ChildResultCode::Timeout) {
+      result_code = MissionResultCode::Timeout;
+    } else if (result.code == ChildResultCode::SafetyFault) {
+      result_code = MissionResultCode::SafetyFault;
+    } else if (result.code == ChildResultCode::InternalError) {
+      result_code = MissionResultCode::InternalError;
+    }
     select_terminal_and_stop(
-      result.code == ChildResultCode::Timeout ?
-      MissionResultCode::Timeout : MissionResultCode::ExecutionFailed,
+      result_code,
       result.detail.empty() ? "relative-motion child failed" : result.detail);
     return;
   }
@@ -834,6 +979,33 @@ void RuntimeCore::on_child_result(
   ++active_->step_index;
   ++active_->step_generation;
   start_step();
+}
+
+void RuntimeCore::fail_closed(std::string detail)
+{
+  if (active_.has_value()) {
+    select_terminal_and_stop(
+      MissionResultCode::SafetyFault,
+      std::move(detail));
+    return;
+  }
+  state_.availability = RuntimeAvailability::Faulted;
+  publish_state();
+}
+
+void RuntimeCore::fail_closed_at_epoch(
+  const std::uint64_t admission_epoch,
+  std::string detail)
+{
+  if (admission_epoch > state_.admission_epoch) {
+    state_.admission_epoch = admission_epoch;
+  }
+  if (active_.has_value()) {
+    (void)select_terminal_and_stop(
+      MissionResultCode::SafetyFault, std::move(detail));
+  }
+  state_.availability = RuntimeAvailability::Faulted;
+  publish_state();
 }
 
 RuntimeCore::TerminalOutcome RuntimeCore::select_terminal_and_stop(
@@ -860,13 +1032,24 @@ RuntimeCore::TerminalOutcome RuntimeCore::select_terminal_and_stop(
     code = MissionResultCode::SafetyFault;
   }
   publish_feedback(FeedbackPhase::SafeStopping, active_->step_index, 0.0);
-  const bool zero = inhibit_and_prove_zero();
   bool canceled = true;
-  try {
-    canceled = relative_motion_->cancel(
-      token, clock_->now() + config_.cancel_grace);
-  } catch (...) {
-    canceled = false;
+  bool zero = false;
+  if (relative_motion_->owns_authority_lifecycle()) {
+    try {
+      canceled = relative_motion_->cancel(
+        token, clock_->now() + config_.stationarity_deadline);
+      zero = canceled && relative_motion_->zero_proven();
+    } catch (...) {
+      canceled = false;
+    }
+  } else {
+    zero = inhibit_and_prove_zero();
+    try {
+      canceled = relative_motion_->cancel(
+        token, clock_->now() + config_.cancel_grace);
+    } catch (...) {
+      canceled = false;
+    }
   }
   if (!zero || !canceled) {
     state_.availability = RuntimeAvailability::Faulted;

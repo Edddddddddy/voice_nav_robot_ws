@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "voice_nav_mission/mission_runtime_core.hpp"
-
 #include <gtest/gtest.h>
 
 #include <algorithm>
@@ -24,6 +22,9 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "voice_nav_mission/mission_runtime_core.hpp"
+#include "voice_nav_mission/runtime_emergency_fence.hpp"
 
 namespace voice_nav_mission
 {
@@ -118,6 +119,20 @@ TEST(RuntimeCore, ProductionUnavailablePortDoesNotAcquireGate)
   EXPECT_FALSE(fixture.core.has_active_mission());
 }
 
+TEST(RuntimeCore, RevokedStartPermitPreventsRelativeMotionSideEffect)
+{
+  Fixture fixture;
+  const auto admission = fixture.core.admit(
+    goal(1U), []() {return false;});
+
+  EXPECT_FALSE(admission.accepted);
+  EXPECT_EQ(admission.result.code, MissionResultCode::SafetyFault);
+  EXPECT_TRUE(fixture.relative->started_steps().empty());
+  EXPECT_TRUE(fixture.authority->operations().empty());
+  EXPECT_TRUE(fixture.results.empty());
+  EXPECT_FALSE(fixture.core.has_active_mission());
+}
+
 TEST(RuntimeCore, FakeFSMIsOrderedBusyAndExactlyOnce)
 {
   Fixture fixture;
@@ -154,6 +169,53 @@ TEST(RuntimeCore, FakeFSMIsOrderedBusyAndExactlyOnce)
   // produce a second result or reopen the Gate.
   fixture.relative->complete();
   EXPECT_EQ(fixture.results.size(), 1U);
+}
+
+TEST(RuntimeCore, ChildCallbacksCanBeQueuedAndAppliedByTheRuntimeWorker)
+{
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  std::vector<MissionFeedback> feedback;
+  std::vector<MissionResult> results;
+  std::vector<std::pair<MotionToken, double>> queued_feedback;
+  std::vector<std::pair<MotionToken, ChildResult>> queued_results;
+  RuntimeCore core(
+    config(), clock, authority, relative,
+    {},
+    [&feedback](std::uint64_t, const MissionFeedback & item) {
+      feedback.push_back(item);
+    },
+    [&results](std::uint64_t, const MissionResult & item) {
+      results.push_back(item);
+    },
+    [&queued_feedback](const MotionToken & token, const double progress) {
+      queued_feedback.emplace_back(token, progress);
+      return true;
+    },
+    [&queued_results](const MotionToken & token, const ChildResult & result) {
+      queued_results.emplace_back(token, result);
+      return true;
+    });
+  core.observe_gate(authority->snapshot());
+
+  ASSERT_TRUE(core.admit(goal(1U)).accepted);
+  const auto token = relative->started_tokens().front();
+  relative->feedback(0.5);
+  ASSERT_EQ(queued_feedback.size(), 1U);
+  EXPECT_TRUE(core.has_active_mission());
+  core.on_child_feedback(queued_feedback.front().first, queued_feedback.front().second);
+  EXPECT_FALSE(feedback.empty());
+
+  relative->complete();
+  ASSERT_EQ(queued_results.size(), 1U);
+  EXPECT_TRUE(core.has_active_mission());
+  core.on_child_result(queued_results.front().first, queued_results.front().second);
+
+  ASSERT_EQ(results.size(), 1U);
+  EXPECT_EQ(results.front().code, MissionResultCode::Succeeded);
+  EXPECT_EQ(queued_results.front().first.mission_id, token.mission_id);
+  EXPECT_FALSE(core.has_active_mission());
 }
 
 TEST(RuntimeCore, ThreeStepFeedbackUsesExactMissionBoundaries)
@@ -202,6 +264,26 @@ TEST(RuntimeCore, StopRotatesEpochAndDuplicateDoesNotRotateAgain)
   EXPECT_EQ(duplicate.admission_epoch, 2U);
   EXPECT_TRUE(duplicate.motion_inhibited);
   EXPECT_EQ(fixture.authority->inhibit_count(), 2U);
+}
+
+TEST(RuntimeCore, EmergencyFenceRotatesEpochAndRejectsOldGeneration)
+{
+  Fixture fixture;
+  ASSERT_TRUE(fixture.core.admit(goal(1U)).accepted);
+  RuntimeEmergencyFence fence(1U);
+  ASSERT_TRUE(fence.raise("control admission failed"));
+  const auto snapshot = fence.take();
+  ASSERT_TRUE(snapshot.has_value());
+
+  fixture.core.fail_closed_at_epoch(snapshot->admission_epoch, snapshot->detail);
+
+  EXPECT_EQ(fixture.core.state().admission_epoch, 2U);
+  ASSERT_EQ(fixture.results.size(), 1U);
+  EXPECT_EQ(fixture.results.front().code, MissionResultCode::SafetyFault);
+  EXPECT_TRUE(fixture.core.state().availability == RuntimeAvailability::Faulted);
+  const auto stale = fixture.core.admit(goal(2U));
+  EXPECT_FALSE(stale.accepted);
+  EXPECT_EQ(stale.result.code, MissionResultCode::StaleRequest);
 }
 
 TEST(RuntimeCore, ActiveStopEpochExhaustionFailsTheWholeTransaction)
@@ -353,6 +435,36 @@ TEST(RuntimeCore, ChildFailureReportsTheStartedStepAndSkipsTheRest)
   EXPECT_EQ(fixture.results.front().code, MissionResultCode::ExecutionFailed);
   EXPECT_EQ(fixture.results.front().failed_step, 0);
   EXPECT_EQ(fixture.relative->started_steps().size(), 1U);
+}
+
+TEST(RuntimeCore, ChildFailureCodesRemainTypedAtTheMissionBoundary)
+{
+  const auto mission_code_for = [](const ChildResultCode child_code) {
+      Fixture fixture;
+      const auto admission = fixture.core.admit(goal(1U));
+      if (!admission.accepted) {
+        return MissionResultCode::InternalError;
+      }
+      const auto token = fixture.relative->started_tokens().front();
+      fixture.core.on_child_result(token, ChildResult{child_code, "typed"});
+      if (fixture.results.empty()) {
+        return MissionResultCode::InternalError;
+      }
+      return fixture.results.front().code;
+    };
+
+  EXPECT_EQ(
+    mission_code_for(ChildResultCode::DependencyUnavailable),
+    MissionResultCode::DependencyUnavailable);
+  EXPECT_EQ(
+    mission_code_for(ChildResultCode::Timeout),
+    MissionResultCode::Timeout);
+  EXPECT_EQ(
+    mission_code_for(ChildResultCode::Failed),
+    MissionResultCode::ExecutionFailed);
+  EXPECT_EQ(
+    mission_code_for(ChildResultCode::SafetyFault),
+    MissionResultCode::SafetyFault);
 }
 
 TEST(RuntimeCore, TerminalCancelUsesTheManualSteadyClockGraceDeadline)
