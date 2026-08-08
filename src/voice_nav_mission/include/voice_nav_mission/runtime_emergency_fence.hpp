@@ -75,6 +75,13 @@ public:
     return admission_epoch_.load(std::memory_order_acquire);
   }
 
+  [[nodiscard]] bool admission_allowed(
+    const std::uint64_t expected_epoch) const noexcept
+  {
+    return !blocked_.load(std::memory_order_acquire) &&
+           admission_epoch_.load(std::memory_order_acquire) == expected_epoch;
+  }
+
   [[nodiscard]] std::optional<RuntimeEmergencyFenceSnapshot> take()
   {
     std::lock_guard<std::mutex> lock(mutex_);

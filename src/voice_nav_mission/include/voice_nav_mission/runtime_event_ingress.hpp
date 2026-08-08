@@ -17,6 +17,7 @@
 
 #include <exception>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <utility>
 
@@ -40,6 +41,7 @@ public:
   using FenceCallback =
     std::function<void(const RuntimeEmergencyFenceSnapshot &)>;
   using EmergencyControlSelector = std::function<bool(const Event &)>;
+  using BeforeDispatchCallback = std::function<void(Event &)>;
 
   RuntimeEventIngress(
     Queue & queue,
@@ -47,13 +49,15 @@ public:
     LaneSelector lane_selector,
     EmergencyCallback emergency_callback,
     FenceCallback fence_callback,
-    EmergencyControlSelector emergency_control_selector = {})
+    EmergencyControlSelector emergency_control_selector = {},
+    BeforeDispatchCallback before_dispatch_callback = {})
   : queue_(queue),
     fence_(fence),
     lane_selector_(std::move(lane_selector)),
     emergency_callback_(std::move(emergency_callback)),
     fence_callback_(std::move(fence_callback)),
-    emergency_control_selector_(std::move(emergency_control_selector))
+    emergency_control_selector_(std::move(emergency_control_selector)),
+    before_dispatch_callback_(std::move(before_dispatch_callback))
   {
   }
 
@@ -85,13 +89,15 @@ public:
 
   void request_emergency(std::string detail) noexcept
   {
-    (void)fence_.raise(std::move(detail));
-    try {
-      if (emergency_callback_) {
-        emergency_callback_();
+    const bool first_raise = fence_.raise(std::move(detail));
+    if (first_raise) {
+      try {
+        if (emergency_callback_) {
+          emergency_callback_();
+        }
+      } catch (...) {
+        // The fence remains latched even if an adapter callback is faulty.
       }
-    } catch (...) {
-      // The fence remains latched even if an adapter callback is faulty.
     }
     queue_.wake();
   }
@@ -120,7 +126,22 @@ public:
         continue;
       }
       try {
-        dispatch(event);
+        if (before_dispatch_callback_) {
+          before_dispatch_callback_(event);
+        }
+        bool dispatch_allowed = false;
+        {
+          std::lock_guard<std::mutex> lock(dispatch_mutex_);
+          const bool emergency_control =
+            emergency_control_selector_ && emergency_control_selector_(event);
+          dispatch_allowed = emergency_control || !fence_.blocked();
+          if (dispatch_allowed) {
+            dispatch(event);
+          }
+        }
+        if (!dispatch_allowed) {
+          (void)process_pending_fence();
+        }
       } catch (const std::exception & error) {
         try {
           fault_handler(std::string{"Runtime event worker raised: "} + error.what());
@@ -139,16 +160,10 @@ public:
 
   [[nodiscard]] bool process_pending_fence() noexcept
   {
+    std::lock_guard<std::mutex> lock(dispatch_mutex_);
     const auto snapshot = fence_.take();
     if (!snapshot.has_value()) {
       return false;
-    }
-    try {
-      if (emergency_callback_) {
-        emergency_callback_();
-      }
-    } catch (...) {
-      // Keep the fail-closed fence latched if direct zero delivery throws.
     }
     try {
       if (fence_callback_) {
@@ -165,6 +180,12 @@ public:
     return fence_.blocked();
   }
 
+  [[nodiscard]] bool admission_allowed(
+    const std::uint64_t expected_epoch) const noexcept
+  {
+    return fence_.admission_allowed(expected_epoch);
+  }
+
 private:
   Queue & queue_;
   RuntimeEmergencyFence & fence_;
@@ -172,6 +193,8 @@ private:
   EmergencyCallback emergency_callback_;
   FenceCallback fence_callback_;
   EmergencyControlSelector emergency_control_selector_;
+  BeforeDispatchCallback before_dispatch_callback_;
+  mutable std::mutex dispatch_mutex_;
 };
 
 }  // namespace voice_nav_mission

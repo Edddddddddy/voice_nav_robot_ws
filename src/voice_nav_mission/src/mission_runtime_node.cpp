@@ -211,6 +211,9 @@ public:
     conditioning_config.stop_barrier = config_.stop_barrier;
     conditioning_config.collision_source_timeout = std::chrono::milliseconds(
       kTrustedCollisionSourceTimeoutMs);
+    conditioning_config.admission_fence_check = [this](const std::uint64_t epoch) {
+        return event_ingress_.admission_allowed(epoch);
+      };
     relative_motion_ = std::make_shared<RelativeMotionRosAdapter>(
       *this, authority_, motion_policy, conditioning_config);
     core_ = std::make_unique<RuntimeCore>(
@@ -232,6 +235,9 @@ public:
       [this](const MotionToken & token, const ChildResult & result) {
         return enqueue_internal_event(RuntimeEvent{
           token.mission_generation, ChildResultEvent{token, result}});
+      },
+      [this](const std::uint64_t epoch) {
+        return event_ingress_.admission_allowed(epoch);
       });
     runtime_worker_ = std::thread([this]() {run_runtime_events();});
     (void)enqueue_event(RuntimeEvent{

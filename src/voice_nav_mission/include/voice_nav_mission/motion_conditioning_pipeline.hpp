@@ -109,6 +109,7 @@ struct MotionConditioningConfig
   std::function<void()> before_adapter_clock_callback;
   std::function<void()> before_adapter_command_supplier;
   std::function<void()> before_adapter_ingress_wait;
+  std::function<bool(std::uint64_t)> admission_fence_check;
 };
 
 class MotionProducerPort

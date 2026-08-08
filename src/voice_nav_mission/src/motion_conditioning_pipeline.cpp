@@ -1849,8 +1849,13 @@ private:
         detail += "; Gate zero proof was unavailable";
       }
     }
-    if (!components_clean) {
-      detail += "; component cleanup could not be proven";
+    const bool cleanup_residual =
+      !components_clean || cleanup_failure_.has_value() ||
+      cleanup_identity_fault_ || !pending_loads_.empty() ||
+      !residual_components_.empty();
+    if (cleanup_residual) {
+      failure = MotionConditioningFailure::SafetyFault;
+      detail += "; component/container/writer cleanup could not be proven";
     }
     detail = with_cleanup_failure(std::move(detail));
     std::lock_guard<std::recursive_mutex> lock(mutex_);

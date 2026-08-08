@@ -304,6 +304,7 @@ public:
   using ChildFeedbackDispatcher = std::function<bool(const MotionToken &, double)>;
   using ChildResultDispatcher = std::function<bool(
         const MotionToken &, const ChildResult &)>;
+  using AdmissionFenceCheck = std::function<bool(std::uint64_t)>;
 
   RuntimeCore(
     RuntimeConfig config,
@@ -314,7 +315,8 @@ public:
     FeedbackCallback feedback_callback = {},
     ResultCallback result_callback = {},
     ChildFeedbackDispatcher child_feedback_dispatcher = {},
-    ChildResultDispatcher child_result_dispatcher = {});
+    ChildResultDispatcher child_result_dispatcher = {},
+    AdmissionFenceCheck admission_fence_check = {});
 
   [[nodiscard]] AdmissionResult admit(const MissionGoal & goal);
   void cancel(std::uint64_t mission_id);
@@ -378,6 +380,7 @@ private:
     const std::string & lease_id = {}) const;
   [[nodiscard]] std::string new_identifier() const;
   [[nodiscard]] bool rotate_epoch();
+  [[nodiscard]] bool admission_allowed(std::uint64_t admission_epoch) const;
   void set_availability_from_dependencies();
   void publish_state();
   void publish_feedback(
@@ -412,6 +415,7 @@ private:
   ResultCallback result_callback_;
   ChildFeedbackDispatcher child_feedback_dispatcher_;
   ChildResultDispatcher child_result_dispatcher_;
+  AdmissionFenceCheck admission_fence_check_;
   RuntimeState state_;
   GateSnapshot gate_snapshot_;
   bool gate_bound_{false};

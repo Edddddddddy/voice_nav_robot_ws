@@ -592,10 +592,23 @@ public:
   {
     join_emergency_thread();
     ResultCallback rejected_result;
+    ChildResultCode rejection_code = ChildResultCode::InternalError;
+    std::string rejection_detail =
+      "relative-motion generation was already active";
+    const auto admission_allowed = [this, &token]() {
+        return !conditioning_config_.admission_fence_check ||
+               conditioning_config_.admission_fence_check(token.admission_epoch);
+      };
     {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (shutting_down_ || active_ || transaction_kind_ != TransactionKind::Idle) {
+      const bool fenced = !admission_allowed();
+      if (fenced || shutting_down_ || active_ || transaction_kind_ != TransactionKind::Idle) {
         rejected_result = std::move(result);
+        if (fenced) {
+          rejection_code = ChildResultCode::SafetyFault;
+          rejection_detail =
+            "relative-motion start rejected by the active admission fence";
+        }
       } else {
         active_ = true;
         starting_ = true;
@@ -618,8 +631,7 @@ public:
     if (rejected_result) {
       rejected_result(
         token,
-        ChildResult{ChildResultCode::InternalError,
-          "relative-motion generation was already active"});
+        ChildResult{rejection_code, rejection_detail});
       return;
     }
 
