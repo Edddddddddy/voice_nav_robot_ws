@@ -44,7 +44,7 @@ TEST(RuntimeAdmissionGateTest, CallbackGapIsRejectedByTheQuiesceLinearization)
   RuntimeAdmissionGate gate;
 
   ASSERT_TRUE(gate.try_provision(tracker, "callback-gap", 4U, {}));
-  gate.begin_quiesce(tracker);
+  ASSERT_TRUE(gate.begin_quiesce(tracker, std::chrono::steady_clock::now() + 1s));
 
   bool enqueued = false;
   EXPECT_FALSE(gate.submit([&enqueued]() {
@@ -69,7 +69,7 @@ TEST(RuntimeAdmissionGateTest, QueuedAdmissionCannotClaimStartAfterQuiesce)
   }));
   ASSERT_TRUE(queued);
 
-  gate.begin_quiesce(tracker);
+  ASSERT_TRUE(gate.begin_quiesce(tracker, std::chrono::steady_clock::now() + 1s));
   EXPECT_FALSE(gate.claim_start(7U).issued);
 }
 
@@ -82,7 +82,7 @@ TEST(RuntimeAdmissionGateTest, ClaimedPermitIsGenerationFenced)
   const auto permit = gate.claim_start(9U);
   ASSERT_TRUE(permit.issued);
   EXPECT_TRUE(gate.start_allowed(permit));
-  gate.begin_quiesce(tracker);
+  ASSERT_TRUE(gate.begin_quiesce(tracker, std::chrono::steady_clock::now() + 1s));
   EXPECT_FALSE(gate.start_allowed(permit));
 }
 

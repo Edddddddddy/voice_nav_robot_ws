@@ -74,17 +74,14 @@ public:
   using CancelHandler = std::function<rclcpp_action::CancelResponse(
         const std::shared_ptr<GoalHandle> &)>;
   using AcceptedHandler = std::function<void(const std::shared_ptr<GoalHandle> &)>;
-  using LateAcceptedHandler = std::function<void(const std::shared_ptr<GoalHandle> &)>;
 
   ActionCallbackLifetime(
     GoalHandler goal_handler,
     CancelHandler cancel_handler,
-    AcceptedHandler accepted_handler,
-    LateAcceptedHandler late_accepted_handler)
+    AcceptedHandler accepted_handler)
   : goal_handler_(std::move(goal_handler)),
     cancel_handler_(std::move(cancel_handler)),
-    accepted_handler_(std::move(accepted_handler)),
-    late_accepted_handler_(std::move(late_accepted_handler))
+    accepted_handler_(std::move(accepted_handler))
   {
   }
 
@@ -116,9 +113,10 @@ public:
       accepted_handler_(goal_handle);
       return;
     }
-    if (late_accepted_handler_) {
-      late_accepted_handler_(goal_handle);
-    }
+    // The provisional ticket is revoked by ActionAdmissionTracker during the
+    // bounded shutdown drain.  Jazzy does not expose a transport handoff
+    // guarantee for a callback that has not entered production on_accepted;
+    // do not fabricate a Result for that no-handle path.
   }
 
   void deactivate() noexcept
@@ -141,7 +139,6 @@ private:
   GoalHandler goal_handler_;
   CancelHandler cancel_handler_;
   AcceptedHandler accepted_handler_;
-  LateAcceptedHandler late_accepted_handler_;
   bool active_{true};
 };
 
@@ -365,15 +362,6 @@ public:
       },
       [this](const std::shared_ptr<GoalHandle> & goal_handle) {
         on_accepted(goal_handle);
-      },
-      [](const std::shared_ptr<GoalHandle> & goal_handle) {
-        auto result = std::make_shared<ExecuteMission::Result>();
-        fill_result(
-          MissionResult{
-          MissionResultCode::SafetyFault, -1,
-          "Runtime action callback arrived after bounded shutdown"},
-          *result);
-        goal_handle->abort(result);
       });
     action_server_ = rclcpp_action::create_server<ExecuteMission>(
       this,
@@ -464,16 +452,35 @@ private:
       shutdown_barrier_owner_ = std::this_thread::get_id();
     }
 
-    admission_gate_.begin_quiesce(action_admission_tracker_);
+    const bool transaction_drained = admission_gate_.begin_quiesce(
+      action_admission_tracker_,
+      std::chrono::steady_clock::now() + config_.stop_barrier);
+    if (!transaction_drained) {
+      action_shutdown_fail_closed_ = true;
+      request_independent_emergency();
+      request_emergency_fence(
+        "transaction quiesce deadline expired; SAFETY_FAULT");
+    }
     timer_.reset();
     stop_service_.reset();
     if (action_callback_lifetime_) {
       action_callback_lifetime_->deactivate();
     }
-    // Keep the Action Server alive while a goal accepted by on_goal is still
-    // waiting for on_accepted, and while any Action callback is aborting or
-    // handing the goal to the runtime queue.
+    // The lifetime mutex and admission lease cover callbacks that have already
+    // entered production on_accepted.  A provisional ticket without that
+    // handoff is revoked at the fixed bound and has no fabricated Result.
     const auto action_admission_drained = wait_for_action_admission_drain();
+    if (!action_admission_drained) {
+      action_shutdown_fail_closed_ = true;
+      request_independent_emergency();
+      request_emergency_fence(
+        "Action admission drain deadline expired; no-handle Result is not "
+        "guaranteed; SAFETY_FAULT");
+      RCLCPP_ERROR(
+        get_logger(),
+        "Action callback drain deadline expired; closing without fabricating a "
+        "no-handle Result and retaining fail-closed state");
+    }
     if (relative_motion_) {
       relative_motion_->begin_shutdown();
       relative_motion_->wait_for_internal_completion();
@@ -482,22 +489,14 @@ private:
     if (runtime_worker_.joinable()) {
       runtime_worker_.join();
     }
-    // Keep the Action Server and its GoalHandles alive until the runtime
-    // worker has executed finish_goal and published each client-visible
-    // terminal result.
-    if (action_admission_drained) {
-      action_server_.reset();
-      action_admission_tracker_.clear();
-    } else {
-      // The revoked tombstone or a late callback is still held by the shared
-      // action lifetime state.  Keep the Action Server and tracker alive; the
-      // inactive callback path will reject new goals and abort a late handle
-      // exactly once instead of fabricating a result for a missing handle.
-      action_shutdown_fail_closed_ = true;
-      RCLCPP_ERROR(
-        get_logger(),
-        "Action callback drain deadline expired; preserving shared server lifetime");
-    }
+    // An accepted production callback has already completed its handoff before
+    // this point; the runtime worker has also delivered active GoalHandles.
+    // If only a provisional/no-handle tombstone missed the bound, close the
+    // shared transport state without claiming that a client Result can still
+    // be delivered after context shutdown.
+    action_server_.reset();
+    action_admission_tracker_.clear();
+    action_callback_lifetime_.reset();
     if (relative_motion_) {
       relative_motion_->finalize_shutdown();
     }
