@@ -194,16 +194,18 @@ public:
   struct StartOperationGuard
   {
     StartOperationGuard(Impl & owner, const std::uint64_t generation)
-    : owner_(owner), active_(owner.begin_start_operation(generation)) {}
+    : owner_(owner), generation_(generation),
+      active_(owner.begin_start_operation(generation)) {}
 
     ~StartOperationGuard()
     {
       if (active_) {
-        owner_.end_start_operation();
+        owner_.end_start_operation(generation_);
       }
     }
 
     Impl & owner_;
+    std::uint64_t generation_{0U};
     bool active_{false};
   };
 
@@ -500,6 +502,7 @@ private:
     (void)stop();
     drain_start_operations();
     wait_for_renew_callbacks();
+    join_cleanup_continuation();
     finalize_destruction_cleanup();
     wait_for_ingress_callbacks();
     callback_state_.reset();
@@ -636,7 +639,7 @@ private:
           "conditioning PREPARE was cancelled while component setup drained");
       }
       const auto result = fail_owned(
-        MotionConditioningFailure::SafetyFault,
+        MotionConditioningFailure::DependencyUnavailable,
         "Nav2 component load/configure failed: " + setup_failure_detail_, true);
       finish_teardown(result, TeardownIntent::Failure);
       return result;
@@ -647,7 +650,7 @@ private:
     }
     if (std::chrono::steady_clock::now() >= prepare_open_deadline_) {
       const auto result = fail_owned(
-        MotionConditioningFailure::SafetyFault,
+        MotionConditioningFailure::Timeout,
         "PREPARE to OPEN deadline expired during component setup", true);
       finish_teardown(result, TeardownIntent::Failure);
       return result;
@@ -715,7 +718,7 @@ private:
     if (!invalid_detail.empty()) {
       if (prepare_open_deadline_expired) {
         return fail_synchronously(
-          MotionConditioningFailure::SafetyFault, std::move(invalid_detail));
+          MotionConditioningFailure::Timeout, std::move(invalid_detail));
       }
       std::lock_guard<std::recursive_mutex> lock(mutex_);
       auto result = make_result(
@@ -782,14 +785,37 @@ private:
     if (!controller_is_active(handover_deadline)) {
       return abort_activation(
         generation,
-        MotionConditioningFailure::SafetyFault,
+        MotionConditioningFailure::DependencyUnavailable,
         "diff_drive_controller is not active before MotionGate OPEN");
     }
-    if (!candidate_writer_is_visible(expected_candidate, handover_deadline)) {
+    if (!activation_token_current(generation)) {
       return abort_activation(
         generation,
         MotionConditioningFailure::SafetyFault,
+        activation_failure_detail());
+    }
+    if (!candidate_writer_is_visible(expected_candidate, handover_deadline, generation)) {
+      return abort_activation(
+        generation,
+        MotionConditioningFailure::DependencyUnavailable,
         "candidate writer was not visible before MotionGate OPEN");
+    }
+
+    if (config_.before_open_callback) {
+      try {
+        config_.before_open_callback();
+      } catch (...) {
+        return abort_activation(
+          generation,
+          MotionConditioningFailure::InternalError,
+          "OPEN cancellation fence raised an exception");
+      }
+    }
+    if (!activation_token_current(generation)) {
+      return abort_activation(
+        generation,
+        MotionConditioningFailure::SafetyFault,
+        "activation was cancelled before MotionGate OPEN");
     }
 
     bool producer_started = false;
@@ -821,7 +847,7 @@ private:
     {
       return abort_activation(
         generation,
-        MotionConditioningFailure::SafetyFault,
+        MotionConditioningFailure::DependencyUnavailable,
         "MotionGate OPEN did not bind the current candidate writer: " +
         gate_open.detail);
     }
@@ -886,7 +912,9 @@ private:
     {
       return abort_activation(
         generation,
-        MotionConditioningFailure::SafetyFault,
+        std::chrono::steady_clock::now() >= handover_deadline ?
+        MotionConditioningFailure::Timeout :
+        MotionConditioningFailure::DependencyUnavailable,
         "Collision Monitor activation failed after MotionGate OPEN");
     }
     if (!change_state(
@@ -898,34 +926,45 @@ private:
     {
       return abort_activation(
         generation,
-        MotionConditioningFailure::SafetyFault,
+        std::chrono::steady_clock::now() >= handover_deadline ?
+        MotionConditioningFailure::Timeout :
+        MotionConditioningFailure::DependencyUnavailable,
         "Velocity Smoother activation failed after MotionGate OPEN");
     }
     const auto second_renew_ok = renew_for_activation(
       generation, expected_lease, open_operation.gate_instance_id);
-    const auto graph_healthy = second_renew_ok &&
-      runtime_graph_is_healthy(handover_deadline, expected_candidate);
-    if (!graph_healthy || !activation_token_current(generation)) {
+    const auto graph_health = second_renew_ok ?
+      runtime_graph_health(handover_deadline, expected_candidate) :
+      RuntimeHealthAssessment{
+      RuntimeHealthReason::ComponentUnavailable,
+      "MotionGate RENEW failed during activation"};
+    if (!graph_health.healthy() || !activation_token_current(generation)) {
       return abort_activation(
         generation,
-        MotionConditioningFailure::SafetyFault,
-        "conditioning authority or dependency health failed during activation");
+        failure_for_health(graph_health.reason),
+        graph_health.detail.empty() ?
+        "conditioning authority or dependency health failed during activation" :
+        graph_health.detail);
     }
 
     if (std::chrono::steady_clock::now() >= handover_deadline) {
       return abort_activation(
         generation,
-        MotionConditioningFailure::SafetyFault,
+        MotionConditioningFailure::Timeout,
         "PREPARE to OPEN deadline expired during activation");
     }
 
     producer_lock = std::unique_lock<std::mutex>(producer_mutex_);
-    if (!runtime_graph_is_healthy(handover_deadline, expected_candidate)) {
+    const auto producer_health = runtime_graph_health(
+      handover_deadline, expected_candidate);
+    if (!producer_health.healthy()) {
       producer_lock.unlock();
       return abort_activation(
         generation,
-        MotionConditioningFailure::SafetyFault,
-        "conditioning dependency graph changed before producer start");
+        failure_for_health(producer_health.reason),
+        producer_health.detail.empty() ?
+        "conditioning dependency graph changed before producer start" :
+        producer_health.detail);
     }
     bool activation_fence_valid = false;
     {
@@ -1136,6 +1175,7 @@ private:
     None,
     Prepare,
     Cleanup,
+    CleanupContinuation,
   };
 
   struct TerminalRecord
@@ -1300,6 +1340,11 @@ private:
     bool wait_for_existing)
   {
     std::unique_lock<std::mutex> teardown_lock(teardown_mutex_);
+    if (cleanup_continuation_running_) {
+      teardown_cv_.wait(teardown_lock, [this]() {
+          return !cleanup_continuation_running_;
+        });
+    }
     if (teardown_in_progress_.load()) {
       if (!wait_for_existing) {
         existing = teardown_result_;
@@ -1354,7 +1399,7 @@ private:
     return true;
   }
 
-  void end_start_operation()
+  void end_start_operation(const std::uint64_t generation)
   {
     std::lock_guard<std::mutex> teardown_lock(teardown_mutex_);
     if (active_start_operations_ > 0U) {
@@ -1370,8 +1415,99 @@ private:
       }
     }
     if (active_start_operations_ == 0U) {
+      terminal_records_.erase(generation);
       start_operation_cv_.notify_all();
     }
+  }
+
+  void join_cleanup_continuation()
+  {
+    std::thread continuation;
+    {
+      std::lock_guard<std::mutex> lock(teardown_mutex_);
+      if (cleanup_continuation_thread_.joinable()) {
+        continuation = std::move(cleanup_continuation_thread_);
+      }
+    }
+    if (continuation.joinable()) {
+      continuation.join();
+    }
+  }
+
+  void wait_for_cleanup_continuation()
+  {
+    std::unique_lock<std::mutex> lock(teardown_mutex_);
+    teardown_cv_.wait(lock, [this]() {
+        return !cleanup_continuation_running_;
+      });
+  }
+
+  void schedule_cleanup_continuation()
+  {
+    std::lock_guard<std::mutex> lock(teardown_mutex_);
+    if (cleanup_continuation_running_ || cleanup_continuation_thread_.joinable()) {
+      return;
+    }
+    cleanup_continuation_running_ = true;
+    teardown_owner_ = TeardownOwner::CleanupContinuation;
+    cleanup_complete_.store(false);
+    try {
+      cleanup_continuation_thread_ = std::thread([this]() {
+            run_cleanup_continuation();
+        });
+    } catch (...) {
+      cleanup_continuation_running_ = false;
+      teardown_owner_ = TeardownOwner::Cleanup;
+      cleanup_blocked_ = true;
+      record_cleanup_failure(
+        "cleanup_continuation", config_.container_fqn, 0U,
+        "cleanup continuation could not be started");
+      teardown_cv_.notify_all();
+    }
+  }
+
+  void run_cleanup_continuation() noexcept
+  {
+    try {
+      drain_start_operations();
+      const bool producer_stopped = safe_producer_stop();
+      bool components_clean = false;
+      try {
+        components_clean = cleanup_components();
+      } catch (...) {
+        record_cleanup_failure(
+          "cleanup", config_.container_fqn, 0U,
+          "cleanup continuation raised an unknown exception");
+      }
+      const bool clean = producer_stopped && components_clean;
+      cleanup_complete_.store(clean);
+      {
+        std::lock_guard<std::recursive_mutex> lock(mutex_);
+        if (clean) {
+          cleanup_blocked_ = false;
+          reset_generation();
+        } else {
+          cleanup_blocked_ = true;
+        }
+      }
+    } catch (...) {
+      cleanup_blocked_ = true;
+      cleanup_complete_.store(false);
+      try {
+        record_cleanup_failure(
+          "cleanup_continuation", config_.container_fqn, 0U,
+          "cleanup continuation failed unexpectedly");
+      } catch (...) {
+      }
+    }
+    {
+      std::lock_guard<std::mutex> lock(teardown_mutex_);
+      cleanup_continuation_running_ = false;
+      if (teardown_owner_ == TeardownOwner::CleanupContinuation) {
+        teardown_owner_ = TeardownOwner::None;
+      }
+    }
+    teardown_cv_.notify_all();
   }
 
   [[nodiscard]] bool wait_for_start_operations()
@@ -1405,6 +1541,11 @@ private:
     bool & cleanup_needed)
   {
     std::unique_lock<std::mutex> teardown_lock(teardown_mutex_);
+    if (cleanup_continuation_running_) {
+      teardown_cv_.wait(teardown_lock, [this]() {
+          return !cleanup_continuation_running_;
+        });
+    }
     if (teardown_in_progress_.load()) {
       teardown_cv_.wait(teardown_lock, [this]() {
           return !teardown_in_progress_.load();
@@ -1510,11 +1651,38 @@ private:
       if (!terminal_record_) {
         terminal_record_ = TerminalRecord{teardown_generation_, intent, result};
         terminal_records_.emplace(teardown_generation_, result);
+        prune_terminal_records_locked();
       }
-      teardown_owner_ = TeardownOwner::None;
+      if (!cleanup_continuation_running_) {
+        teardown_owner_ = TeardownOwner::None;
+      }
       teardown_in_progress_.store(false);
     }
     teardown_cv_.notify_all();
+  }
+
+  void prune_terminal_records_locked()
+  {
+    constexpr std::size_t kMaxTerminalRecords = 8U;
+    while (terminal_records_.size() > kMaxTerminalRecords) {
+      auto candidate = terminal_records_.end();
+      for (auto iterator = terminal_records_.begin();
+        iterator != terminal_records_.end(); ++iterator)
+      {
+        if (iterator->first == teardown_generation_) {
+          continue;
+        }
+        if (candidate == terminal_records_.end() ||
+          iterator->first < candidate->first)
+        {
+          candidate = iterator;
+        }
+      }
+      if (candidate == terminal_records_.end()) {
+        break;
+      }
+      terminal_records_.erase(candidate);
+    }
   }
 
   [[nodiscard]] bool terminal_result_for_generation(
@@ -1561,6 +1729,7 @@ private:
     // responsibility after that operation drains.
     if (!destroying_.load() && !wait_for_start_operations()) {
       cleanup_blocked_ = true;
+      schedule_cleanup_continuation();
       std::lock_guard<std::recursive_mutex> lock(mutex_);
       state_ = MotionConditioningState::Failed;
       auto result = make_result(
@@ -1580,7 +1749,6 @@ private:
       }
       components_clean = cleanup_components();
     } catch (...) {
-      zero_proven = false;
       components_clean = false;
       record_cleanup_failure(
         "cleanup", config_.container_fqn, 0U,
@@ -1639,35 +1807,44 @@ private:
     if (wait_for_callbacks) {
       wait_for_renew_callbacks();
     }
+    if (failure == MotionConditioningFailure::None) {
+      failure = MotionConditioningFailure::InternalError;
+    }
+    bool zero_proven = false;
+    std::chrono::steady_clock::time_point zero_proven_at{};
+    zero_proven = inhibit_gate(true, &zero_proven_at);
     if (!destroying_.load() && !wait_for_start_operations()) {
       cleanup_blocked_ = true;
+      schedule_cleanup_continuation();
       std::lock_guard<std::recursive_mutex> lock(mutex_);
       state_ = MotionConditioningState::Failed;
       auto result = make_result(
-          state_, MotionConditioningFailure::SafetyFault, false, false,
+          state_,
+          zero_proven ? failure : MotionConditioningFailure::SafetyFault,
+          false, zero_proven,
           collision_stop_, lease_id_, candidate_topic_,
-          "active start operation did not drain before failure teardown");
+          zero_proven ?
+          detail + "; active start operation did not drain before failure teardown" :
+          detail + "; active start operation did not drain before failure teardown; "
+          "Gate zero proof was unavailable");
+      result.zero_proven_at = zero_proven_at;
       return remember(std::move(result));
     }
     drain_start_operations();
     const bool producer_stopped = safe_producer_stop();
-    bool zero_proven = false;
-    std::chrono::steady_clock::time_point zero_proven_at{};
     bool components_clean = false;
     try {
-      zero_proven = inhibit_gate(false, &zero_proven_at);
+      if (!zero_proven) {
+        zero_proven = inhibit_gate(false, &zero_proven_at);
+      }
       components_clean = cleanup_components();
     } catch (...) {
-      zero_proven = false;
       components_clean = false;
       record_cleanup_failure(
         "cleanup", config_.container_fqn, 0U,
         "cleanup raised an unknown exception");
     }
-    if (failure == MotionConditioningFailure::None) {
-      failure = MotionConditioningFailure::InternalError;
-    }
-    if (!producer_stopped || !zero_proven || !components_clean) {
+    if (!producer_stopped || !zero_proven) {
       failure = MotionConditioningFailure::SafetyFault;
       if (!producer_stopped) {
         detail += "; producer stop could not be proven";
@@ -1675,9 +1852,9 @@ private:
       if (!zero_proven) {
         detail += "; Gate zero proof was unavailable";
       }
-      if (!components_clean) {
-        detail += "; component cleanup could not be proven";
-      }
+    }
+    if (!components_clean) {
+      detail += "; component cleanup could not be proven";
     }
     detail = with_cleanup_failure(std::move(detail));
     std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -1695,6 +1872,10 @@ private:
     correlation_token_ = {};
     activation_in_progress_.store(false);
     activation_failed_.store(true);
+    try {
+      node_.get_node_graph_interface()->notify_graph_change();
+    } catch (...) {
+    }
   }
 
   [[nodiscard]] bool activation_current_locked(
@@ -2240,6 +2421,12 @@ private:
     const auto graph_deadline = std::min(
       overall_deadline,
       std::chrono::steady_clock::now() + config_.writer_graph_timeout);
+    rclcpp::Event::SharedPtr graph_event;
+    try {
+      graph_event = node_.get_graph_event();
+    } catch (...) {
+      return false;
+    }
     while (std::chrono::steady_clock::now() < graph_deadline) {
       const auto publishers = node_.get_publishers_info_by_topic(
         config_.collision_state_topic);
@@ -2264,7 +2451,15 @@ private:
       if (prepare_cancel_requested_.load()) {
         return false;
       }
-      std::this_thread::sleep_for(5ms);
+      try {
+        node_.wait_for_graph_change(
+          graph_event,
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+            graph_deadline - std::chrono::steady_clock::now()));
+        graph_event->check_and_clear();
+      } catch (...) {
+        return false;
+      }
     }
     return false;
   }
@@ -2914,17 +3109,19 @@ private:
           "Collision Monitor reported STOP for stop_zone");
         return;
       }
-      if (!runtime_graph_is_healthy(
-          std::chrono::steady_clock::now() + config_.health_rpc_timeout,
-          {}, false))
-      {
+      const auto health = runtime_graph_health(
+        std::chrono::steady_clock::now() + config_.health_rpc_timeout,
+        {}, false);
+      if (!health.healthy()) {
         if (!running_generation_current(callback_token.generation)) {
           return;
         }
         fail_from_renew_callback(
           callback_token,
-          MotionConditioningFailure::SafetyFault,
-          "conditioning component or dependency graph is unhealthy");
+          failure_for_health(health.reason),
+          health.detail.empty() ?
+          "conditioning component or dependency graph is unhealthy" :
+          health.detail);
         return;
       }
       if (!running_generation_current(callback_token.generation)) {
@@ -3003,12 +3200,22 @@ private:
 
   [[nodiscard]] bool candidate_writer_is_visible(
     const std::string & candidate_topic,
-    std::chrono::steady_clock::time_point overall_deadline)
+    std::chrono::steady_clock::time_point overall_deadline,
+    std::uint64_t generation)
   {
     const auto graph_deadline = std::min(
       overall_deadline,
       std::chrono::steady_clock::now() + config_.writer_graph_timeout);
+    rclcpp::Event::SharedPtr graph_event;
+    try {
+      graph_event = node_.get_graph_event();
+    } catch (...) {
+      return false;
+    }
     while (std::chrono::steady_clock::now() < graph_deadline) {
+      if (!activation_token_current(generation)) {
+        return false;
+      }
       const auto publishers = node_.get_publishers_info_by_topic(candidate_topic);
       const auto writer = std::find_if(
         publishers.cbegin(), publishers.cend(),
@@ -3016,12 +3223,64 @@ private:
       if (writer != publishers.cend()) {
         return true;
       }
-      std::this_thread::sleep_for(5ms);
+      try {
+        node_.wait_for_graph_change(
+          graph_event,
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+            graph_deadline - std::chrono::steady_clock::now()));
+        graph_event->check_and_clear();
+      } catch (...) {
+        return false;
+      }
     }
     return false;
   }
 
-  [[nodiscard]] bool runtime_graph_is_healthy(
+  enum class RuntimeHealthReason : std::uint8_t
+  {
+    Healthy,
+    ScanSourceLost,
+    OdomSourceLost,
+    ClockSourceLost,
+    ClockNotAdvancing,
+    Deadline,
+    ComponentUnavailable,
+    CandidateWriterUnavailable,
+    ControllerUnavailable,
+  };
+
+  struct RuntimeHealthAssessment
+  {
+    RuntimeHealthReason reason{RuntimeHealthReason::Healthy};
+    std::string detail;
+
+    [[nodiscard]] bool healthy() const
+    {
+      return reason == RuntimeHealthReason::Healthy;
+    }
+  };
+
+  [[nodiscard]] static MotionConditioningFailure failure_for_health(
+    RuntimeHealthReason reason)
+  {
+    switch (reason) {
+      case RuntimeHealthReason::ScanSourceLost:
+      case RuntimeHealthReason::OdomSourceLost:
+      case RuntimeHealthReason::ClockSourceLost:
+      case RuntimeHealthReason::ClockNotAdvancing:
+        return MotionConditioningFailure::DependencyUnavailable;
+      case RuntimeHealthReason::Deadline:
+        return MotionConditioningFailure::Timeout;
+      case RuntimeHealthReason::Healthy:
+      case RuntimeHealthReason::ComponentUnavailable:
+      case RuntimeHealthReason::CandidateWriterUnavailable:
+      case RuntimeHealthReason::ControllerUnavailable:
+      default:
+        return MotionConditioningFailure::DependencyUnavailable;
+    }
+  }
+
+  [[nodiscard]] RuntimeHealthAssessment runtime_graph_health(
     std::chrono::steady_clock::time_point overall_deadline,
     const std::string & expected_candidate = {},
     bool check_component_states = true)
@@ -3036,7 +3295,9 @@ private:
       }
     }
     if (!components_loaded) {
-      return false;
+      return {
+        RuntimeHealthReason::ComponentUnavailable,
+        "conditioning components are not loaded"};
     }
     // OPEN performs the full lifecycle graph check.  During the running
     // renew path, the 100 ms health budget must also leave time for the
@@ -3050,22 +3311,44 @@ private:
       component_state(kVelocitySmootherFqn, overall_deadline) !=
       lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE))
     {
-      return false;
+      return {
+        RuntimeHealthReason::ComponentUnavailable,
+        "conditioning lifecycle component is not active"};
     }
-    if (std::chrono::steady_clock::now() >= overall_deadline ||
-      !node_.get_clock()->ros_time_is_active() ||
+    if (std::chrono::steady_clock::now() >= overall_deadline) {
+      return {
+        RuntimeHealthReason::Deadline,
+        "conditioning health step exceeded its deadline"};
+    }
+    if (!node_.get_clock()->ros_time_is_active() ||
       node_.get_clock()->now().nanoseconds() <= 0)
     {
-      return false;
+      return {
+        RuntimeHealthReason::ClockSourceLost,
+        "ROS clock is not active or has no positive sample"};
     }
     {
       std::lock_guard<std::mutex> lock(health_mutex_);
       const auto now = std::chrono::steady_clock::now();
-      if (!clock_seen_ || !scan_freshness_.fresh_at(now) ||
-        !odom_freshness_.fresh_at(now) || !clock_freshness_.fresh_at(now) ||
-        !clock_progress_freshness_.fresh_at(now))
-      {
-        return false;
+      if (!clock_seen_ || !clock_freshness_.fresh_at(now)) {
+        return {
+          RuntimeHealthReason::ClockSourceLost,
+          "clock source is not fresh"};
+      }
+      if (!scan_freshness_.fresh_at(now)) {
+        return {
+          RuntimeHealthReason::ScanSourceLost,
+          "scan source is not fresh"};
+      }
+      if (!odom_freshness_.fresh_at(now)) {
+        return {
+          RuntimeHealthReason::OdomSourceLost,
+          "odom source is not fresh"};
+      }
+      if (!clock_progress_freshness_.fresh_at(now)) {
+        return {
+          RuntimeHealthReason::ClockNotAdvancing,
+          "clock source has not advanced"};
       }
     }
     const auto candidate_publishers =
@@ -3075,7 +3358,27 @@ private:
       [this](const rclcpp::TopicEndpointInfo & endpoint) {
         return candidate_writer_is_exact(endpoint);
       });
-    return candidate_writer && controller_is_active(overall_deadline);
+    if (!candidate_writer) {
+      return {
+        RuntimeHealthReason::CandidateWriterUnavailable,
+        "candidate writer is not visible"};
+    }
+    if (std::chrono::steady_clock::now() >= overall_deadline) {
+      return {
+        RuntimeHealthReason::Deadline,
+        "conditioning health step exceeded its deadline"};
+    }
+    if (!controller_is_active(overall_deadline)) {
+      if (std::chrono::steady_clock::now() >= overall_deadline) {
+        return {
+          RuntimeHealthReason::Deadline,
+          "controller health step exceeded its deadline"};
+      }
+      return {
+        RuntimeHealthReason::ControllerUnavailable,
+        "diff_drive_controller is not active"};
+    }
+    return {RuntimeHealthReason::Healthy, {}};
   }
 
   rclcpp::Node & node_;
@@ -3122,6 +3425,8 @@ private:
   std::condition_variable start_operation_cv_;
   std::size_t active_start_operations_{0U};
   std::unordered_map<std::thread::id, std::size_t> start_operation_threads_;
+  std::thread cleanup_continuation_thread_;
+  bool cleanup_continuation_running_{false};
   MotionConditioningResult teardown_result_{};
   TeardownOwner teardown_owner_{TeardownOwner::None};
   std::atomic<bool> prepare_cancel_requested_{false};
