@@ -75,12 +75,17 @@ using ListControllers = controller_manager_msgs::srv::ListControllers;
 using CollisionState = nav2_msgs::msg::CollisionMonitorState;
 
 constexpr char kCi64RenewChildEnvironment[] = "VOICE_NAV_CI64_03_CHILD";
+constexpr char kCi64RenewReadyToken[] = "VOICE_NAV_CI64_READY\n";
 constexpr int kCi64RenewChildLivenessFd = 200;
 
 struct ChildProcessResult final
 {
   bool spawned{false};
+  bool ready{false};
+  bool setup_failure{false};
+  bool hang_deadline_started{false};
   bool timed_out{false};
+  bool early_exit{false};
   bool killed{false};
   bool reaped{false};
   bool exited{false};
@@ -91,7 +96,8 @@ struct ChildProcessResult final
 
 ChildProcessResult run_renew_drain_child(
   const std::string & mode,
-  const std::chrono::milliseconds deadline_budget)
+  const std::chrono::milliseconds setup_budget,
+  const std::chrono::milliseconds hang_budget)
 {
   ChildProcessResult result;
   int pipe_fds[2] = {-1, -1};
@@ -99,7 +105,9 @@ ChildProcessResult run_renew_drain_child(
     return result;
   }
   const int read_flags = fcntl(pipe_fds[0], F_GETFD);
-  if (read_flags < 0 || fcntl(pipe_fds[0], F_SETFD, read_flags | FD_CLOEXEC) != 0) {
+  if (read_flags < 0 || fcntl(pipe_fds[0], F_SETFD, read_flags | FD_CLOEXEC) != 0 ||
+    fcntl(pipe_fds[0], F_SETFL, fcntl(pipe_fds[0], F_GETFL) | O_NONBLOCK) != 0)
+  {
     close(pipe_fds[0]);
     close(pipe_fds[1]);
     return result;
@@ -162,16 +170,124 @@ ChildProcessResult run_renew_drain_child(
   }
   result.spawned = true;
 
-  const auto deadline = std::chrono::steady_clock::now() + deadline_budget;
-  bool child_closed_liveness_pipe = false;
-  while (!child_closed_liveness_pipe) {
+  const auto reap_child = [&]() {
+      int child_status = 0;
+      pid_t waited_pid;
+      do {
+        waited_pid = waitpid(child_pid, &child_status, 0);
+      } while (waited_pid < 0 && errno == EINTR);
+      result.reaped = waited_pid == child_pid;
+      if (result.reaped) {
+        result.exited = WIFEXITED(child_status);
+        result.exit_code = result.exited ? WEXITSTATUS(child_status) : -1;
+        result.signaled = WIFSIGNALED(child_status);
+        result.signal_number = result.signaled ? WTERMSIG(child_status) : -1;
+      }
+    };
+  const auto kill_child = [&]() {
+      const int kill_status = kill(child_pid, SIGKILL);
+      result.killed = kill_status == 0 || (kill_status < 0 && errno == ESRCH);
+    };
+
+  const auto setup_deadline = std::chrono::steady_clock::now() + setup_budget;
+  std::string ready_data;
+  bool eof = false;
+  bool read_error = false;
+  while (!result.ready && !result.setup_failure) {
     const auto now = std::chrono::steady_clock::now();
-    if (now >= deadline) {
+    if (now >= setup_deadline) {
+      result.setup_failure = true;
       result.timed_out = true;
       break;
     }
     const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-      deadline - now);
+      setup_deadline - now);
+    const auto bounded_milliseconds = std::max<std::int64_t>(1, remaining.count());
+    const auto poll_timeout = static_cast<int>(std::min<std::int64_t>(
+        bounded_milliseconds, std::numeric_limits<int>::max()));
+    pollfd descriptor{pipe_fds[0], POLLIN | POLLHUP | POLLERR, 0};
+    int poll_status;
+    do {
+      poll_status = poll(&descriptor, 1, poll_timeout);
+    } while (poll_status < 0 && errno == EINTR);
+    if (poll_status < 0) {
+      result.setup_failure = true;
+      read_error = true;
+      break;
+    }
+    if (poll_status == 0) {
+      result.setup_failure = true;
+      result.timed_out = true;
+      break;
+    }
+
+    if ((descriptor.revents & POLLIN) != 0) {
+      for (;; ) {
+        char buffer[64] = {};
+        const auto count = read(pipe_fds[0], buffer, sizeof(buffer));
+        if (count > 0) {
+          ready_data.append(buffer, static_cast<std::size_t>(count));
+          if (ready_data.size() > sizeof(kCi64RenewReadyToken) - 1U ||
+            ready_data.compare(0, ready_data.size(), kCi64RenewReadyToken,
+            ready_data.size()) != 0)
+          {
+            result.setup_failure = true;
+            break;
+          }
+          if (ready_data.size() == sizeof(kCi64RenewReadyToken) - 1U) {
+            result.ready = true;
+          }
+          continue;
+        }
+        if (count == 0) {
+          eof = true;
+          break;
+        }
+        if (errno == EINTR) {
+          continue;
+        }
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+          read_error = true;
+        }
+        break;
+      }
+    }
+
+    if (result.setup_failure) {
+      break;
+    }
+    const bool hangup = (descriptor.revents & POLLHUP) != 0;
+    const bool error = (descriptor.revents & (POLLERR | POLLNVAL)) != 0;
+    if (!result.ready && (eof || hangup || error || read_error)) {
+      result.setup_failure = true;
+    }
+    if (result.ready && (error || read_error)) {
+      result.setup_failure = true;
+      result.ready = false;
+    }
+  }
+
+  if (result.setup_failure) {
+    kill_child();
+    reap_child();
+    close(pipe_fds[0]);
+    return result;
+  }
+
+  const auto completion_budget = mode == "normal" ? setup_budget : hang_budget;
+  const auto completion_deadline = std::chrono::steady_clock::now() + completion_budget;
+  if (mode != "normal") {
+    result.hang_deadline_started = true;
+  }
+  bool child_closed_liveness_pipe = false;
+  while (!child_closed_liveness_pipe) {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= completion_deadline) {
+      result.timed_out = true;
+      break;
+    }
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+      completion_deadline - now);
     const auto bounded_milliseconds = std::max<std::int64_t>(1, remaining.count());
     const auto poll_timeout = static_cast<int>(std::min<std::int64_t>(
         bounded_milliseconds, std::numeric_limits<int>::max()));
@@ -188,28 +304,37 @@ ChildProcessResult run_renew_drain_child(
       (descriptor.revents & (POLLHUP | POLLERR | POLLNVAL)) != 0)
     {
       child_closed_liveness_pipe = true;
+      result.early_exit = mode != "normal" && !result.timed_out;
     }
   }
 
   if (result.timed_out) {
-    const int kill_status = kill(child_pid, SIGKILL);
-    result.killed = kill_status == 0 || (kill_status < 0 && errno == ESRCH);
+    kill_child();
   }
-
-  int child_status = 0;
-  pid_t waited_pid;
-  do {
-    waited_pid = waitpid(child_pid, &child_status, 0);
-  } while (waited_pid < 0 && errno == EINTR);
+  reap_child();
   close(pipe_fds[0]);
-  result.reaped = waited_pid == child_pid;
-  if (result.reaped) {
-    result.exited = WIFEXITED(child_status);
-    result.exit_code = result.exited ? WEXITSTATUS(child_status) : -1;
-    result.signaled = WIFSIGNALED(child_status);
-    result.signal_number = result.signaled ? WTERMSIG(child_status) : -1;
-  }
   return result;
+}
+
+bool write_renew_ready_token()
+{
+  std::size_t written = 0U;
+  constexpr std::size_t token_size = sizeof(kCi64RenewReadyToken) - 1U;
+  while (written < token_size) {
+    const auto count = write(
+      kCi64RenewChildLivenessFd,
+      kCi64RenewReadyToken + written,
+      token_size - written);
+    if (count > 0) {
+      written += static_cast<std::size_t>(count);
+      continue;
+    }
+    if (count < 0 && errno == EINTR) {
+      continue;
+    }
+    return false;
+  }
+  return true;
 }
 
 class CallbackBarrier final
@@ -2942,15 +3067,17 @@ TEST_F(MotionConditioningPipelineTest, DestructorDrainsQueuedRenewCallback)
   const auto child_mode = std::getenv(kCi64RenewChildEnvironment);
   if (child_mode != nullptr) {
     const std::string mode(child_mode);
-    if (mode != "normal" && mode != "hang") {
+    if (mode != "normal" && mode != "hang" && mode != "pre-ready-hang" &&
+      mode != "pre-ready-stop")
+    {
       ADD_FAILURE() << "unknown CI-64-03 child mode: " << mode;
       return;
     }
 
+    const bool pre_ready = mode == "pre-ready-hang" || mode == "pre-ready-stop";
     const bool hang_child = mode == "hang";
     auto renew_barrier = std::make_shared<CallbackBarrier>();
     auto callback_wait_barrier = std::make_shared<CallbackBarrier>();
-    auto renew_wait_barrier = std::make_shared<CallbackBarrier>();
     auto health_ready = std::make_shared<CallbackCounter>();
     auto pipeline_config = config();
     pipeline_config.writer_graph_timeout = 1s;
@@ -2963,9 +3090,6 @@ TEST_F(MotionConditioningPipelineTest, DestructorDrainsQueuedRenewCallback)
       };
     pipeline_config.before_callback_wait = [callback_wait_barrier]() {
         (*callback_wait_barrier)();
-      };
-    pipeline_config.before_renew_wait = [renew_wait_barrier]() {
-        (*renew_wait_barrier)();
       };
 
     auto pipeline = std::make_unique<MotionConditioningPipeline>(
@@ -2989,7 +3113,6 @@ TEST_F(MotionConditioningPipelineTest, DestructorDrainsQueuedRenewCallback)
       return;
     }
     callback_wait_barrier->arm();
-    renew_wait_barrier->arm();
 
     auto owned_pipeline = std::move(pipeline);
     std::promise<void> destructor_promise;
@@ -3000,14 +3123,26 @@ TEST_F(MotionConditioningPipelineTest, DestructorDrainsQueuedRenewCallback)
         destructor_promise.set_value();
       });
 
+    if (pre_ready) {
+      if (mode == "pre-ready-stop") {
+        raise(SIGSTOP);
+      }
+      pause();
+      return;
+    }
+
     const bool callback_wait_entered = callback_wait_barrier->wait_for_entry(5s);
+    if (!callback_wait_entered || !write_renew_ready_token()) {
+      callback_wait_barrier->release();
+      renew_barrier->release();
+      std::_Exit(callback_wait_entered ? 4 : 3);
+    }
     if (hang_child) {
       pause();
       return;
     }
 
     callback_wait_barrier->release();
-    renew_wait_barrier->release();
     renew_barrier->release();
     const bool destructor_ready =
       destructor_future.wait_for(2s) ==
@@ -3023,21 +3158,47 @@ TEST_F(MotionConditioningPipelineTest, DestructorDrainsQueuedRenewCallback)
     return;
   }
 
-  const auto normal_child = run_renew_drain_child("normal", 5s);
+  const auto normal_child = run_renew_drain_child("normal", 5s, 500ms);
   EXPECT_TRUE(normal_child.spawned);
+  EXPECT_TRUE(normal_child.ready);
+  EXPECT_FALSE(normal_child.setup_failure);
   EXPECT_TRUE(normal_child.reaped);
   EXPECT_FALSE(normal_child.timed_out);
   EXPECT_TRUE(normal_child.exited);
   EXPECT_EQ(normal_child.exit_code, 0);
   EXPECT_FALSE(normal_child.signaled);
 
-  const auto hanging_child = run_renew_drain_child("hang", 500ms);
+  const auto hanging_child = run_renew_drain_child("hang", 5s, 500ms);
   EXPECT_TRUE(hanging_child.spawned);
+  EXPECT_TRUE(hanging_child.ready);
+  EXPECT_FALSE(hanging_child.setup_failure);
+  EXPECT_TRUE(hanging_child.hang_deadline_started);
   EXPECT_TRUE(hanging_child.timed_out);
+  EXPECT_FALSE(hanging_child.early_exit);
   EXPECT_TRUE(hanging_child.killed);
   EXPECT_TRUE(hanging_child.reaped);
   EXPECT_TRUE(hanging_child.signaled);
   EXPECT_EQ(hanging_child.signal_number, SIGKILL);
+
+  const auto pre_ready_hang = run_renew_drain_child("pre-ready-hang", 5s, 500ms);
+  EXPECT_TRUE(pre_ready_hang.spawned);
+  EXPECT_FALSE(pre_ready_hang.ready);
+  EXPECT_TRUE(pre_ready_hang.setup_failure);
+  EXPECT_TRUE(pre_ready_hang.timed_out);
+  EXPECT_TRUE(pre_ready_hang.killed);
+  EXPECT_TRUE(pre_ready_hang.reaped);
+  EXPECT_TRUE(pre_ready_hang.signaled);
+  EXPECT_EQ(pre_ready_hang.signal_number, SIGKILL);
+
+  const auto pre_ready_stop = run_renew_drain_child("pre-ready-stop", 5s, 500ms);
+  EXPECT_TRUE(pre_ready_stop.spawned);
+  EXPECT_FALSE(pre_ready_stop.ready);
+  EXPECT_TRUE(pre_ready_stop.setup_failure);
+  EXPECT_TRUE(pre_ready_stop.timed_out);
+  EXPECT_TRUE(pre_ready_stop.killed);
+  EXPECT_TRUE(pre_ready_stop.reaped);
+  EXPECT_TRUE(pre_ready_stop.signaled);
+  EXPECT_EQ(pre_ready_stop.signal_number, SIGKILL);
 }
 
 TEST_F(MotionConditioningPipelineTest, RenewAuthorityLossFailsClosed)
