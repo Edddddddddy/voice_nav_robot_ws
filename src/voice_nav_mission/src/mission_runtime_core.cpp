@@ -960,6 +960,9 @@ void RuntimeCore::on_child_result(
     } else if (result.code == ChildResultCode::InternalError) {
       result_code = MissionResultCode::InternalError;
     }
+    if (result_code == MissionResultCode::SafetyFault) {
+      state_.availability = RuntimeAvailability::Faulted;
+    }
     select_terminal_and_stop(
       result_code,
       result.detail.empty() ? "relative-motion child failed" : result.detail);
