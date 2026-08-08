@@ -44,6 +44,8 @@
 #include "voice_nav_mission/mission_action_result_router.hpp"
 #include "voice_nav_mission/motion_authority_ros_adapter.hpp"
 #include "voice_nav_mission/relative_motion_ros_adapter.hpp"
+#include "voice_nav_mission/runtime_emergency_fence.hpp"
+#include "voice_nav_mission/runtime_event_ingress.hpp"
 #include "voice_nav_mission/runtime_event_queue.hpp"
 
 namespace voice_nav_mission
@@ -147,6 +149,7 @@ using RuntimeEventQueueType = RuntimeEventQueue<RuntimeEvent>;
 {
   return std::holds_alternative<CancelEvent>(event.payload) ||
          std::holds_alternative<StopEvent>(event.payload) ||
+         std::holds_alternative<ChildResultEvent>(event.payload) ||
          std::holds_alternative<QueueFaultEvent>(event.payload) ?
          RuntimeEventQueueType::Lane::Control : RuntimeEventQueueType::Lane::Normal;
 }
@@ -170,6 +173,17 @@ public:
     clock_(std::make_shared<RosSteadyClock>()),
     event_queue_([]() {
         return RuntimeEvent{0U, QueueFaultEvent{"Runtime event queue overflow"}};
+      }),
+    emergency_fence_(1U),
+    event_ingress_(
+      event_queue_,
+      emergency_fence_,
+      runtime_event_lane,
+      [this]() {request_independent_emergency();},
+      [this](const RuntimeEmergencyFenceSnapshot & snapshot) {
+        if (core_) {
+          core_->fail_closed_at_epoch(snapshot.admission_epoch, snapshot.detail);
+        }
       })
   {
     if (std::string(get_fully_qualified_name()) != "/mission_runtime_node") {
@@ -184,7 +198,7 @@ public:
       config_.control_response_deadline,
       config_.stop_barrier,
       [this](const GateSnapshot & snapshot) {
-        (void)enqueue_event(RuntimeEvent{0U, GateSnapshotEvent{snapshot}});
+        (void)enqueue_internal_event(RuntimeEvent{0U, GateSnapshotEvent{snapshot}});
       });
     const auto initial_gate_snapshot = authority_->snapshot();
     RelativeMotionPolicy motion_policy;
@@ -208,11 +222,11 @@ public:
         action_adapter_.finish(mission_id, result);
       },
       [this](const MotionToken & token, const double progress) {
-        return enqueue_event(RuntimeEvent{
+        return enqueue_internal_event(RuntimeEvent{
           token.mission_generation, ChildFeedbackEvent{token, progress}});
       },
       [this](const MotionToken & token, const ChildResult & result) {
-        return enqueue_event(RuntimeEvent{
+        return enqueue_internal_event(RuntimeEvent{
           token.mission_generation, ChildResultEvent{token, result}});
       });
     runtime_worker_ = std::thread([this]() {run_runtime_events();});
@@ -350,7 +364,7 @@ private:
   rclcpp_action::GoalResponse on_goal(
     const std::shared_ptr<const ExecuteMission::Goal> &) const
   {
-    if (!rclcpp::ok()) {
+    if (!rclcpp::ok() || event_ingress_.blocked()) {
       return rclcpp_action::GoalResponse::REJECT;
     }
     // Every wire-valid Goal reaches Core. Business rejection is returned as
@@ -382,6 +396,12 @@ private:
 
   void on_accepted(const std::shared_ptr<GoalHandle> & goal_handle)
   {
+    if (event_ingress_.blocked()) {
+      abort_goal(goal_handle, MissionResult{
+          MissionResultCode::SafetyFault, -1,
+          "Runtime emergency fence is active"});
+      return;
+    }
     const auto goal_message = goal_handle->get_goal();
     MissionGoal goal;
     goal.source_instance_id = goal_message->source_instance_id;
@@ -405,43 +425,53 @@ private:
     if (ingress_stopped_.load()) {
       return false;
     }
-    const auto lane = runtime_event_lane(event);
-    const auto result = event_queue_.push(
-      std::move(event), lane) ==
-      RuntimeEventQueueType::PushResult::Accepted;
-    if (!result) {
-      request_independent_emergency();
-    }
-    return result;
+    return enqueue_internal_event(std::move(event));
+  }
+
+  [[nodiscard]] bool enqueue_internal_event(RuntimeEvent event) noexcept
+  {
+    return event_ingress_.enqueue(std::move(event));
   }
 
   void request_independent_emergency() noexcept
   {
-    if (ingress_stopped_.load() || !relative_motion_) {
+    if (!relative_motion_) {
       return;
     }
     relative_motion_->request_emergency_stop();
   }
 
+  void request_emergency_fence(std::string detail) noexcept
+  {
+    event_ingress_.request_emergency(std::move(detail));
+  }
+
+  void process_emergency_fence()
+  {
+    (void)event_ingress_.process_pending_fence();
+  }
+
   void run_runtime_events()
   {
     RuntimeEvent event;
-    while (event_queue_.wait_pop(event)) {
+    while (true) {
+      const auto wait_result = event_ingress_.wait_pop(event);
+      if (wait_result == RuntimeEventQueueType::WaitResult::Closed) {
+        break;
+      }
+      if (wait_result == RuntimeEventQueueType::WaitResult::ExternalWake) {
+        process_emergency_fence();
+        continue;
+      }
       try {
         std::visit(
           [this](auto & typed_event) {process_event(typed_event);},
           event.payload);
       } catch (const std::exception & error) {
-        request_independent_emergency();
-        if (core_) {
-          core_->fail_closed(
-            std::string{"Runtime event worker raised: "} + error.what());
-        }
+        request_emergency_fence(
+          std::string{"Runtime event worker raised: "} + error.what());
       } catch (...) {
-        request_independent_emergency();
-        if (core_) {
-          core_->fail_closed("Runtime event worker raised an unknown exception");
-        }
+        request_emergency_fence("Runtime event worker raised an unknown exception");
       }
     }
   }
@@ -533,8 +563,7 @@ private:
 
   void process_event(QueueFaultEvent & event)
   {
-    request_independent_emergency();
-    core_->fail_closed(event.detail);
+    request_emergency_fence(event.detail);
   }
 
   static void abort_goal(
@@ -686,6 +715,8 @@ private:
   std::shared_ptr<RelativeMotionRosAdapter> relative_motion_;
   std::unique_ptr<RuntimeCore> core_;
   RuntimeEventQueueType event_queue_;
+  RuntimeEmergencyFence emergency_fence_{1U};
+  RuntimeEventIngress<RuntimeEvent> event_ingress_;
   std::thread runtime_worker_;
   std::recursive_mutex mutex_;
   std::unordered_set<const GoalHandle *> pending_goal_cancels_;
