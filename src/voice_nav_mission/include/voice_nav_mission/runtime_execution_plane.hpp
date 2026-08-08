@@ -16,10 +16,13 @@
 #define VOICE_NAV_MISSION__RUNTIME_EXECUTION_PLANE_HPP_
 
 #include <memory>
+#include <mutex>
+#include <string>
 #include <utility>
 
 #include "voice_nav_mission/mission_runtime_core.hpp"
 #include "voice_nav_mission/runtime_completion_mailbox.hpp"
+#include "voice_nav_mission/runtime_terminal_handoff_lane.hpp"
 
 namespace voice_nav_mission
 {
@@ -43,8 +46,30 @@ public:
     RuntimeCore::AdmissionFenceCheck admission_fence_check,
     NodeCompletionMailbox::TokenEnqueue token_enqueue,
     NodeCompletionMailbox::EmergencyRequest emergency_request)
-  : completion_mailbox_(
-      std::move(token_enqueue), std::move(emergency_request)),
+  : emergency_request_(std::move(emergency_request)),
+    terminal_handoff_lane_(
+      [this](const MotionToken & token, const ChildResult & result) {
+        std::lock_guard<std::recursive_mutex> lock(core_serial_mutex_);
+        if (core_) {
+          core_->on_child_result(token, result);
+        }
+      },
+      [this](std::string detail) {
+        if (emergency_request_) {
+          emergency_request_(std::move(detail));
+        }
+      }),
+    completion_mailbox_(
+      std::move(token_enqueue),
+      [this](std::string detail) {
+        if (emergency_request_) {
+          emergency_request_(std::move(detail));
+        }
+      },
+      [this](const MotionToken & token, const ChildResult & result) {
+        return terminal_handoff_lane_.enqueue(token, result);
+      }),
+    completion_reaper_(completion_mailbox_),
     core_(std::make_unique<RuntimeCore>(
       std::move(config),
       std::move(clock),
@@ -88,15 +113,37 @@ public:
     return completion_mailbox_;
   }
 
+  [[nodiscard]] std::recursive_mutex & core_serial_mutex() noexcept
+  {
+    return core_serial_mutex_;
+  }
+
+  [[nodiscard]] NodeTerminalHandoffLane & terminal_handoff_lane() noexcept
+  {
+    return terminal_handoff_lane_;
+  }
+
   void shutdown() noexcept
   {
+    if (shutdown_complete_) {
+      return;
+    }
+    completion_mailbox_.close();
+    completion_reaper_.stop();
+    terminal_handoff_lane_.stop();
     core_.reset();
     completion_mailbox_.stop();
+    shutdown_complete_ = true;
   }
 
 private:
+  NodeCompletionMailbox::EmergencyRequest emergency_request_;
+  std::recursive_mutex core_serial_mutex_;
+  NodeTerminalHandoffLane terminal_handoff_lane_;
   NodeCompletionMailbox completion_mailbox_;
+  NodeCompletionReaper completion_reaper_;
   std::unique_ptr<RuntimeCore> core_;
+  bool shutdown_complete_{false};
 };
 
 }  // namespace voice_nav_mission

@@ -155,6 +155,8 @@ public:
         []() {},
         [this](const RuntimeEmergencyFenceSnapshot & snapshot) {
           if (plane_ && plane_->core()) {
+            std::lock_guard<std::recursive_mutex> lock(
+              plane_->core_serial_mutex());
             plane_->core()->fail_closed_at_epoch(
             snapshot.admission_epoch, snapshot.detail);
           }
@@ -181,6 +183,8 @@ public:
     worker_ = std::thread([this]() {
           ingress_->run(
             [this](CompletionEvent & event) {
+              std::lock_guard<std::recursive_mutex> lock(
+                plane_->core_serial_mutex());
               plane_->core()->on_child_result(
             event.token, ChildResult{ChildResultCode::SafetyFault, "relay"});
         },

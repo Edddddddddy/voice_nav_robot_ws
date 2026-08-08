@@ -36,16 +36,16 @@ class NodeCompletionMailbox final
 public:
   using TokenEnqueue = std::function<bool(const MotionToken &)>;
   using EmergencyRequest = std::function<void(std::string)>;
+  using TerminalHandoff = std::function<bool(const MotionToken &, const ChildResult &)>;
 
   NodeCompletionMailbox(
     TokenEnqueue token_enqueue,
-    EmergencyRequest emergency_request)
+    EmergencyRequest emergency_request,
+    TerminalHandoff terminal_handoff = {})
   : token_enqueue_(std::move(token_enqueue)),
-    emergency_request_(std::move(emergency_request))
+    emergency_request_(std::move(emergency_request)),
+    terminal_handoff_(std::move(terminal_handoff))
   {
-    // All synchronization state is constructed before the reaper can
-    // observe a relay rejection or an explicit stop.
-    reaper_thread_ = std::thread([this]() {run_reaper();});
   }
 
   ~NodeCompletionMailbox()
@@ -80,11 +80,16 @@ public:
       return false;
     }
     const auto token = record->token;
+    const auto result = record->result;
     if (!registry_.accept(record)) {
       const auto retained = registry_.reject(token, std::move(record));
+      const auto terminal_handed_off = handoff_terminal(token, result);
       reject(
         retained ? "Node completion registry rejected a terminal record" :
         "Node completion registry rejected and could not retain a terminal record");
+      if (!terminal_handed_off) {
+        reject("Node terminal handoff lane rejected a terminal record");
+      }
       return false;
     }
     bool accepted = false;
@@ -95,9 +100,13 @@ public:
     }
     if (!accepted) {
       const auto retained = registry_.reject_accepted(token);
+      const auto terminal_handed_off = handoff_terminal(token, result);
       reject("Runtime event ingress rejected a terminal completion token");
       if (!retained) {
         reject("Node completion registry could not retain a rejected terminal entry");
+      }
+      if (!terminal_handed_off) {
+        reject("Node terminal handoff lane rejected a terminal record");
       }
     }
     return accepted;
@@ -123,20 +132,32 @@ public:
 
   void stop() noexcept
   {
+    close();
+    stop_reaper();
+    registry_.reap_all();
+  }
+
+  // The mailbox has no joinable thread.  A separate Node-owned reaper calls
+  // these methods so releasing a rejected delivery owner can never require a
+  // mailbox to join itself.
+  [[nodiscard]] bool wait_for_reaper_work() noexcept
+  {
+    std::unique_lock<std::mutex> lock(reaper_mutex_);
+    reaper_condition_.wait(lock, [this]() {
+        return reaper_stopped_ || reaper_work_pending_;
+      });
+    reaper_work_pending_ = false;
+    return !reaper_stopped_;
+  }
+
+  void stop_reaper() noexcept
+  {
     {
       std::lock_guard<std::mutex> lock(reaper_mutex_);
-      if (reaper_stopped_) {
-        return;
-      }
       reaper_stopped_ = true;
       reaper_work_pending_ = true;
     }
-    registry_.close();
     reaper_condition_.notify_all();
-    if (reaper_thread_.joinable()) {
-      reaper_thread_.join();
-    }
-    registry_.reap_all();
   }
 
   [[nodiscard]] std::size_t entry_count() const noexcept
@@ -149,7 +170,28 @@ public:
     return registry_.rejected_count();
   }
 
+  void reap_rejected() noexcept
+  {
+    registry_.reap_rejected();
+  }
+
+  void reap_all() noexcept
+  {
+    registry_.reap_all();
+  }
+
 private:
+  [[nodiscard]] bool handoff_terminal(
+    const MotionToken & token,
+    const ChildResult & result) noexcept
+  {
+    try {
+      return terminal_handoff_ && terminal_handoff_(token, result);
+    } catch (...) {
+      return false;
+    }
+  }
+
   void reject(std::string detail) noexcept
   {
     request_reap();
@@ -163,33 +205,55 @@ private:
     }
   }
 
-  void run_reaper() noexcept
-  {
-    for (;; ) {
-      {
-        std::unique_lock<std::mutex> lock(reaper_mutex_);
-        reaper_condition_.wait(lock, [this]() {
-            return reaper_stopped_ || reaper_work_pending_;
-          });
-        reaper_work_pending_ = false;
-        if (reaper_stopped_) {
-          lock.unlock();
-          registry_.reap_rejected();
-          return;
-        }
-      }
-      registry_.reap_rejected();
-    }
-  }
-
   TokenEnqueue token_enqueue_;
   EmergencyRequest emergency_request_;
+  TerminalHandoff terminal_handoff_;
   NodeCompletionRegistry registry_;
   mutable std::mutex reaper_mutex_;
   std::condition_variable reaper_condition_;
   bool reaper_work_pending_{false};
   bool reaper_stopped_{false};
-  std::thread reaper_thread_;
+};
+
+// The reaper is deliberately an external owner of the mailbox's joinable
+// thread.  RuntimeExecutionPlane stops this object before releasing Core or
+// the mailbox, and joins it from the Node shutdown owner.
+class NodeCompletionReaper final
+{
+public:
+  explicit NodeCompletionReaper(NodeCompletionMailbox & mailbox)
+  : mailbox_(mailbox),
+    thread_([this]() {run();})
+  {
+  }
+
+  ~NodeCompletionReaper()
+  {
+    stop();
+  }
+
+  NodeCompletionReaper(const NodeCompletionReaper &) = delete;
+  NodeCompletionReaper & operator=(const NodeCompletionReaper &) = delete;
+
+  void stop() noexcept
+  {
+    mailbox_.stop_reaper();
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+  }
+
+private:
+  void run() noexcept
+  {
+    while (mailbox_.wait_for_reaper_work()) {
+      mailbox_.reap_rejected();
+    }
+    mailbox_.reap_all();
+  }
+
+  NodeCompletionMailbox & mailbox_;
+  std::thread thread_;
 };
 
 }  // namespace voice_nav_mission

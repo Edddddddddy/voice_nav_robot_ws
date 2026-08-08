@@ -306,6 +306,16 @@ if(BUILD_TESTING)
   )
 
   ament_add_gtest(
+    runtime_transaction_plane_test
+    test/runtime_transaction_plane_test.cpp
+  )
+  target_compile_features(runtime_transaction_plane_test PUBLIC cxx_std_17)
+  target_include_directories(
+    runtime_transaction_plane_test
+    PRIVATE include
+  )
+
+  ament_add_gtest(
     relative_motion_ros_adapter_test
     test/relative_motion_ros_adapter_test.cpp
   )
@@ -467,6 +477,16 @@ if(BUILD_TESTING)
     TIMEOUT 60
     RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
   )
+  add_launch_test(
+    test/test_mission_runtime_node_active_shutdown.py
+    TIMEOUT 60
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
+  )
+  add_launch_test(
+    test/test_mission_runtime_node_restart.py
+    TIMEOUT 60
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
+  )
   set_tests_properties(
     test_test_motion_gate_node.py
     PROPERTIES
@@ -489,6 +509,21 @@ if(BUILD_TESTING)
   )
   set_tests_properties(
     test_test_mission_runtime_node.py
+    PROPERTIES
+      ENVIRONMENT_MODIFICATION
+        "ROS_DOMAIN_ID=unset:;DISABLE_ROS_ISOLATION=unset:"
+  )
+  set_tests_properties(
+    test_test_mission_runtime_node_active_shutdown.py
+    test_test_mission_runtime_node_restart.py
+    PROPERTIES
+      ENVIRONMENT
+        "RMW_IMPLEMENTATION=rmw_fastrtps_cpp;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
+      RUN_SERIAL TRUE
+  )
+  set_tests_properties(
+    test_test_mission_runtime_node_active_shutdown.py
+    test_test_mission_runtime_node_restart.py
     PROPERTIES
       ENVIRONMENT_MODIFICATION
         "ROS_DOMAIN_ID=unset:;DISABLE_ROS_ISOLATION=unset:"

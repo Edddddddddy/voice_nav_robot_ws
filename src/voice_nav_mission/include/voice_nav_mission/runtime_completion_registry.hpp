@@ -33,7 +33,8 @@ inline std::string completion_token_key(const MotionToken & token)
 {
   std::string key;
   key.reserve(sizeof(token.mission_id) + sizeof(token.admission_epoch) +
-    sizeof(token.mission_generation) + sizeof(token.step_generation));
+    sizeof(token.mission_generation) + sizeof(token.step_generation) +
+    sizeof(token.admission_generation));
   const auto append = [&key](const auto value) {
       key.append(reinterpret_cast<const char *>(&value), sizeof(value));
     };
@@ -41,6 +42,7 @@ inline std::string completion_token_key(const MotionToken & token)
   append(token.admission_epoch);
   append(token.mission_generation);
   append(token.step_generation);
+  append(token.admission_generation);
   return key;
 }
 

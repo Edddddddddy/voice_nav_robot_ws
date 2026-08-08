@@ -166,7 +166,8 @@ RuntimeCore::RuntimeCore(
 
 AdmissionResult RuntimeCore::admit(
   const MissionGoal & goal,
-  StartPermitCheck start_permit_check)
+  StartPermitCheck start_permit_check,
+  const std::uint64_t admission_generation)
 {
   MissionResult result;
   if (!valid_bounded_id(
@@ -318,6 +319,7 @@ AdmissionResult RuntimeCore::admit(
     0U,
     0U,
     state_.admission_epoch,
+    admission_generation,
     goal.steps,
     clock_->now() + config_.mission_deadline,
     {},
@@ -841,7 +843,8 @@ void RuntimeCore::start_step()
     active_->id,
     active_->admission_epoch,
     active_->generation,
-    active_->step_generation};
+    active_->step_generation,
+    active_->admission_generation};
   active_->child_token = token;
   if (!admission_allowed(token.admission_epoch)) {
     select_terminal_and_stop(

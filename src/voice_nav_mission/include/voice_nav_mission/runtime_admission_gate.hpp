@@ -18,10 +18,12 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <string>
 
 #include "voice_nav_mission/action_admission_tracker.hpp"
+#include "voice_nav_mission/runtime_transaction_plane.hpp"
 
 namespace voice_nav_mission
 {
@@ -42,7 +44,10 @@ public:
 
   using AdmissionCheck = std::function<bool(std::uint64_t)>;
 
-  RuntimeAdmissionGate() = default;
+  RuntimeAdmissionGate()
+  : transaction_plane_(std::make_shared<RuntimeTransactionPlane>(1U))
+  {
+  }
 
   RuntimeAdmissionGate(const RuntimeAdmissionGate &) = delete;
   RuntimeAdmissionGate & operator=(const RuntimeAdmissionGate &) = delete;
@@ -76,13 +81,24 @@ public:
 
   void begin_quiesce(ActionAdmissionTracker & tracker) noexcept
   {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!quiescing_) {
-      quiescing_ = true;
-      if (generation_ != std::numeric_limits<std::uint64_t>::max()) {
-        ++generation_;
+    std::uint64_t next_generation = 0U;
+    bool should_quiesce = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!quiescing_) {
+        quiescing_ = true;
+        if (generation_ != std::numeric_limits<std::uint64_t>::max()) {
+          ++generation_;
+        }
+        next_generation = generation_;
+        tracker.begin_quiesce();
+        should_quiesce = true;
       }
-      tracker.begin_quiesce();
+    }
+    // The transaction plane fences new side effects without waiting for an
+    // already-committed RPC, and the Node admission mutex is not held here.
+    if (should_quiesce && transaction_plane_) {
+      transaction_plane_->quiesce(next_generation);
     }
   }
 
@@ -119,10 +135,17 @@ public:
     return quiescing_;
   }
 
+  [[nodiscard]] std::shared_ptr<RuntimeTransactionPlane> transaction_plane()
+  const noexcept
+  {
+    return transaction_plane_;
+  }
+
 private:
   mutable std::mutex mutex_;
   std::uint64_t generation_{1U};
   bool quiescing_{false};
+  std::shared_ptr<RuntimeTransactionPlane> transaction_plane_;
 };
 
 }  // namespace voice_nav_mission

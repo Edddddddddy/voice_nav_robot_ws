@@ -281,7 +281,8 @@ public:
       [](const RuntimeEmergencyFenceSnapshot &) {}),
     mailbox_(
       [this](const MotionToken & token) {return enqueue_token(token);},
-      [this](std::string detail) {ingress_.request_emergency(std::move(detail));})
+      [this](std::string detail) {ingress_.request_emergency(std::move(detail));}),
+    reaper_(mailbox_)
   {
     if (mode_ == RelayRejectionMode::FenceBlocked) {
       if (!fence_.raise("test relay fence blocked")) {
@@ -328,6 +329,7 @@ private:
   RuntimeEmergencyFence fence_;
   RuntimeEventIngress<RelayCompletionEvent> ingress_;
   NodeCompletionMailbox mailbox_;
+  NodeCompletionReaper reaper_;
   std::atomic<std::size_t> publish_attempts_{0U};
 };
 

@@ -158,5 +158,24 @@ TEST(ActionAdmissionTrackerTest, QuiesceRevokesProvisionalTicketsAtBound)
   EXPECT_TRUE(tracker.drained());
 }
 
+TEST(ActionAdmissionTrackerTest, AcceptedLeaseKeepsSharedStateAliveAfterTrackerOwner)
+{
+  ManualSteadyClock clock;
+  std::weak_ptr<ActionAdmissionTracker::SharedState> weak_state;
+  std::optional<ActionAdmissionTracker::CallbackLease> lease;
+  {
+    ActionAdmissionTracker tracker(
+      [&clock]() {return clock.now();}, 100ms);
+    ASSERT_TRUE(tracker.try_provision("owner-release"));
+    weak_state = tracker.shared_state();
+    lease.emplace(tracker.enter_accepted("owner-release"));
+    ASSERT_TRUE(lease->has_ticket());
+  }
+
+  EXPECT_FALSE(weak_state.expired());
+  lease.reset();
+  EXPECT_TRUE(weak_state.expired());
+}
+
 }  // namespace
 }  // namespace voice_nav_mission

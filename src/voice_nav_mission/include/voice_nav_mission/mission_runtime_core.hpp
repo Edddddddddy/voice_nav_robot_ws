@@ -214,6 +214,7 @@ struct MotionToken
   std::uint64_t admission_epoch{0U};
   std::uint64_t mission_generation{0U};
   std::uint64_t step_generation{0U};
+  std::uint64_t admission_generation{0U};
 };
 
 enum class ChildResultCode : std::uint8_t
@@ -336,7 +337,8 @@ public:
 
   [[nodiscard]] AdmissionResult admit(
     const MissionGoal & goal,
-    StartPermitCheck start_permit_check = {});
+    StartPermitCheck start_permit_check = {},
+    std::uint64_t admission_generation = 0U);
   void cancel(std::uint64_t mission_id);
   [[nodiscard]] StopResponse stop(const StopRequest & request);
   void observe_gate(const GateSnapshot & snapshot);
@@ -360,6 +362,7 @@ private:
     std::uint32_t step_index{0U};
     std::uint32_t completed_steps{0U};
     std::uint64_t admission_epoch{0U};
+    std::uint64_t admission_generation{0U};
     std::vector<MissionStep> steps;
     SteadyClockPort::TimePoint deadline{};
     MotionToken child_token;

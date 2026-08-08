@@ -207,7 +207,8 @@ bool same_token(const MotionToken & left, const MotionToken & right) noexcept
   return left.mission_id == right.mission_id &&
          left.admission_epoch == right.admission_epoch &&
          left.mission_generation == right.mission_generation &&
-         left.step_generation == right.step_generation;
+         left.step_generation == right.step_generation &&
+         left.admission_generation == right.admission_generation;
 }
 
 ChildResultCode child_code_for_conditioning(
@@ -412,8 +413,7 @@ public:
     ingress_(std::make_shared<AdapterIngressState>()),
     producer_(std::make_shared<RawMotionProducer>(
       node_, callback_group_, ingress_)),
-    conditioning_(std::make_unique<MotionConditioningPipeline>(
-      node_, authority_, producer_, conditioning_config_))
+    conditioning_(nullptr)
   {
     if (!authority_) {
       throw std::invalid_argument("RelativeMotionRosAdapter requires a Gate port");
@@ -422,6 +422,15 @@ public:
       throw std::invalid_argument(
         "RelativeMotionRosAdapter requires an external completion relay");
     }
+    if (!conditioning_config_.transaction_plane) {
+      conditioning_config_.transaction_plane =
+        std::make_shared<RuntimeTransactionPlane>();
+    }
+    conditioning_config_.transaction_generation_provider = [this]() {
+        return transaction_generation_.load(std::memory_order_acquire);
+      };
+    conditioning_ = std::make_unique<MotionConditioningPipeline>(
+      node_, authority_, producer_, conditioning_config_);
   }
 
   void initialize()
@@ -659,6 +668,8 @@ public:
         stationarity_waiting_ = false;
         pending_teardown_.reset();
         cancel_requested_.store(false);
+        transaction_generation_.store(
+          token.admission_generation, std::memory_order_release);
         transaction_kind_ = TransactionKind::Start;
       }
     }
@@ -1473,6 +1484,7 @@ private:
   std::shared_ptr<AdapterIngressState> ingress_;
   std::shared_ptr<RawMotionProducer> producer_;
   std::unique_ptr<MotionConditioningPipeline> conditioning_;
+  std::atomic<std::uint64_t> transaction_generation_{0U};
 
   rclcpp::Subscription<Odometry>::SharedPtr odom_subscription_;
   rclcpp::Subscription<LaserScan>::SharedPtr scan_subscription_;
