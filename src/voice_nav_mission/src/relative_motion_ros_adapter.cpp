@@ -67,6 +67,8 @@ ChildResultCode child_code_for_conditioning(
       return ChildResultCode::DependencyUnavailable;
     case MotionConditioningFailure::ExecutionFailed:
       return ChildResultCode::Failed;
+    case MotionConditioningFailure::Timeout:
+      return ChildResultCode::Timeout;
     case MotionConditioningFailure::SafetyFault:
       return ChildResultCode::SafetyFault;
     case MotionConditioningFailure::InternalError:
@@ -104,8 +106,9 @@ MotionConditioningFailure conditioning_failure_for_relative(
     case RelativeMotionFailure::DependencyUnavailable:
       return MotionConditioningFailure::DependencyUnavailable;
     case RelativeMotionFailure::ExecutionFailed:
-    case RelativeMotionFailure::Timeout:
       return MotionConditioningFailure::ExecutionFailed;
+    case RelativeMotionFailure::Timeout:
+      return MotionConditioningFailure::Timeout;
     case RelativeMotionFailure::SafetyFault:
       return MotionConditioningFailure::SafetyFault;
     case RelativeMotionFailure::InternalError:
@@ -280,6 +283,7 @@ public:
       std::lock_guard<std::mutex> lock(mutex_);
       already_shutdown = shutdown_complete_;
       if (!already_shutdown) {
+        shutdown_delivery_requested_ = true;
         shutting_down_ = true;
       }
     }
@@ -425,7 +429,7 @@ public:
             "relative-motion cancellation requested",
             active_token_,
             deadline,
-            false};
+            shutting_down_};
           if (starting_ && !emergency_stop_in_progress_) {
             emergency_request = *pending_teardown_;
             pending_teardown_.reset();
@@ -437,7 +441,7 @@ public:
           pending_teardown_->conditioning_failure = MotionConditioningFailure::None;
           pending_teardown_->detail = "relative-motion cancellation requested";
           pending_teardown_->deadline = deadline;
-          pending_teardown_->deliver_result = false;
+          pending_teardown_->deliver_result = shutting_down_;
         }
         if (transaction_kind_ != TransactionKind::Start) {
           transaction_kind_ = TransactionKind::Teardown;
@@ -1089,9 +1093,11 @@ private:
     (conditioning_result.detail.empty() ? request.detail : conditioning_result.detail));
 
     ResultCallback result_callback;
-    bool shutting_down = false;
+    bool deliver_result = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      deliver_result = request.deliver_result ||
+        shutdown_delivery_requested_;
       stationarity_waiting_ = false;
       if (!active_ || same_token(active_token_, request.token)) {
         active_ = false;
@@ -1102,16 +1108,15 @@ private:
         teardown_complete_ = true;
         teardown_safe_ = zero && stationary &&
           conditioning_result.failure != MotionConditioningFailure::SafetyFault;
-        if (mission_active) {
+        if (deliver_result) {
           result_callback = std::move(result_callback_);
         } else {
           result_callback_ = {};
         }
-        shutting_down = shutting_down_;
         condition_variable_.notify_all();
       }
     }
-    if (request.deliver_result && result_callback && !shutting_down) {
+    if (deliver_result && result_callback) {
       try {
         result_callback(request.token, ChildResult{final_code, final_detail});
       } catch (...) {
@@ -1158,6 +1163,7 @@ private:
   bool transaction_stop_{false};
   bool transaction_in_progress_{false};
   bool shutting_down_{false};
+  bool shutdown_delivery_requested_{false};
   bool shutdown_complete_{false};
   bool emergency_stop_in_progress_{false};
   std::atomic<bool> cancel_requested_{false};

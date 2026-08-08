@@ -410,6 +410,30 @@ above. Every Goal receives exactly one terminal result.
   steady-clock Gate `zero_proven_at`; its deadline is absolute at
   `zero_proven_at + 1200 ms`, with no cleanup-time extension.
 
+### RelativeMotion production seams
+
+- The Runtime event queue has separate normal and control capacity. A full
+  normal lane records a bounded queue fault; a full control lane raises an
+  independent EmergencyFence that advances the admission epoch, inhibits and
+  zeros the Gate, and prevents a later event from reopening the old generation.
+- Cancellation is fenced after every controller, writer, lifecycle, and
+  component boundary and again immediately before `OPEN`. A cancelled start
+  therefore cannot publish a producer command or enter `OPEN`, even when the
+  downstream call returns late.
+- Start-drain timeout cleanup is owned by an object-held asynchronous
+  continuation. It is not dependent on destruction, and producer stop,
+  component cleanup, generation reclaim, and terminal publication are each
+  performed at most once.
+- Runtime health keeps source loss, deadline expiry, and execution failure
+  typed. A dependency or graph resource failure remains
+  `DEPENDENCY_UNAVAILABLE` when Gate inhibit+zero is proven; only failure to
+  prove that safety state selects `SAFETY_FAULT`. The residual fault remains
+  latched against later admission.
+- Node shutdown stops ingress, drains accepted internal completion events, and
+  waits for the saved active-goal callback to be delivered exactly once before
+  closing the queue and destroying Runtime state. Terminal records are
+  bounded to eight recent generations.
+
 ## Failure behavior
 
 | Failure | Required behavior |
