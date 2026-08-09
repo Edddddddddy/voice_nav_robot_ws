@@ -53,6 +53,7 @@ class RapidMissionBridge(Node):
         nav_goal.pose.pose.position.x, nav_goal.pose.pose.position.y = x, y
         nav_goal.pose.pose.orientation.z, nav_goal.pose.pose.orientation.w = math.sin(yaw / 2), math.cos(yaw / 2)
         self.nav.send_goal_async(nav_goal)
+        self.get_logger().info('Forwarded Mission to Nav2 place=%s' % target)
         result.code, result.detail = ExecuteMission.Result.SUCCEEDED, 'Nav2 goal forwarded'
         handle.succeed(); return result
 
