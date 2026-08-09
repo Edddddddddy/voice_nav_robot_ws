@@ -7,6 +7,7 @@ import hashlib
 from http.client import IncompleteRead
 import io
 import json
+import multiprocessing
 from pathlib import Path
 import os
 import subprocess
@@ -14,6 +15,7 @@ import sys
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 from scripts.llm import artifact_manager as llm
 
@@ -45,6 +47,35 @@ class _Opener:
 
     def open(self, url: str, timeout: float) -> _Response:
         return _Response(self.payload)
+
+
+class _FakeProcess:
+    pid = 4242
+
+    def __init__(self, wait_results: list[object]) -> None:
+        self.wait_results = list(wait_results)
+        self.wait_calls: list[float] = []
+
+    def poll(self) -> None:
+        return None
+
+    def wait(self, timeout: float) -> int:
+        self.wait_calls.append(timeout)
+        result = self.wait_results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return int(result)
+
+
+def _hold_bundle_lock(root: str, acquired, release) -> None:
+    with llm.BundleLock(Path(root)):
+        acquired.set()
+        release.wait(5)
+
+
+def _wait_for_bundle_lock(root: str, acquired) -> None:
+    with llm.BundleLock(Path(root)):
+        acquired.set()
 
 
 class LlmManifestTest(unittest.TestCase):
@@ -87,6 +118,130 @@ class RealGateLogTest(unittest.TestCase):
             self.assertEqual(log_path.read_bytes(), payload[: llm.REAL_LOG_MAX_BYTES])
             self.assertEqual(state["bytes"], llm.REAL_LOG_MAX_BYTES)
             self.assertTrue(state["truncated"])
+
+
+@unittest.skipUnless(os.name == "posix", "process-group termination is a POSIX gate seam")
+class ProcessTerminationTest(unittest.TestCase):
+    def test_term_normal_exit_reports_no_escalation(self) -> None:
+        process = _FakeProcess([0])
+        with mock.patch.object(llm.os, "killpg") as killpg:
+            result = llm._terminate_process_group(process)
+
+        self.assertEqual(result, False)
+        killpg.assert_called_once_with(process.pid, llm.signal.SIGTERM)
+        self.assertEqual(process.wait_calls, [llm.PROCESS_TERM_SECONDS])
+
+    def test_term_timeout_kill_reports_escalation_after_group_cleanup(self) -> None:
+        process = _FakeProcess(
+            [
+                subprocess.TimeoutExpired("llama-server", llm.PROCESS_TERM_SECONDS),
+                0,
+            ]
+        )
+        with mock.patch.object(llm.os, "killpg") as killpg:
+            result = llm._terminate_process_group(process)
+
+        self.assertEqual(result, True)
+        self.assertEqual(
+            killpg.call_args_list,
+            [
+                mock.call(process.pid, llm.signal.SIGTERM),
+                mock.call(process.pid, llm.signal.SIGKILL),
+            ],
+        )
+        self.assertEqual(process.wait_calls, [llm.PROCESS_TERM_SECONDS] * 2)
+
+
+@unittest.skipUnless(os.name == "posix", "flock concurrency is a Linux provisioning seam")
+class BundleLockTest(unittest.TestCase):
+    def test_concurrent_provisioners_serialize_on_root_local_flock(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "llm"
+            root.mkdir(mode=0o700)
+            holder_acquired = multiprocessing.Event()
+            release_holder = multiprocessing.Event()
+            waiter_acquired = multiprocessing.Event()
+            holder = multiprocessing.Process(
+                target=_hold_bundle_lock,
+                args=(str(root), holder_acquired, release_holder),
+            )
+            waiter = multiprocessing.Process(
+                target=_wait_for_bundle_lock,
+                args=(str(root), waiter_acquired),
+            )
+            try:
+                holder.start()
+                self.assertTrue(holder_acquired.wait(5))
+                waiter.start()
+                self.assertFalse(waiter_acquired.wait(0.3))
+                release_holder.set()
+                self.assertTrue(waiter_acquired.wait(5))
+                holder.join(5)
+                waiter.join(5)
+            finally:
+                release_holder.set()
+                if holder.is_alive():
+                    holder.terminate()
+                if waiter.is_alive():
+                    waiter.terminate()
+                holder.join(5)
+                waiter.join(5)
+
+            self.assertEqual(holder.exitcode, 0)
+            self.assertEqual(waiter.exitcode, 0)
+
+    def test_real_gate_fails_when_server_cleanup_escalates_to_kill(self) -> None:
+        manifest = llm.load_lock_manifest()
+        digest = llm.lock_sha256()
+        fake_process = mock.Mock()
+        fake_process.stdout = io.BytesIO()
+        fake_process.pid = 4242
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            evidence = Path(temporary_directory)
+            with (
+                mock.patch.object(llm, "validate_artifact_root", return_value=Path(temporary_directory)),
+                mock.patch.object(llm, "verify_bundle", return_value=evidence),
+                mock.patch.object(llm.tempfile, "mkdtemp", return_value=str(evidence)),
+                mock.patch.object(llm.subprocess, "Popen", return_value=fake_process),
+                mock.patch.object(llm, "_capture_process_log"),
+                mock.patch.object(llm, "_wait_for_server"),
+                mock.patch.object(llm, "_check_loopback_listener"),
+                mock.patch.object(llm, "_post_schema_smoke"),
+                mock.patch.object(llm, "_terminate_process_group", return_value=True),
+                mock.patch.object(llm, "_repository_head", return_value="a" * 40),
+                mock.patch.object(llm, "_server_version", return_value="fixture-server 1\n"),
+                mock.patch.object(llm, "_cpu_identity", return_value="fixture-cpu"),
+            ):
+                with self.assertRaises(llm.RealGateError) as context:
+                    llm.real_smoke(
+                        Path(temporary_directory),
+                        manifest,
+                        digest,
+                        REPOSITORY_ROOT,
+                    )
+
+        self.assertIn("SIGKILL", str(context.exception))
+
+    def test_kill_wait_failure_is_a_controlled_gate_error(self) -> None:
+        process = _FakeProcess(
+            [
+                subprocess.TimeoutExpired("llama-server", llm.PROCESS_TERM_SECONDS),
+                subprocess.TimeoutExpired("llama-server", llm.PROCESS_TERM_SECONDS),
+            ]
+        )
+        with mock.patch.object(llm.os, "killpg") as killpg:
+            with self.assertRaises(llm.ArtifactError) as context:
+                llm._terminate_process_group(process)
+
+        self.assertIn("kill/wait", str(context.exception))
+        self.assertEqual(
+            killpg.call_args_list,
+            [
+                mock.call(process.pid, llm.signal.SIGTERM),
+                mock.call(process.pid, llm.signal.SIGKILL),
+            ],
+        )
 
     def test_duplicate_and_unknown_manifest_keys_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -132,6 +287,17 @@ class RealGateLogTest(unittest.TestCase):
                 "docs/process/third-party-llm-notices.md",
             ],
         )
+
+    def test_repo_boundary_rejects_tracked_runtime_log_files(self) -> None:
+        with self.assertRaises(llm.ArtifactError):
+            llm.verify_repository_artifact_boundary(
+                REPOSITORY_ROOT,
+                tracked_paths=[
+                    "server.log",
+                    "evidence/gate.log",
+                    "logs/server.txt",
+                ],
+            )
 
     @unittest.skipIf(
         os.name == "posix" and REPOSITORY_ROOT.as_posix().startswith("/mnt/"),
@@ -186,6 +352,18 @@ class LlmDownloadAndExtractionTest(unittest.TestCase):
                 )
             self.assertFalse(wrong.exists())
             self.assertFalse(wrong.with_name("wrong.bin.part").exists())
+
+            same_size_wrong_hash = Path(temporary_directory) / "same-size-wrong-hash.bin"
+            with self.assertRaises(llm.ArtifactError):
+                llm.download_verified(
+                    "https://example.test/model.bin",
+                    same_size_wrong_hash,
+                    len(payload),
+                    hashlib.sha256(b"different payload").hexdigest(),
+                    opener=_Opener(payload),
+                )
+            self.assertFalse(same_size_wrong_hash.exists())
+            self.assertFalse(same_size_wrong_hash.with_name("same-size-wrong-hash.bin.part").exists())
 
     def test_incomplete_http_read_uses_bounded_retry_and_cleans_part(self) -> None:
         payload = b"retry fixture"
@@ -265,6 +443,24 @@ class LlmDownloadAndExtractionTest(unittest.TestCase):
                     tar.addfile(entry, io.BytesIO(b"x"))
             with self.assertRaises(llm.ArtifactError):
                 llm.safe_extract_tar(archive, root / "extract")
+
+    def test_safe_extraction_rejects_hardlink_device_and_fifo(self) -> None:
+        fixtures = (
+            ("hardlink", tarfile.LNKTYPE),
+            ("device", tarfile.CHRTYPE),
+            ("fifo", tarfile.FIFOTYPE),
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            for name, member_type in fixtures:
+                archive = root / f"{name}.tar"
+                with tarfile.open(archive, "w") as tar:
+                    member = tarfile.TarInfo(f"llama.cpp/{name}")
+                    member.type = member_type
+                    member.linkname = "llama.cpp/target"
+                    tar.addfile(member)
+                with self.assertRaises(llm.ArtifactError):
+                    llm.safe_extract_tar(archive, root / f"extract-{name}")
 
 
 def _fixture_manifest(source_payload: bytes, model_payload: bytes) -> llm.LockManifest:
@@ -413,6 +609,36 @@ class ProvisioningFixtureTest(unittest.TestCase):
             self.assertFalse((root / "bundles" / digest).exists())
             self.assertFalse(any(path.name.startswith(".staging-") for path in root.iterdir()))
 
+    def test_builder_failure_leaves_no_final_bundle_or_staging(self) -> None:
+        source = self._source_archive()
+        model = b"fixture-model"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "llm"
+            provisioner, digest = self._provisioner(root, source, model)
+
+            class FailingBuilder:
+                def build(self, source_root: Path, build_root: Path, output_path: Path) -> llm.BuildResult:
+                    raise llm.ArtifactError("fixture build failed")
+
+            failing = llm.Provisioner(
+                root,
+                provisioner.manifest,
+                digest,
+                downloader=provisioner.downloader,
+                builder=FailingBuilder(),
+                publisher=provisioner.publisher,
+                fsync=lambda path: None,
+                fsync_directory=lambda path: None,
+                lock_factory=lambda path: llm._NoopLock(),
+                check_existing_server=False,
+            )
+            with self.assertRaises(llm.ArtifactError) as context:
+                failing.provision()
+
+            self.assertIn("fixture build failed", str(context.exception))
+            self.assertFalse((root / "bundles" / digest).exists())
+            self.assertFalse(any(path.name.startswith(".staging-") for path in root.iterdir()))
+
     def test_fixture_adapter_output_is_rechecked_before_build(self) -> None:
         source = self._source_archive()
         model = b"fixture-model"
@@ -450,7 +676,7 @@ class ProvisioningFixtureTest(unittest.TestCase):
             def fail_final_directory(path: Path) -> None:
                 nonlocal fsync_calls
                 fsync_calls += 1
-                if fsync_calls == 3:
+                if fsync_calls == 4:
                     raise llm.ArtifactError("fixture directory fsync failed")
 
             failing = llm.Provisioner(
@@ -468,6 +694,47 @@ class ProvisioningFixtureTest(unittest.TestCase):
             with self.assertRaises(llm.ArtifactError):
                 failing.provision()
             self.assertFalse((root / "bundles" / digest).exists())
+
+    def test_post_publish_cleanup_failure_reports_stranded_publication(self) -> None:
+        source = self._source_archive()
+        model = b"fixture-model"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "llm"
+            provisioner, digest = self._provisioner(root, source, model)
+            final_bundle = root / "bundles" / digest
+            fsync_calls = 0
+
+            def fail_persistence(path: Path) -> None:
+                nonlocal fsync_calls
+                fsync_calls += 1
+                if fsync_calls in {4, 5}:
+                    raise llm.ArtifactError("fixture directory fsync failed")
+
+            original_remove = llm._remove_path
+
+            def fail_final_cleanup(path: Path) -> None:
+                if path == final_bundle:
+                    raise llm.ArtifactError("fixture final cleanup failed")
+                original_remove(path)
+
+            failing = llm.Provisioner(
+                root,
+                provisioner.manifest,
+                digest,
+                downloader=provisioner.downloader,
+                builder=provisioner.builder,
+                publisher=provisioner.publisher,
+                fsync=lambda path: None,
+                fsync_directory=fail_persistence,
+                lock_factory=lambda path: llm._NoopLock(),
+                check_existing_server=False,
+            )
+            with mock.patch.object(llm, "_remove_path", side_effect=fail_final_cleanup):
+                with self.assertRaises(llm.ArtifactError) as context:
+                    failing.provision()
+
+            self.assertIn("stranded publication", str(context.exception))
+            self.assertTrue(final_bundle.exists())
 
 
 @unittest.skipUnless(os.name == "posix", "renameat2 is a Linux provisioning seam")
@@ -494,6 +761,60 @@ class ArtifactRootSafetyTest(unittest.TestCase):
             with self.assertRaises(llm.ArtifactError):
                 llm.validate_artifact_root(candidate, create=True)
             self.assertFalse(candidate.exists())
+
+    def test_root_symlink_ownership_and_mode_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            parent = Path(temporary_directory)
+            target = parent / "target"
+            target.mkdir(mode=0o700)
+            target.chmod(0o700)
+            link = parent / "link"
+            link.symlink_to(target, target_is_directory=True)
+
+            with self.assertRaises(llm.ArtifactError):
+                llm.validate_artifact_root(link, create=False)
+
+            target.chmod(0o777)
+            with self.assertRaises(llm.ArtifactError):
+                llm.validate_artifact_root(target, create=False)
+
+            target.chmod(0o700)
+            with mock.patch.object(llm.os, "geteuid", return_value=os.geteuid() + 1):
+                with self.assertRaises(llm.ArtifactError):
+                    llm.validate_artifact_root(target, create=False)
+
+
+@unittest.skipUnless(os.name == "posix", "shell wrapper behavior is a Linux/WSL seam")
+class WrapperCliTest(unittest.TestCase):
+    def _run_wrapper(self, script: str, *arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(REPOSITORY_ROOT / "scripts" / "llm" / script), *arguments],
+            cwd=REPOSITORY_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    def test_verify_wrapper_reports_manifest_and_not_run_real_gate(self) -> None:
+        completed = self._run_wrapper("verify.sh")
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("MANIFEST_GATE=PASS", completed.stdout)
+        self.assertIn(
+            "REAL_MODEL_GATE=NOT_RUN reason=--real-not-requested",
+            completed.stdout,
+        )
+
+    def test_provision_wrapper_rejects_mnt_root_before_network(self) -> None:
+        completed = self._run_wrapper(
+            "provision.sh",
+            "--root",
+            "/mnt/c/voice-nav-issue-48-wrapper-fixture",
+        )
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("PROVISION=FAIL", completed.stderr)
+        self.assertIn("mnt", completed.stderr.lower())
 
 
 if __name__ == "__main__":
