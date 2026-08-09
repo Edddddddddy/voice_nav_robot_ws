@@ -8,6 +8,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import tempfile
 import unittest
 
 from launch.events.process import ProcessStarted
@@ -62,6 +63,114 @@ class ProcessIdentityTest(unittest.TestCase):
             pid=child.pid,
         )
         return child, action, event
+
+    def test_event_absolute_executable_is_used_when_node_is_not_on_path(self):
+        temporary_directory = tempfile.TemporaryDirectory()
+        executable = Path(temporary_directory.name) / 'voice_nav_unlisted_node'
+        executable.symlink_to(sys.executable)
+        action = object()
+        command = [
+            str(executable),
+            '-c',
+            'import time; time.sleep(60)',
+            '--ros-args',
+            '-r',
+            '__node:=pidfd_test_child',
+        ]
+        child = subprocess.Popen(command)
+        event = ProcessStarted(
+            action=action,
+            name='pidfd_test_child',
+            cmd=command,
+            cwd=os.getcwd(),
+            env=dict(os.environ),
+            pid=child.pid,
+        )
+        guard = None
+        try:
+            guard = support.ExactPidfdProcess.from_process_started(
+                action=action,
+                event=event,
+                expected_executable=executable.name,
+                expected_node_name='pidfd_test_child',
+            )
+            acknowledged = guard.kill(lambda: 1)
+            self.assertGreater(acknowledged, 0)
+            self.assertNotEqual(child.wait(timeout=2), 0)
+        finally:
+            if guard is not None:
+                guard.close()
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=2)
+            temporary_directory.cleanup()
+
+    def test_resolved_wrong_elf_is_rejected_before_signal(self):
+        child, action, event = self.make_child()
+        temporary_directory = tempfile.TemporaryDirectory()
+        executable = Path(temporary_directory.name) / 'voice_nav_wrong_node'
+        executable.symlink_to('/bin/sh')
+        command = [str(executable), *event.cmd[1:]]
+        wrong_event = ProcessStarted(
+            action=action,
+            name=event.name,
+            cmd=command,
+            cwd=event.cwd,
+            env=event.env,
+            pid=event.pid,
+        )
+        try:
+            with self.assertRaises(support.ProcessIdentityError):
+                support.ExactPidfdProcess.from_process_started(
+                    action=action,
+                    event=wrong_event,
+                    expected_executable=executable.name,
+                    expected_node_name='pidfd_test_child',
+                )
+        finally:
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=2)
+            temporary_directory.cleanup()
+
+    def test_duplicate_executable_candidates_are_rejected(self):
+        child, action, event = self.make_child()
+        duplicate_command = [*event.cmd, event.cmd[0]]
+        duplicate_event = ProcessStarted(
+            action=action,
+            name=event.name,
+            cmd=duplicate_command,
+            cwd=event.cwd,
+            env=event.env,
+            pid=event.pid,
+        )
+        try:
+            with self.assertRaises(support.ProcessIdentityError):
+                support.ExactPidfdProcess.from_process_started(
+                    action=action,
+                    event=duplicate_event,
+                    expected_executable=Path(sys.executable).name,
+                    expected_node_name='pidfd_test_child',
+                )
+        finally:
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=2)
+
+    def test_wrong_node_name_is_rejected_before_signal(self):
+        child, action, event = self.make_child()
+        try:
+            with self.assertRaises(support.ProcessIdentityError):
+                support.ExactPidfdProcess.from_process_started(
+                    action=action,
+                    event=event,
+                    expected_executable=Path(sys.executable).name,
+                    expected_node_name='wrong_node_name',
+                )
+        finally:
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=2)
 
     def test_exact_child_can_be_killed_and_reaped_through_pidfd(self):
         child, action, event = self.make_child()
