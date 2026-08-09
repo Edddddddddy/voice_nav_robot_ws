@@ -281,7 +281,7 @@ struct RuntimeConfig
   std::chrono::milliseconds control_response_deadline{100};
   std::chrono::milliseconds stop_barrier{250};
   std::chrono::milliseconds cancel_grace{250};
-  std::chrono::milliseconds stationarity_deadline{250};
+  std::chrono::milliseconds stationarity_deadline{1200};
   std::size_t source_cache_size{64U};
   std::size_t stop_cache_size{64U};
   std::uint8_t max_steps{3U};

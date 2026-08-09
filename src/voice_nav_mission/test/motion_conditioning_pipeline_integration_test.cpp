@@ -440,6 +440,16 @@ private:
   std::thread thread_;
 };
 
+TEST(MotionConditioningPipelineIntegration, RuntimeAndAdapterStationarityBudgetsMatch)
+{
+  const RuntimeConfig runtime_config{};
+  const RelativeMotionPolicy adapter_policy{};
+
+  EXPECT_EQ(
+    runtime_config.stationarity_deadline,
+    adapter_policy.stationarity_deadline);
+}
+
 template<typename PredicateT>
 bool wait_for(PredicateT predicate, std::chrono::milliseconds timeout)
 {
@@ -699,11 +709,19 @@ TEST(
       return plane && plane->completion_mailbox().relay(std::move(record));
     };
 
+  RuntimeConfig runtime_config;
+  runtime_config.runtime_instance_id = kIntegrationRuntimeId;
+  runtime_config.initial_admission_epoch = 1U;
+  const RelativeMotionPolicy motion_policy{};
+  ASSERT_EQ(
+    runtime_config.stationarity_deadline,
+    motion_policy.stationarity_deadline);
+
   auto authority = std::make_shared<RosMotionAuthorityPort>(
     *pipeline_node, 100ms, 250ms,
     [&gate_updates](const GateSnapshot &) {gate_updates.observe();});
   auto adapter = std::make_shared<RelativeMotionRosAdapter>(
-    *pipeline_node, authority, RelativeMotionPolicy{}, conditioning_config);
+    *pipeline_node, authority, motion_policy, conditioning_config);
   auto raw_subscription = pipeline_node->create_subscription<TwistStamped>(
     conditioning_config.raw_topic,
     rclcpp::QoS(rclcpp::KeepLast(10)).reliable(),
@@ -715,9 +733,6 @@ TEST(
       }
     });
 
-  RuntimeConfig runtime_config;
-  runtime_config.runtime_instance_id = kIntegrationRuntimeId;
-  runtime_config.initial_admission_epoch = 1U;
   plane = std::shared_ptr<RuntimeExecutionPlane>(new RuntimeExecutionPlane(
     runtime_config,
     std::make_shared<IntegrationSteadyClock>(),
