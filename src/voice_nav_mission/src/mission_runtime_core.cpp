@@ -244,6 +244,7 @@ AdmissionResult RuntimeCore::admit(
   // mistaken for an unbound startup lease and reasserts INHIBIT mid-handover.
   gate_bound_ = true;
   gate_fault_handled_ = false;
+  gate_fault_snapshot_.reset();
 
   // The Node-owned start permit is checked again immediately before any
   // authority transaction.  A queued AdmitEvent that loses the quiesce
@@ -503,21 +504,42 @@ void RuntimeCore::observe_gate(const GateSnapshot & snapshot)
     return;
   }
   const bool is_healthy = gate_is_healthy(gate_snapshot_);
-  if (identity_changed || (!is_healthy && was_healthy)) {
-    if (!gate_fault_handled_) {
-      gate_fault_handled_ = true;
-      (void)rotate_epoch();
-      if (active_.has_value()) {
-        select_terminal_and_stop(
-          MissionResultCode::SafetyFault,
-          "MotionGate health or identity changed during Mission");
-      }
-      state_.availability =
-        snapshot.state == GateState::Faulted || !snapshot.endpoint_available ||
-        (snapshot.endpoint_available && !zero_is_proven(snapshot)) ?
-        RuntimeAvailability::Faulted : RuntimeAvailability::Unavailable;
-      publish_state();
+
+  // A latched fault owns the current Gate generation until a newer, healthy
+  // sample from that same identity proves recovery.  Delayed Prepared samples
+  // from the prior generation must not clear the latch and make the same
+  // fault rotate the Runtime epoch twice.
+  if (gate_fault_handled_) {
+    const bool trusted_recovery =
+      is_healthy && gate_fault_snapshot_.has_value() &&
+      !gate_fault_snapshot_->gate_instance_id.empty() &&
+      snapshot.gate_instance_id == gate_fault_snapshot_->gate_instance_id &&
+      snapshot.control_seq > gate_fault_snapshot_->control_seq;
+    if (!trusted_recovery) {
+      return;
     }
+    gate_fault_handled_ = false;
+    gate_fault_snapshot_.reset();
+    gate_bound_ = true;
+    set_availability_from_dependencies();
+    publish_state();
+    return;
+  }
+
+  if (identity_changed || (!is_healthy && was_healthy)) {
+    gate_fault_handled_ = true;
+    gate_fault_snapshot_ = snapshot;
+    (void)rotate_epoch();
+    if (active_.has_value()) {
+      select_terminal_and_stop(
+        MissionResultCode::SafetyFault,
+        "MotionGate health or identity changed during Mission");
+    }
+    state_.availability =
+      snapshot.state == GateState::Faulted || !snapshot.endpoint_available ||
+      (snapshot.endpoint_available && !zero_is_proven(snapshot)) ?
+      RuntimeAvailability::Faulted : RuntimeAvailability::Unavailable;
+    publish_state();
     return;
   }
   if (is_healthy) {

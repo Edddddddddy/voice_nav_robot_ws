@@ -454,6 +454,54 @@ TEST(RuntimeCore, HealthyAdmissionClearsPriorGateFaultLatchBeforeHealthEvent)
   EXPECT_EQ(authority->inhibit_count(), 1U);
   EXPECT_EQ(core.state().availability, RuntimeAvailability::Faulted);
   EXPECT_FALSE(core.has_active_mission());
+
+  // The delayed Prepared sample belongs to the pre-fault Gate generation.
+  // Replaying the same fault after it must remain idempotent.
+  core.observe_gate(faulted_unavailable);
+
+  EXPECT_EQ(results.size(), 1U);
+  EXPECT_EQ(core.state().admission_epoch, 2U);
+  EXPECT_EQ(authority->inhibit_count(), 1U);
+  EXPECT_EQ(core.state().availability, RuntimeAvailability::Faulted);
+  EXPECT_FALSE(core.has_active_mission());
+}
+
+TEST(RuntimeCore, TrustedGateRecoveryRearmsFaultGeneration)
+{
+  Fixture fixture;
+  ASSERT_TRUE(fixture.core.admit(goal(1U)).accepted);
+
+  const auto first_fault = GateSnapshot{
+    kGateId, 3U, "", GateState::Faulted,
+    false, true, true, false, "", false, false};
+  fixture.core.observe_gate(first_fault);
+
+  ASSERT_EQ(fixture.results.size(), 1U);
+  EXPECT_EQ(fixture.results.front().code, MissionResultCode::SafetyFault);
+  EXPECT_EQ(fixture.core.state().admission_epoch, 2U);
+  EXPECT_EQ(fixture.authority->inhibit_count(), 1U);
+
+  const auto delayed_prepared = GateSnapshot{
+    kGateId, 3U, std::string(32U, 'p'), GateState::Prepared,
+    true, true, true, true, "", false, false};
+  fixture.core.observe_gate(delayed_prepared);
+  EXPECT_EQ(fixture.core.state().admission_epoch, 2U);
+
+  const auto recovered = GateSnapshot{
+    kGateId, 4U, "", GateState::Inhibited,
+    true, true, true, true, "", false, false};
+  fixture.core.observe_gate(recovered);
+
+  const auto second_fault = GateSnapshot{
+    kGateId, 5U, "", GateState::Faulted,
+    false, true, true, false, "", false, false};
+  fixture.core.observe_gate(second_fault);
+
+  EXPECT_EQ(fixture.core.state().admission_epoch, 3U);
+  EXPECT_EQ(fixture.results.size(), 1U);
+  EXPECT_EQ(fixture.authority->inhibit_count(), 1U);
+  EXPECT_EQ(fixture.core.state().availability, RuntimeAvailability::Faulted);
+  EXPECT_FALSE(fixture.core.has_active_mission());
 }
 
 TEST(RuntimeCore, ValidatesEveryStepBeforeAcquiringTheGate)

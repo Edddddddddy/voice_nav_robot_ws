@@ -444,6 +444,7 @@ private:
   GateSnapshot gate_snapshot_;
   bool gate_bound_{false};
   bool gate_fault_handled_{false};
+  std::optional<GateSnapshot> gate_fault_snapshot_;
   bool relative_health_initialized_{false};
   bool last_relative_healthy_{false};
   SteadyClockPort::TimePoint gate_discovery_started_at_{};
