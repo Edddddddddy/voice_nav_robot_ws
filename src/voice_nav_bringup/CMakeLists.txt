@@ -22,8 +22,22 @@ if(BUILD_TESTING)
     TIMEOUT 180
     RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
   )
+  add_launch_test(
+    test/test_mission_runtime_crash_stop.py
+    TARGET mission_runtime_crash_stop
+    TIMEOUT 300
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
+  )
+  add_launch_test(
+    test/test_motion_gate_consumer_deadman.py
+    TARGET motion_gate_consumer_deadman
+    TIMEOUT 300
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
+  )
   set_tests_properties(
     test_test_motion_gate_product.py
+    mission_runtime_crash_stop
+    motion_gate_consumer_deadman
     PROPERTIES
       ENVIRONMENT
         "RMW_IMPLEMENTATION=rmw_fastrtps_cpp;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
@@ -31,6 +45,8 @@ if(BUILD_TESTING)
   )
   set_tests_properties(
     test_test_motion_gate_product.py
+    mission_runtime_crash_stop
+    motion_gate_consumer_deadman
     PROPERTIES
       ENVIRONMENT_MODIFICATION
         "ROS_DOMAIN_ID=unset:;DISABLE_ROS_ISOLATION=unset:"

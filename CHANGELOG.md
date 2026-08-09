@@ -8,6 +8,12 @@ and releases follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Added the Issue #36 crash-stop launch acceptance harness for exact pidfd
+  Runtime/MotionGate injection, controller deadman timing, odometry/wheel
+  stationarity, stale identity isolation, no-Goal recovery, and new-Goal
+  recovery. The harness does not add a public ROS Interface or a product
+  command; ordinary PR runs execute each real scenario once and repeated
+  hardening remains nightly/release-only.
 - Added the Issue #35 package-private Runtime-owned MotionConditioningPipeline
   and its production Nav2 component composition/lifecycle Adapter for
   `nav2_velocity_smoother` and `nav2_collision_monitor`, including bounded

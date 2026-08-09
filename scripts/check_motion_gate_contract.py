@@ -1997,6 +1997,7 @@ def validate_launch_test_registration(
     package_name: str,
     expected_path: str | tuple[str, ...],
     timeout_seconds: int | tuple[int, ...],
+    expected_target: str | tuple[str | None, ...] | None = None,
 ) -> None:
     launch_test_position = source.find("add_launch_test")
     for dependency in (
@@ -2018,6 +2019,16 @@ def validate_launch_test_registration(
     expected_timeouts = (
         (timeout_seconds,) if isinstance(timeout_seconds, int) else timeout_seconds
     )
+    if expected_target is None:
+        expected_targets = (None,) * len(expected_paths)
+    elif isinstance(expected_target, str):
+        expected_targets = (expected_target,)
+    else:
+        expected_targets = expected_target
+    if len(expected_targets) != len(expected_paths):
+        raise MotionGateContractError(
+            f"{package_name} launch-test contract has mismatched path and target counts"
+        )
     if len(expected_paths) != len(expected_timeouts):
         raise MotionGateContractError(
             f"{package_name} launch-test contract has mismatched path and timeout counts"
@@ -2036,13 +2047,15 @@ def validate_launch_test_registration(
         zip(launch_tests, expected_paths, expected_timeouts)
     ):
         actual_arguments = cmake_arguments(registered)
-        expected_arguments = [
-            path,
+        expected_arguments = [path]
+        if expected_targets[index] is not None:
+            expected_arguments.extend(["TARGET", expected_targets[index]])
+        expected_arguments.extend([
             "TIMEOUT",
             str(timeout),
             "RUNNER",
             "${ament_cmake_ros_DIR}/run_test_isolated.py",
-        ]
+        ])
         if actual_arguments != expected_arguments:
             raise MotionGateContractError(
                 f"{package_name} add_launch_test #{index + 1} must be exactly "
@@ -2059,8 +2072,8 @@ def validate_launch_test_registration(
             return []
         return arguments[:properties_index]
 
-    for path in expected_paths:
-        generated_test_name = f"test_{Path(path).name}"
+    for path, target in zip(expected_paths, expected_targets):
+        generated_test_name = target or f"test_{Path(path).name}"
         matching_properties = [
             cmake_arguments(body)
             for body in properties_calls
@@ -2287,8 +2300,13 @@ def validate_bringup_cmake(path: Path) -> None:
     validate_launch_test_registration(
         source,
         "voice_nav_bringup",
-        "test/test_motion_gate_product.py",
-        180,
+        (
+            "test/test_motion_gate_product.py",
+            "test/test_mission_runtime_crash_stop.py",
+            "test/test_motion_gate_consumer_deadman.py",
+        ),
+        (180, 300, 300),
+        (None, "mission_runtime_crash_stop", "motion_gate_consumer_deadman"),
     )
     install_match = re.search(
         r"install\s*\(\s*DIRECTORY(?P<body>.*?)"

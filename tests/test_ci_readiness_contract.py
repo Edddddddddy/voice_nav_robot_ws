@@ -273,13 +273,20 @@ def calls_to_method(tree: ast.AST, method_name: str) -> list[ast.Call]:
 
 def launch_test_runtime(cmake_path: Path) -> tuple[set[str], dict[str, str]]:
     cmake = cmake_path.read_text(encoding="utf-8")
-    matches = re.findall(
-        r"set_tests_properties\(\s*(.*?)\s+PROPERTIES\s+"
-        r"ENVIRONMENT\s+\"([^\"]+)\"\s+"
-        r"RUN_SERIAL\s+TRUE\s*\)",
+    matches = []
+    for block in re.findall(
+        r"set_tests_properties\(\s*(.*?)\s*\)",
         cmake,
         flags=re.DOTALL,
-    )
+    ):
+        environment = re.search(
+            r"\bPROPERTIES\s+ENVIRONMENT\s+\"([^\"]+)\"",
+            block,
+            flags=re.DOTALL,
+        )
+        if environment is None:
+            continue
+        matches.append((block[: environment.start()], environment.group(1)))
     if not matches:
         raise AssertionError(
             f"expected isolated launch-test block in {cmake_path}"
@@ -292,6 +299,17 @@ def launch_test_runtime(cmake_path: Path) -> tuple[set[str], dict[str, str]]:
         )
     environment_text = environment_texts.pop()
     targets = set(re.findall(r"\btest_[A-Za-z0-9_]+\.py\b", target_text))
+    for block in re.findall(
+        r"add_launch_test\(\s*(.*?)\s*\)",
+        cmake,
+        flags=re.DOTALL,
+    ):
+        target = re.search(
+            r"\bTARGET\s+([A-Za-z][A-Za-z0-9_]*)\b",
+            block,
+        )
+        if target is not None:
+            targets.add(target.group(1))
     environment = dict(
         entry.split("=", maxsplit=1)
         for entry in environment_text.split(";")
@@ -398,7 +416,11 @@ class CiReadinessContractTest(unittest.TestCase):
         )
         self.assertEqual(
             bringup_targets,
-            {"test_test_motion_gate_product.py"},
+            {
+                "test_test_motion_gate_product.py",
+                "mission_runtime_crash_stop",
+                "motion_gate_consumer_deadman",
+            },
         )
 
         environments = {
@@ -425,7 +447,7 @@ class CiReadinessContractTest(unittest.TestCase):
         expected_launch_test_counts = {
             SIMULATION_CMAKE: 3,
             MISSION_CMAKE: 4,
-            BRINGUP_CMAKE: 1,
+            BRINGUP_CMAKE: 3,
         }
         expected_isolation_reset_counts = {
             SIMULATION_CMAKE: 1,

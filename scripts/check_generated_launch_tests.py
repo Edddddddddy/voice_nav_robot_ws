@@ -49,6 +49,14 @@ EXPECTED_TESTS = {
             "source": "test_motion_gate_product.py",
             "timeout": 180.0,
         },
+        "mission_runtime_crash_stop": {
+            "source": "test_mission_runtime_crash_stop.py",
+            "timeout": 300.0,
+        },
+        "motion_gate_consumer_deadman": {
+            "source": "test_motion_gate_consumer_deadman.py",
+            "timeout": 300.0,
+        },
     },
 }
 EXPECTED_LABELS = ["launch_test"]
