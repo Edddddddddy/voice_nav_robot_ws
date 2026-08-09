@@ -1,65 +1,52 @@
-# Agent control plane
+# GitHub operations
 
-This directory records the repository-level delivery rules. The root
-[`AGENTS.md`](../../AGENTS.md) defines role behavior and the root
-[`CONTEXT.md`](../../CONTEXT.md) defines shared domain terms.
+The root [AGENTS.md](../../AGENTS.md) owns delivery roles, permissions,
+recovery, and the two-phase evidence protocol. The product glossary is
+[CONTEXT.md](../../CONTEXT.md). This file contains only GitHub Issue/PR
+operations and short examples.
 
-## GitHub Issue tracking
+## Issue and PR records
 
 - A GitHub Issue is the canonical record for requirements, decisions,
   acceptance criteria, dependencies, and status.
-- A PR is the delivery record for one Issue. Its description maps acceptance to
-  files and evidence and includes `Closes #NN`.
-- Issue comments and PR comments preserve decisions, verification summaries,
-  blocked reasons, and event evidence after Manager transport. The first
-  direct `VOICE_NAV_HANDOFF` may carry the complete Chinese evidence needed for
-  that transport. After the Manager returns `VOICE_NAV_PERSISTED` with the
-  canonical URL, only the final `VOICE_NAV_EVENT` uses the compact envelope.
-  Workers and Reviewers never fabricate a URL or poll GitHub, CI, or another
-  thread while waiting for the Manager's direct response.
-- One Task has one fresh managed worktree, one branch, one Worker context, and
-  one Draft PR. A Reviewer receives a separate read-only context.
-- Local notes or task-state indexes may accelerate recovery, but they never
-  override the canonical Issue, PR, or authoritative ADR.
+- One Task has one Issue, one managed worktree/branch, one Worker context, and
+  one Draft PR. A PR maps acceptance to files and evidence and includes
+  `Closes #NN`.
+- Comments preserve decisions, blocked reasons, verification summaries, and
+  evidence after transport. Local notes and Task YAML accelerate recovery but
+  never override the Issue, PR, or ADR.
 
-## Standard labels
+## Labels
 
-Keep the type label and at most one workflow-state label on an Issue:
+Keep the type label and at most one workflow-state label:
 
 | Label | Meaning |
 | --- | --- |
 | `type:prd` | Parent product requirements document |
 | `type:task` | Independently reversible implementation Task |
-| `ready-for-agent` | Decision-complete and eligible for a fresh Worker |
-| `in-progress` | A Worker currently owns the Task |
-| `blocked` | Work cannot continue until a named decision or dependency changes |
-| `review-needed` | A Draft PR is ready for independent review |
+| `ready-for-agent` | Decision-complete and eligible for assignment |
+| `in-progress` | A Worker owns the Task |
+| `blocked` | A named decision or dependency is missing |
+| `review-needed` | Draft PR is ready for independent review |
 | `verified` | Acceptance evidence and required checks are complete |
 
-State changes are recorded in an Issue comment. A blocked Task names the
-smallest decision needed to resume; it is not silently reinterpreted by a
-Worker.
+State changes and the smallest blocker are recorded in an Issue comment.
 
-## External PR intake
+## External contributions
 
-External pull requests are not a requirements or decision intake surface. A
-maintainer first creates or identifies the canonical GitHub Issue, records its
-scope and acceptance criteria, and links any later contribution to that Issue.
-The Issue remains authoritative even when a PR originates outside the
-repository's managed Worker flow.
+An external PR is not a requirements or decision intake surface. A maintainer
+first identifies the canonical Issue, records scope and acceptance there, then
+links the contribution to that Issue.
 
-## Single-context layout
-
-The repository has one shared context layer:
+## Short examples
 
 ```text
-AGENTS.md              role and protocol rules
-CONTEXT.md             implementation-free domain glossary
-docs/adr/              authoritative product and interface decisions
-docs/agents/           delivery configuration and label rules
-.github/               Issue and PR forms
+Issue 链接: #NN
+验收证据: command/result or immutable Git object
+状态: ready-for-agent
 ```
 
-Do not create competing root glossaries or per-Task protocol copies. A fresh
-context reads the assigned Issue, parent PRD, linked evidence, this layout,
-and relevant ADRs, then works only in its own managed worktree.
+```text
+PR: Closes #NN
+结果: acceptance criterion → file → evidence
+```
