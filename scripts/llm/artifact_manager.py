@@ -134,6 +134,10 @@ class RealGateError(ArtifactError):
         self.log_path = log_path
 
 
+class ListenerOwnershipError(ArtifactError):
+    """The locked listener is present but cannot be attributed to this gate."""
+
+
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -1266,15 +1270,30 @@ def _command_output(command: Sequence[str], *, timeout: float) -> str:
     return _bounded_output(_run_command(command, timeout=timeout, label="runtime probe"), "runtime probe")
 
 
-def _check_loopback_listener(host: str, port: int) -> None:
+def _listener_records(port: int) -> list[tuple[str, tuple[int, ...]]]:
     if shutil.which("ss") is None:
         raise ArtifactError("ss is required for loopback proof")
-    completed = _run_command(["ss", "-ltn"], timeout=10.0, label="ss loopback proof")
-    local_addresses: list[str] = []
+    completed = _run_command(["ss", "-ltnp"], timeout=10.0, label="ss loopback proof")
+    records: list[tuple[str, tuple[int, ...]]] = []
     for line in completed.stdout.splitlines()[1:]:
         fields = line.split()
         if len(fields) >= 4:
-            local_addresses.append(fields[3])
+            local_address = fields[3]
+            if local_address.endswith(f":{port}"):
+                pids = tuple(int(value) for value in re.findall(r"\bpid=(\d+)\b", line))
+                records.append((local_address, pids))
+    return records
+
+
+def _check_port_available(host: str, port: int) -> None:
+    del host
+    if _listener_records(port):
+        raise ArtifactError("locked loopback port is already in use")
+
+
+def _check_loopback_listener(host: str, port: int, process: subprocess.Popen[Any]) -> None:
+    records = _listener_records(port)
+    local_addresses = [address for address, _ in records]
     expected = f"{host}:{port}"
     if expected not in local_addresses:
         raise ArtifactError("llama-server is not listening on the locked loopback address")
@@ -1285,9 +1304,51 @@ def _check_loopback_listener(host: str, port: int) -> None:
         f":::{port}",
     }
     if any(address in forbidden for address in local_addresses):
-        raise ArtifactError("llama-server is listening outside loopback")
+        raise ListenerOwnershipError("llama-server is listening outside loopback")
     if any(address.endswith(f":{port}") and address != expected for address in local_addresses):
-        raise ArtifactError("unexpected listener exists on the locked port")
+        raise ListenerOwnershipError("unexpected listener exists on the locked port")
+    try:
+        expected_group = os.getpgid(process.pid)
+    except (AttributeError, OSError) as error:
+        raise ListenerOwnershipError("cannot inspect launched llama-server process group") from error
+    listener_pids = {
+        pid
+        for address, pids in records
+        if address == expected
+        for pid in pids
+    }
+    if not listener_pids:
+        raise ListenerOwnershipError("listener process evidence is missing")
+    try:
+        owned = any(os.getpgid(pid) == expected_group for pid in listener_pids)
+    except (AttributeError, OSError) as error:
+        raise ListenerOwnershipError("cannot inspect listener process group") from error
+    if not owned:
+        raise ListenerOwnershipError("listener is not owned by launched llama-server process group")
+
+
+def _wait_for_owned_listener(
+    host: str,
+    port: int,
+    process: subprocess.Popen[Any],
+    timeout: float,
+) -> None:
+    deadline = time.monotonic() + timeout
+    last_error: ArtifactError | None = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise ArtifactError("llama-server exited before listener ownership proof")
+        try:
+            _check_loopback_listener(host, port, process)
+            return
+        except ListenerOwnershipError:
+            raise
+        except ArtifactError as error:
+            last_error = error
+            if "ss is required" in str(error):
+                raise
+            time.sleep(0.1)
+    raise ArtifactError("llama-server listener ownership proof timed out") from last_error
 
 
 def _loopback_opener() -> Any:
@@ -1500,6 +1561,7 @@ def real_smoke(
     server = bundle / "bin" / "llama-server"
     model = bundle / "models" / manifest.model_file
     runtime = manifest.runtime
+    _check_port_available(runtime["host"], runtime["port"])
     evidence_parent = Path("/tmp") if Path("/tmp").is_dir() else None
     evidence = tempfile.mkdtemp(
         prefix="voice-nav-llm-real-",
@@ -1546,8 +1608,9 @@ def real_smoke(
     termination_error: ArtifactError | None = None
     termination_escalated = False
     try:
+        _wait_for_owned_listener(runtime["host"], runtime["port"], process, REAL_READINESS_SECONDS)
         _wait_for_server(runtime["host"], runtime["port"], process, REAL_READINESS_SECONDS)
-        _check_loopback_listener(runtime["host"], runtime["port"])
+        _check_loopback_listener(runtime["host"], runtime["port"], process)
         _post_schema_smoke(manifest)
     except ArtifactError as error:
         gate_error = error
