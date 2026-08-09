@@ -510,6 +510,98 @@ TEST(RuntimeCore, TrustedGateRecoveryRearmsFaultGeneration)
   EXPECT_FALSE(fixture.core.has_active_mission());
 }
 
+TEST(RuntimeCore, SameSequenceFaultAtMaximumWatermarkFailsClosed)
+{
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
+  authority->set_snapshot(GateSnapshot{
+        kGateId, std::numeric_limits<std::uint64_t>::max(), "",
+        GateState::Inhibited, true, true, true, true, "", false, false});
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  RuntimeCore core(config(), clock, authority, relative);
+  core.observe_gate(authority->snapshot());
+
+  core.observe_gate(GateSnapshot{
+        kGateId, std::numeric_limits<std::uint64_t>::max(), "",
+        GateState::Faulted, true, true, true, true, "", false, false});
+
+  EXPECT_EQ(core.state().admission_epoch, 2U);
+  EXPECT_EQ(core.state().availability, RuntimeAvailability::Faulted);
+  EXPECT_FALSE(core.has_active_mission());
+}
+
+TEST(RuntimeCore, SameSequenceEndpointLossStopsActiveMission)
+{
+  Fixture fixture;
+  ASSERT_TRUE(fixture.core.admit(goal(1U)).accepted);
+  const auto current_control_seq = fixture.authority->snapshot().control_seq;
+
+  fixture.core.observe_gate(GateSnapshot{
+        kGateId, current_control_seq, "", GateState::Faulted,
+        false, true, true, true, "", false, false});
+
+  ASSERT_EQ(fixture.results.size(), 1U);
+  EXPECT_EQ(fixture.results.front().code, MissionResultCode::SafetyFault);
+  EXPECT_EQ(fixture.core.state().admission_epoch, 2U);
+  EXPECT_EQ(fixture.core.state().availability, RuntimeAvailability::Faulted);
+  EXPECT_FALSE(fixture.core.has_active_mission());
+  EXPECT_EQ(fixture.authority->inhibit_count(), 1U);
+  EXPECT_TRUE(fixture.authority->snapshot().motion_inhibited);
+  EXPECT_TRUE(fixture.authority->snapshot().zero_selected);
+  EXPECT_TRUE(fixture.authority->snapshot().zero_published);
+}
+
+TEST(RuntimeCore, DuplicateSameSequenceFaultDoesNotRepeatSafetyAction)
+{
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
+  authority->set_snapshot(GateSnapshot{
+        kGateId, std::numeric_limits<std::uint64_t>::max(), "",
+        GateState::Inhibited, true, true, true, true, "", false, false});
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  std::vector<MissionResult> results;
+  RuntimeCore core(
+    config(), clock, authority, relative, {}, {},
+    [&results](std::uint64_t, const MissionResult & result) {
+      results.push_back(result);
+    });
+  core.observe_gate(authority->snapshot());
+  ASSERT_TRUE(core.admit(goal(1U)).accepted);
+
+  const auto same_sequence_fault = GateSnapshot{
+    kGateId, std::numeric_limits<std::uint64_t>::max(), "",
+    GateState::Faulted, true, true, true, true, "", false, false};
+  core.observe_gate(same_sequence_fault);
+
+  ASSERT_EQ(results.size(), 1U);
+  EXPECT_EQ(core.state().admission_epoch, 2U);
+  EXPECT_EQ(authority->inhibit_count(), 1U);
+  EXPECT_EQ(core.state().gate_state, GateState::Inhibited);
+
+  core.observe_gate(same_sequence_fault);
+
+  EXPECT_EQ(results.size(), 1U);
+  EXPECT_EQ(core.state().admission_epoch, 2U);
+  EXPECT_EQ(authority->inhibit_count(), 1U);
+  EXPECT_EQ(core.state().gate_state, GateState::Inhibited);
+  EXPECT_EQ(core.state().availability, RuntimeAvailability::Faulted);
+  EXPECT_FALSE(core.has_active_mission());
+}
+
+TEST(RuntimeCore, SameSequenceLossOfZeroProofFailsClosed)
+{
+  Fixture fixture;
+  const auto current_control_seq = fixture.authority->snapshot().control_seq;
+
+  fixture.core.observe_gate(GateSnapshot{
+        kGateId, current_control_seq, "", GateState::Prepared,
+        true, false, false, false, "", false, false});
+
+  EXPECT_EQ(fixture.core.state().admission_epoch, 2U);
+  EXPECT_EQ(fixture.core.state().availability, RuntimeAvailability::Faulted);
+  EXPECT_FALSE(fixture.core.has_active_mission());
+}
+
 TEST(RuntimeCore, ValidatesEveryStepBeforeAcquiringTheGate)
 {
   Fixture fixture;

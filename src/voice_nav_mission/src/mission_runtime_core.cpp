@@ -469,12 +469,23 @@ void RuntimeCore::observe_gate(const GateSnapshot & snapshot)
   // duplicate or delayed sample before it can roll the current generation
   // back after a trusted recovery; a genuinely new identity still enters the
   // fail-closed identity-change path below.
-  const bool stale_same_generation =
+  const bool same_generation =
     gate_bound_ && !gate_snapshot_.gate_instance_id.empty() &&
     !snapshot.gate_instance_id.empty() &&
-    gate_snapshot_.gate_instance_id == snapshot.gate_instance_id &&
-    snapshot.control_seq <= gate_snapshot_.control_seq;
+    gate_snapshot_.gate_instance_id == snapshot.gate_instance_id;
+  const bool same_sequence_degradation =
+    !gate_fault_handled_ && same_generation &&
+    snapshot.control_seq == gate_snapshot_.control_seq &&
+    gate_is_healthy(gate_snapshot_) && !gate_is_healthy(snapshot);
+  const bool stale_same_generation =
+    same_generation && snapshot.control_seq < gate_snapshot_.control_seq;
   if (stale_same_generation) {
+    return;
+  }
+  if (
+    same_generation && snapshot.control_seq == gate_snapshot_.control_seq &&
+    !same_sequence_degradation)
+  {
     return;
   }
 
