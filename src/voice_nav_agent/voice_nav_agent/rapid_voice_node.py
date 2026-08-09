@@ -12,6 +12,8 @@ from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from voice_nav_interfaces.action import Speak
 from voice_nav_interfaces.msg import VoiceTurn
 
+from .rapid_commands import normalize_rapid_command
+
 
 class RapidVoiceNode(Node):
     def __init__(self):
@@ -44,6 +46,7 @@ class RapidVoiceNode(Node):
 
     def _publish_text(self, text):
         if not text: return
+        text = normalize_rapid_command(text)
         self.sequence += 1
         turn = VoiceTurn()
         turn.voice_instance_id, turn.voice_seq = self.instance_id, self.sequence

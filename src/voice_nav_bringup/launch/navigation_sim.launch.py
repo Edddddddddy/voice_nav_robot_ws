@@ -12,13 +12,11 @@ It is a rapid-development path only and does not claim MotionGate protection.
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
-    ExecuteProcess,
     GroupAction,
     IncludeLaunchDescription,
-    TimerAction,
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import FindExecutable, LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node, SetRemap
 from launch_ros.substitutions import FindPackageShare
 
@@ -55,22 +53,9 @@ def generate_launch_description():
             'use_respawn': 'False',
         }.items(),
     )
-    initial_pose = TimerAction(
-        period=15.0,
-        actions=[
-            ExecuteProcess(
-                cmd=[
-                    FindExecutable(name='ros2'),
-                    'topic',
-                    'pub',
-                    '--once',
-                    '/initialpose',
-                    'geometry_msgs/msg/PoseWithCovarianceStamped',
-                    '{header: {frame_id: map}, pose: {pose: {position: {x: 0.0, y: 0.0, z: 0.0}, orientation: {w: 1.0}}, covariance: [0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0685389]}}}',
-                ],
-                output='screen',
-            )
-        ],
+    initial_pose = Node(
+        package='voice_nav_agent', executable='rapid_initial_pose', output='screen',
+        parameters=[{'use_sim_time': True}],
     )
     rapid_mission = Node(package='voice_nav_agent', executable='rapid_mission_bridge', output='screen')
     agent = Node(package='voice_nav_agent', executable='agent_node', output='screen')

@@ -9,6 +9,9 @@ The supported baseline is Windows 11 with WSL2 Ubuntu 24.04, ROS 2 Jazzy, and
 Gazebo Harmonic. Real robots, manipulators, cameras, cloud services, and
 functional-safety emergency stops are outside the supported scope.
 
+For the deliberately unsafeguarded, local end-to-end implementation path on
+the `codex/rapid-path` branch, see [Rapid local end-to-end path](docs/rapid-path.md).
+
 ## Current status
 
 The repository currently verifies a v0.2 simulation, MotionGate, and Mission
