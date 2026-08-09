@@ -2,8 +2,7 @@
 
 `CONTEXT.md` is the product glossary. GitHub Issues own requirements,
 decisions, acceptance, dependencies, and status; applicable ADRs own product
-and interface decisions. This file is the single owner of roles, permissions,
-delivery state, and recovery order.
+and interface decisions. This file is the single owner of roles, permissions, delivery state, and recovery order.
 
 ## Ownership
 
@@ -13,8 +12,8 @@ delivery state, and recovery order.
   comments, labels, pushes, Draft PRs, reviews, merges, tags, and releases.
 - **Worker** owns exactly one decision-complete Issue in one fresh isolated
   worktree based on current `origin/main`. Worker is Luna/Max (max reasoning);
-  implement with
-  focused RED, minimal GREEN, refactor while green, and commit locally.
+  implement with focused RED, minimal GREEN, refactor while green, and commit
+  locally.
 - **Reviewer** is a fresh read-only exact-HEAD PR review. Reviewer is Sol/xhigh;
   compare the Issue contract and full diff, report P0–P3 findings, and never
   modify the Worker branch.
@@ -51,12 +50,13 @@ The two-phase transport is owned here and never requires polling:
    `VOICE_NAV_PERSISTED` with the canonical URL.
 3. Only after that response, send the compact
    `VOICE_NAV_EVENT: blocked|completed|reviewed` with `issue`, `pr`, `thread`,
-   `head`, `evidence`, and `decision_needed`. Never fabricate/reuse a URL or
-   send the final event early; use `none` only when no decision/action is
-   needed.
+   `head`, `evidence`, and `decision_needed`; never fabricate/reuse a URL or
+   send the final event early; only the final `VOICE_NAV_EVENT` uses the compact
+   envelope. An unresolved P0/P1 Review finding blocks merge; the final
+   `VOICE_NAV_EVENT: reviewed` must fill `decision_needed`; use `none` only when
+   no decision/action is needed.
 
-Required handoff fields are explicit so recovery never depends on hidden
-conversation state:
+Required handoff fields are explicit; recovery never depends on hidden state:
 
 ```text
 VOICE_NAV_HANDOFF: ready|blocked|reviewed
