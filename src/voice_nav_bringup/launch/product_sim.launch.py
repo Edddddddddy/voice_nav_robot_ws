@@ -29,6 +29,8 @@ def generate_launch_description():
     shutdown_on_gazebo_exit = LaunchConfiguration(
         'shutdown_on_gazebo_exit'
     )
+    world = LaunchConfiguration('world')
+    world_name = LaunchConfiguration('world_name')
     simulation = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution(
@@ -42,6 +44,8 @@ def generate_launch_description():
         launch_arguments={
             'headless': headless,
             'shutdown_on_gazebo_exit': shutdown_on_gazebo_exit,
+            'world': world,
+            'world_name': world_name,
         }.items(),
     )
     gate_config = PathJoinSubstitution(
@@ -99,6 +103,16 @@ def generate_launch_description():
                     'disable this while joining Gazebo explicitly.'
                 ),
                 choices=['true', 'false'],
+            ),
+            DeclareLaunchArgument(
+                'world',
+                default_value='voice_nav_test_world.sdf',
+                description='Installed simulation world selected by this product launch.',
+            ),
+            DeclareLaunchArgument(
+                'world_name',
+                default_value='voice_nav_test_world',
+                description='Gazebo world name declared by the selected SDF.',
             ),
             simulation,
             motion_conditioning_container,

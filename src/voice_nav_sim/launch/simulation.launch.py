@@ -68,7 +68,7 @@ def generate_launch_description():
         [
             package_share,
             'worlds',
-            'voice_nav_test_world.sdf',
+            LaunchConfiguration('world'),
         ]
     )
     robot_description = ParameterValue(
@@ -175,7 +175,7 @@ def generate_launch_description():
         output='screen',
         arguments=[
             '--world',
-            'voice_nav_test_world',
+            LaunchConfiguration('world_name'),
             '--topic',
             'robot_description',
             '--name',
@@ -258,6 +258,19 @@ def generate_launch_description():
                 default_value='true',
                 description='Run Gazebo server-only when true.',
                 choices=['true', 'false'],
+            ),
+            DeclareLaunchArgument(
+                'world',
+                default_value='voice_nav_test_world.sdf',
+                description=(
+                    'Installed world asset to load. Product launch files '
+                    'select a fixed world rather than exposing this to users.'
+                ),
+            ),
+            DeclareLaunchArgument(
+                'world_name',
+                default_value='voice_nav_test_world',
+                description='Gazebo world name declared by the selected SDF.',
             ),
             DeclareLaunchArgument(
                 'shutdown_on_gazebo_exit',
