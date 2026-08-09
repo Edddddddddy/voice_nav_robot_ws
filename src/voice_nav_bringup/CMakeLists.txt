@@ -41,6 +41,7 @@ install(
   DIRECTORY
     config
     launch
+    maps
   DESTINATION share/${PROJECT_NAME}
   PATTERN "__pycache__" EXCLUDE
   PATTERN "*.pyc" EXCLUDE
