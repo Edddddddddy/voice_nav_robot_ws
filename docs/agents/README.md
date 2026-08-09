@@ -11,8 +11,12 @@ This directory records the repository-level delivery rules. The root
 - A PR is the delivery record for one Issue. Its description maps acceptance to
   files and evidence and includes `Closes #NN`.
 - Issue comments and PR comments preserve decisions, verification summaries,
-  blocked reasons, and event evidence. Direct messages only carry the compact
-  event envelope.
+  blocked reasons, and event evidence after Manager transport. The first
+  direct `VOICE_NAV_HANDOFF` may carry the complete Chinese evidence needed for
+  that transport. After the Manager returns `VOICE_NAV_PERSISTED` with the
+  canonical URL, only the final `VOICE_NAV_EVENT` uses the compact envelope.
+  Workers and Reviewers never fabricate a URL or poll GitHub, CI, or another
+  thread while waiting for the Manager's direct response.
 - One Task has one fresh managed worktree, one branch, one Worker context, and
   one Draft PR. A Reviewer receives a separate read-only context.
 - Local notes or task-state indexes may accelerate recovery, but they never
