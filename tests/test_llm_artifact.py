@@ -215,6 +215,19 @@ class LlmDownloadAndExtractionTest(unittest.TestCase):
             self.assertEqual(destination.read_bytes(), payload)
             self.assertFalse(destination.with_name("model.bin.part").exists())
 
+    def test_missing_bundle_verification_does_not_create_a_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "llm"
+            bundles = root / "bundles"
+            bundles.mkdir(parents=True)
+            manifest = llm.load_lock_manifest()
+            digest = llm.lock_sha256()
+            missing_bundle = bundles / digest
+
+            with self.assertRaises(llm.ArtifactError):
+                llm.verify_bundle(root, manifest, digest)
+            self.assertFalse(missing_bundle.exists())
+
     def test_redirect_handler_rejects_non_https(self) -> None:
         handler = llm._HttpsRedirectHandler()
         request = llm.Request("https://example.test/source")

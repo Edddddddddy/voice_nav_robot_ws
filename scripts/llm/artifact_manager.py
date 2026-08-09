@@ -520,6 +520,21 @@ def _ensure_private_directory(path: Path) -> None:
         raise ArtifactError(f"cannot create private artifact directory: {path.name}") from error
 
 
+def _require_private_directory(path: Path, label: str) -> None:
+    """Check a private directory without creating or changing it."""
+
+    try:
+        info = path.lstat()
+    except FileNotFoundError as error:
+        raise ArtifactError(f"{label} is missing") from error
+    except OSError as error:
+        raise ArtifactError(f"cannot inspect {label}") from error
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise ArtifactError(f"{label} is not a real directory")
+    if os.name == "posix" and info.st_mode & 0o077:
+        raise ArtifactError(f"{label} is not private")
+
+
 def _ensure_regular_non_symlink(path: Path, label: str) -> os.stat_result:
     try:
         info = path.lstat()
@@ -992,15 +1007,15 @@ def validate_bundle_directory(
 ) -> None:
     """Validate a complete bundle, optionally executing server --version."""
 
-    _ensure_private_directory(bundle)
+    _require_private_directory(bundle, "bundle")
     expected_top = {"bin", "models", "provenance.json"}
     actual_top = {entry.name for entry in bundle.iterdir()}
     if actual_top != expected_top:
         raise ArtifactError("bundle is incomplete or contains unexpected files")
     binary_dir = bundle / "bin"
     model_dir = bundle / "models"
-    _ensure_private_directory(binary_dir)
-    _ensure_private_directory(model_dir)
+    _require_private_directory(binary_dir, "bundle binary directory")
+    _require_private_directory(model_dir, "bundle model directory")
     binary = binary_dir / "llama-server"
     model = model_dir / manifest.model_file
     if {entry.name for entry in binary_dir.iterdir()} != {"llama-server"}:
