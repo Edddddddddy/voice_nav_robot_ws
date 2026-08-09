@@ -19,7 +19,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
-import shutil
 import signal
 import threading
 import time
@@ -105,11 +104,42 @@ def _command_has_executable(
     return any(Path(argument).name == executable_name for argument in command)
 
 
+def _resolve_launch_executable(
+    command: Iterable[str],
+    expected_executable: str,
+) -> str:
+    executable_name = Path(expected_executable).name
+    candidates = [
+        Path(argument)
+        for argument in command
+        if Path(argument).name == executable_name
+    ]
+    if len(candidates) != 1:
+        raise ProcessIdentityError(
+            'launch command executable candidate is not unique'
+        )
+    candidate = candidates[0]
+    if not candidate.is_absolute():
+        raise ProcessIdentityError(
+            'launch command executable is not an absolute path'
+        )
+    try:
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise ProcessIdentityError(
+            'launch command executable path cannot be resolved'
+        ) from error
+    if not resolved.is_file() or not os.access(resolved, os.X_OK):
+        raise ProcessIdentityError(
+            'launch command executable path is not executable'
+        )
+    return os.path.realpath(resolved)
+
+
 def _executable_matches(
     executable: str,
-    expected_executable: str,
+    expected_path: str,
 ) -> bool:
-    expected_path = shutil.which(expected_executable) or expected_executable
     return os.path.realpath(executable) == os.path.realpath(expected_path)
 
 
@@ -128,16 +158,16 @@ class ExactPidfdProcess:
             raise ProcessIdentityError(
                 'ProcessStarted action is not the requested launch action'
             )
-        if not _command_has_executable(event.cmd, expected_executable):
-            raise ProcessIdentityError(
-                'launch command executable does not match the expected node'
-            )
         if not _command_has_node_name(event.cmd, expected_node_name):
             raise ProcessIdentityError(
                 'launch command node name does not match the expected FQN'
             )
+        expected_executable_path = _resolve_launch_executable(
+            event.cmd, expected_executable
+        )
         self.action = action
         self.expected_executable = expected_executable
+        self.expected_executable_path = expected_executable_path
         self.expected_node_name = expected_node_name
         self.event_command = tuple(event.cmd)
         try:
@@ -152,7 +182,7 @@ class ExactPidfdProcess:
             os.close(self.pidfd)
             raise
         if not _executable_matches(
-            self.snapshot.executable, expected_executable
+            self.snapshot.executable, expected_executable_path
         ):
             os.close(self.pidfd)
             raise ProcessIdentityError(
@@ -191,7 +221,7 @@ class ExactPidfdProcess:
         ) or not _command_has_node_name(
             current.cmdline, self.expected_node_name
         ) or not _executable_matches(
-            current.executable, self.expected_executable
+            current.executable, self.expected_executable_path
         ):
             raise ProcessIdentityError(
                 'current process command no longer matches launch identity'
