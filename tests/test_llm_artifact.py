@@ -418,6 +418,90 @@ class ListenerOwnershipTest(unittest.TestCase):
             with self.assertRaises(llm.ListenerOwnershipError):
                 llm._check_loopback_listener("127.0.0.1", 8080, process)
 
+    def test_mixed_listener_owners_fail_gate_without_killing_unrelated_process(self) -> None:
+        if shutil.which("ss") is None:
+            self.skipTest("ss is required for listener ownership evidence")
+        listener = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import socket,time; "
+                    "sock=socket.socket(); sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); "
+                    "sock.bind(('127.0.0.1', 8080)); sock.listen(); "
+                    "print('READY', flush=True); time.sleep(30)"
+                ),
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            ready = listener.stdout.readline() if listener.stdout is not None else ""
+            if ready.strip() != "READY":
+                self.skipTest("127.0.0.1:8080 was already occupied before fixture startup")
+
+            manifest = llm.load_lock_manifest()
+            digest = llm.lock_sha256()
+            fake_process = mock.Mock()
+            fake_process.pid = 4242
+            fake_process.poll.return_value = None
+            fake_process.stdout = io.BytesIO()
+            mixed_records = [("127.0.0.1:8080", (fake_process.pid, listener.pid))]
+            with tempfile.TemporaryDirectory() as temporary_directory:
+                bundle = Path(temporary_directory)
+                with (
+                    mock.patch.object(llm, "validate_artifact_root", return_value=bundle),
+                    mock.patch.object(llm, "verify_bundle", return_value=bundle),
+                    mock.patch.object(llm, "_check_port_available"),
+                    mock.patch.object(llm, "_listener_records", return_value=mixed_records),
+                    mock.patch.object(llm.subprocess, "Popen", return_value=fake_process),
+                    mock.patch.object(llm, "_capture_process_log"),
+                    mock.patch.object(llm, "_wait_for_server") as readiness,
+                    mock.patch.object(llm, "_post_schema_smoke") as schema,
+                    mock.patch.object(llm, "_terminate_process_group", return_value=False) as cleanup,
+                    mock.patch.object(llm, "_repository_head", return_value="a" * 40),
+                    mock.patch.object(llm, "_server_version", return_value="fixture-server\n"),
+                    mock.patch.object(llm, "_cpu_identity", return_value="fixture-cpu"),
+                    mock.patch.object(
+                        llm.os,
+                        "getpgid",
+                        side_effect=lambda pid: {
+                            fake_process.pid: fake_process.pid,
+                            listener.pid: listener.pid,
+                        }[pid],
+                    ),
+                    mock.patch("builtins.print") as output,
+                ):
+                    gate_error = None
+                    try:
+                        llm.real_smoke(bundle, manifest, digest, REPOSITORY_ROOT)
+                    except llm.RealGateError as error:
+                        gate_error = error
+
+                self.assertIsNotNone(gate_error)
+                self.assertIn("listener is not owned", str(gate_error))
+                readiness.assert_not_called()
+                schema.assert_not_called()
+                cleanup.assert_called_once_with(fake_process)
+                self.assertFalse(any("REAL_MODEL_GATE=PASS" in str(call) for call in output.call_args_list))
+
+            self.assertIsNone(listener.poll())
+        finally:
+            if listener.poll() is None:
+                listener.terminate()
+                try:
+                    listener.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    listener.kill()
+                    listener.wait(timeout=5)
+            if listener.stdout is not None:
+                listener.stdout.close()
+            if listener.stderr is not None:
+                listener.stderr.close()
+
 
 class LlmDownloadAndExtractionTest(unittest.TestCase):
     def test_download_verifies_size_and_hash_before_publish(self) -> None:
