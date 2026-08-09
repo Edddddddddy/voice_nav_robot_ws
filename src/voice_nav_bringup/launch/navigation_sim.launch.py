@@ -79,6 +79,8 @@ def generate_launch_description():
         parameters=[{
             'piper_path': '/mnt/c/Users/lcy/code/ros2/voice_nav_robot_ws_rapid/.deps/voice/bin/piper',
             'piper_model': '/mnt/c/Users/lcy/code/ros2/voice_nav_robot_ws_rapid/.deps/voice/models/zh_CN-huayan-medium.onnx',
+            'vosk_python': '/mnt/c/Users/lcy/code/ros2/voice_nav_robot_ws_rapid/.deps/voice/bin/python',
+            'vosk_model': '/mnt/c/Users/lcy/code/ros2/voice_nav_robot_ws_rapid/.deps/voice/models/vosk-model-small-cn-0.22',
         }],
     )
     return LaunchDescription([
