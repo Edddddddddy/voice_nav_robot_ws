@@ -1311,19 +1311,15 @@ def _check_loopback_listener(host: str, port: int, process: subprocess.Popen[Any
         expected_group = os.getpgid(process.pid)
     except (AttributeError, OSError) as error:
         raise ListenerOwnershipError("cannot inspect launched llama-server process group") from error
-    listener_pids = {
-        pid
-        for address, pids in records
-        if address == expected
-        for pid in pids
-    }
-    if not listener_pids:
+    exact_records = [pids for address, pids in records if address == expected]
+    if not exact_records or not all(exact_records):
         raise ListenerOwnershipError("listener process evidence is missing")
+    listener_pids = {pid for pids in exact_records for pid in pids}
     try:
-        owned = any(os.getpgid(pid) == expected_group for pid in listener_pids)
+        listener_groups = {pid: os.getpgid(pid) for pid in sorted(listener_pids)}
     except (AttributeError, OSError) as error:
         raise ListenerOwnershipError("cannot inspect listener process group") from error
-    if not owned:
+    if set(listener_groups.values()) != {expected_group}:
         raise ListenerOwnershipError("listener is not owned by launched llama-server process group")
 
 
