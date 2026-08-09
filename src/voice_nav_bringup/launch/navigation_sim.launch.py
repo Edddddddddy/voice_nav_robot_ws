@@ -74,6 +74,7 @@ def generate_launch_description():
     )
     rapid_mission = Node(package='voice_nav_agent', executable='rapid_mission_bridge', output='screen')
     agent = Node(package='voice_nav_agent', executable='agent_node', output='screen')
+    voice = Node(package='voice_nav_agent', executable='rapid_voice_node', output='screen')
     return LaunchDescription([
         DeclareLaunchArgument(
             'headless', default_value='true', choices=['true', 'false'],
@@ -87,4 +88,5 @@ def generate_launch_description():
         initial_pose,
         rapid_mission,
         agent,
+        voice,
     ])
