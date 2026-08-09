@@ -1,0 +1,442 @@
+"""Focused offline tests for the locked LLM artifact manager."""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import io
+import json
+from pathlib import Path
+import os
+import subprocess
+import sys
+import tarfile
+import tempfile
+import unittest
+
+from scripts.llm import artifact_manager as llm
+
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+
+
+class _Response:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+
+    def __enter__(self) -> _Response:
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        return None
+
+    def read(self, size: int = -1) -> bytes:
+        if size < 0:
+            payload, self.payload = self.payload, b""
+            return payload
+        payload, self.payload = self.payload[:size], self.payload[size:]
+        return payload
+
+
+class _Opener:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+
+    def open(self, url: str, timeout: float) -> _Response:
+        return _Response(self.payload)
+
+
+class LlmManifestTest(unittest.TestCase):
+    def test_approved_manifest_and_notice_are_consistent(self) -> None:
+        manifest = llm.load_lock_manifest()
+
+        self.assertEqual(manifest.model["repo"], "Qwen/Qwen3-0.6B-GGUF")
+        self.assertEqual(manifest.model["revision"], "23749fefcc72300e3a2ad315e1317431b06b590a")
+        self.assertEqual(manifest.model["file"], "Qwen3-0.6B-Q8_0.gguf")
+        self.assertEqual(manifest.model["size"], 639446688)
+        self.assertEqual(
+            manifest.model["sha256"],
+            "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+        )
+        self.assertEqual(manifest.llama_cpp["tag"], "b10276")
+        self.assertEqual(
+            manifest.llama_cpp["commit"],
+            "6ea215d171fd31df943bf1ac8227129f2b963160",
+        )
+        self.assertEqual(manifest.runtime["host"], "127.0.0.1")
+        self.assertEqual(manifest.runtime["port"], 8080)
+        self.assertEqual(manifest.runtime["context"], 2048)
+        self.assertEqual(manifest.runtime["max_output"], 256)
+        self.assertEqual(manifest.runtime["parallel"], 1)
+        self.assertFalse(manifest.runtime["stream"])
+        self.assertEqual(manifest.runtime["non_thinking"], "/no_think")
+        llm.validate_notice_consistency(manifest)
+
+    def test_duplicate_and_unknown_manifest_keys_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            duplicate = Path(temporary_directory) / "duplicate.json"
+            duplicate.write_text(
+                '{"schema_version":1,"schema_version":1}\n',
+                encoding="utf-8",
+            )
+            with self.assertRaises(llm.ManifestError):
+                llm.load_lock_manifest(duplicate, approved=False)
+
+            unknown = copy.deepcopy(llm.APPROVED_DOCUMENT)
+            unknown["unexpected"] = True
+            with self.assertRaises(llm.ManifestError):
+                llm.validate_manifest_document(unknown)
+
+    def test_mutated_approved_value_fails_even_when_shape_is_valid(self) -> None:
+        document = copy.deepcopy(llm.APPROVED_DOCUMENT)
+        document["runtime"]["host"] = "0.0.0.0"
+        with self.assertRaises(llm.ManifestError):
+            llm.validate_manifest_document(document, approved=True)
+
+        document = copy.deepcopy(llm.APPROVED_DOCUMENT)
+        document["llama_cpp"]["build"]["flags"]["GGML_NATIVE"] = "ON"
+        with self.assertRaises(llm.ManifestError):
+            llm.validate_manifest_document(document, approved=True)
+
+    def test_repo_boundary_rejects_tracked_model_and_build_artifacts(self) -> None:
+        with self.assertRaises(llm.ArtifactError):
+            llm.verify_repository_artifact_boundary(
+                REPOSITORY_ROOT,
+                tracked_paths=[
+                    "models/locks/voice_nav_llm_v1.lock.json",
+                    "models/weights/Qwen3-0.6B-Q8_0.gguf",
+                    "build/llama-server",
+                ],
+            )
+        llm.verify_repository_artifact_boundary(
+            REPOSITORY_ROOT,
+            tracked_paths=[
+                "models/locks/voice_nav_llm_v1.lock.json",
+                "docs/process/third-party-llm-notices.md",
+            ],
+        )
+
+    @unittest.skipIf(
+        os.name == "posix" and REPOSITORY_ROOT.as_posix().startswith("/mnt/"),
+        "managed WSL Git context is initialized by the shell wrapper",
+    )
+    def test_manifest_cli_reports_real_gate_not_run(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(REPOSITORY_ROOT / "scripts" / "llm" / "artifact_manager.py"),
+                "verify",
+                "--repo-root",
+                str(REPOSITORY_ROOT),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("MANIFEST_GATE=PASS", completed.stdout)
+        self.assertIn(
+            "REAL_MODEL_GATE=NOT_RUN reason=--real-not-requested",
+            completed.stdout,
+        )
+        self.assertNotIn("REAL_MODEL_GATE=PASS", completed.stdout)
+
+
+class LlmDownloadAndExtractionTest(unittest.TestCase):
+    def test_download_verifies_size_and_hash_before_publish(self) -> None:
+        payload = b"tiny fixture"
+        expected_hash = hashlib.sha256(payload).hexdigest()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            destination = Path(temporary_directory) / "model.bin"
+            llm.download_verified(
+                "https://example.test/model.bin",
+                destination,
+                len(payload),
+                expected_hash,
+                opener=_Opener(payload),
+            )
+            self.assertEqual(destination.read_bytes(), payload)
+            self.assertFalse(destination.with_name("model.bin.part").exists())
+
+            wrong = Path(temporary_directory) / "wrong.bin"
+            with self.assertRaises(llm.ArtifactError):
+                llm.download_verified(
+                    "https://example.test/model.bin",
+                    wrong,
+                    len(payload) + 1,
+                    expected_hash,
+                    opener=_Opener(payload),
+                )
+            self.assertFalse(wrong.exists())
+            self.assertFalse(wrong.with_name("wrong.bin.part").exists())
+
+    def test_redirect_handler_rejects_non_https(self) -> None:
+        handler = llm._HttpsRedirectHandler()
+        request = llm.Request("https://example.test/source")
+        with self.assertRaises(llm.ManifestError):
+            handler.redirect_request(request, None, 302, "redirect", {}, "http://example.test/source")
+
+    def test_safe_extraction_rejects_links_and_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            archive = root / "bad.tar.gz"
+            with tarfile.open(archive, "w:gz") as tar:
+                link = tarfile.TarInfo("llama.cpp/link")
+                link.type = tarfile.SYMTYPE
+                link.linkname = "/etc/passwd"
+                tar.addfile(link)
+            with self.assertRaises(llm.ArtifactError):
+                llm.safe_extract_tar(archive, root / "extract-link")
+
+            traversal = root / "traversal.tar.gz"
+            with tarfile.open(traversal, "w:gz") as tar:
+                entry = tarfile.TarInfo("llama.cpp/../escape")
+                entry.size = 1
+                tar.addfile(entry, io.BytesIO(b"x"))
+            with self.assertRaises(llm.ArtifactError):
+                llm.safe_extract_tar(traversal, root / "extract-traversal")
+
+    def test_safe_extraction_requires_one_top_level_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            archive = root / "multi.tar.gz"
+            with tarfile.open(archive, "w:gz") as tar:
+                for name in ("one/file", "two/file"):
+                    entry = tarfile.TarInfo(name)
+                    entry.size = 1
+                    tar.addfile(entry, io.BytesIO(b"x"))
+            with self.assertRaises(llm.ArtifactError):
+                llm.safe_extract_tar(archive, root / "extract")
+
+
+def _fixture_manifest(source_payload: bytes, model_payload: bytes) -> llm.LockManifest:
+    document = copy.deepcopy(llm.APPROVED_DOCUMENT)
+    document["model"]["size"] = len(model_payload)
+    document["model"]["sha256"] = hashlib.sha256(model_payload).hexdigest()
+    document["model"]["download_url"] = "https://fixture.test/model.gguf"
+    document["model"]["source_url"] = "https://fixture.test/model-source"
+    document["model"]["license_url"] = "https://fixture.test/model-license"
+    document["llama_cpp"]["source_size"] = len(source_payload)
+    document["llama_cpp"]["source_sha256"] = hashlib.sha256(source_payload).hexdigest()
+    document["llama_cpp"]["source_url"] = "https://fixture.test/llama.tar.gz"
+    document["llama_cpp"]["license_url"] = "https://fixture.test/llama-license"
+    return llm.validate_manifest_document(document)
+
+
+class ProvisioningFixtureTest(unittest.TestCase):
+    def _source_archive(self) -> bytes:
+        output = io.BytesIO()
+        with tarfile.open(fileobj=output, mode="w:gz") as tar:
+            directory = tarfile.TarInfo("llama.cpp-fixture")
+            directory.type = tarfile.DIRTYPE
+            directory.mode = 0o755
+            tar.addfile(directory)
+            cmake = tarfile.TarInfo("llama.cpp-fixture/CMakeLists.txt")
+            cmake.size = 12
+            tar.addfile(cmake, io.BytesIO(b"project(test)\n"))
+        return output.getvalue()
+
+    def _provisioner(self, root: Path, source: bytes, model: bytes) -> tuple[llm.Provisioner, str]:
+        manifest = _fixture_manifest(source, model)
+        digest = "a" * 64
+
+        def downloader(url: str, destination: Path, expected_size: int, expected_sha256: str) -> None:
+            payload = source if url == manifest.llama_cpp["source_url"] else model
+            self.assertEqual(len(payload), expected_size)
+            self.assertEqual(hashlib.sha256(payload).hexdigest(), expected_sha256)
+            destination.write_bytes(payload)
+
+        test_case = self
+
+        class FixtureBuilder:
+            def build(self, source_root: Path, build_root: Path, output_path: Path) -> llm.BuildResult:
+                test_case.assertTrue((source_root / "CMakeLists.txt").is_file())
+                build_root.mkdir(parents=True)
+                output_path.write_bytes(b"fixture-server")
+                output_path.chmod(0o755)
+                return llm.BuildResult("fixture-server 1", "fixture-compiler 1", "cmake 1")
+
+        def publisher(staging: Path, destination: Path) -> None:
+            if os.path.lexists(str(destination)):
+                raise llm.ArtifactError("destination already exists")
+            staging.rename(destination)
+
+        provisioner = llm.Provisioner(
+            root,
+            manifest,
+            digest,
+            downloader=downloader,
+            builder=FixtureBuilder(),
+            publisher=publisher,
+            fsync=lambda path: None,
+            fsync_directory=lambda path: None,
+            lock_factory=lambda path: llm._NoopLock(),
+            check_existing_server=False,
+        )
+        return provisioner, digest
+
+    def test_provisioning_publishes_complete_bundle_and_is_idempotent(self) -> None:
+        source = self._source_archive()
+        model = b"fixture-model"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "llm"
+            provisioner, digest = self._provisioner(root, source, model)
+            first = provisioner.provision()
+            self.assertFalse(first.idempotent)
+            self.assertTrue((first.bundle / "bin" / "llama-server").is_file())
+            self.assertEqual((first.bundle / "models" / provisioner.manifest.model_file).read_bytes(), model)
+            self.assertTrue((first.bundle / "provenance.json").is_file())
+            self.assertEqual(
+                {entry.name for entry in (root / "bundles").iterdir()},
+                {digest},
+            )
+
+            def should_not_download(*args) -> None:
+                raise AssertionError("idempotent provisioning downloaded again")
+
+            second = llm.Provisioner(
+                root,
+                provisioner.manifest,
+                digest,
+                downloader=should_not_download,
+                builder=provisioner.builder,
+                publisher=provisioner.publisher,
+                fsync=lambda path: None,
+                fsync_directory=lambda path: None,
+                lock_factory=lambda path: llm._NoopLock(),
+                check_existing_server=False,
+            ).provision()
+            self.assertTrue(second.idempotent)
+
+    def test_invalid_existing_bundle_is_never_replaced(self) -> None:
+        source = self._source_archive()
+        model = b"fixture-model"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "llm"
+            provisioner, digest = self._provisioner(root, source, model)
+            (root / "bundles" / digest).mkdir(parents=True)
+            marker = root / "bundles" / digest / "marker"
+            marker.write_text("old", encoding="utf-8")
+            with self.assertRaises(llm.ArtifactError):
+                provisioner.provision()
+            self.assertEqual(marker.read_text(encoding="utf-8"), "old")
+            self.assertFalse(any(path.name.startswith(".staging-") for path in root.iterdir()))
+
+    def test_partial_download_failure_leaves_no_final_bundle(self) -> None:
+        source = self._source_archive()
+        model = b"fixture-model"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "llm"
+            provisioner, digest = self._provisioner(root, source, model)
+            calls = 0
+
+            def fail_on_model(url: str, destination: Path, expected_size: int, expected_sha256: str) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    destination.write_bytes(b"truncated")
+                    raise llm.ArtifactError("fixture download failed")
+                destination.write_bytes(source)
+
+            failing = llm.Provisioner(
+                root,
+                provisioner.manifest,
+                digest,
+                downloader=fail_on_model,
+                builder=provisioner.builder,
+                publisher=provisioner.publisher,
+                fsync=lambda path: None,
+                fsync_directory=lambda path: None,
+                lock_factory=lambda path: llm._NoopLock(),
+                check_existing_server=False,
+            )
+            with self.assertRaises(llm.ArtifactError):
+                failing.provision()
+            self.assertFalse((root / "bundles" / digest).exists())
+            self.assertFalse(any(path.name.startswith(".staging-") for path in root.iterdir()))
+
+    def test_fixture_adapter_output_is_rechecked_before_build(self) -> None:
+        source = self._source_archive()
+        model = b"fixture-model"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "llm"
+            provisioner, digest = self._provisioner(root, source, model)
+
+            def wrong_model(url: str, destination: Path, expected_size: int, expected_sha256: str) -> None:
+                destination.write_bytes(source if url == provisioner.manifest.llama_cpp["source_url"] else b"wrong")
+
+            failing = llm.Provisioner(
+                root,
+                provisioner.manifest,
+                digest,
+                downloader=wrong_model,
+                builder=provisioner.builder,
+                publisher=provisioner.publisher,
+                fsync=lambda path: None,
+                fsync_directory=lambda path: None,
+                lock_factory=lambda path: llm._NoopLock(),
+                check_existing_server=False,
+            )
+            with self.assertRaises(llm.ArtifactError):
+                failing.provision()
+            self.assertFalse((root / "bundles" / digest).exists())
+
+    def test_post_publish_fsync_failure_removes_new_bundle(self) -> None:
+        source = self._source_archive()
+        model = b"fixture-model"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory) / "llm"
+            provisioner, digest = self._provisioner(root, source, model)
+            fsync_calls = 0
+
+            def fail_final_directory(path: Path) -> None:
+                nonlocal fsync_calls
+                fsync_calls += 1
+                if fsync_calls == 3:
+                    raise llm.ArtifactError("fixture directory fsync failed")
+
+            failing = llm.Provisioner(
+                root,
+                provisioner.manifest,
+                digest,
+                downloader=provisioner.downloader,
+                builder=provisioner.builder,
+                publisher=provisioner.publisher,
+                fsync=lambda path: None,
+                fsync_directory=fail_final_directory,
+                lock_factory=lambda path: llm._NoopLock(),
+                check_existing_server=False,
+            )
+            with self.assertRaises(llm.ArtifactError):
+                failing.provision()
+            self.assertFalse((root / "bundles" / digest).exists())
+
+
+@unittest.skipUnless(os.name == "posix", "renameat2 is a Linux provisioning seam")
+class AtomicPublicationTest(unittest.TestCase):
+    def test_no_replace_does_not_overwrite_existing_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            source = root / "staging"
+            destination = root / "bundle"
+            source.mkdir()
+            destination.mkdir()
+            (destination / "marker").write_text("old", encoding="utf-8")
+            with self.assertRaises(llm.ArtifactError):
+                llm.atomic_publish(source, destination)
+            self.assertTrue(source.exists())
+            self.assertEqual((destination / "marker").read_text(encoding="utf-8"), "old")
+
+
+@unittest.skipUnless(os.name == "posix", "Linux artifact-root safety seam")
+class ArtifactRootSafetyTest(unittest.TestCase):
+    def test_mnt_root_is_rejected_before_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            candidate = Path("/mnt") / "voice-nav-test-root" / Path(temporary_directory).name
+            with self.assertRaises(llm.ArtifactError):
+                llm.validate_artifact_root(candidate, create=True)
+            self.assertFalse(candidate.exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

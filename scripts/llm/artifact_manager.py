@@ -366,6 +366,7 @@ def validate_notice_consistency(
         str(manifest.runtime["context"]),
         str(manifest.runtime["max_output"]),
         str(manifest.runtime["parallel"]),
+        f"stream={str(manifest.runtime['stream']).lower()}",
         manifest.runtime["non_thinking"],
     ]
     missing = [marker for marker in markers if marker not in notice]
