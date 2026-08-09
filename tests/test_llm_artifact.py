@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+from http.client import IncompleteRead
 import io
 import json
 from pathlib import Path
@@ -185,6 +186,34 @@ class LlmDownloadAndExtractionTest(unittest.TestCase):
                 )
             self.assertFalse(wrong.exists())
             self.assertFalse(wrong.with_name("wrong.bin.part").exists())
+
+    def test_incomplete_http_read_uses_bounded_retry_and_cleans_part(self) -> None:
+        payload = b"retry fixture"
+        expected_hash = hashlib.sha256(payload).hexdigest()
+
+        class FlakyOpener:
+            calls = 0
+
+            def open(self, url: str, timeout: float) -> _Response:
+                self.calls += 1
+                if self.calls < 3:
+                    raise IncompleteRead(b"partial", 17)
+                return _Response(payload)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            destination = Path(temporary_directory) / "model.bin"
+            opener = FlakyOpener()
+            llm.download_verified(
+                "https://example.test/model.bin",
+                destination,
+                len(payload),
+                expected_hash,
+                opener=opener,
+                retries=3,
+            )
+            self.assertEqual(opener.calls, 3)
+            self.assertEqual(destination.read_bytes(), payload)
+            self.assertFalse(destination.with_name("model.bin.part").exists())
 
     def test_redirect_handler_rejects_non_https(self) -> None:
         handler = llm._HttpsRedirectHandler()

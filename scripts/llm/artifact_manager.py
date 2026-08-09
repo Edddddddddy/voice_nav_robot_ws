@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import datetime as datetime_module
 import errno
 import hashlib
+from http.client import IncompleteRead
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -616,7 +617,7 @@ def download_verified(
             if part.exists() or os.path.lexists(str(part)):
                 _remove_path(part)
             raise
-        except (OSError, HTTPError, URLError) as error:
+        except (OSError, HTTPError, URLError, IncompleteRead) as error:
             last_error = error
             if part.exists() or os.path.lexists(str(part)):
                 _remove_path(part)
