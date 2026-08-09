@@ -207,34 +207,41 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertLess(agents.index(persisted), agents.index(final_event))
         self.assert_review_delivery_semantics(agents)
 
-        compact_marker = (
-            "only the final `VOICE_NAV_EVENT` uses the compact\n"
-            "   envelope"
+        compact_semantic = "only the final `VOICE_NAV_EVENT` uses the compact envelope"
+        reformatted_agents = normalized_agents.replace(
+            compact_semantic,
+            "only the final `VOICE_NAV_EVENT`\n"
+            "      uses the compact\n"
+            "      envelope",
         )
+        self.assert_review_delivery_semantics(reformatted_agents)
+
         negative_mutations = (
             (
                 "deleted compact boundary",
-                agents.replace(compact_marker, ""),
+                normalized_agents.replace(compact_semantic, ""),
             ),
             (
                 "reversed compact boundary",
-                agents.replace(
-                    compact_marker,
-                    "only the first `VOICE_NAV_EVENT` uses the compact\n"
-                    "   envelope",
+                normalized_agents.replace(
+                    compact_semantic,
+                    "only the first `VOICE_NAV_EVENT` uses the compact envelope",
                 ),
             ),
             (
                 "removed P0/P1 blocker mapping",
-                agents.replace("unresolved P0/P1", "resolved P0/P1"),
+                normalized_agents.replace("unresolved P0/P1", "resolved P0/P1"),
             ),
             (
                 "removed decision_needed mapping",
-                agents.replace("fill `decision_needed`", "omit `decision_needed`"),
+                normalized_agents.replace(
+                    "fill `decision_needed`", "omit `decision_needed`"
+                ),
             ),
         )
         for mutation, mutated_agents in negative_mutations:
             with self.subTest(review_semantics_mutation=mutation):
+                self.assertNotEqual(mutated_agents, normalized_agents)
                 with self.assertRaises(AssertionError):
                     self.assert_review_delivery_semantics(mutated_agents)
 
