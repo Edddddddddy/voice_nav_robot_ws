@@ -402,6 +402,60 @@ TEST(RuntimeCore, AdmissionBindsHealthyGateBeforeDelayedStateEvent)
   EXPECT_TRUE(core.has_active_mission());
 }
 
+TEST(RuntimeCore, HealthyAdmissionClearsPriorGateFaultLatchBeforeHealthEvent)
+{
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
+  authority->set_snapshot(GateSnapshot{
+        kGateId, 0U, "", GateState::Faulted,
+        false, true, true, true, "", false, false});
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  std::vector<MissionResult> results;
+  RuntimeCore core(
+    config(), clock, authority, relative, {}, {},
+    [&results](std::uint64_t, const MissionResult & result) {
+      results.push_back(result);
+    });
+
+  core.observe_gate(authority->snapshot());
+  authority->set_snapshot(GateSnapshot{
+        kGateId, 7U, std::string(32U, 'p'), GateState::Armed,
+        true, false, false, false, "", true, true});
+
+  const auto admission = core.admit(goal(1U));
+  ASSERT_TRUE(admission.accepted);
+
+  const auto faulted_unavailable = GateSnapshot{
+    kOtherGateId, 8U, "", GateState::Faulted,
+    false, true, true, true, "", false, false};
+  core.observe_gate(faulted_unavailable);
+
+  ASSERT_EQ(results.size(), 1U);
+  EXPECT_EQ(results.front().code, MissionResultCode::SafetyFault);
+  EXPECT_EQ(core.state().admission_epoch, 2U);
+  EXPECT_FALSE(core.has_active_mission());
+  ASSERT_EQ(authority->inhibit_count(), 1U);
+  EXPECT_EQ(authority->snapshot().state, GateState::Inhibited);
+  EXPECT_TRUE(authority->snapshot().motion_inhibited);
+  EXPECT_TRUE(authority->snapshot().zero_selected);
+  EXPECT_TRUE(authority->snapshot().zero_published);
+
+  auto delayed_prepared = authority->snapshot();
+  delayed_prepared.state = GateState::Prepared;
+  delayed_prepared.lease_id = std::string(32U, 'p');
+  delayed_prepared.motion_inhibited = true;
+  delayed_prepared.zero_selected = true;
+  delayed_prepared.zero_published = true;
+  delayed_prepared.authority_live = false;
+  delayed_prepared.writer_bound = false;
+  core.observe_gate(delayed_prepared);
+
+  EXPECT_EQ(results.size(), 1U);
+  EXPECT_EQ(authority->inhibit_count(), 1U);
+  EXPECT_EQ(core.state().availability, RuntimeAvailability::Faulted);
+  EXPECT_FALSE(core.has_active_mission());
+}
+
 TEST(RuntimeCore, ValidatesEveryStepBeforeAcquiringTheGate)
 {
   Fixture fixture;

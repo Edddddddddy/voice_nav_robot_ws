@@ -243,6 +243,7 @@ AdmissionResult RuntimeCore::admit(
   // a later Gate state event to arrive; otherwise an old Prepared sample is
   // mistaken for an unbound startup lease and reasserts INHIBIT mid-handover.
   gate_bound_ = true;
+  gate_fault_handled_ = false;
 
   // The Node-owned start permit is checked again immediately before any
   // authority transaction.  A queued AdmitEvent that loses the quiesce
