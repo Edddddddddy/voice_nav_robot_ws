@@ -14,6 +14,12 @@
 
 #include <gtest/gtest.h>
 
+#include <fcntl.h>
+#include <poll.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
 #include <atomic>
 #include <algorithm>
 #include <cerrno>
@@ -24,21 +30,16 @@
 #include <cstdlib>
 #include <stdexcept>
 #include <future>
-#include <fcntl.h>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <poll.h>
-#include <spawn.h>
 #include <string>
 #include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
-#include <sys/wait.h>
-#include <unistd.h>
 
 #include <composition_interfaces/srv/load_node.hpp>
 #include <composition_interfaces/srv/list_nodes.hpp>
