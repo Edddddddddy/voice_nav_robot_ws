@@ -17,6 +17,10 @@ decisions.
   them through persisted Issue/PR comments plus direct event messages.
 - Resolves blocked decisions in the canonical Issue before asking a Worker to
   continue.
+- Is the sole transport owner for GitHub writes: Issue/PR comments, labels,
+  branch pushes, Draft PR creation, reviews, merges, tags, and releases.
+- Executes exact, bounded Git/WSL/ROS/build/test commands when a Worker or
+  Reviewer is prevented only by its execution boundary.
 
 ### Worker
 
@@ -26,8 +30,8 @@ decisions.
 - Implements one observable behavior at a time with focused RED, minimal GREEN,
   and refactoring while green. Tests exercise the highest stable public
   Interface.
-- Posts durable evidence, commits intentionally, pushes the Task branch, and
-  opens one Draft PR linked with `Closes #NN`.
+- Produces durable evidence and commits intentionally in its Task worktree.
+  The Manager pushes the branch and creates or updates the Draft PR.
 - Runs the complete repository gate once, on the final PR HEAD. Development
   uses focused checks.
 
@@ -38,6 +42,27 @@ decisions.
   findings on the PR.
 - Does not modify the Worker branch, merge the PR, or replace missing product
   decisions with implementation guesses.
+- Submits the official Review when its GitHub identity permits it; otherwise it
+  returns the complete Chinese Review body and exact HEAD for Manager transport.
+
+## Execution authority and permission routing
+
+- Never ask the user to approve ordinary GitHub writes, Git index access,
+  bounded WSL/ROS commands, focused builds, or focused tests.
+- Never log in to GitHub, refresh credentials, open a browser for auth, or
+  expose/copy tokens from a Worker or Reviewer context.
+- A GitHub auth failure, integration `403`, shared Git index denial, or command
+  sandbox denial is a transport limitation, not a product blocker. Preserve
+  the exact body or command, working directory, timeout, expected artifact,
+  local HEAD, and test evidence; send them to the Manager.
+- If a safe command is denied locally, do not retry through broader shells or
+  weaken the command. The Manager either runs the exact command or chooses an
+  equivalent approved entry point.
+- Request user involvement only when the platform itself requires an
+  interactive confirmation, or a read-only audit cannot exclude impact to
+  unrelated user workloads from a machine-wide/disruptive operation.
+- These routing rules override any later role step that says a Worker or
+  Reviewer should push, comment, create a PR, or obtain ordinary permission.
 
 ## Skill routing
 
@@ -65,9 +90,10 @@ decision_needed: <required for blocked or reviewed P0/P1 blockers; otherwise non
 A `blocked` event must state what was attempted, the smallest unresolved
 decision, available options, and a recommendation in the persisted comment.
 A `reviewed` event with a P0/P1 finding that blocks merge must fill `decision_needed`; use `none` only when no decision/action is needed.
-An implementation Worker sends `completed` only after its Draft PR and
-verification evidence exist. A Reviewer sends `reviewed` after recording the
-review result. No event asks another context to poll for progress.
+An implementation Worker sends `completed` after its local commit and
+verification evidence exist; the Manager then performs GitHub transport. A
+Reviewer sends `reviewed` after recording the Review or supplying a complete
+body for Manager transport. No event asks another context to poll for progress.
 
 ## Context recovery
 
@@ -92,6 +118,8 @@ When a context is new, resumed, or compacted:
   events and direct messages.
 - Do not work in a shared checkout or modify another Task's branch/worktree.
 - Do not merge, tag, release, or force-push as a Worker or Reviewer.
+- Do not ask the user for GitHub authentication or ordinary command approval;
+  follow the execution-authority handoff above.
 - Do not treat an external PR as a requirements or decision intake surface.
 - Do not add source-shape, AST, or full-file-fingerprint checks without explicit
   Issue approval.
