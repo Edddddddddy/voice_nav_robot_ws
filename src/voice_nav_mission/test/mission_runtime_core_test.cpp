@@ -492,6 +492,12 @@ TEST(RuntimeCore, TrustedGateRecoveryRearmsFaultGeneration)
     true, true, true, true, "", false, false};
   fixture.core.observe_gate(recovered);
 
+  // A delayed replay from before the trusted recovery must not roll the
+  // current Gate generation back or consume the next fault latch.
+  fixture.core.observe_gate(first_fault);
+  EXPECT_EQ(fixture.core.state().admission_epoch, 2U);
+  EXPECT_EQ(fixture.authority->inhibit_count(), 1U);
+
   const auto second_fault = GateSnapshot{
     kGateId, 5U, "", GateState::Faulted,
     false, true, true, false, "", false, false};
