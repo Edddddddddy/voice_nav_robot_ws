@@ -238,6 +238,12 @@ AdmissionResult RuntimeCore::admit(
       "MotionGate endpoint is unavailable")};
   }
 
+  // The admission path has just validated a current authority snapshot under
+  // the Core serial owner.  Bind that snapshot before PREPARE/OPEN can cause
+  // a later Gate state event to arrive; otherwise an old Prepared sample is
+  // mistaken for an unbound startup lease and reasserts INHIBIT mid-handover.
+  gate_bound_ = true;
+
   // The Node-owned start permit is checked again immediately before any
   // authority transaction.  A queued AdmitEvent that loses the quiesce
   // generation cannot enter PREPARE, even if it passed validation earlier.
