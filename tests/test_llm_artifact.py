@@ -178,11 +178,9 @@ class ManifestBoundaryTest(unittest.TestCase):
                 ],
             )
 
-    @unittest.skipIf(
-        os.name == "posix" and REPOSITORY_ROOT.as_posix().startswith("/mnt/"),
-        "managed WSL Git context is initialized by the shell wrapper",
-    )
     def test_manifest_cli_reports_real_gate_not_run(self) -> None:
+        if os.name == "posix" and REPOSITORY_ROOT.as_posix().startswith("/mnt/"):
+            self.skipTest("managed WSL Git context is initialized by the shell wrapper")
         completed = subprocess.run(
             [
                 sys.executable,
