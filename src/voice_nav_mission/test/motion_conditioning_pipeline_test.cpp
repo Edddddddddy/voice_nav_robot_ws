@@ -1536,6 +1536,96 @@ TEST_F(MotionConditioningPipelineTest, LeaseLossDuringActivationNeverStartsProdu
 
 TEST_F(
   MotionConditioningPipelineTest,
+  RenewTimerWaitsForArmedActivationCommitAcrossPrepareAndOpen)
+{
+  auto renew_mutex = std::make_shared<std::mutex>();
+  auto renew_condition = std::make_shared<std::condition_variable>();
+  auto renew_callbacks = std::make_shared<std::size_t>(0U);
+  auto armed_commit_barrier = std::make_shared<TransactionOperationBarrier>(
+    RuntimeTransactionSideEffect::Open);
+  auto transaction_plane = std::make_shared<RuntimeTransactionPlane>(
+    0U,
+    RuntimeTransactionPlane::BeforeCommit{},
+    RuntimeTransactionPlane::BeforeOperation{},
+    RuntimeTransactionPlane::QuiesceObserver{},
+    [armed_commit_barrier](const RuntimeTransactionSideEffect side_effect) {
+      (*armed_commit_barrier)(side_effect);
+    });
+  auto health_ready = std::make_shared<CallbackCounter>();
+  auto pipeline_config = config();
+  pipeline_config.renew_period = 1ms;
+  pipeline_config.transaction_plane = transaction_plane;
+  pipeline_config.after_health_callback = [health_ready]() {
+      (*health_ready)();
+    };
+  pipeline_config.before_renew_callback = [
+    renew_mutex, renew_condition, renew_callbacks]() {
+      {
+        std::lock_guard<std::mutex> lock(*renew_mutex);
+        ++(*renew_callbacks);
+      }
+      renew_condition->notify_all();
+    };
+  MotionConditioningPipeline pipeline(*client, authority, producer, pipeline_config);
+
+  authority->block_prepare();
+  MotionConditioningResult prepare_result;
+  std::thread prepare_thread([&]() {
+      prepare_result = pipeline.prepare();
+    });
+  const bool prepare_entered = authority->wait_for_prepare();
+  EXPECT_TRUE(prepare_entered);
+  {
+    std::lock_guard<std::mutex> lock(*renew_mutex);
+    EXPECT_EQ(*renew_callbacks, 0U);
+  }
+  authority->release_blocked_prepare();
+  prepare_thread.join();
+  ASSERT_TRUE(prepare_result.ok) << prepare_result.detail;
+  health_ready->expect(4U);
+  graph->publish_health_once();
+  ASSERT_TRUE(health_ready->wait_for_target());
+
+  authority->block_open();
+  MotionConditioningResult start_result;
+  std::thread start_thread([&]() {
+      start_result = pipeline.start();
+    });
+  const bool open_entered = authority->wait_for_open();
+  EXPECT_TRUE(open_entered);
+  {
+    std::lock_guard<std::mutex> lock(*renew_mutex);
+    EXPECT_EQ(*renew_callbacks, 0U);
+  }
+  authority->release_blocked_open();
+
+  const bool commit_entered = armed_commit_barrier->wait_for_entry();
+  EXPECT_TRUE(commit_entered);
+  if (!commit_entered) {
+    armed_commit_barrier->release();
+    start_thread.join();
+    ADD_FAILURE() << "start did not reach the Open activation commit: "
+                  << start_result.detail;
+    return;
+  }
+  EXPECT_EQ(pipeline.state(), MotionConditioningState::Prepared);
+  {
+    std::lock_guard<std::mutex> lock(*renew_mutex);
+    EXPECT_EQ(*renew_callbacks, 0U);
+  }
+
+  armed_commit_barrier->release();
+  start_thread.join();
+  ASSERT_TRUE(start_result.ok) << start_result.detail;
+  {
+    std::unique_lock<std::mutex> lock(*renew_mutex);
+    ASSERT_TRUE(renew_condition->wait_for(
+      lock, 1s, [&]() {return *renew_callbacks != 0U;}));
+  }
+}
+
+TEST_F(
+  MotionConditioningPipelineTest,
   TransactionQuiesceAtPrepareOperationWaitsForCompletion)
 {
   auto operation = std::make_shared<TransactionOperationBarrier>(
