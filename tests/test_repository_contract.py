@@ -222,6 +222,16 @@ class RepositoryContractTest(unittest.TestCase):
                 self.assertIn(marker, agent_docs)
         self.assertNotIn("needs-review", agent_docs)
 
+        normalized_agent_docs = " ".join(agent_docs.split())
+        for marker in (
+            "The first direct `VOICE_NAV_HANDOFF` may carry the complete Chinese "
+            "evidence needed for that transport.",
+            "After the Manager returns `VOICE_NAV_PERSISTED` with the canonical "
+            "URL, only the final `VOICE_NAV_EVENT` uses the compact envelope.",
+        ):
+            with self.subTest(document="docs/agents/README.md", marker=marker):
+                self.assertIn(marker, normalized_agent_docs)
+
     def test_missing_relative_markdown_link_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
