@@ -164,8 +164,6 @@ class RepositoryContractTest(unittest.TestCase):
             "voice-nav-requirements",
             "voice-nav-worker",
             "voice-nav-review",
-            "## Event message",
-            "VOICE_NAV_EVENT:",
             "## Context recovery",
             "## Forbidden",
             "polling",
@@ -173,6 +171,27 @@ class RepositoryContractTest(unittest.TestCase):
         ):
             with self.subTest(document="AGENTS.md", marker=marker):
                 self.assertIn(marker, agents)
+
+        protocol_markers = (
+            "VOICE_NAV_HANDOFF: ready|blocked|reviewed",
+            "VOICE_NAV_PERSISTED",
+            "VOICE_NAV_EVENT: blocked|completed|reviewed",
+            "Is the sole transport owner for GitHub writes",
+            "The Manager writes the evidence to GitHub and returns",
+            "the canonical URL",
+            "Neither role fabricates an evidence URL or sends a final event before",
+            "No role polls GitHub, CI, or another",
+        )
+        for marker in protocol_markers:
+            with self.subTest(document="AGENTS.md", marker=marker):
+                self.assertIn(marker, agents)
+
+        handoff = "VOICE_NAV_HANDOFF: ready|blocked|reviewed"
+        persisted = "VOICE_NAV_PERSISTED"
+        final_event = "VOICE_NAV_EVENT: blocked|completed|reviewed"
+        self.assertLess(agents.index(handoff), agents.index(persisted))
+        self.assertLess(agents.index(persisted), agents.index(final_event))
+
         self.assertIn(
             "A `reviewed` event with a P0/P1 finding that blocks merge must fill "
             "`decision_needed`",
