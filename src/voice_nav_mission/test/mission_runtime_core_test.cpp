@@ -377,6 +377,31 @@ TEST(RuntimeCore, StartupLegacyLeaseFailureRemainsFaultedAndUnbound)
   EXPECT_FALSE(core.admit(goal(1U)).accepted);
 }
 
+TEST(RuntimeCore, AdmissionBindsHealthyGateBeforeDelayedStateEvent)
+{
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  RuntimeCore core(config(), clock, authority, relative);
+
+  const auto admission = core.admit(goal(1U));
+  ASSERT_TRUE(admission.accepted);
+  ASSERT_EQ(authority->snapshot().state, GateState::Armed);
+
+  auto delayed_prepared = authority->snapshot();
+  delayed_prepared.state = GateState::Prepared;
+  delayed_prepared.motion_inhibited = true;
+  delayed_prepared.zero_selected = true;
+  delayed_prepared.zero_published = true;
+  delayed_prepared.authority_live = false;
+  delayed_prepared.writer_bound = false;
+  core.observe_gate(delayed_prepared);
+
+  EXPECT_EQ(authority->inhibit_count(), 0U);
+  EXPECT_EQ(authority->snapshot().state, GateState::Armed);
+  EXPECT_TRUE(core.has_active_mission());
+}
+
 TEST(RuntimeCore, ValidatesEveryStepBeforeAcquiringTheGate)
 {
   Fixture fixture;

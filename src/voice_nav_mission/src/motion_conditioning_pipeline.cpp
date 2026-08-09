@@ -3634,7 +3634,7 @@ private:
   std::mutex callback_mutex_;
   std::condition_variable callback_cv_;
   std::size_t active_renew_callbacks_{0U};
-  bool renew_callbacks_enabled_{true};
+  bool renew_callbacks_enabled_{false};
   std::shared_ptr<IngressCallbackState> callback_state_;
   rclcpp::CallbackGroup::SharedPtr component_callback_group_;
   rclcpp::CallbackGroup::SharedPtr renew_callback_group_;
