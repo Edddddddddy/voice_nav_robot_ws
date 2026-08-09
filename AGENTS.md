@@ -42,8 +42,8 @@ decisions.
   findings on the PR.
 - Does not modify the Worker branch, merge the PR, or replace missing product
   decisions with implementation guesses.
-- Submits the official Review when its GitHub identity permits it; otherwise it
-  returns the complete Chinese Review body and exact HEAD for Manager transport.
+- Always returns the complete Chinese Review body and exact HEAD to the Manager.
+  Only the Manager submits the official GitHub Review.
 
 ## Execution authority and permission routing
 
@@ -61,8 +61,9 @@ decisions.
 - Request user involvement only when the platform itself requires an
   interactive confirmation, or a read-only audit cannot exclude impact to
   unrelated user workloads from a machine-wide/disruptive operation.
-- These routing rules override any later role step that says a Worker or
-  Reviewer should push, comment, create a PR, or obtain ordinary permission.
+- These routing rules override any role step that says a Worker or Reviewer
+  should push, comment, create a PR, submit a Review, or obtain ordinary
+  permission.
 
 ## Skill routing
 
@@ -71,11 +72,30 @@ decisions.
 - Read-only PR evaluation: `voice-nav-review`.
 - Read the applicable skill instructions before taking the routed action.
 
-## Event message
+## Evidence handoff and event message
 
-Persist the full evidence to the canonical Issue or PR first. Then send the
-following compact envelope to the Manager; do not put logs or the Issue body in
-the direct message:
+GitHub transport uses two phases without polling:
+
+1. The Worker or Reviewer sends `VOICE_NAV_HANDOFF: ready|blocked|reviewed` to
+   the Manager with the exact HEAD, complete Chinese Issue/PR/Review body,
+   commands, results, and local artifact paths. This handoff is the only direct
+   message allowed to contain full evidence.
+2. The Manager writes the evidence to GitHub and returns
+   `VOICE_NAV_PERSISTED` with the canonical URL.
+3. The Worker or Reviewer sends the compact event below using that URL, then
+   remains idle.
+
+```text
+VOICE_NAV_HANDOFF: ready|blocked|reviewed
+issue: #NN
+pr: #NN|none
+thread: <thread-id>
+head: <sha|none>
+body: <complete Chinese transport body>
+local_artifacts: <paths or none>
+```
+
+After Manager persistence, send:
 
 ```text
 VOICE_NAV_EVENT: blocked|completed|reviewed
@@ -87,13 +107,14 @@ evidence: <Issue-or-PR-comment-URL>
 decision_needed: <required for blocked or reviewed P0/P1 blockers; otherwise none>
 ```
 
-A `blocked` event must state what was attempted, the smallest unresolved
-decision, available options, and a recommendation in the persisted comment.
+A `blocked` handoff must state what was attempted, the smallest unresolved
+decision, available options, and a recommendation in its complete body.
 A `reviewed` event with a P0/P1 finding that blocks merge must fill `decision_needed`; use `none` only when no decision/action is needed.
-An implementation Worker sends `completed` after its local commit and
-verification evidence exist; the Manager then performs GitHub transport. A
-Reviewer sends `reviewed` after recording the Review or supplying a complete
-body for Manager transport. No event asks another context to poll for progress.
+An implementation Worker starts the handoff after its local commit and
+verification evidence exist. A Reviewer starts it after its read-only review is
+complete. Neither role fabricates an evidence URL or sends a final event before
+the Manager returns the persisted URL. No role polls GitHub, CI, or another
+thread while waiting for that direct response.
 
 ## Context recovery
 
