@@ -29,9 +29,11 @@ used in requirements, delivery decisions, and review evidence.
 - **Manager** — the role that decomposes approved PRDs, assigns decision-
   complete Tasks, and coordinates delivery through persisted events.
 - **Worker** — the role that owns exactly one Task in one fresh isolated
-  context and produces its Draft PR and evidence.
+  context, commits the implementation locally, and hands complete evidence to
+  the Manager for GitHub transport.
 - **Reviewer** — the read-only role that evaluates one Draft PR against its
-  Issue acceptance criteria and records findings.
+  Issue acceptance criteria and hands complete findings to the Manager for the
+  official GitHub Review.
 - **Context** — the bounded set of requirements, decisions, interfaces, and
   evidence needed to act on one Task without relying on hidden conversation
   history.
