@@ -301,6 +301,31 @@ acceptance criteria:
 
 These command-inhibition thresholds do not claim that the system is a functionally certified emergency stop.
 
+### Issue #36 crash-stop acceptance
+
+The crash-stop slice is a real headless Gazebo/Fast DDS/controller/odometry
+acceptance, not a mock replacement for the killed process. The two ordinary PR
+scenarios run once each with a fresh process-isolated launch; the first real
+failure stops the pair without retry. Five fresh repetitions belong to
+nightly/release hardening and are non-blocking for the ordinary PR.
+
+The harness owns exact `ProcessStarted` actions for Runtime and MotionGate. It
+opens a pidfd immediately, records `/proc/<pid>/stat` starttime, executable and
+cmdline, verifies the unique ROS graph owner, and injects only
+`signal.pidfd_send_signal(pidfd, SIGKILL)`. Process names, PID scans,
+`pkill -f`, and broad cleanup are forbidden. Runtime death is measured from
+the steady pidfd acknowledgement to Gate zero; Gate death is measured from
+the last non-zero final command to the first zero controller output in
+advancing simulation time. Publisher disappearance and controller `ACTIVE`
+are not zero or stationarity proofs.
+
+Both scenarios separately prove odometry and wheel stationarity, fresh
+Runtime/Gate identity, stale tuple and writer isolation, a 1.0 s no-Goal zero
+window, and a new Goal recovery. The launch fixture uses a unique Gazebo
+partition, structured shutdown, bounded wall watchdogs, and unfiltered exit
+code assertions. A real product failure is persisted as a blocked Issue and
+does not authorize Runtime/MotionGate refactoring in the acceptance harness.
+
 ## Mapping completion criteria
 
 - A TF ownership check proves that each required transform has one semantic owner.

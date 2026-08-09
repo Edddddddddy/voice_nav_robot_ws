@@ -130,6 +130,35 @@ A bounded pose query can time out because the server or query stream is
 unhealthy. Diagnose the authoritative query separately from the shutdown
 oracle; do not turn a query retry into a teardown pass.
 
+### PIT-0025: Publisher disappearance is not a zero proof
+
+When a MotionGate process dies, its final publisher disappearing only proves
+that the writer is gone. It does not prove what the controller selected or
+that the robot stopped. Observe the controller output, wheel velocities, and
+odometry under the bounded zero and stationarity contracts.
+
+### PIT-0026: Controller `ACTIVE` is not a wheel-zero proof
+
+Lifecycle state and claimed command interfaces may remain healthy while a
+stale or non-zero command is still being consumed. Acceptance must observe
+the controller-selected command and both wheel velocities; do not replace
+that evidence with `ACTIVE` or interface ownership.
+
+### PIT-0027: Wall time and simulation time answer different questions
+
+Runtime lease expiry and test watchdogs use steady/wall time. Consumer
+deadman latency, odometry stationarity, and no-Goal recovery windows use an
+advancing simulation clock. If `/clock` stops or regresses, fail the measured
+scenario instead of substituting wall time for a simulation-time claim.
+
+### PIT-0028: Process names and PID scans are unsafe injection selectors
+
+A process name or a PID discovered by scanning can refer to a user's ROS or
+Gazebo resource, or to a reused PID. Bind injection to the launch-owned
+`ProcessStarted` action, pidfd, `/proc` starttime/executable/cmdline, and a
+unique ROS graph owner. Use only `pidfd_send_signal(SIGKILL)` and close the
+same exact handle during cleanup.
+
 ## Evidence and test-result integrity
 
 ### PIT-0016: Green status is not proof that the intended tests ran
