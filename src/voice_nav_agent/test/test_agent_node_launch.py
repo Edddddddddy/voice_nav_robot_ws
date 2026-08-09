@@ -273,7 +273,9 @@ class AgentNodeLaunchTest(unittest.TestCase):
         assert endpoint_gid
         return endpoint_gid
 
-    def _wait_for_agent_graph_snapshot(self):
+    def _wait_for_agent_graph_snapshot(self, timer_factory=None):
+        if timer_factory is None:
+            timer_factory = self.node.create_timer
         expected_subscriptions = {
             '/voice/turn',
             '/mission/state',
@@ -293,6 +295,8 @@ class AgentNodeLaunchTest(unittest.TestCase):
             '/voice/speak/_action/cancel_goal',
         }
         graph_converged = threading.Event()
+        state_lock = threading.Lock()
+        closing = False
         last_snapshot = {
             'subscriptions': {},
             'publishers': {},
@@ -302,47 +306,56 @@ class AgentNodeLaunchTest(unittest.TestCase):
 
         def collect_graph_snapshot():
             nonlocal converged_snapshot, last_snapshot
-            snapshot = {
-                'subscriptions': dict(
-                    self.node.get_subscriber_names_and_types_by_node(
-                        'agent_node', '/'
-                    )
-                ),
-                'publishers': dict(
-                    self.node.get_publisher_names_and_types_by_node(
-                        'agent_node', '/'
-                    )
-                ),
-                'clients': dict(
-                    self.node.get_client_names_and_types_by_node(
-                        'agent_node', '/'
-                    )
-                ),
-            }
-            last_snapshot = snapshot
-            if (
-                set(snapshot['subscriptions']) == expected_subscriptions
-                and set(snapshot['publishers']).issubset(allowed_publishers)
-                and set(snapshot['clients']) == expected_clients
-            ):
-                converged_snapshot = snapshot
-                graph_converged.set()
-                graph_timer.cancel()
+            with state_lock:
+                if closing:
+                    return
+                snapshot = {
+                    'subscriptions': dict(
+                        self.node.get_subscriber_names_and_types_by_node(
+                            'agent_node', '/'
+                        )
+                    ),
+                    'publishers': dict(
+                        self.node.get_publisher_names_and_types_by_node(
+                            'agent_node', '/'
+                        )
+                    ),
+                    'clients': dict(
+                        self.node.get_client_names_and_types_by_node(
+                            'agent_node', '/'
+                        )
+                    ),
+                }
+                last_snapshot = snapshot
+                if (
+                    set(snapshot['subscriptions']) == expected_subscriptions
+                    and set(snapshot['publishers']).issubset(allowed_publishers)
+                    and set(snapshot['clients']) == expected_clients
+                ):
+                    converged_snapshot = snapshot
+                    graph_converged.set()
 
-        graph_timer = self.node.create_timer(
+        graph_timer = timer_factory(
             0.05,
             collect_graph_snapshot,
             clock=Clock(clock_type=ClockType.STEADY_TIME),
         )
         try:
             if not graph_converged.wait(10.0):
+                with state_lock:
+                    timeout_snapshot = last_snapshot
                 self.fail(
                     'agent_node graph did not converge; last snapshot: '
-                    f'{last_snapshot!r}'
+                    f'{timeout_snapshot!r}'
                 )
-            return converged_snapshot
+            with state_lock:
+                result = converged_snapshot
+            assert result is not None
+            return result
         finally:
-            self.node.destroy_timer(graph_timer)
+            with state_lock:
+                closing = True
+                graph_timer.cancel()
 
     @staticmethod
     def _accept_goal(_request):
@@ -403,6 +416,9 @@ class AgentNodeLaunchTest(unittest.TestCase):
         self.node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+
+    def test_graph_snapshot_timer_callback_before_factory_return(self):
+        _run_graph_snapshot_timer_callback_before_factory_return()
 
     def test_entrypoint_ports_qos_and_runtime_graph(self):
         """Exercise STOP through the launched product node and inspect graph."""
@@ -615,6 +631,80 @@ class AgentNodeLaunchTest(unittest.TestCase):
             path.startswith('voice_nav_agent/test')
             for path in installed_files
         )
+
+
+def _run_graph_snapshot_timer_callback_before_factory_return():
+    """Keep synchronous timer callbacks safe before factory return."""
+    expected_snapshot = {
+        'subscriptions': {
+            '/voice/turn': [],
+            '/mission/state': [],
+            '/mission/execute/_action/feedback': [],
+            '/mission/execute/_action/status': [],
+            '/voice/speak/_action/feedback': [],
+            '/voice/speak/_action/status': [],
+        },
+        'publishers': {},
+        'clients': {
+            '/mission/execute/_action/send_goal': [],
+            '/mission/execute/_action/get_result': [],
+            '/mission/execute/_action/cancel_goal': [],
+            '/mission/stop': [],
+            '/voice/speak/_action/send_goal': [],
+            '/voice/speak/_action/get_result': [],
+            '/voice/speak/_action/cancel_goal': [],
+        },
+    }
+
+    class FakeNode:
+        def __init__(self):
+            self.calls = {
+                'subscriptions': 0,
+                'publishers': 0,
+                'clients': 0,
+            }
+
+        def get_subscriber_names_and_types_by_node(self, _name, _namespace):
+            self.calls['subscriptions'] += 1
+            return expected_snapshot['subscriptions']
+
+        def get_publisher_names_and_types_by_node(self, _name, _namespace):
+            self.calls['publishers'] += 1
+            return expected_snapshot['publishers']
+
+        def get_client_names_and_types_by_node(self, _name, _namespace):
+            self.calls['clients'] += 1
+            return expected_snapshot['clients']
+
+    class FakeTimer:
+        def __init__(self):
+            self.cancel_calls = 0
+            self.cancel_thread = None
+
+        def cancel(self):
+            self.cancel_calls += 1
+            self.cancel_thread = threading.current_thread()
+
+    test_case = AgentNodeLaunchTest()
+    test_case.node = FakeNode()
+    fake_timer = FakeTimer()
+
+    def fake_timer_factory(_period, callback, *, clock):
+        assert clock.clock_type == ClockType.STEADY_TIME
+        callback()
+        return fake_timer
+
+    test_case.node.create_timer = fake_timer_factory
+    snapshot = test_case._wait_for_agent_graph_snapshot()
+
+    assert snapshot == expected_snapshot
+    assert test_case.node.calls == {
+        'subscriptions': 1,
+        'publishers': 1,
+        'clients': 1,
+    }
+    assert fake_timer.cancel_calls == 1
+    assert fake_timer.cancel_thread is threading.current_thread()
 
 
 @launch_testing.post_shutdown_test()
