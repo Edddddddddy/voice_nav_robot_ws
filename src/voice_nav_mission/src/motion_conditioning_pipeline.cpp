@@ -940,7 +940,6 @@ private:
         timer_error = "activation was cancelled before renew timer startup";
       } else {
         try {
-          enable_renew_callbacks();
           const auto weak_callback_state =
             std::weak_ptr<IngressCallbackState>(callback_state_);
           renew_timer_ = node_.create_wall_timer(
@@ -956,7 +955,8 @@ private:
                 handler();
               }
             },
-            renew_callback_group_);
+            renew_callback_group_,
+            false);
         } catch (const std::exception & error) {
           timer_error =
             std::string{"MotionGate renew timer could not start: "} + error.what();
@@ -1080,7 +1080,7 @@ private:
       !final_snapshot.authority_live || final_snapshot.motion_inhibited ||
       !final_snapshot.writer_bound ||
       final_snapshot.candidate_topic != expected_candidate ||
-      !timer_enabled_.load() || activation_failed_.load() ||
+      activation_failed_.load() ||
       !open_lease->current())
     {
       producer_lock.unlock();
@@ -1129,12 +1129,20 @@ private:
           std::lock_guard<std::recursive_mutex> lock(mutex_);
           if (!activation_current_locked(generation, expected_lease, expected_candidate) ||
           std::chrono::steady_clock::now() >= handover_deadline ||
-          activation_failed_.load())
+          activation_failed_.load() || !renew_timer_)
           {
+            return false;
+          }
+          try {
+            // The timer is created stopped.  Its first possible callback is
+            // admitted only after this lease commits the Running state.
+            renew_timer_->reset();
+          } catch (...) {
             return false;
           }
           activation_in_progress_.store(false);
           state_ = MotionConditioningState::Running;
+          enable_renew_callbacks();
           result = remember(make_result(
             state_, MotionConditioningFailure::None, true, false, false,
             lease_id_, candidate_topic_, "conditioning generation running"));
