@@ -465,6 +465,19 @@ StopResponse RuntimeCore::stop(const StopRequest & request)
 
 void RuntimeCore::observe_gate(const GateSnapshot & snapshot)
 {
+  // Gate control_seq is monotonic within one Gate identity.  Reject a
+  // duplicate or delayed sample before it can roll the current generation
+  // back after a trusted recovery; a genuinely new identity still enters the
+  // fail-closed identity-change path below.
+  const bool stale_same_generation =
+    gate_bound_ && !gate_snapshot_.gate_instance_id.empty() &&
+    !snapshot.gate_instance_id.empty() &&
+    gate_snapshot_.gate_instance_id == snapshot.gate_instance_id &&
+    snapshot.control_seq <= gate_snapshot_.control_seq;
+  if (stale_same_generation) {
+    return;
+  }
+
   const bool was_healthy = gate_is_healthy(gate_snapshot_);
   const bool identity_changed =
     gate_bound_ && !gate_snapshot_.gate_instance_id.empty() &&
