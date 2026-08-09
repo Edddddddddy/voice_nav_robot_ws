@@ -155,17 +155,17 @@ class RepositoryContractTest(unittest.TestCase):
 
     def test_agent_workflow_docs_define_recoverable_protocol(self) -> None:
         agents = (REPOSITORY_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        normalized_agents = " ".join(agents.split())
+        self.assertLessEqual(len(agents.splitlines()), 110)
         for marker in (
-            "## Roles",
-            "### Manager",
-            "### Worker",
-            "### Reviewer",
-            "## Skill routing",
+            "Manager",
+            "Worker",
+            "Reviewer",
             "voice-nav-requirements",
             "voice-nav-worker",
             "voice-nav-review",
-            "## Context recovery",
-            "## Forbidden",
+            "manager-state.yaml",
+            "Task YAML",
             "polling",
             "subagents",
         ):
@@ -176,15 +176,18 @@ class RepositoryContractTest(unittest.TestCase):
             "VOICE_NAV_HANDOFF: ready|blocked|reviewed",
             "VOICE_NAV_PERSISTED",
             "VOICE_NAV_EVENT: blocked|completed|reviewed",
-            "Is the sole transport owner for GitHub writes",
-            "The Manager writes the evidence to GitHub and returns",
-            "the canonical URL",
-            "Neither role fabricates an evidence URL or sends a final event before",
-            "No role polls GitHub, CI, or another",
+            "sole transport owner for GitHub writes",
+            "complete evidence to GitHub",
+            "directly returns",
+            "fabricate/reuse a URL",
+            "final event early",
+            "thread/CI polling",
+            "exact `cwd`, `command`, `timeout`, and expected artifact",
+            "Simplified Chinese",
         )
         for marker in protocol_markers:
             with self.subTest(document="AGENTS.md", marker=marker):
-                self.assertIn(marker, agents)
+                self.assertIn(marker, normalized_agents)
 
         handoff = "VOICE_NAV_HANDOFF: ready|blocked|reviewed"
         persisted = "VOICE_NAV_PERSISTED"
@@ -192,45 +195,58 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertLess(agents.index(handoff), agents.index(persisted))
         self.assertLess(agents.index(persisted), agents.index(final_event))
 
+        for field in (
+            "issue:",
+            "pr:",
+            "thread:",
+            "head:",
+            "body:",
+            "local_artifacts:",
+            "evidence:",
+            "decision_needed:",
+        ):
+            with self.subTest(document="AGENTS.md", field=field):
+                self.assertIn(field, agents)
+
+        self.assertRegex(normalized_agents, r"Worker.*Luna.*max")
+        self.assertRegex(normalized_agents, r"Reviewer.*Sol.*xhigh")
+        self.assertIn("decision_needed", normalized_agents)
         self.assertIn(
-            "A `reviewed` event with a P0/P1 finding that blocks merge must fill "
-            "`decision_needed`",
-            agents,
-        )
-        self.assertIn(
-            "use `none` only when no decision/action is needed",
-            agents,
+            "use `none` only when no decision/action is needed", normalized_agents
         )
 
         agent_docs = (
             REPOSITORY_ROOT / "docs" / "agents" / "README.md"
         ).read_text(encoding="utf-8")
+        normalized_agent_docs = " ".join(agent_docs.split())
         for marker in (
-            "## GitHub Issue tracking",
-            "## Standard labels",
+            "GitHub Issue",
+            "PR",
             "type:prd",
             "type:task",
             "ready-for-agent",
             "in-progress",
             "blocked",
             "review-needed",
-            "## External PR intake",
-            "## Single-context layout",
+            "Closes #NN",
+            "Issue 链接",
+            "AGENTS.md",
             "CONTEXT.md",
         ):
             with self.subTest(document="docs/agents/README.md", marker=marker):
-                self.assertIn(marker, agent_docs)
-        self.assertNotIn("needs-review", agent_docs)
-
-        normalized_agent_docs = " ".join(agent_docs.split())
-        for marker in (
-            "The first direct `VOICE_NAV_HANDOFF` may carry the complete Chinese "
-            "evidence needed for that transport.",
-            "After the Manager returns `VOICE_NAV_PERSISTED` with the canonical "
-            "URL, only the final `VOICE_NAV_EVENT` uses the compact envelope.",
-        ):
-            with self.subTest(document="docs/agents/README.md", marker=marker):
                 self.assertIn(marker, normalized_agent_docs)
+        self.assertNotIn("needs-review", normalized_agent_docs)
+        self.assertNotRegex(
+            normalized_agent_docs, r"VOICE_NAV_(HANDOFF|PERSISTED|EVENT)"
+        )
+
+        context = (REPOSITORY_ROOT / "CONTEXT.md").read_text(encoding="utf-8")
+        for marker in ("VoiceNav", "Mission", "Place", "Stop", "docs/adr/"):
+            with self.subTest(document="docs/agents/README.md", marker=marker):
+                self.assertIn(marker, context)
+        for process_owner in ("Manager", "Worker", "Reviewer", "VOICE_NAV_"):
+            with self.subTest(document="CONTEXT.md", marker=process_owner):
+                self.assertNotIn(process_owner, context)
 
     def test_missing_relative_markdown_link_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

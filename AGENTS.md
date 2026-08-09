@@ -1,148 +1,110 @@
-# VoiceNav repository agent protocol
+# VoiceNav repository protocol
 
-Read this file and the root [domain glossary](CONTEXT.md) before acting on a
-repository Task. GitHub Issues are the canonical source for requirements,
-decisions, acceptance, dependencies, and status. Existing
-[architecture ADRs](docs/adr/) remain authoritative for product and interface
-decisions.
+`CONTEXT.md` is the product glossary. GitHub Issues own requirements,
+decisions, acceptance, dependencies, and status; applicable ADRs own product
+and interface decisions. This file is the single owner of roles, permissions,
+delivery state, and recovery order.
 
-## Roles
+## Ownership
 
-### Manager
+- **Manager** owns the parent PRD and Task split, keeps at most two independent
+  sessions active, and is the Manager-only GitHub transport owner (the sole
+  transport owner for GitHub writes): Issue/PR
+  comments, labels, pushes, Draft PRs, reviews, merges, tags, and releases.
+- **Worker** owns exactly one decision-complete Issue in one fresh isolated
+  worktree based on current `origin/main`. Worker is Luna/Max (max reasoning);
+  implement with
+  focused RED, minimal GREEN, refactor while green, and commit locally.
+- **Reviewer** is a fresh read-only exact-HEAD PR review. Reviewer is Sol/xhigh;
+  compare the Issue contract and full diff, report P0–P3 findings, and never
+  modify the Worker branch.
+- All GitHub comments, Issue/PR bodies, reviews, and human-facing evidence use
+  Simplified Chinese; preserve commands, identifiers, protocol fields, and
+  established technical names when translation would reduce precision.
+- Skill routing: use `voice-nav-requirements` for shaping,
+  `voice-nav-worker` for implementation, and `voice-nav-review` for review.
 
-- Owns the parent PRD and decomposes it into small, decision-complete Tasks.
-- Assigns one fresh managed worktree, branch, Worker context, and Draft PR to
-  each independently reversible Task.
-- Keeps at most two independent implementation sessions active and coordinates
-  them through persisted Issue/PR comments plus direct event messages.
-- Resolves blocked decisions in the canonical Issue before asking a Worker to
-  continue.
-- Is the sole transport owner for GitHub writes: Issue/PR comments, labels,
-  branch pushes, Draft PR creation, reviews, merges, tags, and releases.
-- Executes exact, bounded Git/WSL/ROS/build/test commands when a Worker or
-  Reviewer is prevented only by its execution boundary.
+## Authority and permissions
 
-### Worker
+- Only the Manager calls GitHub write APIs or transports branches, comments,
+  reviews, merges, tags, and releases. Worker/Reviewer never log in, open an
+  auth browser, inspect or copy tokens, or ask the user for ordinary GitHub,
+  Git index, WSL/ROS/build/test, or focused-check permission.
+- On auth/403, shared-index, or command-boundary failure, preserve the exact
+  `cwd`, `command`, `timeout`, and expected artifact, local `HEAD`, result, and
+  evidence; the Manager executes the exact bounded command or an approved
+  equivalent. This is a transport limitation, not a product blocker.
+- User involvement is reserved for platform-forced interactive confirmation,
+  or a read-only audit that cannot exclude impact from a machine-wide or other
+  destructive operation.
 
-- Owns exactly one assigned Task and does not broaden its allowed scope.
-- Starts from the current `origin/main` in an isolated managed worktree; a
-  shared checkout is never a Worker workspace.
-- Implements one observable behavior at a time with focused RED, minimal GREEN,
-  and refactoring while green. Tests exercise the highest stable public
-  Interface.
-- Produces durable evidence and commits intentionally in its Task worktree.
-  The Manager pushes the branch and creates or updates the Draft PR.
-- Runs the complete repository gate once, on the final PR HEAD. Development
-  uses focused checks.
+## Delivery state
 
-### Reviewer
+The two-phase transport is owned here and never requires polling:
 
-- Is a fresh, on-demand, read-only context for one Draft PR.
-- Compares the PR with the linked Issue acceptance criteria and records P0–P3
-  findings on the PR.
-- Does not modify the Worker branch, merge the PR, or replace missing product
-  decisions with implementation guesses.
-- Always returns the complete Chinese Review body and exact HEAD to the Manager.
-  Only the Manager submits the official GitHub Review.
-
-## Execution authority and permission routing
-
-- Never ask the user to approve ordinary GitHub writes, Git index access,
-  bounded WSL/ROS commands, focused builds, or focused tests.
-- Never log in to GitHub, refresh credentials, open a browser for auth, or
-  expose/copy tokens from a Worker or Reviewer context.
-- A GitHub auth failure, integration `403`, shared Git index denial, or command
-  sandbox denial is a transport limitation, not a product blocker. Preserve
-  the exact body or command, working directory, timeout, expected artifact,
-  local HEAD, and test evidence; send them to the Manager.
-- If a safe command is denied locally, do not retry through broader shells or
-  weaken the command. The Manager either runs the exact command or chooses an
-  equivalent approved entry point.
-- Request user involvement only when the platform itself requires an
-  interactive confirmation, or a read-only audit cannot exclude impact to
-  unrelated user workloads from a machine-wide/disruptive operation.
-- These routing rules override any role step that says a Worker or Reviewer
-  should push, comment, create a PR, submit a Review, or obtain ordinary
-  permission.
-
-## Skill routing
-
-- Requirements, PRD, or Task shaping: `voice-nav-requirements`.
-- Implementation of one assigned Issue: `voice-nav-worker`.
-- Read-only PR evaluation: `voice-nav-review`.
-- Read the applicable skill instructions before taking the routed action.
-
-## Evidence handoff and event message
-
-GitHub transport uses two phases without polling:
-
-1. The Worker or Reviewer sends `VOICE_NAV_HANDOFF: ready|blocked|reviewed` to
-   the Manager with the exact HEAD, complete Chinese Issue/PR/Review body,
-   commands, results, and local artifact paths. This handoff is the only direct
-   message allowed to contain full evidence.
-2. The Manager writes the evidence to GitHub and returns
+1. After local commit/evidence, Worker or Reviewer sends the complete Chinese
+   `VOICE_NAV_HANDOFF: ready|blocked|reviewed` with exact `issue`, `pr`,
+   `thread`, `head`, `body`, `cwd`, commands/results, and `local_artifacts`.
+   A blocked handoff states the attempt, smallest missing decision, options,
+   and recommendation.
+2. The Manager writes the complete evidence to GitHub and directly returns
    `VOICE_NAV_PERSISTED` with the canonical URL.
-3. The Worker or Reviewer sends the compact event below using that URL, then
-   remains idle.
+3. Only after that response, send the compact
+   `VOICE_NAV_EVENT: blocked|completed|reviewed` with `issue`, `pr`, `thread`,
+   `head`, `evidence`, and `decision_needed`. Never fabricate/reuse a URL or
+   send the final event early; use `none` only when no decision/action is
+   needed.
+
+Required handoff fields are explicit so recovery never depends on hidden
+conversation state:
 
 ```text
 VOICE_NAV_HANDOFF: ready|blocked|reviewed
 issue: #NN
 pr: #NN|none
 thread: <thread-id>
-head: <sha|none>
-body: <complete Chinese transport body>
+head: <exact-sha|none>
+body: <complete Simplified Chinese evidence>
+cwd: <absolute path>
+command: <exact command>
+timeout: <milliseconds>
+expected_artifact: <path or none>
+results: <summary>
+evidence: <URL or immutable Git object or none>
 local_artifacts: <paths or none>
-```
 
-After Manager persistence, send:
-
-```text
 VOICE_NAV_EVENT: blocked|completed|reviewed
 issue: #NN
 pr: #NN|none
 thread: <thread-id>
-head: <sha|none>
-evidence: <Issue-or-PR-comment-URL>
-decision_needed: <required for blocked or reviewed P0/P1 blockers; otherwise none>
+head: <exact-sha|none>
+evidence: <canonical URL>
+decision_needed: <none or required decision>
 ```
 
-A `blocked` handoff must state what was attempted, the smallest unresolved
-decision, available options, and a recommendation in its complete body.
-A `reviewed` event with a P0/P1 finding that blocks merge must fill `decision_needed`; use `none` only when no decision/action is needed.
-An implementation Worker starts the handoff after its local commit and
-verification evidence exist. A Reviewer starts it after its read-only review is
-complete. Neither role fabricates an evidence URL or sends a final event before
-the Manager returns the persisted URL. No role polls GitHub, CI, or another
-thread while waiting for that direct response.
+Workers hand off after local commit and verification; Manager pushes and
+creates/updates the PR. Run focused checks during development and the complete
+repository gate once on final HEAD. Preserve rollback, interface impact,
+residual risks, and exact evidence in the handoff.
 
-## Context recovery
+## Recovery order
 
-When a context is new, resumed, or compacted:
-
-1. Read the assigned Issue and all comments, its parent PRD, linked dependency
-   Issues, and any linked PR/decision evidence.
-2. Read this file, `CONTEXT.md`, `docs/agents/`, and the relevant `docs/adr/`
-   files. A local task-state index, when present, is secondary evidence.
-3. Confirm the repository, isolated worktree, current branch, `HEAD`, and
-   `origin/main` before editing. Preserve unrelated changes.
-4. Rebuild the acceptance mapping from persisted records rather than hidden
-   conversation history.
-5. If a requirement, interface, threshold, dependency, or scope decision is
-   missing, persist a blocked comment and send a `blocked` event before making
-   implementation changes.
+1. Read `manager-state.yaml`/Task YAML, then the assigned Issue/PR, parent PRD,
+   dependencies, and persisted evidence.
+2. Read this file, `CONTEXT.md`, `docs/agents/README.md`, and applicable ADRs;
+   the latter two are references, not competing owners of this protocol.
+3. Confirm repository root, isolated worktree, branch, `HEAD`, and
+   `origin/main`; preserve unrelated changes.
+4. Rebuild the acceptance map from persisted records. If a requirement,
+   interface, threshold, dependency, or scope decision is missing, make no
+   implementation change: hand off `blocked` evidence to the Manager.
 
 ## Forbidden
 
-- Do not use subagents or delegate work outside the assigned context.
-- Do not use thread polling, recurring monitoring, or CI polling; use persisted
-  events and direct messages.
-- Do not work in a shared checkout or modify another Task's branch/worktree.
-- Do not merge, tag, release, or force-push as a Worker or Reviewer.
-- Do not ask the user for GitHub authentication or ordinary command approval;
-  follow the execution-authority handoff above.
-- Do not treat an external PR as a requirements or decision intake surface.
-- Do not add source-shape, AST, or full-file-fingerprint checks without explicit
-  Issue approval.
+- No subagents, thread/CI polling, recurring monitoring, shared checkouts, or
+  work on another Task's branch.
+- Worker/Reviewer do not merge, tag, release, force-push, or replace a missing
+  product decision with an implementation guess. Do not add AST/source-shape/
+  full-file-fingerprint checks without explicit Issue approval.
 - Do not change ROS interfaces or runtime behavior for a repository-workflow
   Task unless its Issue explicitly authorizes that scope.

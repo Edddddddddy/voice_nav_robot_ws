@@ -1,41 +1,30 @@
-# VoiceNav domain glossary
+# VoiceNav product context
 
-This glossary gives the project one implementation-free meaning for the terms
-used in requirements, delivery decisions, and review evidence.
+This file is limited to product vocabulary and architecture. Delivery roles,
+permissions, recovery, and handoff state live in [AGENTS.md](AGENTS.md).
 
-## Terms
+## Product vocabulary
 
-- **VoiceNav** — the product that helps a person express and complete a
-  bounded walking or navigation intention with a robot.
-- **Mission** — a user-visible intention with a beginning, an outcome, and a
-  terminal result. A Mission is either completed, cancelled, or failed; it is
-  not an unbounded conversation.
-- **Place** — a named or otherwise recognizable destination in the robot's
-  operating environment.
-- **Stop** — an explicit request to end active movement and leave the system in
-  a safe stationary state.
-- **Issue** — the canonical GitHub record for a requirement, decision,
-  dependency, acceptance criterion, or delivery status.
-- **PRD** — a parent Product Requirements Document Issue that records the
-  user value, boundaries, decisions, and acceptance shape for related tasks.
-- **Task** — one independently reversible implementation change with explicit
-  acceptance criteria and one owning delivery context.
-- **Acceptance criterion** — an observable condition that determines whether a
-  Task or PRD is complete.
-- **Stable Interface** — a behavior or contract that other parts of the
-  product, its operators, or its verification evidence may rely on.
-- **Evidence** — a durable reference to the result of a decision, change, or
-  verification, stored in an Issue, pull request, or immutable Git object.
-- **Manager** — the role that decomposes approved PRDs, assigns decision-
-  complete Tasks, and coordinates delivery through persisted events.
-- **Worker** — the role that owns exactly one Task in one fresh isolated
-  context, commits the implementation locally, and hands complete evidence to
-  the Manager for GitHub transport.
-- **Reviewer** — the read-only role that evaluates one Draft PR against its
-  Issue acceptance criteria and hands complete findings to the Manager for the
-  official GitHub Review.
-- **Context** — the bounded set of requirements, decisions, interfaces, and
-  evidence needed to act on one Task without relying on hidden conversation
-  history.
-- **Clarification（澄清）** — 为一个缺失或歧义语义参数发出的有界追问；它会过期，
-  不是 Mission，也不是聊天记忆。
+- **VoiceNav** helps a person express and complete a bounded walking or
+  navigation intention with a robot.
+- **Mission** is a user-visible intention with a beginning, outcome, and
+  terminal result: completed, cancelled, or failed; it is not an unbounded
+  conversation.
+- **Place** is a named or otherwise recognizable destination in the operating
+  environment.
+- **Stop** explicitly ends active movement and leaves the system stationary.
+
+## Product architecture
+
+- One deep Mission Runtime owns Mission execution behind stable actions,
+  services, and observation; an independent Motion Gate retains final velocity
+  authority ([ADR-0003](docs/adr/0003-use-one-deep-mission-runtime.md)).
+- The product control path uses `gz_ros2_control` and
+  `diff_drive_controller`; the historical native-DiffDrive baseline is in
+  [ADR-0002](docs/adr/0002-migrate-to-gz-ros2-control.md) and
+  [ADR-0001](docs/adr/0001-use-native-gazebo-diff-drive.md).
+- Mapping and Navigation launch as separate modes so `map → odom` has one
+  owner at a time ([ADR-0004](docs/adr/0004-separate-mapping-and-navigation-modes.md)).
+
+For GitHub Issue/PR operations, see
+[docs/agents/README.md](docs/agents/README.md).
