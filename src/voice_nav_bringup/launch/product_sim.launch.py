@@ -18,6 +18,7 @@ from launch.actions import (
     IncludeLaunchDescription,
     SetEnvironmentVariable,
 )
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -31,6 +32,7 @@ def generate_launch_description():
     )
     world = LaunchConfiguration('world')
     world_name = LaunchConfiguration('world_name')
+    runtime_enabled = LaunchConfiguration('runtime_enabled')
     simulation = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution(
@@ -81,6 +83,7 @@ def generate_launch_description():
         name='mission_runtime_node',
         output='screen',
         parameters=[runtime_config],
+        condition=IfCondition(runtime_enabled),
     )
 
     return LaunchDescription(
@@ -114,6 +117,7 @@ def generate_launch_description():
                 default_value='voice_nav_test_world',
                 description='Gazebo world name declared by the selected SDF.',
             ),
+            DeclareLaunchArgument('runtime_enabled', default_value='true'),
             simulation,
             motion_conditioning_container,
             motion_gate,

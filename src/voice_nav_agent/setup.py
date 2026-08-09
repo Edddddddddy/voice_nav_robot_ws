@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'agent_node = voice_nav_agent.agent_node:main',
+            'rapid_mission_bridge = voice_nav_agent.rapid_mission_bridge:main',
         ],
     },
 )

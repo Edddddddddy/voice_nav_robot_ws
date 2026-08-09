@@ -19,7 +19,7 @@ from launch.actions import (
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import FindExecutable, LaunchConfiguration, PathJoinSubstitution
-from launch_ros.actions import SetRemap
+from launch_ros.actions import Node, SetRemap
 from launch_ros.substitutions import FindPackageShare
 
 
@@ -35,6 +35,7 @@ def generate_launch_description():
             'shutdown_on_gazebo_exit': 'true',
             'world': 'voice_nav_house_world.sdf',
             'world_name': 'voice_nav_house_world',
+            'runtime_enabled': 'false',
         }.items(),
     )
     nav2 = IncludeLaunchDescription(
@@ -71,6 +72,8 @@ def generate_launch_description():
             )
         ],
     )
+    rapid_mission = Node(package='voice_nav_agent', executable='rapid_mission_bridge', output='screen')
+    agent = Node(package='voice_nav_agent', executable='agent_node', output='screen')
     return LaunchDescription([
         DeclareLaunchArgument(
             'headless', default_value='true', choices=['true', 'false'],
@@ -82,4 +85,6 @@ def generate_launch_description():
             nav2,
         ]),
         initial_pose,
+        rapid_mission,
+        agent,
     ])
