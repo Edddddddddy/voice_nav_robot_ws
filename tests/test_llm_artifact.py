@@ -10,6 +10,7 @@ import json
 import multiprocessing
 from pathlib import Path
 import os
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -120,6 +121,89 @@ class RealGateLogTest(unittest.TestCase):
             self.assertTrue(state["truncated"])
 
 
+class ManifestBoundaryTest(unittest.TestCase):
+    def test_duplicate_and_unknown_manifest_keys_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            duplicate = Path(temporary_directory) / "duplicate.json"
+            duplicate.write_text(
+                '{"schema_version":1,"schema_version":1}\n',
+                encoding="utf-8",
+            )
+            with self.assertRaises(llm.ManifestError):
+                llm.load_lock_manifest(duplicate, approved=False)
+
+            unknown = copy.deepcopy(llm.APPROVED_DOCUMENT)
+            unknown["unexpected"] = True
+            with self.assertRaises(llm.ManifestError):
+                llm.validate_manifest_document(unknown)
+
+    def test_mutated_approved_value_fails_even_when_shape_is_valid(self) -> None:
+        document = copy.deepcopy(llm.APPROVED_DOCUMENT)
+        document["runtime"]["host"] = "0.0.0.0"
+        with self.assertRaises(llm.ManifestError):
+            llm.validate_manifest_document(document, approved=True)
+
+        document = copy.deepcopy(llm.APPROVED_DOCUMENT)
+        document["llama_cpp"]["build"]["flags"]["GGML_NATIVE"] = "ON"
+        with self.assertRaises(llm.ManifestError):
+            llm.validate_manifest_document(document, approved=True)
+
+    def test_repo_boundary_rejects_tracked_model_and_build_artifacts(self) -> None:
+        with self.assertRaises(llm.ArtifactError):
+            llm.verify_repository_artifact_boundary(
+                REPOSITORY_ROOT,
+                tracked_paths=[
+                    "models/locks/voice_nav_llm_v1.lock.json",
+                    "models/weights/Qwen3-0.6B-Q8_0.gguf",
+                    "build/llama-server",
+                    "llama.cpp-locked/source/CMakeLists.txt",
+                ],
+            )
+        llm.verify_repository_artifact_boundary(
+            REPOSITORY_ROOT,
+            tracked_paths=[
+                "models/locks/voice_nav_llm_v1.lock.json",
+                "docs/process/third-party-llm-notices.md",
+            ],
+        )
+
+    def test_repo_boundary_rejects_tracked_runtime_log_files(self) -> None:
+        with self.assertRaises(llm.ArtifactError):
+            llm.verify_repository_artifact_boundary(
+                REPOSITORY_ROOT,
+                tracked_paths=[
+                    "server.log",
+                    "evidence/gate.log",
+                    "logs/server.txt",
+                ],
+            )
+
+    @unittest.skipIf(
+        os.name == "posix" and REPOSITORY_ROOT.as_posix().startswith("/mnt/"),
+        "managed WSL Git context is initialized by the shell wrapper",
+    )
+    def test_manifest_cli_reports_real_gate_not_run(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(REPOSITORY_ROOT / "scripts" / "llm" / "artifact_manager.py"),
+                "verify",
+                "--repo-root",
+                str(REPOSITORY_ROOT),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("MANIFEST_GATE=PASS", completed.stdout)
+        self.assertIn(
+            "REAL_MODEL_GATE=NOT_RUN reason=--real-not-requested",
+            completed.stdout,
+        )
+        self.assertNotIn("REAL_MODEL_GATE=PASS", completed.stdout)
+
+
 @unittest.skipUnless(os.name == "posix", "process-group termination is a POSIX gate seam")
 class ProcessTerminationTest(unittest.TestCase):
     def test_term_normal_exit_reports_no_escalation(self) -> None:
@@ -202,9 +286,11 @@ class BundleLockTest(unittest.TestCase):
             with (
                 mock.patch.object(llm, "validate_artifact_root", return_value=Path(temporary_directory)),
                 mock.patch.object(llm, "verify_bundle", return_value=evidence),
+                mock.patch.object(llm, "_check_port_available"),
                 mock.patch.object(llm.tempfile, "mkdtemp", return_value=str(evidence)),
                 mock.patch.object(llm.subprocess, "Popen", return_value=fake_process),
                 mock.patch.object(llm, "_capture_process_log"),
+                mock.patch.object(llm, "_wait_for_owned_listener"),
                 mock.patch.object(llm, "_wait_for_server"),
                 mock.patch.object(llm, "_check_loopback_listener"),
                 mock.patch.object(llm, "_post_schema_smoke"),
@@ -243,86 +329,94 @@ class BundleLockTest(unittest.TestCase):
             ],
         )
 
-    def test_duplicate_and_unknown_manifest_keys_fail_closed(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            duplicate = Path(temporary_directory) / "duplicate.json"
-            duplicate.write_text(
-                '{"schema_version":1,"schema_version":1}\n',
-                encoding="utf-8",
-            )
-            with self.assertRaises(llm.ManifestError):
-                llm.load_lock_manifest(duplicate, approved=False)
 
-            unknown = copy.deepcopy(llm.APPROVED_DOCUMENT)
-            unknown["unexpected"] = True
-            with self.assertRaises(llm.ManifestError):
-                llm.validate_manifest_document(unknown)
-
-    def test_mutated_approved_value_fails_even_when_shape_is_valid(self) -> None:
-        document = copy.deepcopy(llm.APPROVED_DOCUMENT)
-        document["runtime"]["host"] = "0.0.0.0"
-        with self.assertRaises(llm.ManifestError):
-            llm.validate_manifest_document(document, approved=True)
-
-        document = copy.deepcopy(llm.APPROVED_DOCUMENT)
-        document["llama_cpp"]["build"]["flags"]["GGML_NATIVE"] = "ON"
-        with self.assertRaises(llm.ManifestError):
-            llm.validate_manifest_document(document, approved=True)
-
-    def test_repo_boundary_rejects_tracked_model_and_build_artifacts(self) -> None:
-        with self.assertRaises(llm.ArtifactError):
-            llm.verify_repository_artifact_boundary(
-                REPOSITORY_ROOT,
-                tracked_paths=[
-                    "models/locks/voice_nav_llm_v1.lock.json",
-                    "models/weights/Qwen3-0.6B-Q8_0.gguf",
-                    "build/llama-server",
-                    "llama.cpp-locked/source/CMakeLists.txt",
-                ],
-            )
-        llm.verify_repository_artifact_boundary(
-            REPOSITORY_ROOT,
-            tracked_paths=[
-                "models/locks/voice_nav_llm_v1.lock.json",
-                "docs/process/third-party-llm-notices.md",
-            ],
-        )
-
-    def test_repo_boundary_rejects_tracked_runtime_log_files(self) -> None:
-        with self.assertRaises(llm.ArtifactError):
-            llm.verify_repository_artifact_boundary(
-                REPOSITORY_ROOT,
-                tracked_paths=[
-                    "server.log",
-                    "evidence/gate.log",
-                    "logs/server.txt",
-                ],
-            )
-
-    @unittest.skipIf(
-        os.name == "posix" and REPOSITORY_ROOT.as_posix().startswith("/mnt/"),
-        "managed WSL Git context is initialized by the shell wrapper",
-    )
-    def test_manifest_cli_reports_real_gate_not_run(self) -> None:
-        completed = subprocess.run(
+@unittest.skipUnless(os.name == "posix", "listener ownership is a Linux gate seam")
+class ListenerOwnershipTest(unittest.TestCase):
+    def test_unrelated_listener_blocks_gate_without_killing_it(self) -> None:
+        if shutil.which("ss") is None:
+            self.skipTest("ss is required for listener ownership evidence")
+        listener = subprocess.Popen(
             [
                 sys.executable,
-                str(REPOSITORY_ROOT / "scripts" / "llm" / "artifact_manager.py"),
-                "verify",
-                "--repo-root",
-                str(REPOSITORY_ROOT),
+                "-c",
+                (
+                    "import socket,time; "
+                    "sock=socket.socket(); sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); "
+                    "sock.bind(('127.0.0.1', 8080)); sock.listen(); "
+                    "print('READY', flush=True); time.sleep(30)"
+                ),
             ],
-            check=False,
-            capture_output=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
+            start_new_session=True,
         )
-        self.assertEqual(completed.returncode, 0)
-        self.assertIn("MANIFEST_GATE=PASS", completed.stdout)
-        self.assertIn(
-            "REAL_MODEL_GATE=NOT_RUN reason=--real-not-requested",
-            completed.stdout,
+        try:
+            ready = listener.stdout.readline() if listener.stdout is not None else ""
+            if ready.strip() != "READY":
+                self.skipTest("127.0.0.1:8080 was already occupied before fixture startup")
+
+            manifest = llm.load_lock_manifest()
+            digest = llm.lock_sha256()
+            with tempfile.TemporaryDirectory() as temporary_directory:
+                bundle = Path(temporary_directory)
+                original_popen = subprocess.Popen
+
+                def reject_server_start(command, *args, **kwargs):
+                    if list(command)[:2] == ["ss", "-ltnp"]:
+                        return original_popen(command, *args, **kwargs)
+                    raise AssertionError("gate attempted to start beside an existing listener")
+
+                with (
+                    mock.patch.object(llm, "validate_artifact_root", return_value=bundle),
+                    mock.patch.object(llm, "verify_bundle", return_value=bundle),
+                    mock.patch.object(
+                        llm.subprocess,
+                        "Popen",
+                        side_effect=reject_server_start,
+                    ),
+                ):
+                    with self.assertRaises(llm.ArtifactError) as context:
+                        llm.real_smoke(bundle, manifest, digest, REPOSITORY_ROOT)
+
+            self.assertIn("already in use", str(context.exception))
+            self.assertIsNone(listener.poll())
+        finally:
+            if listener.poll() is None:
+                listener.terminate()
+                try:
+                    listener.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    listener.kill()
+                    listener.wait(timeout=5)
+            if listener.stdout is not None:
+                listener.stdout.close()
+            if listener.stderr is not None:
+                listener.stderr.close()
+
+    def test_listener_pid_must_belong_to_launched_process_group(self) -> None:
+        process = _FakeProcess([0])
+        ss_result = subprocess.CompletedProcess(
+            ["ss", "-ltnp"],
+            0,
+            stdout=(
+                "State Recv-Q Send-Q Local Address:Port Peer Address:Port Process\n"
+                'LISTEN 0 128 127.0.0.1:8080 0.0.0.0:* users:(("unrelated",pid=5151,fd=3))\n'
+            ),
+            stderr="",
         )
-        self.assertNotIn("REAL_MODEL_GATE=PASS", completed.stdout)
+        with (
+            mock.patch.object(llm.shutil, "which", return_value="/usr/bin/ss"),
+            mock.patch.object(llm, "_run_command", return_value=ss_result),
+            mock.patch.object(
+                llm.os,
+                "getpgid",
+                side_effect=lambda pid: {process.pid: process.pid, 5151: 5151}[pid],
+            ),
+        ):
+            with self.assertRaises(llm.ListenerOwnershipError):
+                llm._check_loopback_listener("127.0.0.1", 8080, process)
 
 
 class LlmDownloadAndExtractionTest(unittest.TestCase):
