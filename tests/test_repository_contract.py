@@ -153,6 +153,17 @@ class RepositoryContractTest(unittest.TestCase):
             pull_request_template.lower(), r"lesson|learning[- ]record|work[- ]item"
         )
 
+    def assert_review_delivery_semantics(self, document: str) -> None:
+        normalized = " ".join(document.split())
+        for marker in (
+            "only the final `VOICE_NAV_EVENT` uses the compact envelope",
+            "unresolved P0/P1",
+            "blocks merge",
+            "final `VOICE_NAV_EVENT: reviewed`",
+            "fill `decision_needed`",
+        ):
+            self.assertIn(marker, normalized)
+
     def test_agent_workflow_docs_define_recoverable_protocol(self) -> None:
         agents = (REPOSITORY_ROOT / "AGENTS.md").read_text(encoding="utf-8")
         normalized_agents = " ".join(agents.split())
@@ -194,6 +205,38 @@ class RepositoryContractTest(unittest.TestCase):
         final_event = "VOICE_NAV_EVENT: blocked|completed|reviewed"
         self.assertLess(agents.index(handoff), agents.index(persisted))
         self.assertLess(agents.index(persisted), agents.index(final_event))
+        self.assert_review_delivery_semantics(agents)
+
+        compact_marker = (
+            "only the final `VOICE_NAV_EVENT` uses the compact\n"
+            "   envelope"
+        )
+        negative_mutations = (
+            (
+                "deleted compact boundary",
+                agents.replace(compact_marker, ""),
+            ),
+            (
+                "reversed compact boundary",
+                agents.replace(
+                    compact_marker,
+                    "only the first `VOICE_NAV_EVENT` uses the compact\n"
+                    "   envelope",
+                ),
+            ),
+            (
+                "removed P0/P1 blocker mapping",
+                agents.replace("unresolved P0/P1", "resolved P0/P1"),
+            ),
+            (
+                "removed decision_needed mapping",
+                agents.replace("fill `decision_needed`", "omit `decision_needed`"),
+            ),
+        )
+        for mutation, mutated_agents in negative_mutations:
+            with self.subTest(review_semantics_mutation=mutation):
+                with self.assertRaises(AssertionError):
+                    self.assert_review_delivery_semantics(mutated_agents)
 
         for field in (
             "issue:",
