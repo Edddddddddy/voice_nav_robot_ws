@@ -250,7 +250,12 @@ def validate_manifest_document(document: Any, *, approved: bool = False) -> Lock
     _require_string(model["repo"], "model.repo")
     _require_revision(model["revision"], "model.revision")
     model_file = _require_string(model["file"], "model.file")
-    if model_file != Path(model_file).name or "/" in model_file or "\\" in model_file:
+    if (
+        model_file in {".", ".."}
+        or model_file != Path(model_file).name
+        or "/" in model_file
+        or "\\" in model_file
+    ):
         raise ManifestError("model.file must be a basename")
     _require_positive_integer(model["size"], "model.size")
     _require_sha(model["sha256"], "model.sha256")
@@ -408,9 +413,9 @@ def forbidden_tracked_artifacts(paths: Sequence[str]) -> list[str]:
         if (
             name.endswith(".gguf")
             or name in {"llama-server", "llama-server.exe"}
-            or "llama.cpp" in parts
+            or any(part.startswith("llama.cpp") for part in parts)
             or name.endswith(".tar.gz") and "llama" in name
-            or any(part in {"build", "install", "log"} for part in parts)
+            or any(part in {"build", "install", "log", "source"} for part in parts)
             or ".deps" in parts
             or "weights" in parts and "models" in parts
         ):
