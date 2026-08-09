@@ -74,7 +74,13 @@ def generate_launch_description():
     )
     rapid_mission = Node(package='voice_nav_agent', executable='rapid_mission_bridge', output='screen')
     agent = Node(package='voice_nav_agent', executable='agent_node', output='screen')
-    voice = Node(package='voice_nav_agent', executable='rapid_voice_node', output='screen')
+    voice = Node(
+        package='voice_nav_agent', executable='rapid_voice_node', output='screen',
+        parameters=[{
+            'piper_path': '/mnt/c/Users/lcy/code/ros2/voice_nav_robot_ws_rapid/.deps/voice/bin/piper',
+            'piper_model': '/mnt/c/Users/lcy/code/ros2/voice_nav_robot_ws_rapid/.deps/voice/models/zh_CN-huayan-medium.onnx',
+        }],
+    )
     return LaunchDescription([
         DeclareLaunchArgument(
             'headless', default_value='true', choices=['true', 'false'],

@@ -1,6 +1,9 @@
 """Terminal transcript and speech sink for the rapid local VoiceNav demo."""
 import secrets
 import threading
+import subprocess
+import tempfile
+from pathlib import Path
 
 import rclpy
 from rclpy.action import ActionServer
@@ -14,6 +17,8 @@ class RapidVoiceNode(Node):
     def __init__(self):
         super().__init__('rapid_voice_node')
         self.instance_id, self.sequence = secrets.token_hex(16), 0
+        self.piper = self.declare_parameter('piper_path', '').value
+        self.model = self.declare_parameter('piper_model', '').value
         qos = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1, reliability=ReliabilityPolicy.RELIABLE)
         self.turns = self.create_publisher(VoiceTurn, '/voice/turn', qos)
         self.speak = ActionServer(self, Speak, '/voice/speak', self._speak)
@@ -35,6 +40,13 @@ class RapidVoiceNode(Node):
 
     def _speak(self, handle):
         self.get_logger().info('SPEAK: %s' % handle.request.text)
+        if self.piper and Path(self.piper).is_file() and Path(self.model).is_file():
+            wav = Path(tempfile.gettempdir()) / ('voice-nav-' + secrets.token_hex(8) + '.wav')
+            try:
+                subprocess.run([self.piper, '--model', self.model, '--output_file', str(wav)], input=handle.request.text, text=True, check=True, timeout=30)
+                subprocess.Popen(['paplay', str(wav)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except (OSError, subprocess.SubprocessError) as error:
+                self.get_logger().warning('Piper playback failed: %s' % error)
         result = Speak.Result(); result.code, result.detail = Speak.Result.COMPLETED, 'printed by rapid voice node'
         handle.succeed(); return result
 
