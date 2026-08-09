@@ -28,6 +28,7 @@ import launch_testing.markers
 import pytest
 import rclpy
 from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
+from rclpy.clock import Clock, ClockType
 from rclpy.event_handler import PublisherEventCallbacks
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.qos import (
@@ -272,6 +273,77 @@ class AgentNodeLaunchTest(unittest.TestCase):
         assert endpoint_gid
         return endpoint_gid
 
+    def _wait_for_agent_graph_snapshot(self):
+        expected_subscriptions = {
+            '/voice/turn',
+            '/mission/state',
+            '/mission/execute/_action/feedback',
+            '/mission/execute/_action/status',
+            '/voice/speak/_action/feedback',
+            '/voice/speak/_action/status',
+        }
+        allowed_publishers = {'/rosout', '/parameter_events'}
+        expected_clients = {
+            '/mission/execute/_action/send_goal',
+            '/mission/execute/_action/get_result',
+            '/mission/execute/_action/cancel_goal',
+            '/mission/stop',
+            '/voice/speak/_action/send_goal',
+            '/voice/speak/_action/get_result',
+            '/voice/speak/_action/cancel_goal',
+        }
+        graph_converged = threading.Event()
+        last_snapshot = {
+            'subscriptions': {},
+            'publishers': {},
+            'clients': {},
+        }
+        converged_snapshot = None
+
+        def collect_graph_snapshot():
+            nonlocal converged_snapshot, last_snapshot
+            snapshot = {
+                'subscriptions': dict(
+                    self.node.get_subscriber_names_and_types_by_node(
+                        'agent_node', '/'
+                    )
+                ),
+                'publishers': dict(
+                    self.node.get_publisher_names_and_types_by_node(
+                        'agent_node', '/'
+                    )
+                ),
+                'clients': dict(
+                    self.node.get_client_names_and_types_by_node(
+                        'agent_node', '/'
+                    )
+                ),
+            }
+            last_snapshot = snapshot
+            if (
+                set(snapshot['subscriptions']) == expected_subscriptions
+                and set(snapshot['publishers']).issubset(allowed_publishers)
+                and set(snapshot['clients']) == expected_clients
+            ):
+                converged_snapshot = snapshot
+                graph_converged.set()
+                graph_timer.cancel()
+
+        graph_timer = self.node.create_timer(
+            0.05,
+            collect_graph_snapshot,
+            clock=Clock(clock_type=ClockType.STEADY_TIME),
+        )
+        try:
+            if not graph_converged.wait(10.0):
+                self.fail(
+                    'agent_node graph did not converge; last snapshot: '
+                    f'{last_snapshot!r}'
+                )
+            return converged_snapshot
+        finally:
+            self.node.destroy_timer(graph_timer)
+
     @staticmethod
     def _accept_goal(_request):
         return GoalResponse.ACCEPT
@@ -360,19 +432,10 @@ class AgentNodeLaunchTest(unittest.TestCase):
         assert self.speak_goals[0].priority == Speak.Goal.URGENT
         assert self.speak_goals[0].allow_barge_in
 
-        subscriptions = dict(
-            self.node.get_subscriber_names_and_types_by_node(
-                'agent_node', '/'
-            )
-        )
-        publishers = dict(
-            self.node.get_publisher_names_and_types_by_node(
-                'agent_node', '/'
-            )
-        )
-        clients = dict(
-            self.node.get_client_names_and_types_by_node('agent_node', '/')
-        )
+        graph_snapshot = self._wait_for_agent_graph_snapshot()
+        subscriptions = graph_snapshot['subscriptions']
+        publishers = graph_snapshot['publishers']
+        clients = graph_snapshot['clients']
         assert set(subscriptions) == {
             '/voice/turn',
             '/mission/state',
@@ -430,10 +493,7 @@ class AgentNodeLaunchTest(unittest.TestCase):
         )
 
     def test_installed_agent_restarts_state_epoch_through_public_ros_behavior(self):
-        """Prove installed A-to-B GID rebuild and one-shot B live delivery.
-
-        Prove subsequent B-token Missions.
-        """
+        """Prove installed A-to-B GID rebuild, B live delivery, and B-token Missions."""
         assert self.turn_matched.wait(10.0)
         assert self.state_matched.wait(10.0)
         assert self.state_current_match_events['A'].wait(10.0)
