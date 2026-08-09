@@ -426,7 +426,8 @@ def forbidden_tracked_artifacts(paths: Sequence[str]) -> list[str]:
             or name in {"llama-server", "llama-server.exe"}
             or any(part.startswith("llama.cpp") for part in parts)
             or name.endswith(".tar.gz") and "llama" in name
-            or any(part in {"build", "install", "log", "source"} for part in parts)
+            or name.endswith(".log")
+            or any(part in {"build", "install", "log", "logs", "source"} for part in parts)
             or ".deps" in parts
             or "weights" in parts and "models" in parts
         ):
@@ -1218,19 +1219,29 @@ class Provisioner:
                 _remove_path(work)
                 self.fsync(bundle)
                 self.fsync_directory(staging)
+                self.fsync_directory(bundles)
                 self.publisher(bundle, final_bundle)
                 published = True
                 try:
                     self.fsync_directory(bundles)
-                except ArtifactError:
+                except ArtifactError as publish_error:
                     # The just-published path did not become durable.  It is
                     # ours (RENAME_NOREPLACE proved no prior bundle existed),
-                    # so remove that incomplete publication before failing.
+                    # so remove that incomplete publication and persist the
+                    # cleanup before failing.
+                    cleanup_errors: list[ArtifactError] = []
                     try:
                         _remove_path(final_bundle)
-                    except ArtifactError:
-                        pass
-                    raise
+                    except ArtifactError as error:
+                        cleanup_errors.append(error)
+                    try:
+                        self.fsync_directory(bundles)
+                    except ArtifactError as error:
+                        cleanup_errors.append(error)
+                    if cleanup_errors:
+                        details = "; ".join(str(error) for error in cleanup_errors)
+                        raise ArtifactError(f"stranded publication: {details}") from cleanup_errors[0]
+                    raise publish_error
                 return ProvisionResult(self.digest, final_bundle, False)
             finally:
                 if not published and (os.path.lexists(str(staging))):
@@ -1343,21 +1354,34 @@ def _post_schema_smoke(manifest: LockManifest) -> None:
         raise ArtifactError("loopback JSON-schema smoke returned an unexpected object")
 
 
-def _terminate_process_group(process: subprocess.Popen[Any]) -> None:
+def _terminate_process_group(process: subprocess.Popen[Any]) -> bool:
+    """Terminate the exact process group and report whether SIGKILL was needed."""
+
     if process.poll() is not None:
-        return
+        return False
     if os.name != "posix":
-        process.terminate()
+        try:
+            process.terminate()
+        except OSError as error:
+            raise ArtifactError("llama-server termination failed") from error
         try:
             process.wait(timeout=PROCESS_TERM_SECONDS)
         except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=PROCESS_TERM_SECONDS)
-        return
+            try:
+                process.kill()
+                process.wait(timeout=PROCESS_TERM_SECONDS)
+            except (OSError, subprocess.TimeoutExpired) as error:
+                raise ArtifactError("llama-server kill/wait failed") from error
+            return True
+        except OSError as error:
+            raise ArtifactError("llama-server termination wait failed") from error
+        return False
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
-        return
+        return False
+    except OSError as error:
+        raise ArtifactError("llama-server SIGTERM failed") from error
     try:
         process.wait(timeout=PROCESS_TERM_SECONDS)
     except subprocess.TimeoutExpired:
@@ -1365,7 +1389,16 @@ def _terminate_process_group(process: subprocess.Popen[Any]) -> None:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        process.wait(timeout=PROCESS_TERM_SECONDS)
+        except OSError as error:
+            raise ArtifactError("llama-server SIGKILL failed") from error
+        try:
+            process.wait(timeout=PROCESS_TERM_SECONDS)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise ArtifactError("llama-server kill/wait failed") from error
+        return True
+    except OSError as error:
+        raise ArtifactError("llama-server termination wait failed") from error
+    return False
 
 
 def _cpu_identity() -> str:
@@ -1510,6 +1543,8 @@ def real_smoke(
     )
     log_reader.start()
     gate_error: ArtifactError | None = None
+    termination_error: ArtifactError | None = None
+    termination_escalated = False
     try:
         _wait_for_server(runtime["host"], runtime["port"], process, REAL_READINESS_SECONDS)
         _check_loopback_listener(runtime["host"], runtime["port"])
@@ -1517,13 +1552,21 @@ def real_smoke(
     except ArtifactError as error:
         gate_error = error
     finally:
-        _terminate_process_group(process)
-        log_reader.join(timeout=PROCESS_TERM_SECONDS + 2.0)
-        if log_reader.is_alive():
-            process.stdout.close()
-            log_reader.join(timeout=PROCESS_TERM_SECONDS)
+        try:
+            termination_escalated = _terminate_process_group(process)
+        except ArtifactError as error:
+            termination_error = error
+        finally:
+            log_reader.join(timeout=PROCESS_TERM_SECONDS + 2.0)
+            if log_reader.is_alive():
+                process.stdout.close()
+                log_reader.join(timeout=PROCESS_TERM_SECONDS)
     if log_errors:
         raise RealGateError("server log capture failed", log_path) from log_errors[0]
+    if termination_error is not None:
+        raise RealGateError(str(termination_error), log_path) from termination_error
+    if termination_escalated:
+        raise RealGateError("llama-server required SIGKILL during shutdown", log_path)
     if gate_error is not None:
         raise RealGateError(str(gate_error), log_path) from gate_error
     head = _repository_head(repo_root)
