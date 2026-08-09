@@ -106,6 +106,7 @@ class LlmManifestTest(unittest.TestCase):
                     "models/locks/voice_nav_llm_v1.lock.json",
                     "models/weights/Qwen3-0.6B-Q8_0.gguf",
                     "build/llama-server",
+                    "llama.cpp-locked/source/CMakeLists.txt",
                 ],
             )
         llm.verify_repository_artifact_boundary(
