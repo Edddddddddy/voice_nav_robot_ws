@@ -72,6 +72,21 @@ class LlmManifestTest(unittest.TestCase):
         self.assertEqual(manifest.runtime["non_thinking"], "/no_think")
         llm.validate_notice_consistency(manifest)
 
+
+class RealGateLogTest(unittest.TestCase):
+    def test_server_log_is_retained_with_a_hard_size_bound(self) -> None:
+        payload = b"raw-log\n" * ((llm.REAL_LOG_MAX_BYTES // 8) + 32)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            log_path = Path(temporary_directory) / "server.log"
+            state: dict[str, object] = {}
+            errors: list[BaseException] = []
+            llm._capture_process_log(io.BytesIO(payload), log_path, state, errors)
+
+            self.assertEqual(errors, [])
+            self.assertEqual(log_path.read_bytes(), payload[: llm.REAL_LOG_MAX_BYTES])
+            self.assertEqual(state["bytes"], llm.REAL_LOG_MAX_BYTES)
+            self.assertTrue(state["truncated"])
+
     def test_duplicate_and_unknown_manifest_keys_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             duplicate = Path(temporary_directory) / "duplicate.json"

@@ -29,6 +29,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 from types import TracebackType
 from typing import Any, Protocol
@@ -54,6 +55,7 @@ DOWNLOAD_RETRIES = 3
 REAL_READINESS_SECONDS = 30.0
 REAL_REQUEST_SECONDS = 10.0
 PROCESS_TERM_SECONDS = 3.0
+REAL_LOG_MAX_BYTES = 1024 * 1024
 RENAME_NOREPLACE = 1
 AT_FDCWD = -100
 
@@ -121,6 +123,14 @@ class ManifestError(ArtifactError):
 
 class OfflineGateUnavailable(ArtifactError):
     """The requested offline namespace could not be established."""
+
+
+class RealGateError(ArtifactError):
+    """A real gate failure with a retained bounded server log."""
+
+    def __init__(self, message: str, log_path: Path) -> None:
+        super().__init__(message)
+        self.log_path = log_path
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -1391,6 +1401,39 @@ def _bring_up_loopback() -> None:
         raise OfflineGateUnavailable("cannot configure loopback namespace")
 
 
+def _capture_process_log(
+    stream: Any,
+    log_path: Path,
+    state: dict[str, Any],
+    errors: list[BaseException],
+) -> None:
+    """Drain the server pipe while retaining only a bounded raw prefix."""
+
+    captured = 0
+    truncated = False
+    try:
+        with log_path.open("wb") as log_stream:
+            while True:
+                chunk = stream.read(CHUNK_SIZE)
+                if not chunk:
+                    break
+                if captured < REAL_LOG_MAX_BYTES:
+                    retained = chunk[: REAL_LOG_MAX_BYTES - captured]
+                    log_stream.write(retained)
+                    captured += len(retained)
+                    if len(retained) != len(chunk):
+                        truncated = True
+                else:
+                    truncated = True
+            log_stream.flush()
+            os.fsync(log_stream.fileno())
+    except BaseException as error:
+        errors.append(error)
+    finally:
+        state["bytes"] = captured
+        state["truncated"] = truncated
+
+
 def real_smoke(
     root: Path,
     manifest: LockManifest,
@@ -1409,40 +1452,64 @@ def real_smoke(
     model = bundle / "models" / manifest.model_file
     runtime = manifest.runtime
     evidence_parent = Path("/tmp") if Path("/tmp").is_dir() else None
-    with tempfile.TemporaryDirectory(prefix="voice-nav-llm-real-", dir=str(evidence_parent) if evidence_parent else None) as evidence:
-        log_path = Path(evidence) / "server.log"
-        with log_path.open("wb") as log_stream:
-            command = [
-                str(server),
-                "--model",
-                str(model),
-                "--host",
-                runtime["host"],
-                "--port",
-                str(runtime["port"]),
-                "--ctx-size",
-                str(runtime["context"]),
-                "--n-predict",
-                str(runtime["max_output"]),
-                "--parallel",
-                str(runtime["parallel"]),
-            ]
-            try:
-                process = subprocess.Popen(
-                    command,
-                    stdin=subprocess.DEVNULL,
-                    stdout=log_stream,
-                    stderr=log_stream,
-                    start_new_session=True,
-                )
-            except OSError as error:
-                raise ArtifactError("cannot start locked llama-server") from error
-            try:
-                _wait_for_server(runtime["host"], runtime["port"], process, REAL_READINESS_SECONDS)
-                _check_loopback_listener(runtime["host"], runtime["port"])
-                _post_schema_smoke(manifest)
-            finally:
-                _terminate_process_group(process)
+    evidence = tempfile.mkdtemp(
+        prefix="voice-nav-llm-real-",
+        dir=str(evidence_parent) if evidence_parent else None,
+    )
+    log_path = Path(evidence) / "server.log"
+    command = [
+        str(server),
+        "--model",
+        str(model),
+        "--host",
+        runtime["host"],
+        "--port",
+        str(runtime["port"]),
+        "--ctx-size",
+        str(runtime["context"]),
+        "--n-predict",
+        str(runtime["max_output"]),
+        "--parallel",
+        str(runtime["parallel"]),
+    ]
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except OSError as error:
+        raise RealGateError("cannot start locked llama-server", log_path) from error
+    if process.stdout is None:
+        raise RealGateError("llama-server log pipe was not created", log_path)
+    log_state: dict[str, Any] = {}
+    log_errors: list[BaseException] = []
+    log_reader = threading.Thread(
+        target=_capture_process_log,
+        args=(process.stdout, log_path, log_state, log_errors),
+        name="voice-nav-llm-log-reader",
+        daemon=True,
+    )
+    log_reader.start()
+    gate_error: ArtifactError | None = None
+    try:
+        _wait_for_server(runtime["host"], runtime["port"], process, REAL_READINESS_SECONDS)
+        _check_loopback_listener(runtime["host"], runtime["port"])
+        _post_schema_smoke(manifest)
+    except ArtifactError as error:
+        gate_error = error
+    finally:
+        _terminate_process_group(process)
+        log_reader.join(timeout=PROCESS_TERM_SECONDS + 2.0)
+        if log_reader.is_alive():
+            process.stdout.close()
+            log_reader.join(timeout=PROCESS_TERM_SECONDS)
+    if log_errors:
+        raise RealGateError("server log capture failed", log_path) from log_errors[0]
+    if gate_error is not None:
+        raise RealGateError(str(gate_error), log_path) from gate_error
     head = _repository_head(repo_root)
     server_identity = _server_version(server).splitlines()[0].strip()
     print(
@@ -1450,7 +1517,9 @@ def real_smoke(
         f"HEAD={head} lock_sha256={digest} "
         f"cpu={_cpu_identity()} "
         f"server={server_identity} model={manifest.model_file} "
-        f"listen={runtime['host']}:{runtime['port']} smoke=status:ok"
+        f"listen={runtime['host']}:{runtime['port']} smoke=status:ok "
+        f"log={log_path} log_bytes={log_state.get('bytes', 0)} "
+        f"log_truncated={str(log_state.get('truncated', False)).lower()}"
     )
 
 
@@ -1570,7 +1639,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.command == "provision":
             print(f"PROVISION=FAIL reason={_safe_error(error)}", file=sys.stderr)
         elif arguments.command in {"verify", "_real_smoke"} and getattr(arguments, "real", arguments.command == "_real_smoke"):
-            print(f"REAL_MODEL_GATE=FAIL reason={_safe_error(error)}", file=sys.stderr)
+            if isinstance(error, RealGateError):
+                print(
+                    f"REAL_MODEL_GATE=FAIL reason={_safe_error(error)} log={error.log_path}",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"REAL_MODEL_GATE=FAIL reason={_safe_error(error)}", file=sys.stderr)
         else:
             print(f"MANIFEST_GATE=FAIL reason={_safe_error(error)}", file=sys.stderr)
         return 1
