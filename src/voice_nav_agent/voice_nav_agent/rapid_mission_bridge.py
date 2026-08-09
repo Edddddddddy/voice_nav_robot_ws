@@ -25,6 +25,7 @@ class RapidMissionBridge(Node):
         self.server = ActionServer(self, ExecuteMission, '/mission/execute', self.execute)
         self.stop = self.create_service(StopMission, '/mission/stop', self.stop_goal)
         self.publish_state()
+        self.create_timer(1.0, self.publish_state)
 
     def publish_state(self):
         state = MissionState()
