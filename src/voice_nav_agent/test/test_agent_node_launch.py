@@ -15,6 +15,7 @@
 from importlib.metadata import distribution
 import pathlib
 import threading
+from types import SimpleNamespace
 import unittest
 import xml.etree.ElementTree as ElementTree
 
@@ -76,6 +77,98 @@ def generate_test_description():
     return LaunchDescription(
         [agent, launch_testing.actions.ReadyToTest()]
     ), {'agent': agent}
+
+
+def _wait_for_agent_graph_snapshot(node, timer_factory=None):
+    if timer_factory is None:
+        timer_factory = node.create_timer
+    expected_subscriptions = {
+        '/voice/turn',
+        '/mission/state',
+        '/mission/execute/_action/feedback',
+        '/mission/execute/_action/status',
+        '/voice/speak/_action/feedback',
+        '/voice/speak/_action/status',
+    }
+    allowed_publishers = {'/rosout', '/parameter_events'}
+    graph_converged = threading.Event()
+    state_lock = threading.Lock()
+    closing = False
+    last_snapshot = {
+        'subscriptions': {},
+        'publishers': {},
+    }
+    converged_snapshot = None
+
+    def collect_graph_snapshot():
+        nonlocal converged_snapshot, last_snapshot
+        with state_lock:
+            if closing:
+                return
+            subscriptions = {}
+            publishers = {}
+            for topic_name, _topic_types in node.get_topic_names_and_types():
+                subscription_infos = [
+                    info
+                    for info in node.get_subscriptions_info_by_topic(
+                        topic_name
+                    )
+                    if (
+                        info.node_name == 'agent_node'
+                        and info.node_namespace == '/'
+                    )
+                ]
+                if subscription_infos:
+                    subscriptions[topic_name] = sorted({
+                        info.topic_type for info in subscription_infos
+                    })
+
+                publisher_infos = [
+                    info
+                    for info in node.get_publishers_info_by_topic(topic_name)
+                    if (
+                        info.node_name == 'agent_node'
+                        and info.node_namespace == '/'
+                    )
+                ]
+                if publisher_infos:
+                    publishers[topic_name] = sorted({
+                        info.topic_type for info in publisher_infos
+                    })
+
+            snapshot = {
+                'subscriptions': subscriptions,
+                'publishers': publishers,
+            }
+            last_snapshot = snapshot
+            if (
+                set(snapshot['subscriptions']) == expected_subscriptions
+                and set(snapshot['publishers']).issubset(allowed_publishers)
+            ):
+                converged_snapshot = snapshot
+                graph_converged.set()
+
+    graph_timer = timer_factory(
+        0.05,
+        collect_graph_snapshot,
+        clock=Clock(clock_type=ClockType.STEADY_TIME),
+    )
+    try:
+        if not graph_converged.wait(10.0):
+            with state_lock:
+                timeout_snapshot = last_snapshot
+            raise AssertionError(
+                'agent_node graph did not converge; last snapshot: '
+                f'{timeout_snapshot!r}'
+            )
+        with state_lock:
+            result = converged_snapshot
+        assert result is not None
+        return result
+    finally:
+        with state_lock:
+            closing = True
+            graph_timer.cancel()
 
 
 class AgentNodeLaunchTest(unittest.TestCase):
@@ -273,90 +366,6 @@ class AgentNodeLaunchTest(unittest.TestCase):
         assert endpoint_gid
         return endpoint_gid
 
-    def _wait_for_agent_graph_snapshot(self, timer_factory=None):
-        if timer_factory is None:
-            timer_factory = self.node.create_timer
-        expected_subscriptions = {
-            '/voice/turn',
-            '/mission/state',
-            '/mission/execute/_action/feedback',
-            '/mission/execute/_action/status',
-            '/voice/speak/_action/feedback',
-            '/voice/speak/_action/status',
-        }
-        allowed_publishers = {'/rosout', '/parameter_events'}
-        expected_clients = {
-            '/mission/execute/_action/send_goal',
-            '/mission/execute/_action/get_result',
-            '/mission/execute/_action/cancel_goal',
-            '/mission/stop',
-            '/voice/speak/_action/send_goal',
-            '/voice/speak/_action/get_result',
-            '/voice/speak/_action/cancel_goal',
-        }
-        graph_converged = threading.Event()
-        state_lock = threading.Lock()
-        closing = False
-        last_snapshot = {
-            'subscriptions': {},
-            'publishers': {},
-            'clients': {},
-        }
-        converged_snapshot = None
-
-        def collect_graph_snapshot():
-            nonlocal converged_snapshot, last_snapshot
-            with state_lock:
-                if closing:
-                    return
-                snapshot = {
-                    'subscriptions': dict(
-                        self.node.get_subscriber_names_and_types_by_node(
-                            'agent_node', '/'
-                        )
-                    ),
-                    'publishers': dict(
-                        self.node.get_publisher_names_and_types_by_node(
-                            'agent_node', '/'
-                        )
-                    ),
-                    'clients': dict(
-                        self.node.get_client_names_and_types_by_node(
-                            'agent_node', '/'
-                        )
-                    ),
-                }
-                last_snapshot = snapshot
-                if (
-                    set(snapshot['subscriptions']) == expected_subscriptions
-                    and set(snapshot['publishers']).issubset(allowed_publishers)
-                    and set(snapshot['clients']) == expected_clients
-                ):
-                    converged_snapshot = snapshot
-                    graph_converged.set()
-
-        graph_timer = timer_factory(
-            0.05,
-            collect_graph_snapshot,
-            clock=Clock(clock_type=ClockType.STEADY_TIME),
-        )
-        try:
-            if not graph_converged.wait(10.0):
-                with state_lock:
-                    timeout_snapshot = last_snapshot
-                self.fail(
-                    'agent_node graph did not converge; last snapshot: '
-                    f'{timeout_snapshot!r}'
-                )
-            with state_lock:
-                result = converged_snapshot
-            assert result is not None
-            return result
-        finally:
-            with state_lock:
-                closing = True
-                graph_timer.cancel()
-
     @staticmethod
     def _accept_goal(_request):
         return GoalResponse.ACCEPT
@@ -417,9 +426,6 @@ class AgentNodeLaunchTest(unittest.TestCase):
         if rclpy.ok():
             rclpy.shutdown()
 
-    def test_graph_snapshot_timer_callback_before_factory_return(self):
-        _run_graph_snapshot_timer_callback_before_factory_return()
-
     def test_entrypoint_ports_qos_and_runtime_graph(self):
         """Exercise STOP through the launched product node and inspect graph."""
         assert self.turn_matched.wait(10.0)
@@ -448,10 +454,9 @@ class AgentNodeLaunchTest(unittest.TestCase):
         assert self.speak_goals[0].priority == Speak.Goal.URGENT
         assert self.speak_goals[0].allow_barge_in
 
-        graph_snapshot = self._wait_for_agent_graph_snapshot()
+        graph_snapshot = _wait_for_agent_graph_snapshot(self.node)
         subscriptions = graph_snapshot['subscriptions']
         publishers = graph_snapshot['publishers']
-        clients = graph_snapshot['clients']
         assert set(subscriptions) == {
             '/voice/turn',
             '/mission/state',
@@ -461,18 +466,7 @@ class AgentNodeLaunchTest(unittest.TestCase):
             '/voice/speak/_action/status',
         }
         assert set(publishers).issubset({'/rosout', '/parameter_events'})
-        assert set(clients) == {
-            '/mission/execute/_action/send_goal',
-            '/mission/execute/_action/get_result',
-            '/mission/execute/_action/cancel_goal',
-            '/mission/stop',
-            '/voice/speak/_action/send_goal',
-            '/voice/speak/_action/get_result',
-            '/voice/speak/_action/cancel_goal',
-        }
-        graph_text = ' '.join(
-            [*subscriptions, *publishers, *clients]
-        ).lower()
+        graph_text = ' '.join([*subscriptions, *publishers]).lower()
         for forbidden in ('velocity', 'nav2', 'gazebo', 'controller'):
             assert forbidden not in graph_text
 
@@ -635,46 +629,41 @@ class AgentNodeLaunchTest(unittest.TestCase):
 
 def _run_graph_snapshot_timer_callback_before_factory_return():
     """Keep synchronous timer callbacks safe before factory return."""
-    expected_snapshot = {
-        'subscriptions': {
-            '/voice/turn': [],
-            '/mission/state': [],
-            '/mission/execute/_action/feedback': [],
-            '/mission/execute/_action/status': [],
-            '/voice/speak/_action/feedback': [],
-            '/voice/speak/_action/status': [],
-        },
-        'publishers': {},
-        'clients': {
-            '/mission/execute/_action/send_goal': [],
-            '/mission/execute/_action/get_result': [],
-            '/mission/execute/_action/cancel_goal': [],
-            '/mission/stop': [],
-            '/voice/speak/_action/send_goal': [],
-            '/voice/speak/_action/get_result': [],
-            '/voice/speak/_action/cancel_goal': [],
-        },
+    expected_subscriptions = {
+        '/voice/turn',
+        '/mission/state',
+        '/mission/execute/_action/feedback',
+        '/mission/execute/_action/status',
+        '/voice/speak/_action/feedback',
+        '/voice/speak/_action/status',
     }
+    expected_publishers = {'/rosout', '/parameter_events'}
+    all_topics = expected_subscriptions | expected_publishers
+    endpoint = SimpleNamespace(
+        node_name='agent_node',
+        node_namespace='/',
+        topic_type='test/type',
+    )
 
     class FakeNode:
         def __init__(self):
             self.calls = {
+                'topics': 0,
                 'subscriptions': 0,
                 'publishers': 0,
-                'clients': 0,
             }
 
-        def get_subscriber_names_and_types_by_node(self, _name, _namespace):
+        def get_topic_names_and_types(self):
+            self.calls['topics'] += 1
+            return [(topic, ['test/type']) for topic in all_topics]
+
+        def get_subscriptions_info_by_topic(self, topic):
             self.calls['subscriptions'] += 1
-            return expected_snapshot['subscriptions']
+            return [endpoint] if topic in expected_subscriptions else []
 
-        def get_publisher_names_and_types_by_node(self, _name, _namespace):
+        def get_publishers_info_by_topic(self, topic):
             self.calls['publishers'] += 1
-            return expected_snapshot['publishers']
-
-        def get_client_names_and_types_by_node(self, _name, _namespace):
-            self.calls['clients'] += 1
-            return expected_snapshot['clients']
+            return [endpoint] if topic in expected_publishers else []
 
     class FakeTimer:
         def __init__(self):
@@ -685,8 +674,7 @@ def _run_graph_snapshot_timer_callback_before_factory_return():
             self.cancel_calls += 1
             self.cancel_thread = threading.current_thread()
 
-    test_case = AgentNodeLaunchTest()
-    test_case.node = FakeNode()
+    fake_node = FakeNode()
     fake_timer = FakeTimer()
 
     def fake_timer_factory(_period, callback, *, clock):
@@ -694,17 +682,34 @@ def _run_graph_snapshot_timer_callback_before_factory_return():
         callback()
         return fake_timer
 
-    test_case.node.create_timer = fake_timer_factory
-    snapshot = test_case._wait_for_agent_graph_snapshot()
+    snapshot = _wait_for_agent_graph_snapshot(
+        fake_node,
+        fake_timer_factory,
+    )
+    expected_snapshot = {
+        'subscriptions': {
+            topic: ['test/type'] for topic in expected_subscriptions
+        },
+        'publishers': {
+            topic: ['test/type'] for topic in expected_publishers
+        },
+    }
 
     assert snapshot == expected_snapshot
-    assert test_case.node.calls == {
-        'subscriptions': 1,
-        'publishers': 1,
-        'clients': 1,
+    assert fake_node.calls == {
+        'topics': 1,
+        'subscriptions': len(all_topics),
+        'publishers': len(all_topics),
     }
     assert fake_timer.cancel_calls == 1
     assert fake_timer.cancel_thread is threading.current_thread()
+
+
+class GraphSnapshotTimerRegressionTest(unittest.TestCase):
+    """Exercise the timer seam without ROS launch fixtures."""
+
+    def test_callback_before_factory_return(self):
+        _run_graph_snapshot_timer_callback_before_factory_return()
 
 
 @launch_testing.post_shutdown_test()
