@@ -464,12 +464,36 @@ class CrashStopProbe:
 
         return self.wait_until(ready, timeout, 'Runtime AVAILABLE/inhibited')
 
-    def wait_runtime_fault(self, timeout: float = 10.0):
+    def wait_runtime_fault(
+        self,
+        *,
+        after_monotonic_ns: int | None = None,
+        timeout: float = 10.0,
+    ):
+        """Observe Runtime FAULTED without requiring a fresh Gate state.
+
+        After the Gate process is killed, MissionState may legitimately retain
+        its last valid Gate snapshot (for example GATE_ARMED).  The crash-stop
+        test proves the independent zero, consumer-deadman, and stationarity
+        barriers before reaching this wait; here we only require Runtime's
+        FAULTED transition and reject malformed Gate enum values.
+        """
         def faulted():
-            for _, message in reversed(self._snapshot(self.mission_states)):
+            for receipt_ns, message in reversed(
+                self._snapshot(self.mission_states)
+            ):
+                if (
+                    after_monotonic_ns is not None
+                    and receipt_ns < after_monotonic_ns
+                ):
+                    continue
                 if (
                     message.availability == MissionState.FAULTED
-                    and message.gate_state == MissionState.GATE_FAULTED
+                    and message.gate_state in (
+                        MissionState.GATE_INHIBITED,
+                        MissionState.GATE_ARMED,
+                        MissionState.GATE_FAULTED,
+                    )
                 ):
                     return deepcopy(message)
             return None
