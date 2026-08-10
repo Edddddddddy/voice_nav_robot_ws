@@ -438,6 +438,7 @@ private:
   [[nodiscard]] bool gate_is_healthy(const GateSnapshot & snapshot) const;
   [[nodiscard]] bool startup_gate_is_ready(const GateSnapshot & snapshot) const;
   [[nodiscard]] bool zero_is_proven(const GateSnapshot & snapshot) const;
+  [[nodiscard]] bool try_rearm_pending_gate_replacement();
   [[nodiscard]] AuthorityOperation make_operation(
     const std::string & lease_id = {}) const;
   [[nodiscard]] std::string new_identifier() const;
