@@ -277,9 +277,11 @@ class ProcessStartedCapture:
         self.expected_node_name = expected_node_name
         self._ready = threading.Event()
         self._process: ExactPidfdProcess | None = None
+        self.started_monotonic_ns: int | None = None
 
     def on_start(self, event: ProcessStarted, _context: object) -> list[object]:
         if event.action is self.action:
+            self.started_monotonic_ns = time.monotonic_ns()
             self._process = ExactPidfdProcess.from_process_started(
                 action=self.action,
                 event=event,
