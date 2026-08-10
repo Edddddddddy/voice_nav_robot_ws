@@ -188,7 +188,7 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                 consumer_zero['zero_sim_ns'],
                 consumer_zero['zero_receipt_ns'],
             )
-            consumer_zero = self.probe.confirm_consumer_timeout(
+            consumer_zero = self.probe.wait_confirm_consumer_timeout(
                 signal_boundary_last_nonzero_sim_ns,
                 consumer_zero,
             )

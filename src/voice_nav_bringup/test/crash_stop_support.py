@@ -81,6 +81,7 @@ STATIONARY_HOLD_NS = 200_000_000
 NO_GOAL_WINDOW_NS = 1_000_000_000
 WALL_WATCHDOG_SECONDS = 5.0
 DEPENDENCY_FRESHNESS_NS = 200_000_000
+FINAL_STREAM_QUIESCENCE_NS = 200_000_000
 
 
 def _load_gazebo_shutdown():
@@ -920,16 +921,89 @@ class CrashStopProbe:
             'controller cmd_vel_out did not select zero before the watchdog'
         )
 
-    def confirm_consumer_timeout(
+    def wait_confirm_consumer_timeout(
         self,
         signal_boundary_sim_ns: int,
         consumer_zero: dict[str, int],
+        *,
+        timeout: float = WALL_WATCHDOG_SECONDS,
     ):
-        return consumer_timeout_result(
-            self._snapshot(self.final_commands),
-            signal_boundary_sim_ns=signal_boundary_sim_ns,
-            zero_sim_ns=consumer_zero['zero_sim_ns'],
-            zero_receipt_ns=consumer_zero['zero_receipt_ns'],
+        deadline = time.monotonic() + timeout
+        stable_key = None
+        stable_since_ns = None
+        stable_clock_ns = None
+        while time.monotonic() < deadline:
+            now_ns = time.monotonic_ns()
+            with self.lock:
+                final_snapshot = tuple(self.final_commands)
+                clock_sample = (
+                    self.clock_samples[-1]
+                    if self.clock_samples
+                    else None
+                )
+            if not final_snapshot or clock_sample is None:
+                stable_key = None
+                stable_since_ns = None
+                stable_clock_ns = None
+                time.sleep(0.01)
+                continue
+
+            last_receipt_ns, last_message = final_snapshot[-1]
+            current_key = (
+                len(final_snapshot),
+                last_receipt_ns,
+                _stamp_ns(last_message),
+            )
+            if current_key != stable_key:
+                stable_key = current_key
+                stable_since_ns = now_ns
+                stable_clock_ns = clock_sample[1]
+            elif (
+                stable_since_ns is not None
+                and stable_clock_ns is not None
+                and now_ns - stable_since_ns >= FINAL_STREAM_QUIESCENCE_NS
+                and clock_sample[1] - stable_clock_ns
+                >= FINAL_STREAM_QUIESCENCE_NS
+            ):
+                with self.lock:
+                    confirmed_snapshot = tuple(self.final_commands)
+                    confirmed_clock = (
+                        self.clock_samples[-1]
+                        if self.clock_samples
+                        else None
+                    )
+                    confirmed_last = (
+                        confirmed_snapshot[-1]
+                        if confirmed_snapshot
+                        else None
+                    )
+                    confirmed_key = (
+                        len(confirmed_snapshot),
+                        confirmed_last[0],
+                        _stamp_ns(confirmed_last[1]),
+                    ) if confirmed_last is not None else None
+                    if (
+                        confirmed_key == stable_key
+                        and confirmed_clock is not None
+                        and confirmed_clock[1] - stable_clock_ns
+                        >= FINAL_STREAM_QUIESCENCE_NS
+                    ):
+                        return consumer_timeout_result(
+                            confirmed_snapshot,
+                            signal_boundary_sim_ns=(
+                                signal_boundary_sim_ns
+                            ),
+                            zero_sim_ns=consumer_zero['zero_sim_ns'],
+                            zero_receipt_ns=(
+                                consumer_zero['zero_receipt_ns']
+                            ),
+                        )
+                stable_key = None
+                stable_since_ns = None
+                stable_clock_ns = None
+            time.sleep(0.01)
+        raise AssertionError(
+            'final command observer did not quiesce with advancing clock'
         )
 
     @staticmethod
