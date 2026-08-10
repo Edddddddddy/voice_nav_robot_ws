@@ -244,6 +244,13 @@ bool gate_snapshot_proves_zero(const GateSnapshot & snapshot) noexcept
          snapshot.zero_published;
 }
 
+bool conditioning_failure_is_safety_terminal(
+  const MotionConditioningFailure failure) noexcept
+{
+  return failure == MotionConditioningFailure::SafetyFault ||
+         failure == MotionConditioningFailure::GateLoss;
+}
+
 ChildResultCode child_code_for_conditioning(
   const MotionConditioningFailure failure) noexcept
 {
@@ -255,6 +262,7 @@ ChildResultCode child_code_for_conditioning(
     case MotionConditioningFailure::Timeout:
       return ChildResultCode::Timeout;
     case MotionConditioningFailure::SafetyFault:
+    case MotionConditioningFailure::GateLoss:
       return ChildResultCode::SafetyFault;
     case MotionConditioningFailure::InternalError:
       return ChildResultCode::InternalError;
@@ -737,17 +745,15 @@ public:
   }
 
   [[nodiscard]] bool rearm_after_gate_replacement(
-    const GateSnapshot & snapshot) noexcept
+    const GateSnapshot & snapshot,
+    GateSnapshot * accepted_snapshot) noexcept
   {
     try {
       if (!gate_snapshot_proves_zero(snapshot)) {
         return false;
       }
-      const auto current = authority_->snapshot();
-      if (!gate_snapshot_proves_zero(current) ||
-        current.gate_instance_id != snapshot.gate_instance_id ||
-        current.control_seq < snapshot.control_seq)
-      {
+      const auto accepted = authority_->accept_rearm_snapshot(snapshot);
+      if (!accepted.has_value() || !gate_snapshot_proves_zero(*accepted)) {
         return false;
       }
       std::lock_guard<std::mutex> lock(mutex_);
@@ -761,7 +767,8 @@ public:
       {
         return false;
       }
-      if (!conditioning_->rearm_after_gate_replacement(current)) {
+      GateSnapshot reasserted;
+      if (!conditioning_->rearm_after_gate_replacement(*accepted, &reasserted)) {
         return false;
       }
       sticky_admission_fault_ = false;
@@ -771,6 +778,9 @@ public:
       teardown_complete_ = true;
       teardown_safe_ = true;
       command_ = {};
+      if (accepted_snapshot != nullptr) {
+        *accepted_snapshot = reasserted;
+      }
       condition_variable_.notify_all();
       return true;
     } catch (...) {
@@ -1297,12 +1307,13 @@ private:
       result = MotionConditioningResult{
         false, MotionConditioningState::Failed,
         MotionConditioningFailure::SafetyFault, false, false, {}, {},
-        std::string{"startup component reconciliation raised: "} + error.what()};
+        std::string{"startup component reconciliation raised: "} + error.what(),
+        {}, {}};
     } catch (...) {
       result = MotionConditioningResult{
         false, MotionConditioningState::Failed,
         MotionConditioningFailure::SafetyFault, false, false, {}, {},
-        "startup component reconciliation raised an unknown exception"};
+        "startup component reconciliation raised an unknown exception", {}, {}};
     }
     const auto startup_elapsed_ms = std::chrono::duration_cast<
       std::chrono::milliseconds>(
@@ -1365,7 +1376,7 @@ private:
       prepared = MotionConditioningResult{
         false, MotionConditioningState::Failed,
         MotionConditioningFailure::InternalError, false, false, {}, {},
-        "conditioning PREPARE raised"};
+        "conditioning PREPARE raised", {}, {}};
     }
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -1385,7 +1396,7 @@ private:
       started = MotionConditioningResult{
         false, MotionConditioningState::Failed,
         MotionConditioningFailure::InternalError, false, false, {}, {},
-        "conditioning OPEN raised"};
+        "conditioning OPEN raised", {}, {}};
     }
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -1632,7 +1643,7 @@ private:
       conditioning_result.zero_proven_at != TimePoint{};
     auto code = child_code_for_conditioning(conditioning_result.failure);
     if (!zero_proven ||
-      conditioning_result.failure == MotionConditioningFailure::SafetyFault)
+      conditioning_failure_is_safety_terminal(conditioning_result.failure))
     {
       code = ChildResultCode::SafetyFault;
     }
@@ -1654,7 +1665,7 @@ private:
       zero_proven_ = zero_proven;
       teardown_complete_ = true;
       teardown_safe_ = zero_proven &&
-        conditioning_result.failure != MotionConditioningFailure::SafetyFault;
+        !conditioning_failure_is_safety_terminal(conditioning_result.failure);
       if (code == ChildResultCode::SafetyFault) {
         latch_admission_fault_locked(failure_detail);
       }
@@ -1758,7 +1769,7 @@ private:
       conditioning_result = MotionConditioningResult{
         false, MotionConditioningState::Failed,
         MotionConditioningFailure::SafetyFault, false, false, {}, {},
-        "conditioning teardown raised"};
+        "conditioning teardown raised", {}, {}};
     }
 
     const auto zero_proven_at = conditioning_result.zero_proven_at;
@@ -1809,7 +1820,7 @@ private:
 
     ChildResultCode final_code = request.child_code;
     if (!zero || (mission_active && !stationary) ||
-      conditioning_result.failure == MotionConditioningFailure::SafetyFault)
+      conditioning_failure_is_safety_terminal(conditioning_result.failure))
     {
       final_code = ChildResultCode::SafetyFault;
     }
@@ -1835,8 +1846,11 @@ private:
         zero_proven_ = zero;
         teardown_complete_ = true;
         teardown_safe_ = zero && stationary &&
-          conditioning_result.failure != MotionConditioningFailure::SafetyFault;
-        if (!zero && final_code == ChildResultCode::SafetyFault) {
+          !conditioning_failure_is_safety_terminal(conditioning_result.failure);
+        if (
+          conditioning_result.failure == MotionConditioningFailure::GateLoss &&
+          !conditioning_result.gate_loss_instance_id.empty())
+        {
           // A dead/unavailable Gate cannot produce the steady zero proof that
           // normally closes this generation.  Keep a narrow rearm candidate;
           // the explicit replacement handshake below still requires a fresh
@@ -1864,7 +1878,7 @@ private:
       publish_completion(std::move(completion));
     }
     const bool safe = zero && (!mission_active || stationary) &&
-      conditioning_result.failure != MotionConditioningFailure::SafetyFault;
+      !conditioning_failure_is_safety_terminal(conditioning_result.failure);
     if (!safe) {
       RCLCPP_ERROR(
         node_.get_logger(),
@@ -2063,9 +2077,10 @@ bool RelativeMotionRosAdapter::safety_faulted() const noexcept
 }
 
 bool RelativeMotionRosAdapter::rearm_after_gate_replacement(
-  const GateSnapshot & snapshot) noexcept
+  const GateSnapshot & snapshot,
+  GateSnapshot * accepted_snapshot) noexcept
 {
-  return impl_ && impl_->rearm_after_gate_replacement(snapshot);
+  return impl_ && impl_->rearm_after_gate_replacement(snapshot, accepted_snapshot);
 }
 
 bool detail::RelativeMotionRosAdapterTestAccess::start_raw_producer(

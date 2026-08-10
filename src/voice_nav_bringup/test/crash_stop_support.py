@@ -479,7 +479,8 @@ class CrashStopProbe:
         after_monotonic_ns: int | None = None,
         timeout: float = 10.0,
     ):
-        """Observe Runtime FAULTED without requiring a fresh Gate state.
+        """
+        Observe Runtime FAULTED without requiring a fresh Gate state.
 
         After the Gate process is killed, MissionState may legitimately retain
         its last valid Gate snapshot (for example GATE_ARMED).  The crash-stop
@@ -967,6 +968,7 @@ class CrashStopProbe:
         request.gate_instance_id = old_state.gate_instance_id
         request.expected_control_seq = old_state.control_seq
         request.lease_id = old_state.lease_id
+        request_start_ns = time.monotonic_ns()
         response = self._wait_future(
             self.gate_client.call_async(request),
             5.0,
@@ -988,12 +990,47 @@ class CrashStopProbe:
         after = self.latest(self.gate_states)
         if before is None or after is None:
             raise AssertionError('Gate snapshot missing around stale replay')
-        if after[1].gate_instance_id != before[1].gate_instance_id:
-            raise AssertionError('stale replay changed Gate instance')
-        if after[1].control_seq != before[1].control_seq:
-            raise AssertionError('stale replay changed Gate control sequence')
-        if after[1].lease_id != before[1].lease_id:
-            raise AssertionError('stale replay changed Gate lease')
+        stable_fields = (
+            'gate_instance_id',
+            'control_seq',
+            'state',
+            'lease_id',
+            'candidate_topic',
+            'bound_writer_gid',
+            'motion_inhibited',
+            'authority_live',
+            'candidate_fresh',
+            'writer_bound',
+            'zero_selected',
+            'reason',
+        )
+        for field in stable_fields:
+            if getattr(after[1], field) != getattr(before[1], field):
+                raise AssertionError(
+                    f'stale replay changed Gate field {field}'
+                )
+        observed_gate = False
+        for receipt_ns, message in self._snapshot(self.gate_states):
+            if receipt_ns < request_start_ns:
+                continue
+            observed_gate = True
+            if not gate_zero_proven(message):
+                raise AssertionError(
+                    'stale replay interrupted the continuous Gate zero proof'
+                )
+        if not observed_gate:
+            raise AssertionError('no Gate state observed during stale replay')
+        observed_final = False
+        for receipt_ns, message in self._snapshot(self.final_commands):
+            if receipt_ns < request_start_ns:
+                continue
+            observed_final = True
+            if not is_zero(message):
+                raise AssertionError(
+                    'stale replay published a non-zero final command'
+                )
+        if not observed_final:
+            raise AssertionError('no final command observed during stale replay')
         return {
             'code': int(response.code),
             'reason': int(response.reason),

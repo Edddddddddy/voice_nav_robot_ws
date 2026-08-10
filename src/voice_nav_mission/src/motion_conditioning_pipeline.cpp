@@ -132,7 +132,9 @@ MotionConditioningResult make_result(
     collision_stop,
     std::move(lease_id),
     std::move(candidate_topic),
-    std::move(detail)};
+    std::move(detail),
+    {},
+    {}};
 }
 
 bool gate_snapshot_proves_zero(const GateSnapshot & snapshot)
@@ -832,7 +834,9 @@ private:
         if (activation_ready) {
           generation_request_id_ = open_operation.request_id;
           correlation_token_ = MotionConditioningCorrelationToken{
-            generation, expected_lease, open_operation.request_id};
+            generation, expected_lease, open_operation.request_id,
+            open_operation.gate_instance_id};
+          generation_gate_instance_id_ = open_operation.gate_instance_id;
           activation_in_progress_.store(true);
           activation_failed_.store(false);
           std::lock_guard<std::mutex> activation_lock(activation_mutex_);
@@ -1224,7 +1228,8 @@ private:
     }
     MotionConditioningResult result;
     try {
-      result = fail_owned(failure, std::move(detail), true);
+      result = fail_owned(
+        failure, std::move(detail), true, token.gate_instance_id);
     } catch (...) {
       std::lock_guard<std::recursive_mutex> lock(mutex_);
       state_ = MotionConditioningState::Failed;
@@ -1258,31 +1263,50 @@ private:
   }
 
   [[nodiscard]] bool rearm_after_gate_replacement(
-    const GateSnapshot & snapshot) noexcept
+    const GateSnapshot & snapshot,
+    GateSnapshot * accepted_snapshot) noexcept
   {
     if (!gate_snapshot_proves_zero(snapshot)) {
       return false;
     }
+    const auto candidate_is_authorized = [this, &snapshot]() {
+        std::unique_lock<std::mutex> teardown_lock(teardown_mutex_);
+        if (
+          destroying_.load() || shutdown_ingress_requested_.load() ||
+          teardown_in_progress_.load() || cleanup_continuation_running_ ||
+          active_start_operations_ != 0U || !cleanup_complete_.load() ||
+          !producer_stop_proven_.load())
+        {
+          return false;
+        }
+        std::lock_guard<std::recursive_mutex> state_lock(mutex_);
+        return state_ == MotionConditioningState::Failed &&
+               last_result_.failure == MotionConditioningFailure::GateLoss &&
+               !last_result_.gate_loss_instance_id.empty() &&
+               snapshot.gate_instance_id != last_result_.gate_loss_instance_id &&
+               !components_loaded_ && pending_loads_.empty() &&
+               residual_components_.empty() && !cleanup_blocked_ &&
+               !cleanup_identity_fault_ && !cleanup_failure_ &&
+               !activation_in_progress_.load();
+      };
+    if (!candidate_is_authorized()) {
+      return false;
+    }
+    // A cached TRANSIENT_LOCAL zero is insufficient.  Reassert INHIBIT on the
+    // replacement Gate and accept the post-request watermarked tuple.
+    if (!startup_gate_zero_reassert()) {
+      return false;
+    }
+    const auto reasserted = authority_->accept_rearm_snapshot(snapshot);
+    if (
+      !reasserted.has_value() || !gate_snapshot_proves_zero(*reasserted) ||
+      reasserted->gate_instance_id != snapshot.gate_instance_id ||
+      !candidate_is_authorized())
+    {
+      return false;
+    }
     std::unique_lock<std::mutex> teardown_lock(teardown_mutex_);
-    if (
-      destroying_.load() || shutdown_ingress_requested_.load() ||
-      teardown_in_progress_.load() || cleanup_continuation_running_ ||
-      active_start_operations_ != 0U || !cleanup_complete_.load() ||
-      !producer_stop_proven_.load())
-    {
-      return false;
-    }
     std::lock_guard<std::recursive_mutex> state_lock(mutex_);
-    if (
-      state_ != MotionConditioningState::Failed ||
-      last_result_.failure != MotionConditioningFailure::SafetyFault ||
-      components_loaded_ || !pending_loads_.empty() ||
-      !residual_components_.empty() ||
-      cleanup_blocked_ || cleanup_identity_fault_ || cleanup_failure_ ||
-      activation_in_progress_.load())
-    {
-      return false;
-    }
     reset_generation(true);
     collision_stop_ = false;
     terminal_record_.reset();
@@ -1295,6 +1319,9 @@ private:
     last_result_.zero_proven_at = std::chrono::steady_clock::now();
     teardown_result_ = last_result_;
     cleanup_complete_.store(true);
+    if (accepted_snapshot != nullptr) {
+      *accepted_snapshot = *reasserted;
+    }
     return true;
   }
 
@@ -1942,6 +1969,11 @@ private:
     // Explicit shutdown/destroy sets shutdown_ingress_requested_ and closes
     // all source ingress through begin_shutdown_ingress().
     disable_renew_callbacks();
+    std::string generation_gate_instance_id;
+    {
+      std::lock_guard<std::recursive_mutex> lock(mutex_);
+      generation_gate_instance_id = generation_gate_instance_id_;
+    }
     bool zero_proven = false;
     std::chrono::steady_clock::time_point zero_proven_at{};
     // Invalidation in begin_teardown() is the cancellation fence.  Prove
@@ -1998,16 +2030,27 @@ private:
         "cleanup", config_.container_fqn, 0U,
         "cleanup raised an unknown exception");
     }
+    const bool cleanup_residual =
+      !components_clean || cleanup_failure_.has_value() ||
+      cleanup_identity_fault_ || !pending_loads_.empty() ||
+      !residual_components_.empty();
+    const bool typed_gate_loss =
+      producer_stopped && !zero_proven && !cleanup_residual &&
+      gate_identity_lost(generation_gate_instance_id);
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!producer_stopped || !zero_proven || !components_clean) {
       state_ = MotionConditioningState::Failed;
       auto result = make_result(
-          state_, MotionConditioningFailure::SafetyFault, false,
+          state_, typed_gate_loss ? MotionConditioningFailure::GateLoss :
+          MotionConditioningFailure::SafetyFault, false,
           zero_proven && producer_stopped,
           collision_stop_, lease_id_, candidate_topic_,
           with_cleanup_failure(
             "conditioning stop could not prove zero and cleanup"));
       result.zero_proven_at = zero_proven_at;
+      if (typed_gate_loss) {
+        result.gate_loss_instance_id = generation_gate_instance_id;
+      }
       return remember(std::move(result));
     }
     reset_generation();
@@ -2045,7 +2088,8 @@ private:
   [[nodiscard]] MotionConditioningResult fail_owned(
     MotionConditioningFailure failure,
     std::string detail,
-    bool wait_for_callbacks)
+    bool wait_for_callbacks,
+    const std::string & expected_gate_instance_id = {})
   {
     // A failed generation cannot keep renewing or producing output while its
     // immutable zero/terminal cleanup is in flight.  Shared health/collision
@@ -2095,14 +2139,11 @@ private:
         "cleanup", config_.container_fqn, 0U,
         "cleanup raised an unknown exception");
     }
-    if (!producer_stopped || !zero_proven) {
+    const bool requested_gate_loss =
+      failure == MotionConditioningFailure::GateLoss;
+    if (!producer_stopped) {
       failure = MotionConditioningFailure::SafetyFault;
-      if (!producer_stopped) {
-        detail += "; producer stop could not be proven";
-      }
-      if (!zero_proven) {
-        detail += "; Gate zero proof was unavailable";
-      }
+      detail += "; producer stop could not be proven";
     }
     const bool cleanup_residual =
       !components_clean || cleanup_failure_.has_value() ||
@@ -2112,6 +2153,16 @@ private:
       failure = MotionConditioningFailure::SafetyFault;
       detail += "; component/container/writer cleanup could not be proven";
     }
+    const bool typed_gate_loss =
+      requested_gate_loss && producer_stopped && !zero_proven &&
+      !cleanup_residual && gate_identity_lost(expected_gate_instance_id);
+    if (!zero_proven && !typed_gate_loss) {
+      failure = MotionConditioningFailure::SafetyFault;
+      detail += "; Gate zero proof was unavailable";
+    } else if (requested_gate_loss && !typed_gate_loss) {
+      failure = MotionConditioningFailure::SafetyFault;
+      detail += "; Gate-loss identity transition was not proven";
+    }
     detail = with_cleanup_failure(std::move(detail));
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     state_ = MotionConditioningState::Failed;
@@ -2119,7 +2170,26 @@ private:
         state_, failure, false, zero_proven && producer_stopped,
         collision_stop_, lease_id_, candidate_topic_, std::move(detail));
     result.zero_proven_at = zero_proven_at;
+    if (typed_gate_loss) {
+      result.gate_loss_instance_id = expected_gate_instance_id;
+    }
     return remember(std::move(result));
+  }
+
+  [[nodiscard]] bool gate_identity_lost(
+    const std::string & expected_gate_instance_id) noexcept
+  {
+    if (expected_gate_instance_id.empty()) {
+      return false;
+    }
+    try {
+      std::lock_guard<std::mutex> authority_lock(authority_call_mutex_);
+      const auto current = authority_->snapshot();
+      return !current.endpoint_available ||
+             current.gate_instance_id != expected_gate_instance_id;
+    } catch (...) {
+      return false;
+    }
   }
 
   void invalidate_activation_locked()
@@ -3701,6 +3771,7 @@ private:
     lease_id_.clear();
     candidate_topic_.clear();
     generation_request_id_.clear();
+    generation_gate_instance_id_.clear();
     prepare_open_deadline_ = {};
     if (ready_for_new_generation) {
       producer_stop_proven_.store(false);
@@ -4242,6 +4313,7 @@ private:
   std::uint64_t generation_counter_{0U};
   std::uint64_t generation_{0U};
   std::string generation_request_id_;
+  std::string generation_gate_instance_id_;
   MotionConditioningCorrelationToken correlation_token_;
   std::mutex startup_mutex_;
   bool startup_reconciled_{false};
@@ -4289,9 +4361,10 @@ MotionConditioningResult MotionConditioningPipeline::fail(
 }
 
 bool MotionConditioningPipeline::rearm_after_gate_replacement(
-  const GateSnapshot & snapshot) noexcept
+  const GateSnapshot & snapshot,
+  GateSnapshot * accepted_snapshot) noexcept
 {
-  return impl_->rearm_after_gate_replacement(snapshot);
+  return impl_->rearm_after_gate_replacement(snapshot, accepted_snapshot);
 }
 
 MotionConditioningCorrelationToken MotionConditioningPipeline::correlation_token() const

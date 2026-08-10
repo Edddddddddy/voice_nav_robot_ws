@@ -69,6 +69,45 @@ using GateStateMessage = voice_nav_mission::msg::InternalMotionGateState;
 constexpr char kIntegrationRuntimeId[] =
   "0123456789abcdef0123456789abcdef";
 
+TEST(MotionAuthoritySnapshotWatermark, RejectsDelayedStateAfterIdentitySwitch)
+{
+  detail::GateSnapshotWatermark watermark;
+  GateSnapshot accepted;
+  const auto gate_a = GateSnapshot{
+    "gate-a", 3U, "lease-a", GateState::Armed,
+    true, false, false, false, "/candidate/a", true, true};
+  ASSERT_TRUE(watermark.merge(gate_a, accepted));
+
+  const auto gate_b = GateSnapshot{
+    "gate-b", 1U, "", GateState::Inhibited,
+    true, true, true, true, "", false, false};
+  ASSERT_TRUE(watermark.merge(gate_b, accepted));
+  EXPECT_EQ(accepted.gate_instance_id, "gate-b");
+
+  auto lost_zero_proof_gate_b = gate_b;
+  lost_zero_proof_gate_b.zero_published = false;
+  ASSERT_TRUE(watermark.merge(lost_zero_proof_gate_b, accepted));
+  EXPECT_FALSE(accepted.zero_published);
+  EXPECT_FALSE(watermark.snapshot().zero_published);
+
+  ASSERT_TRUE(watermark.merge(gate_b, accepted));
+  EXPECT_FALSE(accepted.zero_published);
+  EXPECT_FALSE(watermark.snapshot().zero_published);
+
+  auto delayed_gate_a = gate_a;
+  delayed_gate_a.control_seq = 4U;
+  EXPECT_FALSE(watermark.merge(delayed_gate_a, accepted));
+  EXPECT_EQ(watermark.snapshot().gate_instance_id, "gate-b");
+  EXPECT_EQ(watermark.snapshot().control_seq, 1U);
+
+  auto newer_gate_b = gate_b;
+  newer_gate_b.control_seq = 2U;
+  ASSERT_TRUE(watermark.merge(newer_gate_b, accepted));
+  EXPECT_EQ(accepted.control_seq, 2U);
+  EXPECT_FALSE(watermark.merge(gate_b, accepted));
+  EXPECT_EQ(watermark.snapshot().control_seq, 2U);
+}
+
 class SyntheticProducer final : public MotionProducerPort
 {
 public:

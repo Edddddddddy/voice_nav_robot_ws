@@ -48,6 +48,77 @@ GateState gate_state_from_message(std::uint8_t state)
 
 }  // namespace
 
+bool detail::GateSnapshotWatermark::merge(
+  const GateSnapshot & incoming,
+  GateSnapshot & accepted)
+{
+  if (incoming.gate_instance_id.empty()) {
+    return false;
+  }
+  if (snapshot_.gate_instance_id.empty()) {
+    snapshot_ = incoming;
+    accepted = snapshot_;
+    return true;
+  }
+  if (incoming.gate_instance_id != snapshot_.gate_instance_id) {
+    if (retired_gate_instance_ids_.count(incoming.gate_instance_id) != 0U) {
+      return false;
+    }
+    retired_gate_instance_ids_.insert(snapshot_.gate_instance_id);
+    snapshot_ = incoming;
+    accepted = snapshot_;
+    return true;
+  }
+  if (incoming.control_seq < snapshot_.control_seq) {
+    return false;
+  }
+  if (incoming.control_seq == snapshot_.control_seq) {
+    const bool same_control_tuple =
+      incoming.lease_id == snapshot_.lease_id &&
+      incoming.state == snapshot_.state &&
+      incoming.motion_inhibited == snapshot_.motion_inhibited &&
+      incoming.zero_selected == snapshot_.zero_selected &&
+      incoming.candidate_topic == snapshot_.candidate_topic &&
+      incoming.authority_live == snapshot_.authority_live &&
+      incoming.writer_bound == snapshot_.writer_bound;
+    if (!same_control_tuple) {
+      return false;
+    }
+    snapshot_.endpoint_available = incoming.endpoint_available;
+    snapshot_.zero_published =
+      snapshot_.endpoint_available && snapshot_.zero_published &&
+      incoming.zero_published;
+    accepted = snapshot_;
+    return true;
+  }
+  snapshot_ = incoming;
+  accepted = snapshot_;
+  return true;
+}
+
+const GateSnapshot & detail::GateSnapshotWatermark::snapshot() const noexcept
+{
+  return snapshot_;
+}
+
+bool detail::GateSnapshotWatermark::set_endpoint_available(
+  const bool available,
+  GateSnapshot & accepted) noexcept
+{
+  if (
+    snapshot_.endpoint_available == available &&
+    (available || !snapshot_.zero_published))
+  {
+    return false;
+  }
+  snapshot_.endpoint_available = available;
+  if (!available) {
+    snapshot_.zero_published = false;
+  }
+  accepted = snapshot_;
+  return true;
+}
+
 RosMotionAuthorityPort::RosMotionAuthorityPort(
   rclcpp::Node & node,
   std::chrono::milliseconds control_response_deadline,
@@ -74,9 +145,10 @@ RosMotionAuthorityPort::RosMotionAuthorityPort(
     [this](const GateStateMessage::ConstSharedPtr message) {
       const bool graph_available = graph_endpoint_available();
       GateSnapshot snapshot;
+      bool accepted = false;
       {
         std::lock_guard<std::mutex> lock(mutex_);
-        snapshot_ = GateSnapshot{
+        const auto incoming = GateSnapshot{
           message->gate_instance_id,
           message->control_seq,
           message->lease_id,
@@ -89,10 +161,12 @@ RosMotionAuthorityPort::RosMotionAuthorityPort(
           message->candidate_topic,
           message->authority_live,
           message->writer_bound};
-        state_sample_available_ = graph_available;
-        snapshot = snapshot_;
+        accepted = snapshot_watermark_.merge(incoming, snapshot);
+        if (accepted) {
+          state_sample_available_ = graph_available;
+        }
       }
-      if (callback_) {
+      if (accepted && callback_) {
         callback_(snapshot);
       }
     },
@@ -118,7 +192,7 @@ RosMotionAuthorityPort::RosMotionAuthorityPort(
 GateSnapshot RosMotionAuthorityPort::snapshot() const
 {
   std::lock_guard<std::mutex> lock(mutex_);
-  return snapshot_;
+  return snapshot_watermark_.snapshot();
 }
 
 AuthorityResult RosMotionAuthorityPort::prepare(
@@ -145,6 +219,27 @@ AuthorityResult RosMotionAuthorityPort::inhibit(
   return authority_adapter_->inhibit(operation);
 }
 
+std::optional<GateSnapshot> RosMotionAuthorityPort::accept_rearm_snapshot(
+  const GateSnapshot & candidate) const noexcept
+{
+  try {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto current = snapshot_watermark_.snapshot();
+    if (
+      current.gate_instance_id != candidate.gate_instance_id ||
+      current.control_seq < candidate.control_seq ||
+      !current.endpoint_available || current.state != GateState::Inhibited ||
+      !current.motion_inhibited || !current.zero_selected ||
+      !current.zero_published)
+    {
+      return std::nullopt;
+    }
+    return current;
+  } catch (...) {
+    return std::nullopt;
+  }
+}
+
 void RosMotionAuthorityPort::refresh_endpoint()
 {
   const bool available = graph_endpoint_available();
@@ -152,15 +247,21 @@ void RosMotionAuthorityPort::refresh_endpoint()
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!available) {
-      if (snapshot_.endpoint_available || snapshot_.zero_published) {
-        snapshot_.endpoint_available = false;
-        snapshot_.zero_published = false;
-        changed = snapshot_;
+      GateSnapshot snapshot;
+      if (snapshot_watermark_.set_endpoint_available(false, snapshot)) {
+        changed = snapshot;
       }
       state_sample_available_ = false;
-    } else if (state_sample_available_ && !snapshot_.endpoint_available) {
-      snapshot_.endpoint_available = true;
-      changed = snapshot_;
+    } else {
+      const bool endpoint_recovered =
+        state_sample_available_ &&
+        !snapshot_watermark_.snapshot().endpoint_available;
+      if (endpoint_recovered) {
+        GateSnapshot snapshot;
+        if (snapshot_watermark_.set_endpoint_available(true, snapshot)) {
+          changed = snapshot;
+        }
+      }
     }
   }
   if (changed.has_value() && callback_) {
@@ -240,9 +341,10 @@ AuthorityResult RosMotionAuthorityPort::send_once(
   const auto response = future.get();
   const bool endpoint_available = graph_endpoint_available();
   GateSnapshot snapshot;
+  bool tuple_accepted = false;
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    snapshot_ = GateSnapshot{
+    const auto incoming = GateSnapshot{
       response->gate_instance_id,
       response->control_seq,
       response->lease_id,
@@ -254,18 +356,24 @@ AuthorityResult RosMotionAuthorityPort::send_once(
       response->candidate_topic,
       response->authority_live,
       response->writer_bound};
-    state_sample_available_ = snapshot_.endpoint_available;
-    snapshot = snapshot_;
+    tuple_accepted = snapshot_watermark_.merge(incoming, snapshot);
+    if (!tuple_accepted) {
+      snapshot = snapshot_watermark_.snapshot();
+    } else {
+      state_sample_available_ = snapshot.endpoint_available;
+    }
   }
-  if (callback_) {
+  if (tuple_accepted && callback_) {
     callback_(snapshot);
   }
-  const bool applied =
+  const bool response_applied =
     response->code == GateControl::Response::APPLIED ||
     response->code == GateControl::Response::DUPLICATE;
+  const bool applied = tuple_accepted && response_applied;
   const bool zero = response->motion_inhibited && response->zero_selected &&
     response->zero_published;
   const bool retryable =
+    !tuple_accepted ||
     response->reason == GateControl::Response::STALE_GATE ||
     response->reason == GateControl::Response::STALE_SEQUENCE ||
     response->reason == GateControl::Response::STALE_LEASE;
@@ -299,7 +407,7 @@ AuthorityResult RosMotionAuthorityPort::unavailable(
 {
   std::lock_guard<std::mutex> lock(mutex_);
   return AuthorityResult{
-    false, false, retryable, snapshot_, {}, std::move(detail)};
+    false, false, retryable, snapshot_watermark_.snapshot(), {}, std::move(detail)};
 }
 
 }  // namespace voice_nav_mission

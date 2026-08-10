@@ -82,6 +82,28 @@ public:
            admission_epoch_.load(std::memory_order_acquire) == expected_epoch;
   }
 
+  // RuntimeCore-owned generation changes must advance the Node admission
+  // fence at the same linearization point.  This seam never clears an
+  // ordinary emergency: once raise() blocks the fence, only process teardown
+  // may replace it.
+  [[nodiscard]] bool advance_epoch(
+    const std::uint64_t expected_current,
+    const std::uint64_t next) noexcept
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (
+      blocked_.load(std::memory_order_acquire) ||
+      pending_.load(std::memory_order_acquire) ||
+      admission_epoch_.load(std::memory_order_relaxed) != expected_current ||
+      expected_current == std::numeric_limits<std::uint64_t>::max() ||
+      next != expected_current + 1U)
+    {
+      return false;
+    }
+    admission_epoch_.store(next, std::memory_order_release);
+    return true;
+  }
+
   [[nodiscard]] std::optional<RuntimeEmergencyFenceSnapshot> take()
   {
     std::lock_guard<std::mutex> lock(mutex_);

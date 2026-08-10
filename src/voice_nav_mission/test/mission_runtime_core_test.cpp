@@ -778,17 +778,54 @@ TEST(RuntimeCore, ReplacementGateZeroRearmsAfterGateSafetyFault)
   EXPECT_EQ(fixture.core.state().availability, RuntimeAvailability::Faulted);
 
   fixture.relative->set_rearm_after_gate_replacement(true);
-  const auto replacement_retry = GateSnapshot{
-    kReplacementGateId, 2U, "", GateState::Inhibited,
-    true, true, true, true, "", false, false};
-  fixture.authority->set_snapshot(replacement_retry);
-  fixture.core.observe_gate(replacement_retry);
+  // The authority may advance again after the replacement callback was
+  // queued.  Rearm must commit the immutable tuple accepted by the Adapter;
+  // this newer observation is handled as a subsequent Gate event.
+  fixture.authority->set_snapshot(GateSnapshot{
+        kOtherGateId, 2U, "", GateState::Faulted, false,
+        true, true, false, "", false, false});
+  fixture.core.observe_gate(replacement);
 
   EXPECT_EQ(fixture.core.state().admission_epoch, 3U);
   EXPECT_EQ(fixture.core.state().availability, RuntimeAvailability::Available);
   EXPECT_EQ(fixture.core.state().gate_state, GateState::Inhibited);
   EXPECT_TRUE(fixture.core.usable());
   EXPECT_FALSE(fixture.core.has_active_mission());
+}
+
+TEST(RuntimeCore, ReplacementGateRearmAdvancesNodeOwnedAdmissionFence)
+{
+  RuntimeEmergencyFence fence(1U);
+  auto runtime_config = config();
+  runtime_config.admission_epoch_advance =
+    [&fence](const std::uint64_t current, const std::uint64_t next) {
+      return fence.advance_epoch(current, next);
+    };
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  RuntimeCore core(runtime_config, clock, authority, relative);
+  core.observe_gate(authority->snapshot());
+
+  core.observe_gate(GateSnapshot{
+        kOtherGateId, 1U, "", GateState::Faulted, false,
+        true, true, false, "", false, false});
+  ASSERT_EQ(core.state().admission_epoch, 2U);
+  EXPECT_FALSE(fence.admission_allowed(1U));
+  EXPECT_TRUE(fence.admission_allowed(2U));
+
+  const auto replacement = GateSnapshot{
+    kReplacementGateId, 1U, "", GateState::Inhibited,
+    true, true, true, true, "", false, false};
+  authority->set_snapshot(replacement);
+  core.observe_gate(replacement);
+  relative->set_rearm_after_gate_replacement(true);
+  core.observe_gate(replacement);
+
+  EXPECT_EQ(core.state().admission_epoch, 3U);
+  EXPECT_FALSE(fence.admission_allowed(2U));
+  EXPECT_TRUE(fence.admission_allowed(3U));
+  EXPECT_TRUE(core.usable());
 }
 
 TEST(RuntimeCore, ZeroProofFailureStillCancelsAndReturnsSafetyFault)

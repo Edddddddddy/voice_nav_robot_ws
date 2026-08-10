@@ -513,6 +513,9 @@ public:
   GateSnapshot snapshot() const override
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (throw_on_snapshot_) {
+      throw std::runtime_error("scripted MotionGate snapshot failure");
+    }
     return snapshot_;
   }
 
@@ -655,6 +658,13 @@ public:
     snapshot_.zero_published = value;
   }
 
+  void set_gate_identity(std::string identity, bool endpoint_available = true)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    snapshot_.gate_instance_id = std::move(identity);
+    snapshot_.endpoint_available = endpoint_available;
+  }
+
   void set_renew_failure_after(std::size_t successful_renews)
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -665,6 +675,12 @@ public:
   {
     std::lock_guard<std::mutex> lock(mutex_);
     throw_on_open_ = value;
+  }
+
+  void set_throw_on_snapshot(bool value)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    throw_on_snapshot_ = value;
   }
 
   void block_open()
@@ -778,6 +794,7 @@ private:
   std::size_t renew_count_{0U};
   std::optional<std::size_t> renew_failure_after_;
   bool throw_on_open_{false};
+  bool throw_on_snapshot_{false};
   bool block_open_{false};
   bool open_entered_{false};
   bool release_open_{false};
@@ -1785,17 +1802,22 @@ TEST_F(
   const auto token = pipeline.correlation_token();
 
   authority->set_inhibit_zero_proof(false);
+  authority->set_gate_identity("gate-test", false);
   const auto failed = pipeline.fail(
-    token, MotionConditioningFailure::SafetyFault, "Gate process disappeared");
+    token, MotionConditioningFailure::GateLoss, "Gate process disappeared");
   ASSERT_FALSE(failed.ok);
-  EXPECT_EQ(failed.failure, MotionConditioningFailure::SafetyFault);
+  EXPECT_EQ(failed.failure, MotionConditioningFailure::GateLoss);
+  EXPECT_EQ(failed.gate_loss_instance_id, "gate-test");
   EXPECT_FALSE(failed.zero_proven);
   EXPECT_EQ(pipeline.state(), MotionConditioningState::Failed);
 
-  const auto replacement = authority->snapshot();
-  EXPECT_FALSE(pipeline.rearm_after_gate_replacement(replacement));
-
   authority->set_initial_zero_proof(true);
+  authority->set_gate_identity("gate-test");
+  const auto same_identity = authority->snapshot();
+  EXPECT_FALSE(pipeline.rearm_after_gate_replacement(same_identity));
+
+  authority->set_gate_identity("replacement-gate");
+  authority->set_inhibit_zero_proof(true);
   const auto zero_proven_replacement = authority->snapshot();
   EXPECT_TRUE(pipeline.rearm_after_gate_replacement(zero_proven_replacement));
   EXPECT_EQ(pipeline.state(), MotionConditioningState::Stopped);
@@ -1803,6 +1825,65 @@ TEST_F(
   EXPECT_TRUE(rearmed.ok);
   EXPECT_TRUE(rearmed.zero_proven);
   EXPECT_EQ(rearmed.failure, MotionConditioningFailure::None);
+}
+
+TEST_F(
+  MotionConditioningPipelineTest,
+  OrdinarySafetyFaultCannotBeClearedByUnrelatedGateReplacement)
+{
+  auto health_ready = std::make_shared<CallbackCounter>();
+  auto pipeline_config = config();
+  pipeline_config.after_health_callback = [health_ready]() {
+      (*health_ready)();
+    };
+  MotionConditioningPipeline pipeline(*client, authority, producer, pipeline_config);
+  ASSERT_TRUE(pipeline.prepare().ok);
+  health_ready->expect(4U);
+  graph->publish_health_once();
+  ASSERT_TRUE(health_ready->wait_for_target());
+  ASSERT_TRUE(pipeline.start().ok);
+  const auto token = pipeline.correlation_token();
+
+  authority->set_inhibit_zero_proof(false);
+  const auto failed = pipeline.fail(
+    token, MotionConditioningFailure::SafetyFault,
+    "ordinary cleanup zero proof failed");
+  ASSERT_EQ(failed.failure, MotionConditioningFailure::SafetyFault);
+  EXPECT_TRUE(failed.gate_loss_instance_id.empty());
+
+  authority->set_initial_zero_proof(true);
+  authority->set_gate_identity("unrelated-gate");
+  EXPECT_FALSE(pipeline.rearm_after_gate_replacement(authority->snapshot()));
+  EXPECT_EQ(pipeline.state(), MotionConditioningState::Failed);
+}
+
+TEST_F(
+  MotionConditioningPipelineTest,
+  SnapshotFailureCannotProveTypedGateLoss)
+{
+  auto health_ready = std::make_shared<CallbackCounter>();
+  auto pipeline_config = config();
+  pipeline_config.after_health_callback = [health_ready]() {
+      (*health_ready)();
+    };
+  MotionConditioningPipeline pipeline(*client, authority, producer, pipeline_config);
+  ASSERT_TRUE(pipeline.prepare().ok);
+  health_ready->expect(4U);
+  graph->publish_health_once();
+  ASSERT_TRUE(health_ready->wait_for_target());
+  ASSERT_TRUE(pipeline.start().ok);
+  const auto token = pipeline.correlation_token();
+
+  authority->set_inhibit_zero_proof(false);
+  authority->set_throw_on_snapshot(true);
+  const auto failed = pipeline.fail(
+    token, MotionConditioningFailure::GateLoss,
+    "Gate snapshot transport failed");
+
+  EXPECT_FALSE(failed.ok);
+  EXPECT_EQ(failed.failure, MotionConditioningFailure::SafetyFault);
+  EXPECT_TRUE(failed.gate_loss_instance_id.empty());
+  EXPECT_EQ(pipeline.state(), MotionConditioningState::Failed);
 }
 
 TEST_F(MotionConditioningPipelineTest, CollisionStopIsReportedAndFailsClosed)

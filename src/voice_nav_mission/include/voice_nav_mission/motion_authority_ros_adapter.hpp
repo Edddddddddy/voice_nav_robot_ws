@@ -19,7 +19,9 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <unordered_set>
 
 #include <rclcpp/rclcpp.hpp>
 
@@ -30,6 +32,30 @@
 
 namespace voice_nav_mission
 {
+
+namespace detail
+{
+
+// Package-private monotonic merge seam shared by the ROS Adapter and its
+// deterministic interleaving tests.  Once identity A is retired by B, no
+// delayed state or service response from A can restore it.
+class GateSnapshotWatermark final
+{
+public:
+  [[nodiscard]] bool merge(
+    const GateSnapshot & incoming,
+    GateSnapshot & accepted);
+  [[nodiscard]] const GateSnapshot & snapshot() const noexcept;
+  [[nodiscard]] bool set_endpoint_available(
+    bool available,
+    GateSnapshot & accepted) noexcept;
+
+private:
+  GateSnapshot snapshot_{};
+  std::unordered_set<std::string> retired_gate_instance_ids_;
+};
+
+}  // namespace detail
 
 class RosMotionAuthorityPort final : public MotionAuthorityPort
 {
@@ -51,6 +77,8 @@ public:
     const AuthorityOperation & operation) override;
   [[nodiscard]] AuthorityResult inhibit(
     const AuthorityOperation & operation) override;
+  [[nodiscard]] std::optional<GateSnapshot> accept_rearm_snapshot(
+    const GateSnapshot & candidate) const noexcept override;
 
   void refresh_endpoint();
 
@@ -78,7 +106,7 @@ private:
   rclcpp::Subscription<voice_nav_mission::msg::InternalMotionGateState>::SharedPtr
     subscription_;
   mutable std::mutex mutex_;
-  GateSnapshot snapshot_{};
+  detail::GateSnapshotWatermark snapshot_watermark_;
   bool state_sample_available_{false};
 };
 

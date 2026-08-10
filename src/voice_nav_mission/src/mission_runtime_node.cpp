@@ -287,6 +287,10 @@ public:
       throw std::runtime_error("mission_runtime_node must run at /mission_runtime_node");
     }
     config_ = load_config();
+    config_.admission_epoch_advance =
+      [this](const std::uint64_t current, const std::uint64_t next) {
+        return emergency_fence_.advance_epoch(current, next);
+      };
     auto state_qos = rclcpp::QoS(rclcpp::KeepLast(1));
     state_qos.reliable().transient_local();
     state_publisher_ = create_publisher<MissionStateMessage>(kStateTopic, state_qos);
