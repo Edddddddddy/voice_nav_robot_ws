@@ -172,7 +172,9 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                 consumer_zero['zero_sim_ns'],
                 consumer_zero['zero_receipt_ns'],
             )
-            runtime_fault = self.probe.wait_runtime_fault()
+            runtime_fault = self.probe.wait_runtime_fault(
+                after_monotonic_ns=kill_ack_ns,
+            )
 
             replacement = support.restart_product_node(
                 launch_service,
