@@ -10,9 +10,9 @@ make a MotionGate, collision-monitor, recovery, or real-robot safety claim.
 ```text
 Gazebo house + LiDAR
   -> SLAM Toolbox (mapping) or AMCL + Nav2 (navigation)
-  -> rapid mission bridge (home / study / kitchen)
+  -> rapid mission bridge (up to three ordered places)
   -> Agent deterministic Mandarin parser
-  -> Vosk microphone transcript or terminal text
+  -> Vosk microphone transcript -> wake phrase gate
   -> Piper speech output
 ```
 
@@ -27,6 +27,7 @@ installed:
 
 ```bash
 cd /mnt/c/Users/lcy/code/ros2/voice_nav_robot_ws_rapid
+unset AMENT_PREFIX_PATH COLCON_PREFIX_PATH CMAKE_PREFIX_PATH LD_LIBRARY_PATH PYTHONPATH
 source /opt/ros/jazzy/setup.bash
 source install/setup.bash
 
@@ -43,6 +44,10 @@ existing Agent, and the rapid voice endpoint.  Named places are `home`,
 parser maps it to `kitchen`).  The voice endpoint uses Vosk when its model and
 Python path are available, and still accepts terminal text when standard input
 is attached.
+
+The rapid wake phrase is `小智`. For example, say or type `小智，去厨房，然后去书房`.
+The resulting Mission executes its two Nav2 goals in order. This is a simple
+Vosk-transcript gate, not the dedicated low-latency KWS planned for #56.
 
 ## Local speech assets
 
