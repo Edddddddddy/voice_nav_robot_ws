@@ -2258,6 +2258,13 @@ private:
     const std::string & lease = {})
   {
     const auto snapshot = authority_->snapshot();
+    return make_operation(snapshot, lease);
+  }
+
+  [[nodiscard]] AuthorityOperation make_operation(
+    const GateSnapshot & snapshot,
+    const std::string & lease)
+  {
     const auto request_id = request_id_generator_();
     if (request_id.size() != 32U) {
       throw std::runtime_error("conditioning request ID must be 32 hex characters");
@@ -2889,6 +2896,34 @@ private:
     }
   }
 
+  [[nodiscard]] bool startup_gate_zero_reassert(
+    std::chrono::steady_clock::time_point * zero_proven_at = nullptr)
+  {
+    try {
+      const auto snapshot = authority_->snapshot();
+      const auto lease = snapshot.state == GateState::Prepared ||
+        snapshot.state == GateState::Armed ? snapshot.lease_id : std::string{};
+      const auto operation = make_operation(snapshot, lease);
+      std::lock_guard<std::mutex> authority_lock(authority_call_mutex_);
+      const auto result = authority_->inhibit(operation);
+      const bool current_zero = result.applied && result.zero_proven &&
+        result.snapshot.gate_instance_id == operation.gate_instance_id &&
+        result.snapshot.control_seq >= operation.expected_control_seq &&
+        gate_snapshot_proves_zero(result.snapshot);
+      if (!current_zero) {
+        return false;
+      }
+      const auto proven_at = std::chrono::steady_clock::now();
+      if (zero_proven_at != nullptr) {
+        *zero_proven_at = proven_at;
+      }
+      remember_zero_proof(proven_at, result.lease_id);
+      return true;
+    } catch (...) {
+      return false;
+    }
+  }
+
   [[nodiscard]] bool wait_for_startup_graph_change(
     const rclcpp::Event::SharedPtr & graph_event,
     const std::chrono::steady_clock::time_point deadline) const
@@ -2963,10 +2998,10 @@ private:
     cleanup_blocked_ = false;
     const auto deadline = std::chrono::steady_clock::now() +
       config_.startup_reconciliation_timeout;
-    std::chrono::steady_clock::time_point zero_proven_at{};
-    const auto fail_startup = [this, &zero_proven_at](std::string detail) {
+    const auto fail_startup = [this](std::string detail) {
         cleanup_blocked_ = true;
-        const auto zero_proven = zero_proven_at != std::chrono::steady_clock::time_point{};
+        std::chrono::steady_clock::time_point zero_proven_at{};
+        const auto zero_proven = startup_gate_zero_reassert(&zero_proven_at);
         MotionConditioningResult result;
         {
           std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -2981,7 +3016,7 @@ private:
         return result;
       };
 
-    if (!inhibit_gate(false, &zero_proven_at)) {
+    if (!startup_gate_zero_reassert()) {
       return fail_startup(
         "startup reconciliation could not prove an inhibited zero Gate state");
     }
@@ -2994,6 +3029,12 @@ private:
     }
     if (!confirm_startup_graph_clean(deadline)) {
       return fail_startup("startup component residual or candidate writer cleanup failed");
+    }
+
+    std::chrono::steady_clock::time_point zero_proven_at{};
+    if (!startup_gate_zero_reassert(&zero_proven_at)) {
+      return fail_startup(
+        "startup reconciliation could not reassert the current inhibited zero Gate state");
     }
 
     MotionConditioningResult result;

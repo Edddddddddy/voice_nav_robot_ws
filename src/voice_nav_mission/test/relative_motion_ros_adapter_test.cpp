@@ -507,17 +507,23 @@ public:
 
   AuthorityResult inhibit(const AuthorityOperation &) override
   {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
     ++inhibit_count_;
+    if (block_inhibit_) {
+      inhibit_entered_ = true;
+      inhibit_condition_.notify_all();
+      inhibit_condition_.wait(lock, [this]() {return release_inhibit_;});
+    }
     snapshot_.control_seq++;
     snapshot_.state = GateState::Inhibited;
     snapshot_.motion_inhibited = true;
     snapshot_.zero_selected = true;
-    snapshot_.zero_published = true;
+    snapshot_.zero_published = inhibit_zero_proof_;
     snapshot_.authority_live = false;
     snapshot_.writer_bound = false;
     return AuthorityResult{
-      true, true, false, snapshot_, snapshot_.lease_id, "inhibited"};
+      true, inhibit_zero_proof_, false, snapshot_, snapshot_.lease_id,
+      "inhibited"};
   }
 
   bool wait_for_prepare()
@@ -546,12 +552,45 @@ public:
     return inhibit_count_;
   }
 
+  void set_inhibit_zero_proof(bool value)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    inhibit_zero_proof_ = value;
+  }
+
+  void block_inhibit()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    block_inhibit_ = true;
+    inhibit_entered_ = false;
+    release_inhibit_ = false;
+  }
+
+  bool wait_for_inhibit(std::chrono::milliseconds timeout = 1s)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return inhibit_condition_.wait_for(
+      lock, timeout, [this]() {return inhibit_entered_;});
+  }
+
+  void release_blocked_inhibit()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    release_inhibit_ = true;
+    inhibit_condition_.notify_all();
+  }
+
 private:
   mutable std::mutex mutex_;
   std::condition_variable prepare_condition_;
+  std::condition_variable inhibit_condition_;
   GateSnapshot snapshot_;
   bool prepare_entered_{false};
   bool release_prepare_{false};
+  bool block_inhibit_{false};
+  bool inhibit_entered_{false};
+  bool release_inhibit_{true};
+  bool inhibit_zero_proof_{true};
   std::size_t inhibit_count_{0U};
 };
 
@@ -659,6 +698,41 @@ TEST_F(RelativeMotionRosAdapterTest, StartupReconciliationFailureLatchesSafetyFa
   EXPECT_EQ(result_code.load(), ChildResultCode::SafetyFault);
   EXPECT_EQ(result_count.load(), 1U);
   EXPECT_FALSE(authority->prepare_entered());
+  adapter.shutdown();
+}
+
+TEST_F(
+  RelativeMotionRosAdapterTest,
+  ShutdownDuringStartupQueuesBoundedTeardownAfterZeroProofFailure)
+{
+  auto node = std::make_shared<rclcpp::Node>(
+    "relative_motion_adapter_startup_shutdown");
+  auto authority = std::make_shared<BlockingAuthority>();
+  authority->set_inhibit_zero_proof(false);
+  authority->block_inhibit();
+  MotionConditioningConfig conditioning_config;
+  conditioning_config.component_rpc_timeout = 50ms;
+  conditioning_config.startup_reconciliation_timeout = 500ms;
+  conditioning_config.stop_barrier = 100ms;
+  auto relay = install_completion_relay(conditioning_config);
+  RelativeMotionRosAdapter adapter(*node, authority, {}, conditioning_config);
+
+  EXPECT_FALSE(adapter.healthy());
+  ASSERT_TRUE(authority->wait_for_inhibit());
+
+  EXPECT_FALSE(adapter.cancel(
+      MotionToken{}, std::chrono::steady_clock::now() + 100ms));
+  const auto blocked_deadline = std::chrono::steady_clock::now() + 100ms;
+  detail::begin_relative_motion_shutdown(adapter, blocked_deadline);
+  EXPECT_FALSE(detail::wait_for_relative_motion_internal_completion(
+      adapter, std::chrono::steady_clock::now() + 150ms));
+
+  authority->release_blocked_inhibit();
+  EXPECT_TRUE(detail::wait_for_relative_motion_internal_completion(
+    adapter, std::chrono::steady_clock::now() + 2s));
+  EXPECT_FALSE(adapter.zero_proven());
+  const auto calls = authority->inhibit_count();
+  EXPECT_GE(calls, 2U);
   adapter.shutdown();
 }
 

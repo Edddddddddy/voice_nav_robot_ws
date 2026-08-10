@@ -795,6 +795,15 @@ private:
   std::vector<AuthorityOperationKind> calls_;
 };
 
+bool startup_calls_only_reassert_inhibit(
+  const std::vector<AuthorityOperationKind> & calls)
+{
+  return std::all_of(
+    calls.cbegin(), calls.cend(), [](const auto kind) {
+      return kind == AuthorityOperationKind::Inhibit;
+    });
+}
+
 class FakeProducer final : public MotionProducerPort
 {
 public:
@@ -1523,6 +1532,38 @@ TEST_F(MotionConditioningPipelineTest, StartupReconciliationCleanStartDoesNotUnl
 
   ASSERT_TRUE(prepared.ok) << prepared.detail;
   EXPECT_TRUE(graph->unload_requests().empty());
+  const auto calls = authority->calls();
+  EXPECT_EQ(
+    std::count(
+      calls.cbegin(), calls.cend(), AuthorityOperationKind::Inhibit), 2);
+  ASSERT_GE(calls.size(), 2U);
+  EXPECT_EQ(calls[0], AuthorityOperationKind::Inhibit);
+  EXPECT_EQ(calls[1], AuthorityOperationKind::Inhibit);
+}
+
+TEST_F(
+  MotionConditioningPipelineTest,
+  StartupRequiresCurrentGateZeroReassertBeforeCommit)
+{
+  // The cached snapshot remains inhibited+zero, but the next current Gate
+  // transaction proves that zero is no longer available.  Startup must not
+  // commit from the stale snapshot or advance into PREPARE/OPEN/RENEW.
+  authority->set_inhibit_zero_proof(false);
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+
+  const auto result = pipeline.prepare();
+  const auto calls = authority->calls();
+
+  EXPECT_FALSE(result.ok);
+  EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
+  EXPECT_FALSE(result.zero_proven);
+  EXPECT_GE(
+    std::count(
+      calls.cbegin(), calls.cend(), AuthorityOperationKind::Inhibit), 1U);
+  EXPECT_TRUE(std::all_of(
+    calls.cbegin(), calls.cend(), [](const auto kind) {
+        return kind == AuthorityOperationKind::Inhibit;
+    }));
 }
 
 TEST_F(MotionConditioningPipelineTest, StartupUnknownFqnFailsClosedBeforeGatePrepare)
@@ -1536,7 +1577,7 @@ TEST_F(MotionConditioningPipelineTest, StartupUnknownFqnFailsClosedBeforeGatePre
   EXPECT_FALSE(result.ok);
   EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
   EXPECT_TRUE(result.zero_proven);
-  EXPECT_TRUE(calls.empty());
+  EXPECT_TRUE(startup_calls_only_reassert_inhibit(calls));
   EXPECT_TRUE(graph->unload_requests().empty());
 }
 
@@ -1550,7 +1591,7 @@ TEST_F(MotionConditioningPipelineTest, StartupZeroUniqueIdFailsClosedBeforeGateP
   EXPECT_FALSE(result.ok);
   EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
   EXPECT_TRUE(result.zero_proven);
-  EXPECT_TRUE(authority->calls().empty());
+  EXPECT_TRUE(startup_calls_only_reassert_inhibit(authority->calls()));
   EXPECT_TRUE(graph->unload_requests().empty());
 }
 
@@ -1564,7 +1605,7 @@ TEST_F(MotionConditioningPipelineTest, StartupDuplicateIdentityFailsClosedBefore
 
   EXPECT_FALSE(result.ok);
   EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
-  EXPECT_TRUE(authority->calls().empty());
+  EXPECT_TRUE(startup_calls_only_reassert_inhibit(authority->calls()));
   EXPECT_TRUE(graph->unload_requests().empty());
 }
 
@@ -1578,7 +1619,7 @@ TEST_F(MotionConditioningPipelineTest, StartupConflictingFqnIdentityFailsClosed)
 
   EXPECT_FALSE(result.ok);
   EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
-  EXPECT_TRUE(authority->calls().empty());
+  EXPECT_TRUE(startup_calls_only_reassert_inhibit(authority->calls()));
   EXPECT_TRUE(graph->unload_requests().empty());
 }
 
@@ -1596,7 +1637,7 @@ TEST_F(MotionConditioningPipelineTest, StartupListNodesTimeoutFailsClosed)
   EXPECT_FALSE(result.ok);
   EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
   EXPECT_TRUE(result.zero_proven);
-  EXPECT_TRUE(authority->calls().empty());
+  EXPECT_TRUE(startup_calls_only_reassert_inhibit(authority->calls()));
   EXPECT_TRUE(graph->unload_requests().empty());
 }
 
@@ -1611,7 +1652,7 @@ TEST_F(MotionConditioningPipelineTest, StartupLifecycleFailureFailsClosedBeforeU
   EXPECT_FALSE(result.ok);
   EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
   EXPECT_TRUE(result.zero_proven);
-  EXPECT_TRUE(authority->calls().empty());
+  EXPECT_TRUE(startup_calls_only_reassert_inhibit(authority->calls()));
   EXPECT_TRUE(graph->unload_requests().empty());
   EXPECT_EQ(graph->loaded_count(), 2U);
 }
@@ -1628,7 +1669,7 @@ TEST_F(MotionConditioningPipelineTest, StartupUnloadFailureFailsClosed)
   EXPECT_FALSE(result.ok);
   EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
   EXPECT_TRUE(result.zero_proven);
-  EXPECT_TRUE(authority->calls().empty());
+  EXPECT_TRUE(startup_calls_only_reassert_inhibit(authority->calls()));
   ASSERT_EQ(unload_requests.size(), 1U);
   EXPECT_EQ(unload_requests.front(), 41U);
   EXPECT_EQ(graph->loaded_count(), 2U);
@@ -1648,7 +1689,7 @@ TEST_F(MotionConditioningPipelineTest, StartupWriterResidueFailsClosed)
   EXPECT_FALSE(result.ok);
   EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
   EXPECT_TRUE(result.zero_proven);
-  EXPECT_TRUE(authority->calls().empty());
+  EXPECT_TRUE(startup_calls_only_reassert_inhibit(authority->calls()));
   EXPECT_EQ(graph->loaded_count(), 0U);
   EXPECT_FALSE(graph->unload_requests().empty());
 }
@@ -1672,9 +1713,11 @@ TEST_F(MotionConditioningPipelineTest, GateCandidateAndWriterBindingAreRequired)
   EXPECT_NE(started.zero_proven_at, std::chrono::steady_clock::time_point{});
 
   const auto calls = authority->calls();
-  ASSERT_GE(calls.size(), 3U);
-  EXPECT_EQ(calls[0], AuthorityOperationKind::Prepare);
-  EXPECT_EQ(calls[1], AuthorityOperationKind::Open);
+  ASSERT_GE(calls.size(), 5U);
+  EXPECT_EQ(calls[0], AuthorityOperationKind::Inhibit);
+  EXPECT_EQ(calls[1], AuthorityOperationKind::Inhibit);
+  EXPECT_EQ(calls[2], AuthorityOperationKind::Prepare);
+  EXPECT_EQ(calls[3], AuthorityOperationKind::Open);
   EXPECT_EQ(calls.back(), AuthorityOperationKind::Inhibit);
 }
 
@@ -1696,6 +1739,7 @@ TEST_F(MotionConditioningPipelineTest, PrepareRequiresGateZeroProof)
 TEST_F(MotionConditioningPipelineTest, NoLeaseRequiresCurrentGateZeroProof)
 {
   authority->set_initial_zero_proof(false);
+  authority->set_inhibit_zero_proof(false);
   MotionConditioningPipeline pipeline(*client, authority, producer, config());
 
   const auto result = pipeline.prepare();
@@ -1704,7 +1748,7 @@ TEST_F(MotionConditioningPipelineTest, NoLeaseRequiresCurrentGateZeroProof)
   EXPECT_FALSE(result.ok);
   EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
   EXPECT_FALSE(result.zero_proven);
-  EXPECT_TRUE(calls.empty());
+  EXPECT_TRUE(startup_calls_only_reassert_inhibit(calls));
 }
 
 TEST_F(MotionConditioningPipelineTest, StopWithoutLeaseRequiresInhibitedZeroSnapshot)
@@ -2232,7 +2276,7 @@ TEST_F(MotionConditioningPipelineTest, StopDuringPrepareRetainsUniqueCleanupOwne
   const auto calls = authority->calls();
   EXPECT_EQ(
     std::count(
-      calls.cbegin(), calls.cend(), AuthorityOperationKind::Inhibit), 1);
+      calls.cbegin(), calls.cend(), AuthorityOperationKind::Inhibit), 3);
   EXPECT_EQ(graph->unload_count(), 0U);
   EXPECT_EQ(pipeline.state(), MotionConditioningState::Stopped);
 }
@@ -2268,7 +2312,7 @@ TEST_F(MotionConditioningPipelineTest, TeardownDrainsBlockedActivationBeforeClea
   const auto calls = authority->calls();
   EXPECT_EQ(
     std::count(
-      calls.cbegin(), calls.cend(), AuthorityOperationKind::Inhibit), 1);
+      calls.cbegin(), calls.cend(), AuthorityOperationKind::Inhibit), 3);
 }
 
 TEST_F(MotionConditioningPipelineTest, TeardownDrainsProducerStartBeforeCleanup)
@@ -2311,7 +2355,7 @@ TEST_F(MotionConditioningPipelineTest, TeardownDrainsProducerStartBeforeCleanup)
   const auto calls = authority->calls();
   EXPECT_EQ(
     std::count(
-      calls.cbegin(), calls.cend(), AuthorityOperationKind::Inhibit), 1);
+      calls.cbegin(), calls.cend(), AuthorityOperationKind::Inhibit), 3);
 }
 
 TEST_F(MotionConditioningPipelineTest, SecondStartCannotClaimTeardownOrOpen)
@@ -2369,7 +2413,7 @@ TEST_F(MotionConditioningPipelineTest, SecondStartCannotClaimTeardownOrOpen)
       calls.cbegin(), calls.cend(), AuthorityOperationKind::Open), 1);
   EXPECT_EQ(
     std::count(
-      calls.cbegin(), calls.cend(), AuthorityOperationKind::Inhibit), 1);
+      calls.cbegin(), calls.cend(), AuthorityOperationKind::Inhibit), 3);
   EXPECT_EQ(graph->unload_count(), 2U);
   EXPECT_EQ(producer->stop_count, 1U);
 }
@@ -2533,9 +2577,9 @@ TEST_F(MotionConditioningPipelineTest, BusinessFailureAndCachedTerminalShareZero
 
 TEST_F(MotionConditioningPipelineTest, ZeroProofFailureEscalatesExecutionFailureToSafetyFault)
 {
-  authority->set_inhibit_zero_proof(false);
   MotionConditioningPipeline pipeline(*client, authority, producer, config());
   ASSERT_TRUE(pipeline.prepare().ok);
+  authority->set_inhibit_zero_proof(false);
   std::this_thread::sleep_for(50ms);
   ASSERT_TRUE(pipeline.start().ok);
   const auto token = pipeline.correlation_token();
@@ -2924,7 +2968,7 @@ TEST_F(MotionConditioningPipelineTest, StopAndFailShareOneTeardownOwner)
   EXPECT_EQ(
     std::count(
       calls.cbegin(), calls.cend(),
-      AuthorityOperationKind::Inhibit), 1);
+      AuthorityOperationKind::Inhibit), 3);
   EXPECT_EQ(graph->unload_count(), 2U);
 }
 
@@ -2956,7 +3000,7 @@ TEST_F(MotionConditioningPipelineTest, TerminalRecordIgnoresLateFailureAndCollis
   EXPECT_EQ(
     std::count(
       calls.cbegin(), calls.cend(),
-      AuthorityOperationKind::Inhibit), 1);
+      AuthorityOperationKind::Inhibit), 3);
 }
 
 TEST_F(MotionConditioningPipelineTest, LateOldCollisionCannotTerminateNextGeneration)
@@ -3122,7 +3166,7 @@ TEST_F(MotionConditioningPipelineTest, StopWaitsForRenewFailureTeardownOwner)
   EXPECT_EQ(
     std::count(
       calls.cbegin(), calls.cend(),
-      AuthorityOperationKind::Inhibit), 1);
+      AuthorityOperationKind::Inhibit), 3);
   EXPECT_EQ(graph->unload_count(), 2U);
 }
 
@@ -3159,7 +3203,7 @@ TEST_F(MotionConditioningPipelineTest, ExternalFailureWaitsForActiveRenew)
   EXPECT_EQ(
     std::count(
       calls.cbegin(), calls.cend(),
-      AuthorityOperationKind::Inhibit), 1);
+      AuthorityOperationKind::Inhibit), 3);
   EXPECT_EQ(graph->unload_count(), 2U);
 }
 
@@ -3236,7 +3280,7 @@ TEST_F(MotionConditioningPipelineTest, DestructorWaitsForActiveTeardownOwner)
   const auto calls = authority->calls();
   EXPECT_EQ(
     std::count(
-      calls.cbegin(), calls.cend(), AuthorityOperationKind::Inhibit), 1);
+      calls.cbegin(), calls.cend(), AuthorityOperationKind::Inhibit), 3);
   EXPECT_EQ(graph->unload_count(), 2U);
 }
 

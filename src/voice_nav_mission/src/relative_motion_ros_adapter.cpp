@@ -556,8 +556,9 @@ public:
   void begin_shutdown() noexcept
   {
     begin_shutdown(
-      std::chrono::steady_clock::now() + conditioning_config_.stop_barrier +
-      policy_.stationarity_deadline);
+      std::chrono::steady_clock::now() +
+      conditioning_config_.startup_reconciliation_timeout +
+      conditioning_config_.stop_barrier + policy_.stationarity_deadline);
   }
 
   void begin_shutdown(const TimePoint deadline) noexcept
@@ -569,6 +570,12 @@ public:
       }
       shutdown_delivery_requested_ = true;
       shutting_down_ = true;
+      startup_close_requested_ = true;
+      if (startup_close_deadline_ == TimePoint{} ||
+        deadline < startup_close_deadline_)
+      {
+        startup_close_deadline_ = deadline;
+      }
     }
     // Stop new source callbacks, but retain the subscriptions, producer, and
     // conditioning Module until the internal terminal delivery has reached
@@ -603,8 +610,11 @@ public:
 
   void finalize_shutdown() noexcept
   {
-    begin_shutdown();
-    wait_for_internal_completion();
+    const auto deadline = std::chrono::steady_clock::now() +
+      conditioning_config_.startup_reconciliation_timeout +
+      conditioning_config_.stop_barrier + policy_.stationarity_deadline;
+    begin_shutdown(deadline);
+    (void)wait_for_internal_completion_until(deadline);
 
     ingress_->disable_odom();
     clock_subscription_.reset();
@@ -673,6 +683,12 @@ public:
           return false;
         }
         self->startup_state_ = StartupState::Pending;
+        self->startup_close_requested_ = false;
+        self->startup_close_teardown_terminal_ = false;
+        self->startup_close_deadline_ = TimePoint{};
+        self->zero_proven_ = false;
+        self->teardown_complete_ = false;
+        self->teardown_safe_ = false;
         self->transaction_kind_ = TransactionKind::StartupReconcile;
         schedule_startup = true;
       }
@@ -798,13 +814,31 @@ public:
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!active_) {
-        if (transaction_kind_ == TransactionKind::Idle &&
+        const bool startup_in_flight =
+          startup_state_ == StartupState::Pending ||
+          startup_state_ == StartupState::Running ||
+          transaction_kind_ == TransactionKind::StartupReconcile;
+        if (startup_in_flight) {
+          startup_close_requested_ = true;
+          if (startup_close_deadline_ == TimePoint{} ||
+            deadline < startup_close_deadline_)
+          {
+            startup_close_deadline_ = deadline;
+          }
+          zero_proven_ = false;
+          teardown_complete_ = false;
+          teardown_safe_ = false;
+          cancel_requested_.store(true);
+        } else if (startup_close_requested_ &&
+          startup_close_teardown_terminal_)
+        {
+          return teardown_safe_;
+        } else if (transaction_kind_ == TransactionKind::Idle &&
           !emergency_stop_in_progress_ && teardown_complete_ &&
           teardown_safe_ && zero_proven_)
         {
           return true;
-        }
-        if (transaction_kind_ == TransactionKind::Idle &&
+        } else if (transaction_kind_ == TransactionKind::Idle &&
           !emergency_stop_in_progress_)
         {
           zero_proven_ = false;
@@ -1001,6 +1035,7 @@ private:
     MotionToken token{};
     TimePoint deadline{};
     bool deliver_result{true};
+    bool suppress_delivery{false};
   };
 
   struct DeliveryPlan
@@ -1091,7 +1126,6 @@ private:
           return;
         }
         kind = transaction_kind_;
-        transaction_kind_ = TransactionKind::Idle;
         transaction_in_progress_ = true;
         if (kind == TransactionKind::StartupReconcile) {
           startup_state_ = StartupState::Running;
@@ -1118,6 +1152,26 @@ private:
       }
       {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (kind == TransactionKind::StartupReconcile &&
+          transaction_kind_ == kind && startup_close_requested_ &&
+          !startup_close_teardown_terminal_)
+        {
+          const auto deadline = startup_close_deadline_ == TimePoint{} ?
+          std::chrono::steady_clock::now() + policy_.stationarity_deadline :
+          startup_close_deadline_;
+          pending_teardown_ = TeardownRequest{
+            TeardownKind::Cancel,
+            ChildResultCode::Failed,
+            MotionConditioningFailure::None,
+            "startup reconciliation closed during adapter shutdown",
+            {},
+            deadline,
+            false,
+            true};
+          transaction_kind_ = TransactionKind::Teardown;
+        } else if (transaction_kind_ == kind) {
+          transaction_kind_ = TransactionKind::Idle;
+        }
         transaction_in_progress_ = false;
         condition_variable_.notify_all();
       }
@@ -1189,16 +1243,17 @@ private:
     }
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      const bool close_requested = startup_close_requested_;
       if (result.ok) {
         startup_state_ = StartupState::Succeeded;
         zero_proven_ = result.zero_proven;
-        teardown_complete_ = true;
-        teardown_safe_ = result.zero_proven;
+        teardown_complete_ = !close_requested;
+        teardown_safe_ = !close_requested && result.zero_proven;
       } else {
         startup_state_ = StartupState::Failed;
         zero_proven_ = result.zero_proven;
-        teardown_complete_ = result.zero_proven;
-        teardown_safe_ = result.zero_proven;
+        teardown_complete_ = !close_requested && result.zero_proven;
+        teardown_safe_ = !close_requested && result.zero_proven;
         latch_admission_fault_locked(
           result.detail.empty() ?
           "startup component reconciliation failed closed" : result.detail);
@@ -1693,7 +1748,7 @@ private:
     {
       std::lock_guard<std::mutex> lock(mutex_);
       deliver_result = request.deliver_result ||
-        shutdown_delivery_requested_;
+        (shutdown_delivery_requested_ && !request.suppress_delivery);
       deliver_result = deliver_result && !completion_record_sent_;
       stationarity_waiting_ = false;
       if (!active_ || same_token(active_token_, request.token)) {
@@ -1705,6 +1760,9 @@ private:
         teardown_complete_ = true;
         teardown_safe_ = zero && stationary &&
           conditioning_result.failure != MotionConditioningFailure::SafetyFault;
+        if (startup_close_requested_) {
+          startup_close_teardown_terminal_ = true;
+        }
         if (final_code == ChildResultCode::SafetyFault) {
           latch_admission_fault_locked(final_detail);
         }
@@ -1761,6 +1819,9 @@ private:
   bool transaction_stop_{false};
   bool transaction_in_progress_{false};
   StartupState startup_state_{StartupState::NotRequested};
+  bool startup_close_requested_{false};
+  bool startup_close_teardown_terminal_{false};
+  TimePoint startup_close_deadline_{};
   bool shutting_down_{false};
   bool shutdown_delivery_requested_{false};
   bool shutdown_complete_{false};
