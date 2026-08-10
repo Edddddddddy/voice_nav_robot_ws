@@ -425,6 +425,13 @@ class AgentNode(Node):
         _generation, turn_generation, token = operation
         if operation != self._llm_operation or turn_generation != self._turn_generation:
             return
+        snapshot = self._planning_snapshot(require_execute_ready=True)
+        if (
+            snapshot is None
+            or snapshot.runtime_instance_id != token.runtime_instance_id
+            or snapshot.admission_epoch != token.admission_epoch
+        ):
+            return
         if response['kind'] == 'reply':
             self._speak_text(response.get('text', '')[:512] or '无法理解该指令。', Speak.Goal.NORMAL,
                              token.session_id, token.turn_id, turn_generation)
