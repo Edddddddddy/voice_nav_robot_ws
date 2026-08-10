@@ -71,6 +71,7 @@ struct Fixture
     std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
   std::shared_ptr<ScriptedRelativeMotionPort> relative =
     std::make_shared<ScriptedRelativeMotionPort>();
+  std::vector<RuntimeState> states;
   std::vector<MissionResult> results;
   std::vector<MissionFeedback> feedback;
   RuntimeCore core{
@@ -78,7 +79,9 @@ struct Fixture
     clock,
     authority,
     relative,
-    {},
+    [this](const RuntimeState & item) {
+      states.push_back(item);
+    },
     [this](std::uint64_t, const MissionFeedback & item) {
       feedback.push_back(item);
     },
@@ -737,6 +740,97 @@ TEST(RuntimeCore, DependencyLossRotatesEpochOnlyOnceAndCancelsActiveMission)
   EXPECT_EQ(fixture.results.front().code, MissionResultCode::SafetyFault);
   EXPECT_EQ(fixture.core.state().admission_epoch, 2U);
   EXPECT_EQ(fixture.relative->cancel_count(), 1U);
+}
+
+TEST(RuntimeCore, IdleDependencyLossRemainsUnavailableAndRecovers)
+{
+  Fixture fixture;
+  ASSERT_EQ(
+    fixture.core.state().availability,
+    RuntimeAvailability::Available);
+  ASSERT_EQ(fixture.core.state().admission_epoch, 1U);
+  fixture.states.clear();
+
+  fixture.relative->set_healthy(false);
+  fixture.core.observe_dependencies();
+
+  EXPECT_EQ(
+    fixture.core.state().availability,
+    RuntimeAvailability::Unavailable);
+  EXPECT_EQ(fixture.core.state().admission_epoch, 2U);
+  EXPECT_FALSE(fixture.core.has_active_mission());
+  EXPECT_TRUE(fixture.results.empty());
+  ASSERT_FALSE(fixture.states.empty());
+  EXPECT_TRUE(std::all_of(
+    fixture.states.cbegin(), fixture.states.cend(), [](const auto & state) {
+        return state.availability == RuntimeAvailability::Unavailable &&
+               state.admission_epoch == 2U;
+    }));
+
+  fixture.states.clear();
+  fixture.relative->set_healthy(true);
+  fixture.core.observe_dependencies();
+
+  EXPECT_EQ(
+    fixture.core.state().availability,
+    RuntimeAvailability::Available);
+  EXPECT_EQ(fixture.core.state().admission_epoch, 2U);
+  EXPECT_TRUE(fixture.results.empty());
+  ASSERT_FALSE(fixture.states.empty());
+  EXPECT_TRUE(std::all_of(
+    fixture.states.cbegin(), fixture.states.cend(), [](const auto & state) {
+        return state.availability == RuntimeAvailability::Available &&
+               state.admission_epoch == 2U;
+    }));
+}
+
+TEST(RuntimeCore, IdleSafetyFaultStillLatchesRuntimeFault)
+{
+  Fixture fixture;
+  fixture.relative->set_safety_faulted(true);
+  fixture.relative->set_healthy(false);
+
+  fixture.core.observe_dependencies();
+
+  EXPECT_EQ(
+    fixture.core.state().availability,
+    RuntimeAvailability::Faulted);
+  EXPECT_EQ(fixture.core.state().admission_epoch, 2U);
+
+  fixture.relative->set_healthy(true);
+  fixture.core.observe_dependencies();
+
+  EXPECT_EQ(
+    fixture.core.state().availability,
+    RuntimeAvailability::Faulted);
+  EXPECT_EQ(fixture.core.state().admission_epoch, 2U);
+}
+
+TEST(RuntimeCore, IdleDependencyLossAtMaximumEpochFailsClosed)
+{
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  auto max_epoch_config = config();
+  max_epoch_config.initial_admission_epoch =
+    std::numeric_limits<std::uint64_t>::max();
+  std::vector<MissionResult> results;
+  RuntimeCore core(
+    max_epoch_config, clock, authority, relative, {}, {},
+    [&results](std::uint64_t, const MissionResult & result) {
+      results.push_back(result);
+    });
+  core.observe_gate(authority->snapshot());
+  relative->set_healthy(false);
+
+  core.observe_dependencies();
+
+  EXPECT_EQ(core.state().availability, RuntimeAvailability::Faulted);
+  EXPECT_EQ(
+    core.state().admission_epoch,
+    std::numeric_limits<std::uint64_t>::max());
+  EXPECT_FALSE(core.has_active_mission());
+  EXPECT_TRUE(results.empty());
 }
 
 TEST(RuntimeCore, GateIdentityLossRotatesEpochOnlyOnceAndFailsClosed)
