@@ -271,6 +271,15 @@ public:
   {
     return true;
   }
+
+  // A production adapter may be permanently safety-faulted while it performs
+  // bounded startup reconciliation.  RuntimeCore keeps that distinction from
+  // an ordinary dependency-unavailable condition so availability is latched
+  // Faulted and admission cannot reopen.
+  [[nodiscard]] virtual bool safety_faulted() const noexcept
+  {
+    return false;
+  }
 };
 
 struct RuntimeConfig
@@ -524,6 +533,10 @@ class ScriptedRelativeMotionPort final : public RelativeMotionPort
 {
 public:
   [[nodiscard]] bool healthy() const override {return healthy_;}
+  [[nodiscard]] bool safety_faulted() const noexcept override
+  {
+    return safety_faulted_;
+  }
   void start(
     const MotionToken & token,
     const MissionStep & step,
@@ -535,6 +548,7 @@ public:
   void tick(SteadyClockPort::TimePoint) override {}
 
   void set_healthy(bool value) {healthy_ = value;}
+  void set_safety_faulted(bool value) {safety_faulted_ = value;}
   void set_cancel_acknowledged(bool value) {cancel_acknowledged_ = value;}
   void set_start_completion(bool value) {start_completion_ = value;}
   void set_start_failure(std::string detail) {next_start_failure_ = std::move(detail);}
@@ -580,6 +594,7 @@ private:
   };
 
   bool healthy_{true};
+  bool safety_faulted_{false};
   bool cancel_acknowledged_{true};
   bool start_completion_{false};
   std::string next_start_failure_;

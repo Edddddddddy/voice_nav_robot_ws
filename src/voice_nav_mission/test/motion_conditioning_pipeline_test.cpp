@@ -910,7 +910,13 @@ public:
       [this](
         const std::shared_ptr<ListNodes::Request>,
         std::shared_ptr<ListNodes::Response> response) {
+        std::this_thread::sleep_for(list_delay_);
         std::lock_guard<std::mutex> lock(graph_mutex_);
+        if (list_override_enabled_) {
+          response->unique_ids = list_override_ids_;
+          response->full_node_names = list_override_fqns_;
+          return;
+        }
         for (const auto & entry : loaded_) {
           response->unique_ids.push_back(entry.first);
           response->full_node_names.push_back(entry.second);
@@ -934,9 +940,12 @@ public:
           std::lock_guard<std::mutex> lock(graph_mutex_);
           unload_completed_.push_back(request->unique_id);
           ++unload_count_;
-          response->success = loaded_.erase(request->unique_id) == 1U;
+          const bool forced_failure = unload_failures_.find(request->unique_id) !=
+          unload_failures_.cend();
+          response->success = !forced_failure &&
+          loaded_.erase(request->unique_id) == 1U;
         }
-        if (response->success) {
+        if (response->success && !retain_candidate_writer_) {
           collision_candidate_.reset();
           collision_events_.reset();
           collision_state_ = lifecycle_msgs::msg::State::PRIMARY_STATE_UNKNOWN;
@@ -1083,6 +1092,64 @@ public:
     wrong_fqn_ = value;
   }
 
+  void set_list_delay(std::chrono::milliseconds delay)
+  {
+    list_delay_ = delay;
+  }
+
+  void set_list_override(
+    std::vector<std::uint64_t> unique_ids,
+    std::vector<std::string> node_fqns)
+  {
+    std::lock_guard<std::mutex> lock(graph_mutex_);
+    list_override_ids_ = std::move(unique_ids);
+    list_override_fqns_ = std::move(node_fqns);
+    list_override_enabled_ = true;
+  }
+
+  void clear_list_override()
+  {
+    std::lock_guard<std::mutex> lock(graph_mutex_);
+    list_override_ids_.clear();
+    list_override_fqns_.clear();
+    list_override_enabled_ = false;
+  }
+
+  void set_unload_failure(std::uint64_t unique_id)
+  {
+    std::lock_guard<std::mutex> lock(graph_mutex_);
+    unload_failures_.insert(unique_id);
+  }
+
+  void set_lifecycle_failure(const std::string & node_fqn, bool value)
+  {
+    std::lock_guard<std::mutex> lock(graph_mutex_);
+    if (node_fqn == "/collision_monitor") {
+      collision_lifecycle_failure_ = value;
+    } else if (node_fqn == "/velocity_smoother") {
+      smoother_lifecycle_failure_ = value;
+    }
+  }
+
+  void seed_orphan_components(
+    const std::string & candidate_topic =
+    "/voice_nav_internal/motion_gate/candidate/old")
+  {
+    std::lock_guard<std::mutex> lock(graph_mutex_);
+    loaded_[41U] = "/collision_monitor";
+    loaded_[42U] = "/velocity_smoother";
+    next_id_ = 43U;
+    collision_state_ = lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE;
+    smoother_state_ = lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE;
+    collision_candidate_ = collision_->create_generic_publisher(
+      candidate_topic, "geometry_msgs/msg/TwistStamped", rclcpp::QoS(1));
+  }
+
+  void set_retain_candidate_writer(bool value)
+  {
+    retain_candidate_writer_ = value;
+  }
+
   void set_health_sources(bool scan, bool odom, bool clock)
   {
     publish_scan_ = scan;
@@ -1189,6 +1256,15 @@ private:
         [this, state, fqn](
           const std::shared_ptr<ChangeState::Request> request,
           std::shared_ptr<ChangeState::Response> response) {
+          {
+            std::lock_guard<std::mutex> lock(graph_mutex_);
+            if ((fqn == "/collision_monitor" && collision_lifecycle_failure_) ||
+            (fqn == "/velocity_smoother" && smoother_lifecycle_failure_))
+            {
+              response->success = false;
+              return;
+            }
+          }
           switch (request->transition.id) {
             case lifecycle_msgs::msg::Transition::TRANSITION_CONFIGURE:
               *state = lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE;
@@ -1262,8 +1338,16 @@ private:
     lifecycle_msgs::msg::State::PRIMARY_STATE_UNKNOWN};
   std::chrono::milliseconds activation_delay_{};
   std::chrono::milliseconds load_delay_{};
+  std::chrono::milliseconds list_delay_{};
   std::chrono::milliseconds unload_delay_{};
+  std::unordered_set<std::uint64_t> unload_failures_;
+  std::vector<std::uint64_t> list_override_ids_;
+  std::vector<std::string> list_override_fqns_;
+  bool list_override_enabled_{false};
+  bool collision_lifecycle_failure_{false};
+  bool smoother_lifecycle_failure_{false};
   bool wrong_fqn_{false};
+  bool retain_candidate_writer_{false};
   bool publish_scan_{true};
   bool publish_odom_{true};
   bool publish_clock_{true};
@@ -1415,6 +1499,159 @@ protected:
   bool spinning{false};
   std::thread spin_thread;
 };
+
+TEST_F(MotionConditioningPipelineTest, StartupReconciliationCleansOrphanComponents)
+{
+  graph->seed_orphan_components();
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+
+  const auto prepared = pipeline.prepare();
+
+  ASSERT_TRUE(prepared.ok) << prepared.detail;
+  const auto unload_requests = graph->unload_requests();
+  ASSERT_GE(unload_requests.size(), 2U);
+  EXPECT_EQ(unload_requests[0], 41U);
+  EXPECT_EQ(unload_requests[1], 42U);
+  EXPECT_EQ(graph->loaded_count(), 2U);
+}
+
+TEST_F(MotionConditioningPipelineTest, StartupReconciliationCleanStartDoesNotUnload)
+{
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+
+  const auto prepared = pipeline.prepare();
+
+  ASSERT_TRUE(prepared.ok) << prepared.detail;
+  EXPECT_TRUE(graph->unload_requests().empty());
+}
+
+TEST_F(MotionConditioningPipelineTest, StartupUnknownFqnFailsClosedBeforeGatePrepare)
+{
+  graph->set_list_override({41U}, {"/unrelated_component"});
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+
+  const auto result = pipeline.prepare();
+  const auto calls = authority->calls();
+
+  EXPECT_FALSE(result.ok);
+  EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
+  EXPECT_TRUE(result.zero_proven);
+  EXPECT_TRUE(calls.empty());
+  EXPECT_TRUE(graph->unload_requests().empty());
+}
+
+TEST_F(MotionConditioningPipelineTest, StartupZeroUniqueIdFailsClosedBeforeGatePrepare)
+{
+  graph->set_list_override({0U}, {"/collision_monitor"});
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+
+  const auto result = pipeline.prepare();
+
+  EXPECT_FALSE(result.ok);
+  EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
+  EXPECT_TRUE(result.zero_proven);
+  EXPECT_TRUE(authority->calls().empty());
+  EXPECT_TRUE(graph->unload_requests().empty());
+}
+
+TEST_F(MotionConditioningPipelineTest, StartupDuplicateIdentityFailsClosedBeforeGatePrepare)
+{
+  graph->set_list_override(
+    {41U, 41U}, {"/collision_monitor", "/velocity_smoother"});
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+
+  const auto result = pipeline.prepare();
+
+  EXPECT_FALSE(result.ok);
+  EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
+  EXPECT_TRUE(authority->calls().empty());
+  EXPECT_TRUE(graph->unload_requests().empty());
+}
+
+TEST_F(MotionConditioningPipelineTest, StartupConflictingFqnIdentityFailsClosed)
+{
+  graph->set_list_override(
+    {41U, 42U}, {"/collision_monitor", "/collision_monitor"});
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+
+  const auto result = pipeline.prepare();
+
+  EXPECT_FALSE(result.ok);
+  EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
+  EXPECT_TRUE(authority->calls().empty());
+  EXPECT_TRUE(graph->unload_requests().empty());
+}
+
+TEST_F(MotionConditioningPipelineTest, StartupListNodesTimeoutFailsClosed)
+{
+  graph->set_list_delay(300ms);
+  auto pipeline_config = config();
+  pipeline_config.component_rpc_timeout = 50ms;
+  pipeline_config.startup_reconciliation_timeout = 100ms;
+  MotionConditioningPipeline pipeline(
+    *client, authority, producer, pipeline_config);
+
+  const auto result = pipeline.prepare();
+
+  EXPECT_FALSE(result.ok);
+  EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
+  EXPECT_TRUE(result.zero_proven);
+  EXPECT_TRUE(authority->calls().empty());
+  EXPECT_TRUE(graph->unload_requests().empty());
+}
+
+TEST_F(MotionConditioningPipelineTest, StartupLifecycleFailureFailsClosedBeforeUnload)
+{
+  graph->seed_orphan_components();
+  graph->set_lifecycle_failure("/collision_monitor", true);
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+
+  const auto result = pipeline.prepare();
+
+  EXPECT_FALSE(result.ok);
+  EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
+  EXPECT_TRUE(result.zero_proven);
+  EXPECT_TRUE(authority->calls().empty());
+  EXPECT_TRUE(graph->unload_requests().empty());
+  EXPECT_EQ(graph->loaded_count(), 2U);
+}
+
+TEST_F(MotionConditioningPipelineTest, StartupUnloadFailureFailsClosed)
+{
+  graph->seed_orphan_components();
+  graph->set_unload_failure(41U);
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+
+  const auto result = pipeline.prepare();
+  const auto unload_requests = graph->unload_requests();
+
+  EXPECT_FALSE(result.ok);
+  EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
+  EXPECT_TRUE(result.zero_proven);
+  EXPECT_TRUE(authority->calls().empty());
+  ASSERT_EQ(unload_requests.size(), 1U);
+  EXPECT_EQ(unload_requests.front(), 41U);
+  EXPECT_EQ(graph->loaded_count(), 2U);
+}
+
+TEST_F(MotionConditioningPipelineTest, StartupWriterResidueFailsClosed)
+{
+  graph->seed_orphan_components();
+  graph->set_retain_candidate_writer(true);
+  auto pipeline_config = config();
+  pipeline_config.startup_reconciliation_timeout = 300ms;
+  MotionConditioningPipeline pipeline(
+    *client, authority, producer, pipeline_config);
+
+  const auto result = pipeline.prepare();
+
+  EXPECT_FALSE(result.ok);
+  EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
+  EXPECT_TRUE(result.zero_proven);
+  EXPECT_TRUE(authority->calls().empty());
+  EXPECT_EQ(graph->loaded_count(), 0U);
+  EXPECT_FALSE(graph->unload_requests().empty());
+}
 
 TEST_F(MotionConditioningPipelineTest, GateCandidateAndWriterBindingAreRequired)
 {

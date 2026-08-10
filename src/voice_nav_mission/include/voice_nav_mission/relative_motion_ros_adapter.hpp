@@ -81,6 +81,7 @@ public:
   void tick(SteadyClockPort::TimePoint now) override;
   [[nodiscard]] bool owns_authority_lifecycle() const noexcept override;
   [[nodiscard]] bool zero_proven() const noexcept override;
+  [[nodiscard]] bool safety_faulted() const noexcept override;
 
 private:
   friend class detail::RelativeMotionRosAdapterTestAccess;

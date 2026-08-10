@@ -527,6 +527,12 @@ public:
       lock, std::chrono::seconds(1), [this]() {return prepare_entered_;});
   }
 
+  bool prepare_entered() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return prepare_entered_;
+  }
+
   void release_prepare()
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -616,6 +622,45 @@ protected:
     }
   }
 };
+
+TEST_F(RelativeMotionRosAdapterTest, StartupReconciliationFailureLatchesSafetyFault)
+{
+  auto node = std::make_shared<rclcpp::Node>("relative_motion_adapter_startup");
+  auto authority = std::make_shared<BlockingAuthority>();
+  MotionConditioningConfig conditioning_config;
+  conditioning_config.component_rpc_timeout = 50ms;
+  conditioning_config.startup_reconciliation_timeout = 100ms;
+  auto relay = install_completion_relay(conditioning_config);
+  RelativeMotionRosAdapter adapter(*node, authority, {}, conditioning_config);
+
+  EXPECT_FALSE(adapter.healthy());
+  const auto deadline = std::chrono::steady_clock::now() + 1s;
+  while (!adapter.safety_faulted() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+
+  EXPECT_TRUE(adapter.safety_faulted());
+  EXPECT_FALSE(adapter.healthy());
+  std::atomic<std::size_t> result_count{0U};
+  std::atomic<ChildResultCode> result_code{ChildResultCode::Failed};
+  const MotionToken token{61U, 1U, 1U, 1U};
+  relay->register_delivery([&result_count, &result_code](
+      const MotionToken &, const ChildResult & result) {
+      result_code.store(result.code);
+      result_count.fetch_add(1U);
+    });
+  adapter.start(
+    token,
+    MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::MoveDistance), 0.1F, 0.0F, {}},
+    {}, {});
+
+  ASSERT_TRUE(relay->wait_for_deliveries(1U));
+  EXPECT_EQ(result_code.load(), ChildResultCode::SafetyFault);
+  EXPECT_EQ(result_count.load(), 1U);
+  EXPECT_FALSE(authority->prepare_entered());
+  adapter.shutdown();
+}
 
 TEST_F(
   RelativeMotionRosAdapterTest,
