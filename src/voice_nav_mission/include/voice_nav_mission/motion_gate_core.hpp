@@ -280,6 +280,7 @@ private:
   std::string candidate_topic_;
   WriterGid bound_writer_gid_{};
   bool writer_bound_{false};
+  bool candidate_seen_{false};
   bool candidate_fresh_{false};
   Command selected_{};
   Reason reason_{Reason::None};

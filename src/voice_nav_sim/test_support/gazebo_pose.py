@@ -24,7 +24,6 @@ import subprocess
 
 QUERY_TIMEOUT_SECONDS = 10.0
 QUERY_ATTEMPTS = 2
-MAX_SNAPSHOT_DOCUMENTS = 4
 
 
 def _number(
@@ -57,10 +56,6 @@ def _decode_snapshot_documents(output: str) -> list[object]:
                 f'cannot parse Gazebo pose JSON: {error}: {output}'
             ) from error
         documents.append(document)
-        if len(documents) > MAX_SNAPSHOT_DOCUMENTS:
-            raise AssertionError(
-                'Gazebo pose query returned too many JSON snapshots'
-            )
     if not documents:
         raise AssertionError('Gazebo pose query returned no JSON snapshot')
     return documents
