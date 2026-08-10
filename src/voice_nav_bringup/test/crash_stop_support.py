@@ -51,12 +51,6 @@ from rclpy.qos import (
 from rosgraph_msgs.msg import Clock
 from sensor_msgs.msg import JointState
 from sensor_msgs.msg import LaserScan
-from voice_nav_interfaces.action import ExecuteMission
-from voice_nav_interfaces.msg import MissionState, MissionStep
-from voice_nav_mission.msg import InternalMotionGateState
-from voice_nav_mission.srv import InternalMotionGateControl
-
-
 FINAL_COMMAND_TOPIC = '/diff_drive_controller/cmd_vel'
 LIMITED_COMMAND_TOPIC = '/diff_drive_controller/cmd_vel_out'
 ODOMETRY_TOPIC = '/odom'
@@ -82,6 +76,32 @@ NO_GOAL_WINDOW_NS = 1_000_000_000
 WALL_WATCHDOG_SECONDS = 5.0
 DEPENDENCY_FRESHNESS_NS = 200_000_000
 FINAL_STREAM_QUIESCENCE_NS = 200_000_000
+
+
+@dataclass(frozen=True)
+class WorkspaceInterfaceTypes:
+    """Generated workspace types required only by a running ROS probe."""
+
+    execute_mission: Any
+    mission_state: Any
+    mission_step: Any
+    gate_state: Any
+    gate_control: Any
+
+
+def _load_workspace_interface_types() -> WorkspaceInterfaceTypes:
+    from voice_nav_interfaces.action import ExecuteMission
+    from voice_nav_interfaces.msg import MissionState, MissionStep
+    from voice_nav_mission.msg import InternalMotionGateState
+    from voice_nav_mission.srv import InternalMotionGateControl
+
+    return WorkspaceInterfaceTypes(
+        execute_mission=ExecuteMission,
+        mission_state=MissionState,
+        mission_step=MissionStep,
+        gate_state=InternalMotionGateState,
+        gate_control=InternalMotionGateControl,
+    )
 
 
 def _load_gazebo_shutdown():
@@ -116,9 +136,6 @@ def _load_product_launch():
     module = importlib.util.module_from_spec(specification)
     specification.loader.exec_module(module)
     return module
-
-
-gazebo_shutdown = _load_gazebo_shutdown()
 
 
 def _load_process_identity():
@@ -179,6 +196,7 @@ class RestartRegistry:
 
 def generate_product_test_description(scope: str):
     """Return product launch actions plus exact handles for both nodes."""
+    gazebo_shutdown = _load_gazebo_shutdown()
     partition = gazebo_shutdown.claim_unique_test_partition(scope)
     product_launch = _load_product_launch().generate_launch_description()
     node_actions = {
@@ -362,9 +380,9 @@ def consumer_timeout_result(
     }
 
 
-def gate_zero_proven(message: InternalMotionGateState) -> bool:
+def gate_zero_proven(message: Any) -> bool:
     return (
-        message.state == InternalMotionGateState.INHIBITED
+        message.state == type(message).INHIBITED
         and message.motion_inhibited
         and message.zero_selected
         and message.zero_publish_seq > 0
@@ -376,6 +394,12 @@ class CrashStopProbe:
     """One ROS observation Interface for both public crash-stop scenarios."""
 
     def __init__(self) -> None:
+        interfaces = _load_workspace_interface_types()
+        self._execute_mission_type = interfaces.execute_mission
+        self._mission_state_type = interfaces.mission_state
+        self._mission_step_type = interfaces.mission_step
+        self._gate_state_type = interfaces.gate_state
+        self._gate_control_type = interfaces.gate_control
         self.node = rclpy.create_node(
             'voice_nav_crash_stop_probe',
             parameter_overrides=[Parameter('use_sim_time', value=True)],
@@ -405,7 +429,7 @@ class CrashStopProbe:
         )
         self.subscriptions = [
             self.node.create_subscription(
-                MissionState,
+                interfaces.mission_state,
                 MISSION_STATE_TOPIC,
                 lambda message: self._append(
                     self.mission_states, message
@@ -413,7 +437,7 @@ class CrashStopProbe:
                 state_qos,
             ),
             self.node.create_subscription(
-                InternalMotionGateState,
+                interfaces.gate_state,
                 GATE_STATE_TOPIC,
                 lambda message: self._append(self.gate_states, message),
                 state_qos,
@@ -464,10 +488,10 @@ class CrashStopProbe:
             ),
         ]
         self.action_client = ActionClient(
-            self.node, ExecuteMission, ACTION_NAME
+            self.node, self._execute_mission_type, ACTION_NAME
         )
         self.gate_client = self.node.create_client(
-            InternalMotionGateControl,
+            self._gate_control_type,
             GATE_CONTROL_SERVICE,
         )
         self.candidate_publishers = []
@@ -530,8 +554,8 @@ class CrashStopProbe:
                 ):
                     continue
                 if (
-                    message.availability == MissionState.AVAILABLE
-                    and message.gate_state == MissionState.GATE_INHIBITED
+                    message.availability == self._mission_state_type.AVAILABLE
+                    and message.gate_state == self._mission_state_type.GATE_INHIBITED
                     and message.runtime_instance_id
                     and (
                         previous_runtime_id is None
@@ -568,11 +592,11 @@ class CrashStopProbe:
                 ):
                     continue
                 if (
-                    message.availability == MissionState.FAULTED
+                    message.availability == self._mission_state_type.FAULTED
                     and message.gate_state in (
-                        MissionState.GATE_INHIBITED,
-                        MissionState.GATE_ARMED,
-                        MissionState.GATE_FAULTED,
+                        self._mission_state_type.GATE_INHIBITED,
+                        self._mission_state_type.GATE_ARMED,
+                        self._mission_state_type.GATE_FAULTED,
                     )
                 ):
                     return deepcopy(message)
@@ -620,7 +644,7 @@ class CrashStopProbe:
 
     def send_goal(
         self,
-        state: MissionState,
+        state: Any,
         *,
         source_instance_id: str,
         source_seq: int,
@@ -631,13 +655,13 @@ class CrashStopProbe:
             20.0,
             'Mission Action server',
         )
-        goal = ExecuteMission.Goal()
+        goal = self._execute_mission_type.Goal()
         goal.source_instance_id = source_instance_id
         goal.source_seq = source_seq
         goal.runtime_instance_id = state.runtime_instance_id
         goal.admission_epoch = state.admission_epoch
-        step = MissionStep()
-        step.kind = MissionStep.MOVE_DISTANCE
+        step = self._mission_step_type()
+        step.kind = self._mission_step_type.MOVE_DISTANCE
         step.distance_m = distance_m
         goal.steps.append(step)
         handle = self._wait_future(
@@ -674,7 +698,7 @@ class CrashStopProbe:
             clock_sample = self.latest(self.clock_samples)
             good = (
                 state_sample is not None
-                and state_sample[1].state == InternalMotionGateState.ARMED
+                and state_sample[1].state == self._gate_state_type.ARMED
                 and state_sample[1].authority_live
                 and state_sample[1].candidate_fresh
                 and final_sample is not None
@@ -751,7 +775,7 @@ class CrashStopProbe:
                 )
             state = state_sample[1]
             if not (
-                state.state == InternalMotionGateState.ARMED
+                state.state == self._gate_state_type.ARMED
                 and state.authority_live
                 and state.candidate_fresh
                 and not state.motion_inhibited
@@ -1167,15 +1191,15 @@ class CrashStopProbe:
             f'no publishers on stale topic {topic}',
         )
 
-    def assert_stale_gate_tuple(self, old_state: InternalMotionGateState):
+    def assert_stale_gate_tuple(self, old_state: Any):
         self.wait_until(
             lambda: self.gate_client.wait_for_service(timeout_sec=0.2),
             10.0,
             'new Gate control service',
         )
         before = self.latest(self.gate_states)
-        request = InternalMotionGateControl.Request()
-        request.operation = InternalMotionGateControl.Request.RENEW
+        request = self._gate_control_type.Request()
+        request.operation = self._gate_control_type.Request.RENEW
         request.request_id = secrets.token_hex(16)
         request.gate_instance_id = old_state.gate_instance_id
         request.expected_control_seq = old_state.control_seq
@@ -1186,14 +1210,14 @@ class CrashStopProbe:
             5.0,
             'stale Gate tuple response',
         )
-        if response.code != InternalMotionGateControl.Response.REJECTED:
+        if response.code != self._gate_control_type.Response.REJECTED:
             raise AssertionError(
                 'old Gate tuple was accepted: ' + response.detail
             )
         if response.reason not in (
-            InternalMotionGateControl.Response.STALE_GATE,
-            InternalMotionGateControl.Response.STALE_SEQUENCE,
-            InternalMotionGateControl.Response.STALE_LEASE,
+            self._gate_control_type.Response.STALE_GATE,
+            self._gate_control_type.Response.STALE_SEQUENCE,
+            self._gate_control_type.Response.STALE_LEASE,
         ):
             raise AssertionError(
                 f'old Gate tuple returned unexpected reason={response.reason}'
@@ -1280,8 +1304,8 @@ class CrashStopProbe:
         if sample is None or not sample[1].lease_id:
             return
         message = sample[1]
-        request = InternalMotionGateControl.Request()
-        request.operation = InternalMotionGateControl.Request.INHIBIT
+        request = self._gate_control_type.Request()
+        request.operation = self._gate_control_type.Request.INHIBIT
         request.request_id = secrets.token_hex(16)
         request.gate_instance_id = message.gate_instance_id
         request.expected_control_seq = message.control_seq
@@ -1313,7 +1337,7 @@ class CrashStopProbe:
 
     def diagnostic(self) -> dict[str, Any]:
         def message_summary(message: Any):
-            if isinstance(message, InternalMotionGateState):
+            if isinstance(message, self._gate_state_type):
                 return {
                     'instance': message.gate_instance_id,
                     'state': int(message.state),
@@ -1324,7 +1348,7 @@ class CrashStopProbe:
                     'output_seq': int(message.output_publish_seq),
                     'zero_seq': int(message.zero_publish_seq),
                 }
-            if isinstance(message, MissionState):
+            if isinstance(message, self._mission_state_type):
                 return {
                     'runtime': message.runtime_instance_id,
                     'epoch': int(message.admission_epoch),
@@ -1457,10 +1481,10 @@ class CrashStopProbe:
 
 def assert_action_result(
     status: int,
-    result: ExecuteMission.Result,
+    result: Any,
     expected_code: int,
 ) -> None:
-    if expected_code == ExecuteMission.Result.SUCCEEDED:
+    if expected_code == type(result).SUCCEEDED:
         expected_status = GoalStatus.STATUS_SUCCEEDED
     else:
         expected_status = GoalStatus.STATUS_ABORTED
