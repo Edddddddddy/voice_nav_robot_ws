@@ -16,6 +16,7 @@
 #define VOICE_NAV_MISSION__MOTION_AUTHORITY_ROS_ADAPTER_HPP_
 
 #include <chrono>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -53,6 +54,7 @@ public:
 private:
   GateSnapshot snapshot_{};
   std::unordered_set<std::string> retired_gate_instance_ids_;
+  std::deque<std::string> retired_gate_instance_order_;
 };
 
 }  // namespace detail

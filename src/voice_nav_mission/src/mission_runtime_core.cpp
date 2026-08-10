@@ -545,26 +545,12 @@ void RuntimeCore::observe_gate(const GateSnapshot & snapshot)
   // from the prior generation must not clear the latch and make the same
   // fault rotate the Runtime epoch twice.
   if (gate_fault_handled_) {
-    if (identity_changed && is_healthy && startup_gate_is_ready(snapshot)) {
-      // The old fault latch must not hide a new Gate identity.  Treat its
-      // inhibited zero as a rearm candidate and retry on later control_seq
-      // samples if the adapter is still draining the failed generation.
+    if (identity_changed) {
+      // Preserve the replacement candidate even when its first sample is not
+      // yet healthy.  A later zero proof from that same identity must still
+      // pass through Adapter/Pipeline rearm instead of being mistaken for a
+      // trusted recovery of the failed Gate generation.
       gate_replacement_pending_ = true;
-      gate_fault_snapshot_ = snapshot;
-      GateSnapshot accepted_replacement;
-      if (
-        relative_motion_->rearm_after_gate_replacement(
-          snapshot, &accepted_replacement) &&
-        rotate_epoch())
-      {
-        gate_fault_handled_ = false;
-        gate_fault_snapshot_.reset();
-        gate_replacement_pending_ = false;
-        gate_bound_ = true;
-        set_availability_from_dependencies(true, &accepted_replacement);
-        publish_state();
-      }
-      return;
     }
     if (gate_replacement_pending_) {
       // A replacement Gate can publish its safe zero before the adapter has
@@ -606,10 +592,10 @@ void RuntimeCore::observe_gate(const GateSnapshot & snapshot)
   }
 
   if (identity_changed || (!is_healthy && was_healthy)) {
-    gate_replacement_pending_ = identity_changed &&
-      is_healthy && startup_gate_is_ready(snapshot);
+    gate_replacement_pending_ = identity_changed;
     GateSnapshot accepted_replacement;
-    if (gate_replacement_pending_ &&
+    if (gate_replacement_pending_ && is_healthy &&
+      startup_gate_is_ready(snapshot) &&
       relative_motion_->rearm_after_gate_replacement(
         snapshot, &accepted_replacement) &&
       rotate_epoch())

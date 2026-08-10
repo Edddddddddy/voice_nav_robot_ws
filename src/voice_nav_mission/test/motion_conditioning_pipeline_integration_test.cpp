@@ -127,11 +127,11 @@ TEST(MotionAuthoritySnapshotWatermark, BoundsAndValidatesRetiredIdentities)
   EXPECT_FALSE(watermark.merge(invalid, accepted));
 
   ASSERT_TRUE(watermark.merge(snapshot_for(0U), accepted));
-  for (std::size_t index = 1U; index <= 16U; ++index) {
+  for (std::size_t index = 1U; index <= 32U; ++index) {
     ASSERT_TRUE(watermark.merge(snapshot_for(index), accepted)) << index;
   }
-  EXPECT_FALSE(watermark.merge(snapshot_for(17U), accepted));
-  EXPECT_EQ(watermark.snapshot().gate_instance_id, snapshot_for(16U).gate_instance_id);
+  EXPECT_FALSE(watermark.merge(snapshot_for(31U), accepted));
+  EXPECT_EQ(watermark.snapshot().gate_instance_id, snapshot_for(32U).gate_instance_id);
 }
 
 class SyntheticProducer final : public MotionProducerPort
