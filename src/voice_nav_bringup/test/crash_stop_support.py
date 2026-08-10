@@ -121,6 +121,27 @@ def _load_gazebo_shutdown():
     return module
 
 
+class _LazyGazeboShutdown:
+    """Preserve the launch-test API without resolving package share on import."""
+
+    def __init__(self) -> None:
+        self._module = None
+        self._lock = threading.Lock()
+
+    def __getattr__(self, name: str) -> Any:
+        module = self._module
+        if module is None:
+            with self._lock:
+                module = self._module
+                if module is None:
+                    module = _load_gazebo_shutdown()
+                    self._module = module
+        return getattr(module, name)
+
+
+gazebo_shutdown = _LazyGazeboShutdown()
+
+
 def _load_product_launch():
     launch_path = (
         Path(get_package_share_directory('voice_nav_bringup'))
@@ -196,7 +217,6 @@ class RestartRegistry:
 
 def generate_product_test_description(scope: str):
     """Return product launch actions plus exact handles for both nodes."""
-    gazebo_shutdown = _load_gazebo_shutdown()
     partition = gazebo_shutdown.claim_unique_test_partition(scope)
     product_launch = _load_product_launch().generate_launch_description()
     node_actions = {
