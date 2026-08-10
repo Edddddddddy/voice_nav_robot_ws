@@ -133,14 +133,6 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                 'graph_owner_gid': final_gid,
             }
             pre_kill_observation = self.probe.diagnostic()
-            latest_final_nonzero = self.probe._latest_nonzero(
-                self.probe.final_commands
-            )
-            if latest_final_nonzero is None:
-                raise AssertionError(
-                    'non-zero final command disappeared before kill'
-                )
-            last_nonzero_sim_ns = support._stamp_ns(latest_final_nonzero[1])
             pidfd_kill = {
                 'call_before_monotonic_ns': time.monotonic_ns(),
             }
@@ -151,8 +143,16 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
             finally:
                 pidfd_kill['call_after_monotonic_ns'] = time.monotonic_ns()
             pidfd_kill['ack_monotonic_ns'] = kill_ack_ns
-            post_kill_observation = self.probe.diagnostic()
             proc_info.assertWaitForShutdown(gate, timeout=10.0)
+            post_kill_observation = self.probe.diagnostic()
+            latest_final_nonzero = self.probe._latest_nonzero(
+                self.probe.final_commands
+            )
+            if latest_final_nonzero is None:
+                raise AssertionError(
+                    'non-zero final command disappeared after target shutdown'
+                )
+            last_nonzero_sim_ns = support._stamp_ns(latest_final_nonzero[1])
             consumer_zero = self.probe.wait_consumer_zero(
                 kill_ack_ns,
                 last_nonzero_sim_ns,
