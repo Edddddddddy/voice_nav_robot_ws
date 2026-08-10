@@ -17,6 +17,7 @@
 #include <rmw/qos_profiles.h>
 
 #include <algorithm>
+#include <array>
 #include <future>
 #include <optional>
 #include <string>
@@ -32,7 +33,11 @@ using GateStateMessage = voice_nav_mission::msg::InternalMotionGateState;
 
 constexpr char kGateControlService[] = "/motion_gate/internal/control";
 constexpr char kGateStateTopic[] = "/motion_gate/internal/state";
-constexpr std::size_t kMaximumRetiredGateIdentities = 16U;
+constexpr std::array<std::uint64_t, 4U> kRetiredIdentityHashSeeds{
+  0x9e3779b97f4a7c15ULL,
+  0xbf58476d1ce4e5b9ULL,
+  0x94d049bb133111ebULL,
+  0xd6e8feb86659fd93ULL};
 
 bool valid_gate_instance_id(const std::string & value)
 {
@@ -41,6 +46,21 @@ bool valid_gate_instance_id(const std::string & value)
       return (character >= '0' && character <= '9') ||
              (character >= 'a' && character <= 'f');
     });
+}
+
+std::uint64_t retired_identity_hash(
+  const std::string & value,
+  const std::uint64_t seed) noexcept
+{
+  constexpr std::uint64_t kFnvOffset = 1469598103934665603ULL;
+  constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
+  auto hash = kFnvOffset ^ seed;
+  for (const auto character : value) {
+    hash ^= static_cast<std::uint8_t>(character);
+    hash *= kFnvPrime;
+  }
+  hash ^= hash >> 32U;
+  return hash;
 }
 
 GateState gate_state_from_message(std::uint8_t state)
@@ -59,6 +79,28 @@ GateState gate_state_from_message(std::uint8_t state)
 
 }  // namespace
 
+bool detail::GateSnapshotWatermark::retired_identity_maybe_contains(
+  const std::string & identity) const noexcept
+{
+  return std::all_of(
+    kRetiredIdentityHashSeeds.cbegin(), kRetiredIdentityHashSeeds.cend(),
+    [this, &identity](const auto seed) {
+      const auto index = retired_identity_hash(identity, seed) %
+      kRetiredIdentityBloomBits;
+      return retired_gate_identity_bloom_.test(index);
+    });
+}
+
+void detail::GateSnapshotWatermark::retire_identity(
+  const std::string & identity) noexcept
+{
+  for (const auto seed : kRetiredIdentityHashSeeds) {
+    const auto index = retired_identity_hash(identity, seed) %
+      kRetiredIdentityBloomBits;
+    retired_gate_identity_bloom_.set(index);
+  }
+}
+
 bool detail::GateSnapshotWatermark::merge(
   const GateSnapshot & incoming,
   GateSnapshot & accepted)
@@ -72,15 +114,10 @@ bool detail::GateSnapshotWatermark::merge(
     return true;
   }
   if (incoming.gate_instance_id != snapshot_.gate_instance_id) {
-    if (retired_gate_instance_ids_.count(incoming.gate_instance_id) != 0U) {
+    if (retired_identity_maybe_contains(incoming.gate_instance_id)) {
       return false;
     }
-    if (retired_gate_instance_order_.size() >= kMaximumRetiredGateIdentities) {
-      retired_gate_instance_ids_.erase(retired_gate_instance_order_.front());
-      retired_gate_instance_order_.pop_front();
-    }
-    retired_gate_instance_ids_.insert(snapshot_.gate_instance_id);
-    retired_gate_instance_order_.push_back(snapshot_.gate_instance_id);
+    retire_identity(snapshot_.gate_instance_id);
     snapshot_ = incoming;
     accepted = snapshot_;
     return true;
