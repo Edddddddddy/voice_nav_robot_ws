@@ -1257,6 +1257,47 @@ private:
     return last_result_;
   }
 
+  [[nodiscard]] bool rearm_after_gate_replacement(
+    const GateSnapshot & snapshot) noexcept
+  {
+    if (!gate_snapshot_proves_zero(snapshot)) {
+      return false;
+    }
+    std::unique_lock<std::mutex> teardown_lock(teardown_mutex_);
+    if (
+      destroying_.load() || shutdown_ingress_requested_.load() ||
+      teardown_in_progress_.load() || cleanup_continuation_running_ ||
+      active_start_operations_ != 0U || !cleanup_complete_.load() ||
+      !producer_stop_proven_.load())
+    {
+      return false;
+    }
+    std::lock_guard<std::recursive_mutex> state_lock(mutex_);
+    if (
+      state_ != MotionConditioningState::Failed ||
+      last_result_.failure != MotionConditioningFailure::SafetyFault ||
+      components_loaded_ || !pending_loads_.empty() ||
+      !residual_components_.empty() ||
+      cleanup_blocked_ || cleanup_identity_fault_ || cleanup_failure_ ||
+      activation_in_progress_.load())
+    {
+      return false;
+    }
+    reset_generation(true);
+    collision_stop_ = false;
+    terminal_record_.reset();
+    terminal_records_.clear();
+    teardown_owner_ = TeardownOwner::None;
+    state_ = MotionConditioningState::Stopped;
+    last_result_ = make_result(
+      state_, MotionConditioningFailure::None, true, true, false,
+      {}, {}, "conditioning generation rearmed after Gate replacement");
+    last_result_.zero_proven_at = std::chrono::steady_clock::now();
+    teardown_result_ = last_result_;
+    cleanup_complete_.store(true);
+    return true;
+  }
+
 private:
   using TransactionLease = RuntimeTransactionPlane::Lease;
 
@@ -4245,6 +4286,12 @@ MotionConditioningResult MotionConditioningPipeline::fail(
   std::string detail)
 {
   return impl_->fail(std::move(token), failure, std::move(detail));
+}
+
+bool MotionConditioningPipeline::rearm_after_gate_replacement(
+  const GateSnapshot & snapshot) noexcept
+{
+  return impl_->rearm_after_gate_replacement(snapshot);
 }
 
 MotionConditioningCorrelationToken MotionConditioningPipeline::correlation_token() const

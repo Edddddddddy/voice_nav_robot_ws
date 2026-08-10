@@ -189,6 +189,12 @@ public:
     MotionConditioningFailure failure,
     std::string detail);
 
+  // Releases only a Gate-loss terminal after a replacement Gate has proved a
+  // current inhibited zero.  This is an internal rearm seam; generic
+  // SafetyFault and cleanup-residual terminals remain non-reusable.
+  [[nodiscard]] bool rearm_after_gate_replacement(
+    const GateSnapshot & snapshot) noexcept;
+
   [[nodiscard]] MotionConditioningCorrelationToken correlation_token() const;
 
   [[nodiscard]] MotionConditioningState state() const noexcept;

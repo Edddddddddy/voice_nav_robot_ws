@@ -82,6 +82,8 @@ public:
   [[nodiscard]] bool owns_authority_lifecycle() const noexcept override;
   [[nodiscard]] bool zero_proven() const noexcept override;
   [[nodiscard]] bool safety_faulted() const noexcept override;
+  [[nodiscard]] bool rearm_after_gate_replacement(
+    const GateSnapshot & snapshot) noexcept override;
 
 private:
   friend class detail::RelativeMotionRosAdapterTestAccess;
