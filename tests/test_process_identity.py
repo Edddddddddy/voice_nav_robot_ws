@@ -274,6 +274,37 @@ class ProcessIdentityTest(unittest.TestCase):
                 child.terminate()
                 child.wait(timeout=2)
 
+    def test_identity_change_after_signal_boundary_does_not_kill(self):
+        child, action, event = self.make_child()
+        guard = None
+        try:
+            guard = support.ExactPidfdProcess.from_process_started(
+                action=action,
+                event=event,
+                expected_executable=Path(sys.executable).name,
+                expected_node_name='pidfd_test_child',
+            )
+
+            def invalidate_recorded_identity():
+                guard.snapshot = replace(
+                    guard.snapshot,
+                    starttime_ticks=guard.snapshot.starttime_ticks + 1,
+                )
+
+            with self.assertRaises(support.ProcessIdentityError):
+                guard.kill(
+                    lambda: 1,
+                    before_signal=invalidate_recorded_identity,
+                )
+            self.assertIsNone(child.poll())
+        finally:
+            if guard is not None:
+                guard.snapshot = support.read_process_snapshot(child.pid)
+                guard.close()
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=2)
+
     def test_wrong_executable_is_rejected_before_signal(self):
         child, action, event = self.make_child()
         guard = None

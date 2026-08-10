@@ -674,8 +674,21 @@ class CrashStopProbe:
                 self.limited_commands[-1]
                 if self.limited_commands else None
             )
+            clock_sample = (
+                self.clock_samples[-1] if self.clock_samples else None
+            )
+            previous_clock_sample = (
+                self.clock_samples[-2]
+                if len(self.clock_samples) >= 2
+                else None
+            )
             observed_ns = time.monotonic_ns()
-            samples = (state_sample, final_sample, limited_sample)
+            samples = (
+                state_sample,
+                final_sample,
+                limited_sample,
+                clock_sample,
+            )
             if any(sample is None for sample in samples):
                 raise AssertionError(
                     'motion proof was incomplete at the pidfd signal boundary'
@@ -689,6 +702,9 @@ class CrashStopProbe:
                 and not state.zero_selected
                 and not is_zero(final_sample[1])
                 and not is_zero(limited_sample[1])
+                and clock_sample[1] > 0
+                and previous_clock_sample is not None
+                and clock_sample[1] > previous_clock_sample[1]
             ):
                 raise AssertionError(
                     'target was not armed and moving at the pidfd signal boundary'
@@ -707,6 +723,7 @@ class CrashStopProbe:
                     limited_sample[0],
                     deepcopy(limited_sample[1]),
                 ),
+                'clock': clock_sample,
                 'observed_ns': observed_ns,
             }
 
