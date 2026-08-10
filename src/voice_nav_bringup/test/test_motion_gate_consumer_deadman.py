@@ -144,26 +144,37 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                 'graph_owner_gid': final_gid,
             }
             pre_kill_observation = self.probe.diagnostic()
+            signal_boundary_motion = None
+
+            def capture_signal_boundary_motion():
+                nonlocal signal_boundary_motion
+                signal_boundary_motion = (
+                    self.probe.capture_motion_at_signal_boundary()
+                )
+
             pidfd_kill = {
                 'call_before_monotonic_ns': time.monotonic_ns(),
             }
             try:
                 kill_ack_ns = self.gate_process.kill(
-                    lambda: self.probe.count_fqn('/motion_gate_node')
+                    lambda: self.probe.count_fqn('/motion_gate_node'),
+                    before_signal=capture_signal_boundary_motion,
                 )
             finally:
                 pidfd_kill['call_after_monotonic_ns'] = time.monotonic_ns()
             pidfd_kill['ack_monotonic_ns'] = kill_ack_ns
+            if signal_boundary_motion is None:
+                raise AssertionError(
+                    'pidfd signal boundary did not capture moving proof'
+                )
+            pidfd_kill['signal_boundary_monotonic_ns'] = (
+                signal_boundary_motion['observed_ns']
+            )
             proc_info.assertWaitForShutdown(gate, timeout=10.0)
             post_kill_observation = self.probe.diagnostic()
-            latest_final_nonzero = self.probe._latest_nonzero(
-                self.probe.final_commands
+            last_nonzero_sim_ns = support._stamp_ns(
+                signal_boundary_motion['final'][1]
             )
-            if latest_final_nonzero is None:
-                raise AssertionError(
-                    'non-zero final command disappeared after target shutdown'
-                )
-            last_nonzero_sim_ns = support._stamp_ns(latest_final_nonzero[1])
             consumer_zero = self.probe.wait_consumer_zero(
                 kill_ack_ns,
                 last_nonzero_sim_ns,

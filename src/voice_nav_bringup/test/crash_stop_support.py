@@ -661,6 +661,55 @@ class CrashStopProbe:
             'did not observe 200 ms of armed, moving Runtime/Gate pipeline'
         )
 
+    def capture_motion_at_signal_boundary(self):
+        """Freeze the moving proof immediately before pidfd SIGKILL."""
+        with self.lock:
+            state_sample = (
+                self.gate_states[-1] if self.gate_states else None
+            )
+            final_sample = (
+                self.final_commands[-1] if self.final_commands else None
+            )
+            limited_sample = (
+                self.limited_commands[-1]
+                if self.limited_commands else None
+            )
+            observed_ns = time.monotonic_ns()
+            samples = (state_sample, final_sample, limited_sample)
+            if any(sample is None for sample in samples):
+                raise AssertionError(
+                    'motion proof was incomplete at the pidfd signal boundary'
+                )
+            state = state_sample[1]
+            if not (
+                state.state == InternalMotionGateState.ARMED
+                and state.authority_live
+                and state.candidate_fresh
+                and not state.motion_inhibited
+                and not state.zero_selected
+                and not is_zero(final_sample[1])
+                and not is_zero(limited_sample[1])
+            ):
+                raise AssertionError(
+                    'target was not armed and moving at the pidfd signal boundary'
+                )
+            if any(
+                observed_ns - sample[0] > DEPENDENCY_FRESHNESS_NS
+                for sample in samples
+            ):
+                raise AssertionError(
+                    'motion proof was stale at the pidfd signal boundary'
+                )
+            return {
+                'gate': deepcopy(state),
+                'final': (final_sample[0], deepcopy(final_sample[1])),
+                'limited': (
+                    limited_sample[0],
+                    deepcopy(limited_sample[1]),
+                ),
+                'observed_ns': observed_ns,
+            }
+
     def wait_runtime_zero(
         self,
         kill_ack_ns: int,

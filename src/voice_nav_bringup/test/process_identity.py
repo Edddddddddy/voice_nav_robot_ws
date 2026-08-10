@@ -244,9 +244,16 @@ class ExactPidfdProcess:
             )
         return current
 
-    def kill(self, graph_count: Callable[[], int]) -> int:
-        """Send SIGKILL only through the validated pidfd and return ACK time."""
+    def kill(
+        self,
+        graph_count: Callable[[], int],
+        *,
+        before_signal: Callable[[], None] | None = None,
+    ) -> int:
+        """Validate, check the signal-boundary condition, and use pidfd SIGKILL."""
         self.validate(graph_count)
+        if before_signal is not None:
+            before_signal()
         try:
             signal.pidfd_send_signal(self.pidfd, signal.SIGKILL)
         except (AttributeError, OSError) as error:
