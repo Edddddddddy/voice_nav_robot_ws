@@ -899,7 +899,7 @@ TEST(RuntimeCore, PendingReplacementGateRearmsOnTickWithoutDuplicateSnapshot)
 
   const auto replacement = GateSnapshot{
     kReplacementGateId, 1U, "", GateState::Inhibited,
-    true, true, true, true, "", false, false};
+    true, true, true, false, "", false, false};
   fixture.authority->set_snapshot(replacement);
   fixture.core.observe_gate(replacement);
   ASSERT_EQ(fixture.relative->rearm_after_gate_replacement_count(), 1U);
@@ -907,6 +907,10 @@ TEST(RuntimeCore, PendingReplacementGateRearmsOnTickWithoutDuplicateSnapshot)
   ASSERT_EQ(fixture.core.state().availability, RuntimeAvailability::Faulted);
 
   fixture.relative->set_rearm_after_gate_replacement(true);
+  auto reasserted_replacement = replacement;
+  reasserted_replacement.control_seq++;
+  reasserted_replacement.zero_published = true;
+  fixture.relative->set_rearm_accepted_snapshot(reasserted_replacement);
   fixture.core.on_tick();
 
   EXPECT_EQ(fixture.relative->rearm_after_gate_replacement_count(), 2U);

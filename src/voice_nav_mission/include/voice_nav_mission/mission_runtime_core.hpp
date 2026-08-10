@@ -225,6 +225,34 @@ public:
       return std::nullopt;
     }
   }
+
+  // A replacement Gate can be discovered before its first published zero is
+  // visible through the ROS graph.  This seam authorizes only a fresh
+  // fail-closed INHIBIT reassert; it does not itself prove zero or permit
+  // motion.  accept_rearm_snapshot() remains the strict post-reassert proof.
+  [[nodiscard]] virtual std::optional<GateSnapshot> accept_rearm_candidate(
+    const GateSnapshot & candidate) const noexcept
+  {
+    try {
+      const auto current = snapshot();
+      const auto inhibited_candidate = [](const GateSnapshot & value) {
+          return value.endpoint_available &&
+                 !value.gate_instance_id.empty() &&
+                 value.state == GateState::Inhibited &&
+                 value.motion_inhibited && value.zero_selected;
+        };
+      if (
+        !inhibited_candidate(candidate) || !inhibited_candidate(current) ||
+        current.gate_instance_id != candidate.gate_instance_id ||
+        current.control_seq < candidate.control_seq)
+      {
+        return std::nullopt;
+      }
+      return current;
+    } catch (...) {
+      return std::nullopt;
+    }
+  }
 };
 
 struct MotionToken
@@ -437,6 +465,8 @@ private:
     MissionResult & result);
   [[nodiscard]] bool gate_is_healthy(const GateSnapshot & snapshot) const;
   [[nodiscard]] bool startup_gate_is_ready(const GateSnapshot & snapshot) const;
+  [[nodiscard]] bool replacement_gate_can_reassert(
+    const GateSnapshot & snapshot) const;
   [[nodiscard]] bool zero_is_proven(const GateSnapshot & snapshot) const;
   [[nodiscard]] bool try_rearm_pending_gate_replacement();
   [[nodiscard]] AuthorityOperation make_operation(
@@ -580,7 +610,7 @@ public:
     ++rearm_after_gate_replacement_count_;
     last_rearm_gate_instance_id_ = candidate.gate_instance_id;
     if (rearm_after_gate_replacement_ && accepted_snapshot != nullptr) {
-      *accepted_snapshot = candidate;
+      *accepted_snapshot = rearm_accepted_snapshot_.value_or(candidate);
     }
     return rearm_after_gate_replacement_;
   }
@@ -599,6 +629,10 @@ public:
   void set_rearm_after_gate_replacement(bool value)
   {
     rearm_after_gate_replacement_ = value;
+  }
+  void set_rearm_accepted_snapshot(GateSnapshot snapshot)
+  {
+    rearm_accepted_snapshot_ = std::move(snapshot);
   }
   [[nodiscard]] std::size_t rearm_after_gate_replacement_count() const noexcept
   {
@@ -655,6 +689,7 @@ private:
   bool healthy_{true};
   bool safety_faulted_{false};
   bool rearm_after_gate_replacement_{false};
+  std::optional<GateSnapshot> rearm_accepted_snapshot_;
   std::size_t rearm_after_gate_replacement_count_{0U};
   std::string last_rearm_gate_instance_id_;
   bool cancel_acknowledged_{true};

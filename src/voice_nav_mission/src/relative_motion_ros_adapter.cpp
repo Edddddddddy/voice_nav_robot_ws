@@ -244,6 +244,14 @@ bool gate_snapshot_proves_zero(const GateSnapshot & snapshot) noexcept
          snapshot.zero_published;
 }
 
+bool gate_snapshot_can_reassert_zero(const GateSnapshot & snapshot) noexcept
+{
+  return !snapshot.gate_instance_id.empty() &&
+         snapshot.endpoint_available &&
+         snapshot.state == GateState::Inhibited &&
+         snapshot.motion_inhibited && snapshot.zero_selected;
+}
+
 bool conditioning_failure_is_safety_terminal(
   const MotionConditioningFailure failure) noexcept
 {
@@ -749,11 +757,14 @@ public:
     GateSnapshot * accepted_snapshot) noexcept
   {
     try {
-      if (!gate_snapshot_proves_zero(snapshot)) {
+      if (!gate_snapshot_can_reassert_zero(snapshot)) {
         return false;
       }
-      const auto accepted = authority_->accept_rearm_snapshot(snapshot);
-      if (!accepted.has_value() || !gate_snapshot_proves_zero(*accepted)) {
+      const auto accepted = authority_->accept_rearm_candidate(snapshot);
+      if (
+        !accepted.has_value() ||
+        !gate_snapshot_can_reassert_zero(*accepted))
+      {
         return false;
       }
       std::lock_guard<std::mutex> lock(mutex_);
@@ -768,7 +779,10 @@ public:
         return false;
       }
       GateSnapshot reasserted;
-      if (!conditioning_->rearm_after_gate_replacement(*accepted, &reasserted)) {
+      if (
+        !conditioning_->rearm_after_gate_replacement(*accepted, &reasserted) ||
+        !gate_snapshot_proves_zero(reasserted))
+      {
         return false;
       }
       sticky_admission_fault_ = false;
