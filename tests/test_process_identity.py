@@ -1,3 +1,17 @@
+# Copyright 2026 Edddddddddy
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Tests for the exact pidfd process-identity Interface."""
 
 from __future__ import annotations
@@ -10,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from launch.events.process import ProcessStarted
 
@@ -191,6 +206,72 @@ class ProcessIdentityTest(unittest.TestCase):
             if guard is not None:
                 guard.close()
             if child.poll() is None:
+                child.wait(timeout=2)
+
+    def test_signal_boundary_precondition_runs_after_identity_validation(self):
+        child, action, event = self.make_child()
+        guard = None
+        calls = []
+        original_pidfd_send_signal = signal.pidfd_send_signal
+
+        def traced_pidfd_send_signal(pidfd, sig):
+            if sig == signal.SIGKILL:
+                calls.append('sigkill')
+            return original_pidfd_send_signal(pidfd, sig)
+
+        try:
+            guard = support.ExactPidfdProcess.from_process_started(
+                action=action,
+                event=event,
+                expected_executable=Path(sys.executable).name,
+                expected_node_name='pidfd_test_child',
+            )
+            with mock.patch.object(
+                support.signal,
+                'pidfd_send_signal',
+                side_effect=traced_pidfd_send_signal,
+            ):
+                guard.kill(
+                    lambda: calls.append('graph') or 1,
+                    before_signal=lambda: calls.append('precondition'),
+                )
+            self.assertEqual(calls, ['graph', 'precondition', 'sigkill'])
+            self.assertNotEqual(child.wait(timeout=2), 0)
+        finally:
+            if guard is not None:
+                guard.close()
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=2)
+
+    def test_failed_signal_boundary_precondition_does_not_kill(self):
+        child, action, event = self.make_child()
+        guard = None
+        try:
+            guard = support.ExactPidfdProcess.from_process_started(
+                action=action,
+                event=event,
+                expected_executable=Path(sys.executable).name,
+                expected_node_name='pidfd_test_child',
+            )
+
+            def reject_signal_boundary():
+                raise AssertionError('target stopped moving before SIGKILL')
+
+            with self.assertRaisesRegex(
+                AssertionError,
+                'target stopped moving before SIGKILL',
+            ):
+                guard.kill(
+                    lambda: 1,
+                    before_signal=reject_signal_boundary,
+                )
+            self.assertIsNone(child.poll())
+        finally:
+            if guard is not None:
+                guard.close()
+            if child.poll() is None:
+                child.terminate()
                 child.wait(timeout=2)
 
     def test_wrong_executable_is_rejected_before_signal(self):
