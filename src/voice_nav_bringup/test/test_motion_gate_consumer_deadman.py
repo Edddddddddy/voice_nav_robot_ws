@@ -146,19 +146,22 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
             pre_kill_observation = self.probe.diagnostic()
             signal_boundary_motion = None
 
-            def capture_signal_boundary_motion():
+            def validate_graph_and_capture_signal_boundary():
                 nonlocal signal_boundary_motion
+                graph_count = self.probe.count_fqn('/motion_gate_node')
+                if graph_count != 1:
+                    return graph_count
                 signal_boundary_motion = (
                     self.probe.capture_motion_at_signal_boundary()
                 )
+                return graph_count
 
             pidfd_kill = {
                 'call_before_monotonic_ns': time.monotonic_ns(),
             }
             try:
                 kill_ack_ns = self.gate_process.kill(
-                    lambda: self.probe.count_fqn('/motion_gate_node'),
-                    before_signal=capture_signal_boundary_motion,
+                    validate_graph_and_capture_signal_boundary,
                 )
             finally:
                 pidfd_kill['call_after_monotonic_ns'] = time.monotonic_ns()

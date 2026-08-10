@@ -27,9 +27,6 @@ from typing import Callable, Iterable
 from launch.events.process import ProcessStarted
 
 
-SIGNAL_BOUNDARY_CALLBACK_DEADLINE_NS = 50_000_000
-
-
 class ProcessIdentityError(RuntimeError):
     """The launch process no longer matches its recorded identity."""
 
@@ -255,22 +252,10 @@ class ExactPidfdProcess:
     def kill(
         self,
         graph_count: Callable[[], int],
-        *,
-        before_signal: Callable[[], None] | None = None,
     ) -> int:
-        """Validate, check the signal-boundary condition, and use pidfd SIGKILL."""
+        """Validate graph-boundary proof and process identity, then SIGKILL."""
         self.validate(graph_count)
-        if before_signal is not None:
-            callback_started_ns = time.monotonic_ns()
-            before_signal()
-            if (
-                time.monotonic_ns() - callback_started_ns
-                > SIGNAL_BOUNDARY_CALLBACK_DEADLINE_NS
-            ):
-                raise ProcessIdentityError(
-                    'pidfd signal-boundary callback exceeded its deadline'
-                )
-            self._validate_process_identity()
+        self._validate_process_identity()
         try:
             signal.pidfd_send_signal(self.pidfd, signal.SIGKILL)
         except (AttributeError, OSError) as error:
