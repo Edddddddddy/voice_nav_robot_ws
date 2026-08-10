@@ -208,7 +208,9 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                 replay_start_ns
             )
 
-            recovered_runtime = self.probe.wait_runtime_ready()
+            recovered_runtime = self.probe.wait_runtime_ready(
+                after_monotonic_ns=new_gate_zero[0],
+            )
             if (
                 recovered_runtime.runtime_instance_id
                 != old_runtime.runtime_instance_id
