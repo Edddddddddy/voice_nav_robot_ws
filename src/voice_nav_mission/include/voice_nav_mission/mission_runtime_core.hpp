@@ -576,6 +576,8 @@ public:
     const GateSnapshot & candidate,
     GateSnapshot * accepted_snapshot = nullptr) noexcept override
   {
+    ++rearm_after_gate_replacement_count_;
+    last_rearm_gate_instance_id_ = candidate.gate_instance_id;
     if (rearm_after_gate_replacement_ && accepted_snapshot != nullptr) {
       *accepted_snapshot = candidate;
     }
@@ -596,6 +598,14 @@ public:
   void set_rearm_after_gate_replacement(bool value)
   {
     rearm_after_gate_replacement_ = value;
+  }
+  [[nodiscard]] std::size_t rearm_after_gate_replacement_count() const noexcept
+  {
+    return rearm_after_gate_replacement_count_;
+  }
+  [[nodiscard]] const std::string & last_rearm_gate_instance_id() const noexcept
+  {
+    return last_rearm_gate_instance_id_;
   }
   void set_cancel_acknowledged(bool value) {cancel_acknowledged_ = value;}
   void set_start_completion(bool value) {start_completion_ = value;}
@@ -644,6 +654,8 @@ private:
   bool healthy_{true};
   bool safety_faulted_{false};
   bool rearm_after_gate_replacement_{false};
+  std::size_t rearm_after_gate_replacement_count_{0U};
+  std::string last_rearm_gate_instance_id_;
   bool cancel_acknowledged_{true};
   bool start_completion_{false};
   std::string next_start_failure_;

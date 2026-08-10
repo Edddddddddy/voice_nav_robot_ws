@@ -828,6 +828,54 @@ TEST(RuntimeCore, ReplacementGateRearmAdvancesNodeOwnedAdmissionFence)
   EXPECT_TRUE(core.usable());
 }
 
+TEST(RuntimeCore, ReplacementGateCanBecomeReadyAfterUnavailableDiscovery)
+{
+  Fixture fixture;
+  ASSERT_TRUE(fixture.core.admit(goal(1U)).accepted);
+
+  const auto unavailable_replacement = GateSnapshot{
+    kReplacementGateId, 1U, "", GateState::Faulted, false,
+    true, true, false, "", false, false};
+  fixture.core.observe_gate(unavailable_replacement);
+  ASSERT_EQ(fixture.core.state().admission_epoch, 2U);
+  ASSERT_EQ(fixture.core.state().availability, RuntimeAvailability::Faulted);
+  ASSERT_EQ(fixture.relative->rearm_after_gate_replacement_count(), 0U);
+
+  fixture.relative->set_rearm_after_gate_replacement(true);
+  const auto ready_replacement = GateSnapshot{
+    kReplacementGateId, 2U, "", GateState::Inhibited, true,
+    true, true, true, "", false, false};
+  fixture.core.observe_gate(ready_replacement);
+
+  EXPECT_EQ(fixture.relative->rearm_after_gate_replacement_count(), 1U);
+  EXPECT_EQ(
+    fixture.relative->last_rearm_gate_instance_id(), kReplacementGateId);
+  EXPECT_EQ(fixture.core.state().admission_epoch, 3U);
+  EXPECT_EQ(fixture.core.state().availability, RuntimeAvailability::Available);
+}
+
+TEST(RuntimeCore, NewerReplacementSupersedesUnavailableReplacementCandidate)
+{
+  Fixture fixture;
+  ASSERT_TRUE(fixture.core.admit(goal(1U)).accepted);
+
+  fixture.core.observe_gate(GateSnapshot{
+        kReplacementGateId, 1U, "", GateState::Faulted, false,
+        true, true, false, "", false, false});
+  ASSERT_EQ(fixture.core.state().admission_epoch, 2U);
+
+  fixture.relative->set_rearm_after_gate_replacement(true);
+  const auto newer_replacement = GateSnapshot{
+    kOtherGateId, 1U, "", GateState::Inhibited, true,
+    true, true, true, "", false, false};
+  fixture.core.observe_gate(newer_replacement);
+
+  EXPECT_EQ(fixture.relative->rearm_after_gate_replacement_count(), 1U);
+  EXPECT_EQ(fixture.relative->last_rearm_gate_instance_id(), kOtherGateId);
+  EXPECT_EQ(fixture.core.state().admission_epoch, 3U);
+  EXPECT_EQ(fixture.core.state().availability, RuntimeAvailability::Available);
+}
+
 TEST(RuntimeCore, ZeroProofFailureStillCancelsAndReturnsSafetyFault)
 {
   Fixture fixture;
