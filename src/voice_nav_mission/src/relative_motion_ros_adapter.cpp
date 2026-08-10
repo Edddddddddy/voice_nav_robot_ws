@@ -818,6 +818,15 @@ public:
           startup_state_ == StartupState::Pending ||
           startup_state_ == StartupState::Running ||
           transaction_kind_ == TransactionKind::StartupReconcile;
+        const bool startup_teardown_is_terminal =
+          startup_close_requested_ && startup_close_teardown_terminal_;
+        const bool idle_teardown_is_safe =
+          transaction_kind_ == TransactionKind::Idle &&
+          !emergency_stop_in_progress_ && teardown_complete_ &&
+          teardown_safe_ && zero_proven_;
+        const bool idle_teardown_is_pending =
+          transaction_kind_ == TransactionKind::Idle &&
+          !emergency_stop_in_progress_;
         if (startup_in_flight) {
           startup_close_requested_ = true;
           if (startup_close_deadline_ == TimePoint{} ||
@@ -829,18 +838,11 @@ public:
           teardown_complete_ = false;
           teardown_safe_ = false;
           cancel_requested_.store(true);
-        } else if (startup_close_requested_ &&
-          startup_close_teardown_terminal_)
-        {
+        } else if (startup_teardown_is_terminal) {
           return teardown_safe_;
-        } else if (transaction_kind_ == TransactionKind::Idle &&
-          !emergency_stop_in_progress_ && teardown_complete_ &&
-          teardown_safe_ && zero_proven_)
-        {
+        } else if (idle_teardown_is_safe) {
           return true;
-        } else if (transaction_kind_ == TransactionKind::Idle &&
-          !emergency_stop_in_progress_)
-        {
+        } else if (idle_teardown_is_pending) {
           zero_proven_ = false;
           teardown_complete_ = false;
           teardown_safe_ = false;
