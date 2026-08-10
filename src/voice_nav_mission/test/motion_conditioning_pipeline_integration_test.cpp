@@ -324,6 +324,38 @@ private:
   std::size_t count_{0U};
 };
 
+class BlockingLatch final
+{
+public:
+  void enter()
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    entered_ = true;
+    condition_.notify_all();
+    condition_.wait(lock, [this]() {return released_;});
+  }
+
+  [[nodiscard]] bool wait_for_entry(
+    const std::chrono::steady_clock::duration timeout = 3s)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, timeout, [this]() {return entered_;});
+  }
+
+  void release()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    released_ = true;
+    condition_.notify_all();
+  }
+
+private:
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  bool entered_{false};
+  bool released_{false};
+};
+
 class TerminalProbe final
 {
 public:
@@ -991,6 +1023,117 @@ TEST(
   EXPECT_EQ(raw_output.value(), raw_at_safety_fault);
   EXPECT_EQ(renew_callbacks.value(), renew_at_safety_fault);
   plane->shutdown();
+}
+
+TEST(
+  MotionConditioningPipelineIntegration,
+  RenewEndpointLossRetainsReplacementRearmAcrossCompletionRejection)
+{
+  RclcppGuard rclcpp_guard;
+  rclcpp::NodeOptions gate_options;
+  gate_options.append_parameter_override("use_sim_time", true);
+  gate_options.append_parameter_override("prepare_timeout_ms", 6000);
+  gate_options.append_parameter_override("writer_graph_timeout_ms", 1000);
+  gate_options.append_parameter_override(
+    "expected_candidate_writer_fqn", "/collision_monitor");
+
+  auto executor = std::make_shared<rclcpp::executors::MultiThreadedExecutor>(
+    rclcpp::ExecutorOptions{}, 16U);
+  auto gate = std::make_shared<MotionGateNode>(gate_options);
+  auto container = std::make_shared<rclcpp_components::ComponentManager>(
+    executor, "motion_conditioning_container",
+    rclcpp::NodeOptions().use_intra_process_comms(false));
+  auto graph = std::make_shared<ConditioningGraphNode>();
+  auto controller = std::make_shared<ControllerObservationNode>();
+  auto pipeline_node = std::make_shared<rclcpp::Node>(
+    "production_adapter_renew_endpoint_loss_test",
+    rclcpp::NodeOptions().append_parameter_override("use_sim_time", true));
+
+  CountLatch gate_updates;
+  CountLatch renew_callbacks;
+  BlockingLatch completion_barrier;
+  MotionConditioningConfig conditioning_config;
+  conditioning_config.component_rpc_timeout = 2s;
+  conditioning_config.writer_graph_timeout = 1s;
+  conditioning_config.prepare_open_deadline = 4s;
+  conditioning_config.stop_barrier = 250ms;
+  conditioning_config.before_renew_callback = [&renew_callbacks]() {
+      renew_callbacks.observe();
+    };
+  conditioning_config.before_adapter_completion_publish = [&completion_barrier]() {
+      completion_barrier.enter();
+    };
+  conditioning_config.completion_relay = [](
+    RelativeMotionCompletionRecordPtr) {return false;};
+
+  auto authority = std::make_shared<RosMotionAuthorityPort>(
+    *pipeline_node, 100ms, 250ms,
+    [&gate_updates](const GateSnapshot &) {gate_updates.observe();});
+  RelativeMotionRosAdapter adapter(
+    *pipeline_node, authority, RelativeMotionPolicy{}, conditioning_config);
+
+  executor->add_node(gate);
+  executor->add_node(container);
+  executor->add_node(graph);
+  executor->add_node(controller);
+  executor->add_node(pipeline_node);
+  SpinGuard spin_guard(executor);
+
+  ASSERT_TRUE(gate_updates.wait_for_at_least(1U));
+  ASSERT_TRUE(wait_for([&adapter]() {return adapter.healthy();}, 5s));
+
+  const MotionToken token{91U, 7U, 3U, 1U};
+  adapter.start(
+    token,
+    MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::MoveDistance),
+        0.5F, 0.0F, {}},
+    {}, {});
+  ASSERT_TRUE(renew_callbacks.wait_for_at_least(2U, 5s));
+  const auto old_gate_identity = authority->snapshot().gate_instance_id;
+  ASSERT_FALSE(old_gate_identity.empty());
+
+  executor->remove_node(gate);
+  gate.reset();
+  if (!completion_barrier.wait_for_entry(5s)) {
+    completion_barrier.release();
+    FAIL() << "old Gate-loss terminal did not reach completion publication";
+  }
+
+  auto replacement_gate = std::make_shared<MotionGateNode>(gate_options);
+  executor->add_node(replacement_gate);
+  GateSnapshot replacement_snapshot;
+  const bool replacement_ready = wait_for(
+    [&authority, &old_gate_identity, &replacement_snapshot]() {
+      replacement_snapshot = authority->snapshot();
+      return replacement_snapshot.gate_instance_id != old_gate_identity &&
+             replacement_snapshot.state == GateState::Inhibited &&
+             replacement_snapshot.motion_inhibited &&
+             replacement_snapshot.zero_selected &&
+             replacement_snapshot.zero_published;
+      },
+      5s);
+  if (!replacement_ready) {
+    completion_barrier.release();
+    FAIL() << "replacement Gate did not publish inhibited zero";
+  }
+
+  GateSnapshot accepted_snapshot;
+  EXPECT_FALSE(adapter.rearm_after_gate_replacement(
+    replacement_snapshot, &accepted_snapshot));
+
+  completion_barrier.release();
+  ASSERT_TRUE(wait_for([&adapter]() {return adapter.safety_faulted();}, 2s));
+  const bool rearmed = wait_for(
+    [&adapter, &authority, &accepted_snapshot]() {
+      return adapter.rearm_after_gate_replacement(
+          authority->snapshot(), &accepted_snapshot);
+      },
+      5s);
+  EXPECT_TRUE(rearmed);
+  EXPECT_FALSE(adapter.safety_faulted());
+  EXPECT_TRUE(adapter.healthy());
+  adapter.shutdown();
 }
 
 TEST(

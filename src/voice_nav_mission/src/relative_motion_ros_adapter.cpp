@@ -1875,6 +1875,9 @@ private:
       }
     }
     if (deliver_result && completion) {
+      if (conditioning_config_.before_adapter_completion_publish) {
+        conditioning_config_.before_adapter_completion_publish();
+      }
       publish_completion(std::move(completion));
     }
     const bool safe = zero && (!mission_active || stationary) &&

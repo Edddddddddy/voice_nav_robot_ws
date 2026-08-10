@@ -98,7 +98,7 @@ private:
     std::chrono::steady_clock::time_point overall_deadline);
   [[nodiscard]] AuthorityResult unavailable(
     std::string detail,
-    bool retryable) const;
+    bool retryable);
 
   rclcpp::Node & node_;
   std::chrono::milliseconds control_response_deadline_;
