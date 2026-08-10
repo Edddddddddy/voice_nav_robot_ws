@@ -857,6 +857,35 @@ TEST(MotionGateCore, CandidateSamplesNeverRenewAuthority)
   EXPECT_EQ(context.gate.snapshot().control_seq, 3U);
 }
 
+TEST(MotionGateCore, AwaitingFirstCandidateSurvivesAuthorityRenew)
+{
+  auto context = make_armed_gate();
+
+  auto renew = lease_request(
+    Operation::Renew, 3U, context.gate.snapshot());
+  ASSERT_EQ(
+    context.gate.renew(renew, at(140ms)).code,
+    ResultCode::Applied);
+
+  EXPECT_TRUE(context.gate.tick(at(249ms)).is_zero());
+  EXPECT_EQ(context.gate.snapshot().state, State::Armed);
+  EXPECT_TRUE(context.gate.snapshot().authority_live);
+  EXPECT_FALSE(context.gate.snapshot().candidate_fresh);
+
+  renew = lease_request(
+    Operation::Renew, 4U, context.gate.snapshot());
+  ASSERT_EQ(
+    context.gate.renew(renew, at(280ms)).code,
+    ResultCode::Applied);
+
+  EXPECT_TRUE(context.gate.tick(at(429ms)).is_zero());
+  EXPECT_EQ(context.gate.snapshot().state, State::Armed);
+  EXPECT_FALSE(context.gate.snapshot().candidate_fresh);
+  EXPECT_TRUE(context.gate.tick(at(430ms)).is_zero());
+  EXPECT_EQ(context.gate.snapshot().state, State::Inhibited);
+  EXPECT_EQ(context.gate.snapshot().reason, Reason::CandidateExpired);
+}
+
 TEST(MotionGateCore, CandidateFreshnessExpiresExactlyAtDeadline)
 {
   auto context = make_armed_gate();

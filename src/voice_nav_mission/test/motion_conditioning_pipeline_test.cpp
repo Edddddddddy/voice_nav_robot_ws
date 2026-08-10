@@ -1977,6 +1977,33 @@ TEST_F(MotionConditioningPipelineTest, LeaseLossDuringActivationNeverStartsProdu
 
 TEST_F(
   MotionConditioningPipelineTest,
+  ActivationRenewsBetweenLifecycleTransitions)
+{
+  auto health_ready = std::make_shared<CallbackCounter>();
+  auto pipeline_config = config();
+  pipeline_config.renew_period = 10s;
+  pipeline_config.after_health_callback = [health_ready]() {
+      (*health_ready)();
+    };
+  MotionConditioningPipeline pipeline(
+    *client, authority, producer, pipeline_config);
+  ASSERT_TRUE(pipeline.prepare().ok);
+  health_ready->expect(4U);
+  graph->publish_health_once();
+  ASSERT_TRUE(health_ready->wait_for_target());
+
+  const auto result = pipeline.start();
+
+  ASSERT_TRUE(result.ok) << result.detail;
+  const auto calls = authority->calls();
+  EXPECT_EQ(
+    std::count(
+      calls.cbegin(), calls.cend(),
+      AuthorityOperationKind::Renew), 3);
+}
+
+TEST_F(
+  MotionConditioningPipelineTest,
   RenewTimerWaitsForArmedActivationCommitAcrossPrepareAndOpen)
 {
   auto renew_mutex = std::make_shared<std::mutex>();

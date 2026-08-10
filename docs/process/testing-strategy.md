@@ -212,7 +212,10 @@ process death or pause recovery:
 
 - Manual-clock Core tables cover the exact 250 ms authority and 150 ms
   candidate-freshness boundaries; a 20 ms wall output tick continuously
-  selects zero while inhibited.
+  selects zero while inhibited. They also prove that activation RENEW may
+  restart the bounded first-candidate window only before the first accepted
+  sample, that later RENEW cannot hide a stale producer, and that candidate
+  samples never renew Runtime authority.
 - Every `PREPARE`/`OPEN`/`RENEW`/`INHIBIT` request uses the Gate instance and
   one global compare-and-swap `control_seq`; operations after `PREPARE` also
   match the Gate-generated current lease. A late old-lease `INHIBIT` cannot

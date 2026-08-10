@@ -93,7 +93,10 @@ Velocity commands, joint state, odometry, and TF remain in ROS 2 control.
 - Candidate freshness is a second, independent steady-clock deadline. A
   non-zero output requires both live Runtime authority and a fresh candidate
   from the currently bound data plane. Freshness expires at **150 ms** of
-  MotionGate steady time.
+  MotionGate steady time. Before the first candidate of a newly opened lease,
+  a successful activation RENEW restarts only this bounded first-sample
+  window; once any candidate is accepted, RENEW never extends candidate
+  freshness. Candidate samples never extend the independent authority lease.
 - Finite `linear.x` and `angular.z` values outside trusted YAML bounds are
   clamped to those bounds. NaN, Inf, a non-zero unsupported axis, stale input,
   or a sample from an unbound writer/topic generation retires the lease and
@@ -238,7 +241,8 @@ revoke old authority, inhibit Gate, and select/publish zero
   -> graph snapshot #3 requires the same writer GID and healthy controller;
      mismatch faults the Gate and selects zero
   -> only now complete OPEN with a 250 ms Runtime authority lease
-  -> activate Collision Monitor, then smoother under the admitted generation
+  -> RENEW while still selecting zero; activate Collision Monitor; RENEW;
+     activate the smoother; then RENEW once more under the admitted generation
   -> start the new producer last
 ```
 
