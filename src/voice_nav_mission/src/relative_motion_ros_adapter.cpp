@@ -1899,10 +1899,13 @@ private:
     if (!safe) {
       RCLCPP_ERROR(
         node_.get_logger(),
-        "Relative motion teardown failed: zero=%d stationary=%d conditioning_failure=%u detail=%s",
+        "Relative motion teardown failed: zero=%d stationary=%d conditioning_failure=%u "
+        "conditioning_detail=%s gate_loss_instance_id=%s detail=%s",
         zero ? 1 : 0,
         stationary ? 1 : 0,
         static_cast<unsigned int>(conditioning_result.failure),
+        conditioning_result.detail.c_str(),
+        conditioning_result.gate_loss_instance_id.c_str(),
         final_detail.c_str());
     }
     return safe;
