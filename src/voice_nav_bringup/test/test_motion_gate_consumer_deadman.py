@@ -223,13 +223,6 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
             no_goal = self.probe.assert_no_goal_zero_window(
                 new_gate_zero[0]
             )
-            stale_gate = self.probe.assert_stale_gate_tuple(old_gate)
-            replay_start_ns = time.monotonic_ns()
-            self.probe.publish_old_candidate(old_gate.candidate_topic)
-            replay_window = self.probe.assert_no_goal_zero_window(
-                replay_start_ns
-            )
-
             recovered_runtime = self.probe.wait_runtime_ready(
                 after_monotonic_ns=new_gate_zero[0],
             )
@@ -244,6 +237,13 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                 raise AssertionError(
                     'Gate restart did not rotate the Runtime admission epoch'
                 )
+
+            stale_gate = self.probe.assert_stale_gate_tuple(old_gate)
+            replay_start_ns = time.monotonic_ns()
+            self.probe.publish_old_candidate(old_gate.candidate_topic)
+            replay_window = self.probe.assert_no_goal_zero_window(
+                replay_start_ns
+            )
             recovery_goal = self.probe.send_goal(
                 recovered_runtime,
                 source_instance_id='gate-crash-recovery',
