@@ -134,6 +134,7 @@ MotionConditioningResult make_result(
     std::move(candidate_topic),
     std::move(detail),
     {},
+    {},
     {}};
 }
 
@@ -1302,10 +1303,18 @@ private:
           return false;
         }
         std::lock_guard<std::recursive_mutex> state_lock(mutex_);
+        const auto failed_gate_instance_id =
+          last_result_.failure == MotionConditioningFailure::GateLoss ?
+          last_result_.gate_loss_instance_id :
+          last_result_.gate_loss_candidate_instance_id;
+        const bool recoverable_terminal =
+          (last_result_.failure == MotionConditioningFailure::GateLoss &&
+          !last_result_.gate_loss_instance_id.empty()) ||
+          (last_result_.failure == MotionConditioningFailure::SafetyFault &&
+          !last_result_.gate_loss_candidate_instance_id.empty());
         return state_ == MotionConditioningState::Failed &&
-               last_result_.failure == MotionConditioningFailure::GateLoss &&
-               !last_result_.gate_loss_instance_id.empty() &&
-               snapshot.gate_instance_id != last_result_.gate_loss_instance_id &&
+               recoverable_terminal &&
+               snapshot.gate_instance_id != failed_gate_instance_id &&
                !components_loaded_ && pending_loads_.empty() &&
                residual_components_.empty() && !cleanup_blocked_ &&
                !cleanup_identity_fault_ && !cleanup_failure_ &&
@@ -1887,7 +1896,8 @@ private:
     const MotionConditioningCorrelationToken & token,
     MotionConditioningFailure failure,
     std::string detail,
-    const std::string & expected_gate_instance_id = {})
+    const std::string & expected_gate_instance_id = {},
+    bool gate_loss_candidate = false)
   {
     {
       std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -1914,7 +1924,8 @@ private:
     MotionConditioningResult result;
     try {
       result = fail_owned(
-        failure, std::move(detail), false, expected_gate_instance_id);
+        failure, std::move(detail), false, expected_gate_instance_id,
+        gate_loss_candidate);
     } catch (...) {
       std::lock_guard<std::recursive_mutex> lock(mutex_);
       state_ = MotionConditioningState::Failed;
@@ -2130,7 +2141,8 @@ private:
     MotionConditioningFailure failure,
     std::string detail,
     bool wait_for_callbacks,
-    const std::string & expected_gate_instance_id = {})
+    const std::string & expected_gate_instance_id = {},
+    bool gate_loss_candidate = false)
   {
     // A failed generation cannot keep renewing or producing output while its
     // immutable zero/terminal cleanup is in flight.  Shared health/collision
@@ -2197,6 +2209,9 @@ private:
     const bool typed_gate_loss =
       requested_gate_loss && producer_stopped && !zero_proven &&
       !cleanup_residual && gate_identity_lost(expected_gate_instance_id);
+    const bool recoverable_transport_candidate =
+      gate_loss_candidate && !expected_gate_instance_id.empty() &&
+      producer_stopped && !zero_proven && !cleanup_residual;
     if (!zero_proven && !typed_gate_loss) {
       failure = MotionConditioningFailure::SafetyFault;
       detail += "; Gate zero proof was unavailable";
@@ -2213,6 +2228,8 @@ private:
     result.zero_proven_at = zero_proven_at;
     if (typed_gate_loss) {
       result.gate_loss_instance_id = expected_gate_instance_id;
+    } else if (recoverable_transport_candidate) {
+      result.gate_loss_candidate_instance_id = expected_gate_instance_id;
     }
     return remember(std::move(result));
   }
@@ -4005,13 +4022,17 @@ private:
             result.snapshot.gate_instance_id != renew_operation.gate_instance_id;
           const bool gate_identity_lost =
             !result.snapshot.endpoint_available || replacement_identity_observed;
+          const bool gate_loss_candidate =
+            result.transport_unavailable &&
+            !renew_operation.gate_instance_id.empty();
           fail_from_renew_callback(
             callback_token,
             gate_identity_lost ? MotionConditioningFailure::GateLoss :
             MotionConditioningFailure::SafetyFault,
             "MotionGate RENEW failed closed",
-            gate_identity_lost ? renew_operation.gate_instance_id :
-            std::string{});
+            (gate_identity_lost || gate_loss_candidate) ?
+            renew_operation.gate_instance_id : std::string{},
+            gate_loss_candidate);
           renew_lease->reject();
         }
         return;

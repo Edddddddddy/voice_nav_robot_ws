@@ -580,6 +580,18 @@ public:
     if (throw_on_renew_) {
       throw std::runtime_error("scripted MotionGate RENEW failure");
     }
+    if (renew_transport_unavailable_) {
+      auto result = AuthorityResult{
+        false, false, false, snapshot_, {},
+        "scripted MotionGate RENEW transport unavailable"};
+      result.transport_unavailable = true;
+      return result;
+    }
+    if (renew_rejected_) {
+      return AuthorityResult{
+        false, false, false, snapshot_, {},
+        "scripted MotionGate RENEW response rejected"};
+    }
     snapshot_.control_seq++;
     ++renew_count_;
     snapshot_.authority_live = authority_live_ &&
@@ -641,6 +653,18 @@ public:
   {
     std::lock_guard<std::mutex> lock(mutex_);
     authority_live_ = value;
+  }
+
+  void set_renew_transport_unavailable(bool value)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    renew_transport_unavailable_ = value;
+  }
+
+  void set_renew_rejected(bool value)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    renew_rejected_ = value;
   }
 
   void set_prepare_zero_proof(bool value)
@@ -809,6 +833,8 @@ private:
   bool open_entered_{false};
   bool release_open_{false};
   bool throw_on_renew_{false};
+  bool renew_transport_unavailable_{false};
+  bool renew_rejected_{false};
   bool block_renew_{false};
   bool renew_entered_{false};
   bool release_renew_{false};
@@ -1958,10 +1984,110 @@ TEST_F(
     "ordinary cleanup zero proof failed");
   ASSERT_EQ(failed.failure, MotionConditioningFailure::SafetyFault);
   EXPECT_TRUE(failed.gate_loss_instance_id.empty());
+  EXPECT_TRUE(failed.gate_loss_candidate_instance_id.empty());
 
   authority->set_initial_zero_proof(true);
   authority->set_gate_identity("unrelated-gate");
   EXPECT_FALSE(pipeline.rearm_after_gate_replacement(authority->snapshot()));
+  EXPECT_EQ(pipeline.state(), MotionConditioningState::Failed);
+}
+
+TEST_F(
+  MotionConditioningPipelineTest,
+  RenewTransportFailureRequiresDifferentGateAndFreshZeroBeforeRearm)
+{
+  auto pipeline_config = config();
+  pipeline_config.renew_period = 100ms;
+  MotionConditioningPipeline pipeline(
+    *client, authority, producer, pipeline_config);
+  ASSERT_TRUE(pipeline.prepare().ok);
+  std::this_thread::sleep_for(50ms);
+  ASSERT_TRUE(pipeline.start().ok);
+
+  authority->block_renew();
+  authority->set_renew_transport_unavailable(true);
+  authority->set_inhibit_zero_proof(false);
+  ASSERT_TRUE(authority->wait_for_renew());
+  authority->release_blocked_renew();
+
+  const auto deadline = std::chrono::steady_clock::now() + 1s;
+  while (
+    pipeline.state() != MotionConditioningState::Failed &&
+    std::chrono::steady_clock::now() < deadline)
+  {
+    std::this_thread::yield();
+  }
+  ASSERT_EQ(pipeline.state(), MotionConditioningState::Failed);
+  const auto failed = pipeline.last_result();
+  EXPECT_EQ(failed.failure, MotionConditioningFailure::SafetyFault);
+  EXPECT_TRUE(failed.gate_loss_instance_id.empty());
+  EXPECT_EQ(failed.gate_loss_candidate_instance_id, "gate-test");
+  EXPECT_FALSE(failed.zero_proven);
+
+  authority->set_initial_zero_proof(true);
+  authority->set_gate_identity("gate-test");
+  EXPECT_FALSE(pipeline.rearm_after_gate_replacement(authority->snapshot()));
+
+  authority->set_gate_identity("replacement-gate");
+  authority->set_initial_zero_proof(false);
+  const auto replacement = authority->snapshot();
+  const auto no_zero_deadline = std::chrono::steady_clock::now() + 100ms;
+  while (std::chrono::steady_clock::now() < no_zero_deadline) {
+    EXPECT_FALSE(pipeline.rearm_after_gate_replacement(replacement));
+    std::this_thread::yield();
+  }
+
+  authority->set_inhibit_zero_proof(true);
+  bool rearmed = false;
+  const auto rearm_deadline = std::chrono::steady_clock::now() + 1s;
+  while (!rearmed && std::chrono::steady_clock::now() < rearm_deadline) {
+    rearmed = pipeline.rearm_after_gate_replacement(replacement);
+    std::this_thread::yield();
+  }
+  EXPECT_TRUE(rearmed);
+  EXPECT_EQ(pipeline.state(), MotionConditioningState::Stopped);
+}
+
+TEST_F(
+  MotionConditioningPipelineTest,
+  RenewResponseRejectionCannotAuthorizeReplacementRearm)
+{
+  auto pipeline_config = config();
+  pipeline_config.renew_period = 100ms;
+  MotionConditioningPipeline pipeline(
+    *client, authority, producer, pipeline_config);
+  ASSERT_TRUE(pipeline.prepare().ok);
+  std::this_thread::sleep_for(50ms);
+  ASSERT_TRUE(pipeline.start().ok);
+
+  authority->block_renew();
+  authority->set_renew_rejected(true);
+  authority->set_inhibit_zero_proof(false);
+  ASSERT_TRUE(authority->wait_for_renew());
+  authority->release_blocked_renew();
+
+  const auto deadline = std::chrono::steady_clock::now() + 1s;
+  while (
+    pipeline.state() != MotionConditioningState::Failed &&
+    std::chrono::steady_clock::now() < deadline)
+  {
+    std::this_thread::yield();
+  }
+  ASSERT_EQ(pipeline.state(), MotionConditioningState::Failed);
+  const auto failed = pipeline.last_result();
+  EXPECT_EQ(failed.failure, MotionConditioningFailure::SafetyFault);
+  EXPECT_TRUE(failed.gate_loss_instance_id.empty());
+  EXPECT_TRUE(failed.gate_loss_candidate_instance_id.empty());
+
+  authority->set_gate_identity("replacement-gate");
+  authority->set_initial_zero_proof(true);
+  authority->set_inhibit_zero_proof(true);
+  const auto replacement = authority->snapshot();
+  const auto rejection_deadline = std::chrono::steady_clock::now() + 100ms;
+  while (std::chrono::steady_clock::now() < rejection_deadline) {
+    EXPECT_FALSE(pipeline.rearm_after_gate_replacement(replacement));
+    std::this_thread::yield();
+  }
   EXPECT_EQ(pipeline.state(), MotionConditioningState::Failed);
 }
 
