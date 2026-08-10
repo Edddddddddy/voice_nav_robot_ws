@@ -104,6 +104,35 @@ def _load_workspace_interface_types() -> WorkspaceInterfaceTypes:
     )
 
 
+_workspace_interface_types: WorkspaceInterfaceTypes | None = None
+_workspace_interface_types_lock = threading.Lock()
+
+
+def _get_workspace_interface_types() -> WorkspaceInterfaceTypes:
+    global _workspace_interface_types
+    interfaces = _workspace_interface_types
+    if interfaces is None:
+        with _workspace_interface_types_lock:
+            interfaces = _workspace_interface_types
+            if interfaces is None:
+                interfaces = _load_workspace_interface_types()
+                _workspace_interface_types = interfaces
+    return interfaces
+
+
+def __getattr__(name: str) -> Any:
+    interface_name = {
+        'ExecuteMission': 'execute_mission',
+        'MissionState': 'mission_state',
+        'MissionStep': 'mission_step',
+        'InternalMotionGateState': 'gate_state',
+        'InternalMotionGateControl': 'gate_control',
+    }.get(name)
+    if interface_name is None:
+        raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
+    return getattr(_get_workspace_interface_types(), interface_name)
+
+
 def _load_gazebo_shutdown():
     support_path = (
         Path(get_package_share_directory('voice_nav_sim'))
@@ -414,7 +443,7 @@ class CrashStopProbe:
     """One ROS observation Interface for both public crash-stop scenarios."""
 
     def __init__(self) -> None:
-        interfaces = _load_workspace_interface_types()
+        interfaces = _get_workspace_interface_types()
         self._execute_mission_type = interfaces.execute_mission
         self._mission_state_type = interfaces.mission_state
         self._mission_step_type = interfaces.mission_step

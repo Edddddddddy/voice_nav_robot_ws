@@ -580,7 +580,7 @@ TEST(MotionGateCore, OpenProviderExceptionFaultsClosed)
   EXPECT_TRUE(gate.selected_command().is_zero());
 }
 
-TEST(MotionGateCore, OpenDuplicateDoesNotExtendCandidateDeadline)
+TEST(MotionGateCore, OpenDuplicateDoesNotStartCandidateDeadline)
 {
   MotionGateCore gate(MotionGateConfig{}, kGateId);
   ASSERT_EQ(prepare_with(gate, 1U, at(0ms)).code, ResultCode::Applied);
@@ -598,9 +598,11 @@ TEST(MotionGateCore, OpenDuplicateDoesNotExtendCandidateDeadline)
     ResultCode::Duplicate);
   EXPECT_EQ(gate.snapshot().state, State::Armed);
 
-  EXPECT_TRUE(gate.tick(at(150ms)).is_zero());
+  EXPECT_TRUE(gate.tick(at(249ms)).is_zero());
+  EXPECT_EQ(gate.snapshot().state, State::Armed);
+  EXPECT_TRUE(gate.tick(at(250ms)).is_zero());
   EXPECT_EQ(gate.snapshot().state, State::Inhibited);
-  EXPECT_EQ(gate.snapshot().reason, Reason::CandidateExpired);
+  EXPECT_EQ(gate.snapshot().reason, Reason::AuthorityExpired);
   EXPECT_EQ(gate.snapshot().control_seq, 3U);
 }
 
@@ -630,11 +632,11 @@ TEST(MotionGateCore, ArmedWindowStartsAfterAcceptingReaderHandover)
 
   gate.start_armed_window(at(100ms));
 
-  EXPECT_EQ(gate.tick(at(249ms)).linear_x, 0.0);
+  EXPECT_EQ(gate.tick(at(349ms)).linear_x, 0.0);
   EXPECT_EQ(gate.snapshot().state, State::Armed);
-  EXPECT_EQ(gate.tick(at(250ms)).linear_x, 0.0);
+  EXPECT_EQ(gate.tick(at(350ms)).linear_x, 0.0);
   EXPECT_EQ(gate.snapshot().state, State::Inhibited);
-  EXPECT_EQ(gate.snapshot().reason, Reason::CandidateExpired);
+  EXPECT_EQ(gate.snapshot().reason, Reason::AuthorityExpired);
 }
 
 TEST(MotionGateCore, CandidateClampsOnlySupportedFiniteAxes)
@@ -864,24 +866,22 @@ TEST(MotionGateCore, AwaitingFirstCandidateSurvivesAuthorityRenew)
   auto renew = lease_request(
     Operation::Renew, 3U, context.gate.snapshot());
   ASSERT_EQ(
-    context.gate.renew(renew, at(140ms)).code,
+    context.gate.renew(renew, at(151ms)).code,
     ResultCode::Applied);
 
-  EXPECT_TRUE(context.gate.tick(at(249ms)).is_zero());
+  EXPECT_TRUE(context.gate.tick(at(199ms)).is_zero());
   EXPECT_EQ(context.gate.snapshot().state, State::Armed);
   EXPECT_TRUE(context.gate.snapshot().authority_live);
   EXPECT_FALSE(context.gate.snapshot().candidate_fresh);
 
-  renew = lease_request(
-    Operation::Renew, 4U, context.gate.snapshot());
-  ASSERT_EQ(
-    context.gate.renew(renew, at(280ms)).code,
-    ResultCode::Applied);
+  auto candidate = valid_candidate(context);
+  ASSERT_TRUE(
+    context.gate.accept_candidate(candidate, at(200ms)).accepted);
 
-  EXPECT_TRUE(context.gate.tick(at(429ms)).is_zero());
+  EXPECT_FALSE(context.gate.tick(at(349ms)).is_zero());
   EXPECT_EQ(context.gate.snapshot().state, State::Armed);
-  EXPECT_FALSE(context.gate.snapshot().candidate_fresh);
-  EXPECT_TRUE(context.gate.tick(at(430ms)).is_zero());
+  EXPECT_TRUE(context.gate.snapshot().candidate_fresh);
+  EXPECT_TRUE(context.gate.tick(at(350ms)).is_zero());
   EXPECT_EQ(context.gate.snapshot().state, State::Inhibited);
   EXPECT_EQ(context.gate.snapshot().reason, Reason::CandidateExpired);
 }
@@ -1418,7 +1418,7 @@ TEST(MotionGateCore, DuplicateAfterDeadlineCarriesCurrentSnapshot)
     armed_gate.open(open, at(0ms), provider).code,
     ResultCode::Applied);
 
-  const auto expired_open = armed_gate.open(open, at(150ms), provider);
+  const auto expired_open = armed_gate.open(open, at(250ms), provider);
   const auto inhibited_after_open = armed_gate.snapshot();
   EXPECT_EQ(expired_open.code, ResultCode::Duplicate);
   EXPECT_EQ(expired_open.state, State::Inhibited);

@@ -91,6 +91,27 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
             with self.assertRaises(ModuleNotFoundError):
                 isolated_support._load_workspace_interface_types()
 
+    def test_workspace_interface_api_is_loaded_lazily_and_cached(self):
+        isolated_support = _load_support()
+        execute_mission = object()
+        interfaces = isolated_support.WorkspaceInterfaceTypes(
+            execute_mission=execute_mission,
+            mission_state=object(),
+            mission_step=object(),
+            gate_state=object(),
+            gate_control=object(),
+        )
+
+        with mock.patch.object(
+            isolated_support,
+            '_load_workspace_interface_types',
+            return_value=interfaces,
+        ) as loader:
+            self.assertIs(isolated_support.ExecuteMission, execute_mission)
+            self.assertIs(isolated_support.ExecuteMission, execute_mission)
+
+        loader.assert_called_once_with()
+
     def test_gazebo_shutdown_api_is_resolved_only_on_first_access(self):
         isolated_support = _load_support()
         structured_stop = object()

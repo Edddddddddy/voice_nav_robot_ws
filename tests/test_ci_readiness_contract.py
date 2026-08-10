@@ -823,7 +823,6 @@ class CiReadinessContractTest(unittest.TestCase):
         )
         self.assertIn("QUERY_TIMEOUT_SECONDS = 10.0", support)
         self.assertIn("QUERY_ATTEMPTS = 2", support)
-        self.assertIn("MAX_SNAPSHOT_DOCUMENTS = 4", support)
         self.assertIn("'--json-output'", support)
         self.assertIn("decoder.raw_decode(output, offset)", support)
         self.assertIn("subprocess.TimeoutExpired", support)

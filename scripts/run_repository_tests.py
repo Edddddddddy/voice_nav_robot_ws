@@ -54,7 +54,7 @@ REQUIRED_TEST_IDS: frozenset[str] = frozenset(
         ),
         (
             "test_gazebo_pose_support.GazeboPoseSupportTest."
-            "test_excess_snapshot_documents_are_rejected"
+            "test_many_complete_snapshots_use_the_latest_document"
         ),
         (
             "test_gazebo_pose_support.GazeboPoseSupportTest."

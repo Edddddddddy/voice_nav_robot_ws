@@ -138,6 +138,7 @@ ControlResult MotionGateCore::prepare(
   candidate_topic_ = make_candidate_topic(lease_id_);
   bound_writer_gid_.fill(0U);
   writer_bound_ = false;
+  candidate_seen_ = false;
   candidate_fresh_ = false;
   selected_ = zero_command();
   prepare_deadline_ = now + config_.prepare_timeout;
@@ -257,7 +258,8 @@ ControlResult MotionGateCore::open(
   writer_bound_ = true;
   state_ = State::Armed;
   authority_deadline_ = now + config_.authority_lease;
-  candidate_deadline_ = now + config_.candidate_freshness;
+  candidate_deadline_ = SteadyTimePoint{};
+  candidate_seen_ = false;
   candidate_fresh_ = false;
   selected_ = zero_command();
   reason_ = Reason::None;
@@ -275,7 +277,8 @@ void MotionGateCore::start_armed_window(SteadyTimePoint now)
     return;
   }
   authority_deadline_ = now + config_.authority_lease;
-  candidate_deadline_ = now + config_.candidate_freshness;
+  candidate_deadline_ = SteadyTimePoint{};
+  candidate_seen_ = false;
   candidate_fresh_ = false;
   selected_ = zero_command();
   reason_ = Reason::None;
@@ -287,11 +290,14 @@ ControlResult MotionGateCore::renew(
   const ControlRequest & request,
   SteadyTimePoint now)
 {
+  const bool candidate_expired =
+    state_ == State::Armed && candidate_seen_ &&
+    now >= candidate_deadline_;
   if (state_ == State::Prepared && now >= prepare_deadline_) {
     retire_lease(Reason::PrepareExpired, "prepared lease expired");
   } else if (state_ == State::Armed && now >= authority_deadline_) {
     retire_lease(Reason::AuthorityExpired, "authority lease expired");
-  } else if (state_ == State::Armed && now >= candidate_deadline_) {
+  } else if (candidate_expired) {
     retire_lease(Reason::CandidateExpired, "candidate freshness expired");
   }
 
@@ -334,9 +340,6 @@ ControlResult MotionGateCore::renew(
 
   const auto authority_lease = config_.authority_lease;
   authority_deadline_ = now + authority_lease;
-  if (!candidate_fresh_) {
-    candidate_deadline_ = now + config_.candidate_freshness;
-  }
   reason_ = Reason::None;
   detail_ = "authority renewed";
   advance_state_seq();
@@ -451,6 +454,7 @@ CandidateResult MotionGateCore::accept_candidate(
   selected_.angular_z = std::clamp(
     candidate.angular_z, config_.angular_z_min, config_.angular_z_max);
   candidate_deadline_ = now + config_.candidate_freshness;
+  candidate_seen_ = true;
   candidate_fresh_ = true;
   reason_ = Reason::None;
   detail_ = "fresh candidate selected";
@@ -461,11 +465,14 @@ CandidateResult MotionGateCore::accept_candidate(
 
 Command MotionGateCore::tick(SteadyTimePoint now)
 {
+  const bool candidate_expired =
+    state_ == State::Armed && candidate_seen_ &&
+    now >= candidate_deadline_;
   if (state_ == State::Prepared && now >= prepare_deadline_) {
     retire_lease(Reason::PrepareExpired, "prepared lease expired");
   } else if (state_ == State::Armed && now >= authority_deadline_) {
     retire_lease(Reason::AuthorityExpired, "authority lease expired");
-  } else if (state_ == State::Armed && now >= candidate_deadline_) {
+  } else if (candidate_expired) {
     retire_lease(Reason::CandidateExpired, "candidate freshness expired");
   }
 
@@ -521,6 +528,7 @@ void MotionGateCore::force_fault(Reason reason, std::string detail)
   candidate_topic_.clear();
   bound_writer_gid_.fill(0U);
   writer_bound_ = false;
+  candidate_seen_ = false;
   candidate_fresh_ = false;
   selected_ = zero_command();
   prepare_deadline_ = SteadyTimePoint{};
@@ -709,6 +717,7 @@ bool MotionGateCore::advance_control_seq()
     candidate_topic_.clear();
     bound_writer_gid_.fill(0U);
     writer_bound_ = false;
+    candidate_seen_ = false;
     candidate_fresh_ = false;
     selected_ = zero_command();
     reason_ = Reason::SequenceExhausted;
@@ -729,11 +738,14 @@ void MotionGateCore::advance_state_seq()
 
 void MotionGateCore::reconcile_deadlines(SteadyTimePoint now)
 {
+  const bool candidate_expired =
+    state_ == State::Armed && candidate_seen_ &&
+    now >= candidate_deadline_;
   if (state_ == State::Prepared && now >= prepare_deadline_) {
     retire_lease(Reason::PrepareExpired, "prepared lease expired");
   } else if (state_ == State::Armed && now >= authority_deadline_) {
     retire_lease(Reason::AuthorityExpired, "authority lease expired");
-  } else if (state_ == State::Armed && now >= candidate_deadline_) {
+  } else if (candidate_expired) {
     retire_lease(Reason::CandidateExpired, "candidate freshness expired");
   }
 }
@@ -757,6 +769,7 @@ void MotionGateCore::retire_lease(Reason reason, std::string detail)
   candidate_topic_.clear();
   bound_writer_gid_.fill(0U);
   writer_bound_ = false;
+  candidate_seen_ = false;
   candidate_fresh_ = false;
   selected_ = zero_command();
   prepare_deadline_ = SteadyTimePoint{};
