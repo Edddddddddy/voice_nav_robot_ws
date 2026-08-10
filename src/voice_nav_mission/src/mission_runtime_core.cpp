@@ -558,20 +558,7 @@ void RuntimeCore::observe_gate(const GateSnapshot & snapshot)
       // until the adapter explicitly accepts this exact replacement; later
       // samples from the same identity are retry points, not trusted recovery
       // of the old Gate generation.
-      GateSnapshot accepted_replacement;
-      if (
-        is_healthy && startup_gate_is_ready(snapshot) &&
-        relative_motion_->rearm_after_gate_replacement(
-          snapshot, &accepted_replacement) &&
-        rotate_epoch())
-      {
-        gate_fault_handled_ = false;
-        gate_fault_snapshot_.reset();
-        gate_replacement_pending_ = false;
-        gate_bound_ = true;
-        set_availability_from_dependencies(true, &accepted_replacement);
-        publish_state();
-      }
+      (void)try_rearm_pending_gate_replacement();
       return;
     }
     const bool trusted_recovery =
@@ -593,19 +580,7 @@ void RuntimeCore::observe_gate(const GateSnapshot & snapshot)
 
   if (identity_changed || (!is_healthy && was_healthy)) {
     gate_replacement_pending_ = identity_changed;
-    GateSnapshot accepted_replacement;
-    if (gate_replacement_pending_ && is_healthy &&
-      startup_gate_is_ready(snapshot) &&
-      relative_motion_->rearm_after_gate_replacement(
-        snapshot, &accepted_replacement) &&
-      rotate_epoch())
-    {
-      gate_fault_handled_ = false;
-      gate_fault_snapshot_.reset();
-      gate_replacement_pending_ = false;
-      gate_bound_ = true;
-      set_availability_from_dependencies(true, &accepted_replacement);
-      publish_state();
+    if (try_rearm_pending_gate_replacement()) {
       return;
     }
     gate_fault_handled_ = true;
@@ -661,7 +636,13 @@ void RuntimeCore::observe_dependencies()
 
 void RuntimeCore::on_tick()
 {
-  observe_dependencies();
+  // Gate state delivery is coalesced by the production watermark, so an
+  // identical inhibited-zero replacement is not guaranteed to produce a
+  // second callback after the failed generation finishes draining.  Retry
+  // the saved immutable tuple from the regular bounded Runtime tick.
+  if (!try_rearm_pending_gate_replacement()) {
+    observe_dependencies();
+  }
   const auto now = clock_->now();
   if (
     !gate_bound_ && !gate_snapshot_.endpoint_available &&
@@ -851,6 +832,34 @@ bool RuntimeCore::zero_is_proven(const GateSnapshot & snapshot) const
 {
   return snapshot.endpoint_available && snapshot.motion_inhibited &&
          snapshot.zero_selected && snapshot.zero_published;
+}
+
+bool RuntimeCore::try_rearm_pending_gate_replacement()
+{
+  if (
+    !gate_replacement_pending_ || active_.has_value() ||
+    !gate_is_healthy(gate_snapshot_) ||
+    !startup_gate_is_ready(gate_snapshot_))
+  {
+    return false;
+  }
+
+  GateSnapshot accepted_replacement;
+  if (
+    !relative_motion_->rearm_after_gate_replacement(
+      gate_snapshot_, &accepted_replacement) ||
+    !rotate_epoch())
+  {
+    return false;
+  }
+
+  gate_fault_handled_ = false;
+  gate_fault_snapshot_.reset();
+  gate_replacement_pending_ = false;
+  gate_bound_ = true;
+  set_availability_from_dependencies(true, &accepted_replacement);
+  publish_state();
+  return true;
 }
 
 AuthorityOperation RuntimeCore::make_operation(const std::string & lease_id) const

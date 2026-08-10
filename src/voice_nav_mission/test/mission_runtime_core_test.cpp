@@ -887,6 +887,62 @@ TEST(RuntimeCore, ReplacementGateZeroRearmsAfterGateSafetyFault)
   EXPECT_FALSE(fixture.core.has_active_mission());
 }
 
+TEST(RuntimeCore, PendingReplacementGateRearmsOnTickWithoutDuplicateSnapshot)
+{
+  Fixture fixture;
+
+  fixture.core.observe_gate(GateSnapshot{
+        kOtherGateId, 1U, "", GateState::Faulted, false,
+        true, true, false, "", false, false});
+  ASSERT_EQ(fixture.core.state().admission_epoch, 2U);
+  ASSERT_EQ(fixture.core.state().availability, RuntimeAvailability::Faulted);
+
+  const auto replacement = GateSnapshot{
+    kReplacementGateId, 1U, "", GateState::Inhibited,
+    true, true, true, true, "", false, false};
+  fixture.authority->set_snapshot(replacement);
+  fixture.core.observe_gate(replacement);
+  ASSERT_EQ(fixture.relative->rearm_after_gate_replacement_count(), 1U);
+  ASSERT_EQ(fixture.core.state().admission_epoch, 2U);
+  ASSERT_EQ(fixture.core.state().availability, RuntimeAvailability::Faulted);
+
+  fixture.relative->set_rearm_after_gate_replacement(true);
+  fixture.core.on_tick();
+
+  EXPECT_EQ(fixture.relative->rearm_after_gate_replacement_count(), 2U);
+  EXPECT_EQ(
+    fixture.relative->last_rearm_gate_instance_id(), kReplacementGateId);
+  EXPECT_EQ(fixture.core.state().admission_epoch, 3U);
+  EXPECT_EQ(fixture.core.state().availability, RuntimeAvailability::Available);
+  EXPECT_EQ(fixture.core.state().gate_state, GateState::Inhibited);
+  EXPECT_TRUE(fixture.core.usable());
+}
+
+TEST(RuntimeCore, ReplacementGateWaitsForActiveMissionTerminalBeforeRearm)
+{
+  Fixture fixture;
+  fixture.relative->set_rearm_after_gate_replacement(true);
+  ASSERT_TRUE(fixture.core.admit(goal(1U)).accepted);
+
+  const auto replacement = GateSnapshot{
+    kReplacementGateId, 1U, "", GateState::Inhibited,
+    true, true, true, true, "", false, false};
+  fixture.authority->set_snapshot(replacement);
+  fixture.core.observe_gate(replacement);
+
+  ASSERT_EQ(fixture.results.size(), 1U);
+  EXPECT_EQ(fixture.results.front().code, MissionResultCode::SafetyFault);
+  EXPECT_FALSE(fixture.core.has_active_mission());
+  EXPECT_EQ(fixture.relative->rearm_after_gate_replacement_count(), 0U);
+  EXPECT_EQ(fixture.core.state().admission_epoch, 2U);
+
+  fixture.core.on_tick();
+
+  EXPECT_EQ(fixture.relative->rearm_after_gate_replacement_count(), 1U);
+  EXPECT_EQ(fixture.core.state().admission_epoch, 3U);
+  EXPECT_EQ(fixture.core.state().availability, RuntimeAvailability::Available);
+}
+
 TEST(RuntimeCore, ReplacementGateRearmAdvancesNodeOwnedAdmissionFence)
 {
   RuntimeEmergencyFence fence(1U);
