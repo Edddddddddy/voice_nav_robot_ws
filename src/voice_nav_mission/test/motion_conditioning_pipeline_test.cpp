@@ -569,6 +569,9 @@ public:
   {
     std::unique_lock<std::mutex> lock(mutex_);
     calls_.push_back(AuthorityOperationKind::Renew);
+    if (renew_observer_) {
+      renew_observer_();
+    }
     if (block_renew_) {
       renew_entered_ = true;
       renew_cv_.notify_all();
@@ -669,6 +672,12 @@ public:
   {
     std::lock_guard<std::mutex> lock(mutex_);
     renew_failure_after_ = successful_renews;
+  }
+
+  void set_renew_observer(std::function<void()> observer)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    renew_observer_ = std::move(observer);
   }
 
   void set_throw_on_open(bool value)
@@ -793,6 +802,7 @@ private:
   bool inhibit_zero_proof_{true};
   std::size_t renew_count_{0U};
   std::optional<std::size_t> renew_failure_after_;
+  std::function<void()> renew_observer_;
   bool throw_on_open_{false};
   bool throw_on_snapshot_{false};
   bool block_open_{false};
@@ -1068,6 +1078,13 @@ public:
     activation_delay_ = delay;
   }
 
+  void set_activation_observer(
+    std::function<void(const std::string &)> observer)
+  {
+    std::lock_guard<std::mutex> lock(activation_mutex_);
+    activation_observer_ = std::move(observer);
+  }
+
   void set_load_delay(std::chrono::milliseconds delay)
   {
     load_delay_ = delay;
@@ -1297,6 +1314,9 @@ private:
               response->success = true;
               return;
             case lifecycle_msgs::msg::Transition::TRANSITION_ACTIVATE:
+              if (activation_observer_) {
+                activation_observer_(fqn);
+              }
               if (fqn == "/collision_monitor") {
                 std::unique_lock<std::mutex> lock(activation_mutex_);
                 if (activation_barrier_) {
@@ -1386,6 +1406,7 @@ private:
   bool activation_barrier_{false};
   bool activation_entered_{false};
   bool activation_released_{false};
+  std::function<void(const std::string &)> activation_observer_;
   rclcpp::GenericPublisher::SharedPtr collision_candidate_;
   rclcpp::Publisher<CollisionState>::SharedPtr collision_events_;
   rclcpp::GenericPublisher::SharedPtr scan_publisher_;
@@ -1979,6 +2000,17 @@ TEST_F(
   MotionConditioningPipelineTest,
   ActivationRenewsBetweenLifecycleTransitions)
 {
+  auto event_mutex = std::make_shared<std::mutex>();
+  auto events = std::make_shared<std::vector<std::string>>();
+  authority->set_renew_observer([event_mutex, events]() {
+      std::lock_guard<std::mutex> lock(*event_mutex);
+      events->push_back("renew");
+    });
+  graph->set_activation_observer(
+    [event_mutex, events](const std::string & fqn) {
+      std::lock_guard<std::mutex> lock(*event_mutex);
+      events->push_back("activate:" + fqn);
+    });
   auto health_ready = std::make_shared<CallbackCounter>();
   auto pipeline_config = config();
   pipeline_config.renew_period = 10s;
@@ -2000,6 +2032,14 @@ TEST_F(
     std::count(
       calls.cbegin(), calls.cend(),
       AuthorityOperationKind::Renew), 3);
+  const std::vector<std::string> expected_events{
+    "renew",
+    "activate:/collision_monitor",
+    "renew",
+    "activate:/velocity_smoother",
+    "renew"};
+  std::lock_guard<std::mutex> lock(*event_mutex);
+  EXPECT_EQ(*events, expected_events);
 }
 
 TEST_F(
