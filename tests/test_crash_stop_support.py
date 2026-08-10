@@ -62,6 +62,35 @@ def command(stamp_ns: int, linear_x: float):
 
 class ConsumerTimeoutAnchorTest(unittest.TestCase):
 
+    def test_pure_helpers_load_before_workspace_interfaces_are_built(self):
+        original_import = __import__
+
+        def reject_workspace_interfaces(name, *args, **kwargs):
+            if name == 'voice_nav_interfaces' or name.startswith(
+                'voice_nav_interfaces.'
+            ) or name == 'voice_nav_mission' or name.startswith(
+                'voice_nav_mission.'
+            ):
+                raise ModuleNotFoundError(name)
+            return original_import(name, *args, **kwargs)
+
+        with mock.patch(
+            'builtins.__import__', side_effect=reject_workspace_interfaces
+        ):
+            isolated_support = _load_support()
+
+        _, message = isolated_support.select_consumer_timeout_anchor(
+            ((10, command(3_994_000_000, 0.01)),),
+            signal_boundary_sim_ns=3_994_000_000,
+        )
+        self.assertEqual(isolated_support._stamp_ns(message), 3_994_000_000)
+
+        with mock.patch(
+            'builtins.__import__', side_effect=reject_workspace_interfaces
+        ):
+            with self.assertRaises(ModuleNotFoundError):
+                isolated_support._load_workspace_interface_types()
+
     def test_selects_latest_nonzero_final_even_when_observer_delivers_it_late(self):
         samples = (
             (10, command(3_994_000_000, 0.01)),
