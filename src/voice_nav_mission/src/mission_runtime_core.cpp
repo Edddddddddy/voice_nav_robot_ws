@@ -635,14 +635,20 @@ void RuntimeCore::observe_dependencies()
 {
   const bool healthy = relative_motion_->healthy();
   if (relative_health_initialized_ && last_relative_healthy_ && !healthy) {
-    (void)rotate_epoch();
     if (active_.has_value()) {
+      (void)rotate_epoch();
       select_terminal_and_stop(
         MissionResultCode::SafetyFault,
         "RelativeMotionPort became unhealthy during Mission");
     } else {
-      state_.availability = RuntimeAvailability::Faulted;
-      publish_state();
+      // Source liveness loss while idle invalidates every previously
+      // advertised Goal tuple, but it is not a permanent infrastructure
+      // safety fault.  Publish the narrowed availability atomically with the
+      // new epoch so a transient dependency gap cannot leave Runtime sticky
+      // Faulted after the sources recover.
+      state_.availability = relative_motion_->safety_faulted() ?
+        RuntimeAvailability::Faulted : RuntimeAvailability::Unavailable;
+      (void)rotate_epoch();
     }
   }
   last_relative_healthy_ = healthy;
