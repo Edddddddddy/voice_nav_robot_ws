@@ -27,6 +27,9 @@ from typing import Callable, Iterable
 from launch.events.process import ProcessStarted
 
 
+SIGNAL_BOUNDARY_CALLBACK_DEADLINE_NS = 50_000_000
+
+
 class ProcessIdentityError(RuntimeError):
     """The launch process no longer matches its recorded identity."""
 
@@ -207,8 +210,8 @@ class ExactPidfdProcess:
             expected_node_name=expected_node_name,
         )
 
-    def validate(self, graph_count: Callable[[], int]) -> ProcessSnapshot:
-        """Revalidate lifetime, executable, command, pidfd, and ROS graph."""
+    def _validate_process_identity(self) -> ProcessSnapshot:
+        """Revalidate lifetime, executable, command, and pidfd identity."""
         if self._closed:
             raise ProcessIdentityError('pidfd was already closed')
         current = read_process_snapshot(self.snapshot.pid)
@@ -232,6 +235,11 @@ class ExactPidfdProcess:
             raise ProcessIdentityError(
                 'recorded pidfd is no longer live'
             ) from error
+        return current
+
+    def validate(self, graph_count: Callable[[], int]) -> ProcessSnapshot:
+        """Revalidate process identity, pidfd liveness, and ROS graph owner."""
+        current = self._validate_process_identity()
         try:
             count = graph_count()
         except Exception as error:
@@ -253,7 +261,16 @@ class ExactPidfdProcess:
         """Validate, check the signal-boundary condition, and use pidfd SIGKILL."""
         self.validate(graph_count)
         if before_signal is not None:
+            callback_started_ns = time.monotonic_ns()
             before_signal()
+            if (
+                time.monotonic_ns() - callback_started_ns
+                > SIGNAL_BOUNDARY_CALLBACK_DEADLINE_NS
+            ):
+                raise ProcessIdentityError(
+                    'pidfd signal-boundary callback exceeded its deadline'
+                )
+            self._validate_process_identity()
         try:
             signal.pidfd_send_signal(self.pidfd, signal.SIGKILL)
         except (AttributeError, OSError) as error:
