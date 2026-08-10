@@ -2058,9 +2058,26 @@ private:
       !components_clean || cleanup_failure_.has_value() ||
       cleanup_identity_fault_ || !pending_loads_.empty() ||
       !residual_components_.empty();
-    const bool typed_gate_loss =
-      producer_stopped && !zero_proven && !cleanup_residual &&
+    const bool identity_check_eligible =
+      producer_stopped && !zero_proven && !cleanup_residual;
+    const bool identity_lost = identity_check_eligible &&
       gate_identity_lost(generation_gate_instance_id);
+    const bool typed_gate_loss = identity_check_eligible && identity_lost;
+    if (!zero_proven) {
+      RCLCPP_ERROR(
+        node_.get_logger(),
+        "VOICE_NAV_DIAGNOSTIC marker=gate_loss_classification phase=stop "
+        "typed_gate_loss=%d producer_stopped=%d zero_proven=%d "
+        "components_clean=%d cleanup_residual=%d cleanup_failure=%d "
+        "cleanup_identity_fault=%d pending_loads=%zu residual_components=%zu "
+        "identity_check_eligible=%d identity_lost=%d generation_gate_instance_id=%s",
+        typed_gate_loss ? 1 : 0, producer_stopped ? 1 : 0, zero_proven ? 1 : 0,
+        components_clean ? 1 : 0, cleanup_residual ? 1 : 0,
+        cleanup_failure_.has_value() ? 1 : 0, cleanup_identity_fault_ ? 1 : 0,
+        pending_loads_.size(), residual_components_.size(),
+        identity_check_eligible ? 1 : 0, identity_lost ? 1 : 0,
+        generation_gate_instance_id.c_str());
+    }
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (!producer_stopped || !zero_proven || !components_clean) {
       state_ = MotionConditioningState::Failed;
