@@ -108,7 +108,7 @@ TEST(MotionAuthoritySnapshotWatermark, RejectsDelayedStateAfterIdentitySwitch)
   EXPECT_EQ(watermark.snapshot().control_seq, 2U);
 }
 
-TEST(MotionAuthoritySnapshotWatermark, BoundsAndValidatesRetiredIdentities)
+TEST(MotionAuthoritySnapshotWatermark, BoundedStateStillRejectsEveryRetiredIdentity)
 {
   detail::GateSnapshotWatermark watermark;
   GateSnapshot accepted;
@@ -131,6 +131,7 @@ TEST(MotionAuthoritySnapshotWatermark, BoundsAndValidatesRetiredIdentities)
     ASSERT_TRUE(watermark.merge(snapshot_for(index), accepted)) << index;
   }
   EXPECT_FALSE(watermark.merge(snapshot_for(31U), accepted));
+  EXPECT_FALSE(watermark.merge(snapshot_for(0U), accepted));
   EXPECT_EQ(watermark.snapshot().gate_instance_id, snapshot_for(32U).gate_instance_id);
 }
 

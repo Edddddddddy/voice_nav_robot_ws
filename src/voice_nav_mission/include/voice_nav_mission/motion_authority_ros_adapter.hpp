@@ -16,13 +16,12 @@
 #define VOICE_NAV_MISSION__MOTION_AUTHORITY_ROS_ADAPTER_HPP_
 
 #include <chrono>
-#include <deque>
+#include <bitset>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
-#include <unordered_set>
 
 #include <rclcpp/rclcpp.hpp>
 
@@ -52,9 +51,13 @@ public:
     GateSnapshot & accepted) noexcept;
 
 private:
+  static constexpr std::size_t kRetiredIdentityBloomBits = 8192U;
+  [[nodiscard]] bool retired_identity_maybe_contains(
+    const std::string & identity) const noexcept;
+  void retire_identity(const std::string & identity) noexcept;
+
   GateSnapshot snapshot_{};
-  std::unordered_set<std::string> retired_gate_instance_ids_;
-  std::deque<std::string> retired_gate_instance_order_;
+  std::bitset<kRetiredIdentityBloomBits> retired_gate_identity_bloom_{};
 };
 
 }  // namespace detail
