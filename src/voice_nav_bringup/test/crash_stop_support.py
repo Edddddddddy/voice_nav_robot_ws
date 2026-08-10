@@ -307,6 +307,60 @@ def is_zero(message: TwistStamped) -> bool:
     return all(value == 0.0 for value in values)
 
 
+def select_consumer_timeout_anchor(
+    final_samples: tuple[tuple[int, Any], ...],
+    *,
+    signal_boundary_sim_ns: int,
+):
+    """Select the latest killed-Gate final command by simulation stamp."""
+    eligible = []
+    for receipt_ns, message in final_samples:
+        stamp_ns = _stamp_ns(message)
+        if (
+            stamp_ns >= signal_boundary_sim_ns
+            and not is_zero(message)
+        ):
+            eligible.append((stamp_ns, receipt_ns, message))
+    if not eligible:
+        raise AssertionError(
+            'no eligible non-zero final command before consumer zero'
+        )
+    _, receipt_ns, message = max(eligible, key=lambda sample: sample[:2])
+    return receipt_ns, deepcopy(message)
+
+
+def consumer_timeout_result(
+    final_samples: tuple[tuple[int, Any], ...],
+    *,
+    signal_boundary_sim_ns: int,
+    zero_sim_ns: int,
+    zero_receipt_ns: int,
+):
+    """Apply the frozen controller timeout to the drained final stream."""
+    last_nonzero_receipt_ns, last_nonzero = (
+        select_consumer_timeout_anchor(
+            final_samples,
+            signal_boundary_sim_ns=signal_boundary_sim_ns,
+        )
+    )
+    last_nonzero_sim_ns = _stamp_ns(last_nonzero)
+    delta_ns = zero_sim_ns - last_nonzero_sim_ns
+    if not (CONSUMER_ZERO_MIN_NS < delta_ns <= CONSUMER_ZERO_MAX_NS):
+        raise AssertionError(
+            'controller consumer timeout outside '
+            f'(0.35, 0.36] s: {delta_ns / 1_000_000_000:.6f} s; '
+            f'last_nonzero_sim_ns={last_nonzero_sim_ns}; '
+            f'zero_sim_ns={zero_sim_ns}'
+        )
+    return {
+        'last_nonzero_sim_ns': last_nonzero_sim_ns,
+        'last_nonzero_receipt_ns': last_nonzero_receipt_ns,
+        'zero_sim_ns': zero_sim_ns,
+        'delta_ns': delta_ns,
+        'zero_receipt_ns': zero_receipt_ns,
+    }
+
+
 def gate_zero_proven(message: InternalMotionGateState) -> bool:
     return (
         message.state == InternalMotionGateState.INHIBITED
@@ -829,7 +883,7 @@ class CrashStopProbe:
         raise AssertionError('no bounded final/controller zero proof observed')
 
     def wait_consumer_zero(
-        self, kill_ack_ns: int, last_nonzero_sim_ns: int
+        self, kill_ack_ns: int, signal_boundary_sim_ns: int
     ):
         deadline = time.monotonic() + WALL_WATCHDOG_SECONDS
         previous_clock = self.latest(self.clock_samples)
@@ -851,29 +905,31 @@ class CrashStopProbe:
                 stamp_ns = _stamp_ns(message)
                 if (
                     receipt_ns >= kill_ack_ns
-                    and stamp_ns > last_nonzero_sim_ns
+                    and stamp_ns > signal_boundary_sim_ns
                     and is_zero(message)
                 ):
                     candidate = (receipt_ns, deepcopy(message))
                     break
             if candidate is not None:
-                delta_ns = _stamp_ns(candidate[1]) - last_nonzero_sim_ns
-                if not (
-                    CONSUMER_ZERO_MIN_NS < delta_ns <= CONSUMER_ZERO_MAX_NS
-                ):
-                    raise AssertionError(
-                        'controller consumer timeout outside '
-                        f'(0.35, 0.36] s: {delta_ns / 1_000_000_000:.6f} s'
-                    )
                 return {
-                    'last_nonzero_sim_ns': last_nonzero_sim_ns,
                     'zero_sim_ns': _stamp_ns(candidate[1]),
-                    'delta_ns': delta_ns,
                     'zero_receipt_ns': candidate[0],
                 }
             time.sleep(0.01)
         raise AssertionError(
             'controller cmd_vel_out did not select zero before the watchdog'
+        )
+
+    def confirm_consumer_timeout(
+        self,
+        signal_boundary_sim_ns: int,
+        consumer_zero: dict[str, int],
+    ):
+        return consumer_timeout_result(
+            self._snapshot(self.final_commands),
+            signal_boundary_sim_ns=signal_boundary_sim_ns,
+            zero_sim_ns=consumer_zero['zero_sim_ns'],
+            zero_receipt_ns=consumer_zero['zero_receipt_ns'],
         )
 
     @staticmethod

@@ -113,6 +113,7 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
         pidfd_kill = None
         pre_kill_observation = None
         post_kill_observation = None
+        signal_boundary_last_nonzero_sim_ns = None
         last_nonzero_sim_ns = None
         try:
             old_runtime = self.probe.wait_runtime_ready()
@@ -174,18 +175,24 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                 signal_boundary_motion['observed_ns']
             )
             proc_info.assertWaitForShutdown(gate, timeout=10.0)
+            self.probe.wait_no_publishers(support.FINAL_COMMAND_TOPIC)
             post_kill_observation = self.probe.diagnostic()
-            last_nonzero_sim_ns = support._stamp_ns(
+            signal_boundary_last_nonzero_sim_ns = support._stamp_ns(
                 signal_boundary_motion['final'][1]
             )
             consumer_zero = self.probe.wait_consumer_zero(
                 kill_ack_ns,
-                last_nonzero_sim_ns,
+                signal_boundary_last_nonzero_sim_ns,
             )
             stationarity = self.probe.wait_stationary(
                 consumer_zero['zero_sim_ns'],
                 consumer_zero['zero_receipt_ns'],
             )
+            consumer_zero = self.probe.confirm_consumer_timeout(
+                signal_boundary_last_nonzero_sim_ns,
+                consumer_zero,
+            )
+            last_nonzero_sim_ns = consumer_zero['last_nonzero_sim_ns']
             runtime_fault = self.probe.wait_runtime_fault(
                 after_monotonic_ns=kill_ack_ns,
             )
@@ -267,7 +274,13 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                 new_gate_instance=new_gate_sample.gate_instance_id,
                 runtime_fault_epoch=int(runtime_fault.admission_epoch),
                 old_lease=old_gate.lease_id,
+                signal_boundary_last_nonzero_sim_ns=(
+                    signal_boundary_last_nonzero_sim_ns
+                ),
                 last_nonzero_sim_ns=last_nonzero_sim_ns,
+                last_nonzero_receipt_ns=(
+                    consumer_zero['last_nonzero_receipt_ns']
+                ),
                 final_owner_gid=final_gid,
                 consumer_timeout_s=consumer_zero['delta_ns'] / 1e9,
                 stationarity_settle_ms=stationarity['settle_ns'] / 1e6,
@@ -297,6 +310,9 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                 'motion_gate_consumer_deadman',
                 status='failed',
                 error=str(error),
+                signal_boundary_last_nonzero_sim_ns=(
+                    signal_boundary_last_nonzero_sim_ns
+                ),
                 last_nonzero_sim_ns=last_nonzero_sim_ns,
                 pidfd_identity=pidfd_identity,
                 pidfd_kill=pidfd_kill,
