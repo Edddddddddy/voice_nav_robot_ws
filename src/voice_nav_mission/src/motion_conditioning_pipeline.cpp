@@ -1864,7 +1864,8 @@ private:
   void fail_from_renew_callback(
     const MotionConditioningCorrelationToken & token,
     MotionConditioningFailure failure,
-    std::string detail)
+    std::string detail,
+    const std::string & expected_gate_instance_id = {})
   {
     {
       std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -1890,7 +1891,8 @@ private:
     }
     MotionConditioningResult result;
     try {
-      result = fail_owned(failure, std::move(detail), false);
+      result = fail_owned(
+        failure, std::move(detail), false, expected_gate_instance_id);
     } catch (...) {
       std::lock_guard<std::recursive_mutex> lock(mutex_);
       state_ = MotionConditioningState::Failed;
@@ -3959,10 +3961,18 @@ private:
         result.snapshot.motion_inhibited)
       {
         if (renew_lease->side_effect_executed()) {
+          const bool replacement_identity_observed =
+            !result.snapshot.gate_instance_id.empty() &&
+            result.snapshot.gate_instance_id != renew_operation.gate_instance_id;
+          const bool gate_identity_lost =
+            !result.snapshot.endpoint_available || replacement_identity_observed;
           fail_from_renew_callback(
             callback_token,
+            gate_identity_lost ? MotionConditioningFailure::GateLoss :
             MotionConditioningFailure::SafetyFault,
-            "MotionGate RENEW failed closed");
+            "MotionGate RENEW failed closed",
+            gate_identity_lost ? renew_operation.gate_instance_id :
+            std::string{});
           renew_lease->reject();
         }
         return;

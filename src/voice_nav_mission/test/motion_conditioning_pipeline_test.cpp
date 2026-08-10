@@ -1829,6 +1829,45 @@ TEST_F(
 
 TEST_F(
   MotionConditioningPipelineTest,
+  RenewEndpointLossRearmsOnlyAfterReplacementZeroProof)
+{
+  auto pipeline_config = config();
+  pipeline_config.renew_period = 100ms;
+  MotionConditioningPipeline pipeline(
+    *client, authority, producer, pipeline_config);
+  ASSERT_TRUE(pipeline.prepare().ok);
+  std::this_thread::sleep_for(50ms);
+  ASSERT_TRUE(pipeline.start().ok);
+
+  authority->block_renew();
+  authority->set_gate_identity("gate-test", false);
+  authority->set_authority_live(false);
+  authority->set_inhibit_zero_proof(false);
+  ASSERT_TRUE(authority->wait_for_renew());
+  authority->release_blocked_renew();
+
+  const auto deadline = std::chrono::steady_clock::now() + 1s;
+  while (
+    pipeline.state() != MotionConditioningState::Failed &&
+    std::chrono::steady_clock::now() < deadline)
+  {
+    std::this_thread::sleep_for(5ms);
+  }
+  ASSERT_EQ(pipeline.state(), MotionConditioningState::Failed);
+  const auto failed = pipeline.last_result();
+  EXPECT_EQ(failed.failure, MotionConditioningFailure::GateLoss);
+  EXPECT_EQ(failed.gate_loss_instance_id, "gate-test");
+  EXPECT_FALSE(failed.zero_proven);
+
+  authority->set_initial_zero_proof(true);
+  authority->set_gate_identity("replacement-gate");
+  authority->set_inhibit_zero_proof(true);
+  EXPECT_TRUE(pipeline.rearm_after_gate_replacement(authority->snapshot()));
+  EXPECT_EQ(pipeline.state(), MotionConditioningState::Stopped);
+}
+
+TEST_F(
+  MotionConditioningPipelineTest,
   OrdinarySafetyFaultCannotBeClearedByUnrelatedGateReplacement)
 {
   auto health_ready = std::make_shared<CallbackCounter>();
