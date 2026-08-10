@@ -112,6 +112,9 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
             maxlen=20,
         )
         probe.clock_samples = deque(((0, 4_500_000_000),), maxlen=20)
+        probe.publisher_count = mock.Mock(
+            side_effect=AssertionError('stale graph endpoint is not liveness')
+        )
 
         class FakeTime:
 
@@ -147,6 +150,7 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
                     },
                     timeout=1.0,
                 )
+        probe.publisher_count.assert_not_called()
 
     def test_rejects_missing_eligible_nonzero_final(self):
         samples = (
