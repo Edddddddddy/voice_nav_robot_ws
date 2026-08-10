@@ -19,6 +19,7 @@ import time
 import unittest
 
 from action_msgs.msg import GoalStatus
+from composition_interfaces.srv import ListNodes
 import launch
 from launch import LaunchDescription
 from launch_ros.actions import Node
@@ -57,6 +58,7 @@ class ActiveShutdownDependencies:
         self.prepare_entered = threading.Event()
         self.release_prepare = threading.Event()
         self.operations = []
+        self.list_nodes_call_count = 0
         self.control_seq = 0
         self.state = InternalMotionGateState.INHIBITED
         self.lease_id = ''
@@ -76,6 +78,12 @@ class ActiveShutdownDependencies:
             InternalMotionGateControl,
             '/motion_gate/internal/control',
             self.on_control,
+            callback_group=ReentrantCallbackGroup(),
+        )
+        self.list_nodes_service = self.node.create_service(
+            ListNodes,
+            '/motion_conditioning_container/_container/list_nodes',
+            self.on_list_nodes,
             callback_group=ReentrantCallbackGroup(),
         )
         sensor_qos = QoSProfile(
@@ -141,6 +149,7 @@ class ActiveShutdownDependencies:
         response.zero_selected = response.motion_inhibited
         response.output_publish_seq = 1
         response.zero_publish_seq = 1 if response.motion_inhibited else 0
+        response.zero_published = response.motion_inhibited
         response.detail = detail
 
     def on_control(self, request, response):
@@ -167,6 +176,14 @@ class ActiveShutdownDependencies:
             with self.lock:
                 self.fill_response(response, 'unexpected operation')
         self.publish_state()
+        return response
+
+    def on_list_nodes(self, request, response):
+        del request
+        with self.lock:
+            self.list_nodes_call_count += 1
+        response.full_node_names = []
+        response.unique_ids = []
         return response
 
     def close(self):
@@ -271,6 +288,13 @@ class MissionRuntimeActiveShutdownTest(unittest.TestCase):
                 None,
             ),
             timeout=10.0,
+        )
+        with self.active_dependencies.lock:
+            operations = list(self.active_dependencies.operations)
+            list_nodes_call_count = self.active_dependencies.list_nodes_call_count
+        self.assertGreaterEqual(list_nodes_call_count, 2)
+        self.assertGreaterEqual(
+            operations.count(InternalMotionGateControl.Request.INHIBIT), 2
         )
         goal = ExecuteMission.Goal()
         goal.source_instance_id = 'source-shutdown-active'

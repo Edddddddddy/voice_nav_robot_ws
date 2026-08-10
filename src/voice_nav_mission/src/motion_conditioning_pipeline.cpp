@@ -2797,6 +2797,9 @@ private:
           "GetState did not return a usable lifecycle state");
         return false;
       }
+      const bool state_is_cleanup_safe =
+        state == lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED ||
+        state == lifecycle_msgs::msg::State::PRIMARY_STATE_FINALIZED;
       if (state == lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) {
         if (!change_state(
             component.node_fqn,
@@ -2829,10 +2832,7 @@ private:
             component.unique_id, "inactive component could not be cleaned up");
           return false;
         }
-      } else if (
-        state != lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED &&
-        state != lifecycle_msgs::msg::State::PRIMARY_STATE_FINALIZED)
-      {
+      } else if (!state_is_cleanup_safe) {
         record_cleanup_failure(
           "startup_lifecycle_state", component.node_fqn, component.unique_id,
           "component lifecycle state was not cleanup-safe");
