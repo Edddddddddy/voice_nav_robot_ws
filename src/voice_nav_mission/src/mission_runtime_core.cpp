@@ -208,6 +208,13 @@ AdmissionResult RuntimeCore::admit(
       MissionResultCode::SafetyFault,
       "Runtime is faulted and remains fail-closed")};
   }
+  if (relative_motion_->safety_faulted()) {
+    state_.availability = RuntimeAvailability::Faulted;
+    publish_state();
+    return AdmissionResult{0U, false, reject(
+      MissionResultCode::SafetyFault,
+      "RelativeMotionPort is permanently safety-faulted")};
+  }
   if (!relative_motion_->healthy()) {
     return AdmissionResult{0U, false, reject(
       MissionResultCode::DependencyUnavailable,
@@ -823,6 +830,10 @@ void RuntimeCore::set_availability_from_dependencies()
   }
   if (active_.has_value()) {
     state_.availability = RuntimeAvailability::Busy;
+    return;
+  }
+  if (relative_motion_->safety_faulted()) {
+    state_.availability = RuntimeAvailability::Faulted;
     return;
   }
   gate_snapshot_ = authority_->snapshot();

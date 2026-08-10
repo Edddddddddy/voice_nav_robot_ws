@@ -772,6 +772,8 @@ TEST(
     std::lock_guard<std::recursive_mutex> lock(plane->core_serial_mutex());
     plane->core()->on_tick();
   }
+  ASSERT_TRUE(wait_for(
+      [&adapter]() {return adapter->healthy();}, 5s));
 
   const auto admit_generation = [&admission_gate, &plane](
     const std::uint64_t sequence) {
@@ -1041,6 +1043,8 @@ TEST(
     std::lock_guard<std::recursive_mutex> lock(plane->core_serial_mutex());
     plane->core()->on_tick();
   }
+  ASSERT_TRUE(wait_for(
+      [&adapter]() {return adapter->healthy();}, 5s));
 
   MissionGoal goal;
   goal.source_instance_id = "production-adapter-shutdown";

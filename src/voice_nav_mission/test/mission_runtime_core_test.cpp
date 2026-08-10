@@ -119,6 +119,21 @@ TEST(RuntimeCore, ProductionUnavailablePortDoesNotAcquireGate)
   EXPECT_FALSE(fixture.core.has_active_mission());
 }
 
+TEST(RuntimeCore, SafetyFaultedRelativePortLatchesRuntimeFault)
+{
+  Fixture fixture;
+  fixture.relative->set_safety_faulted(true);
+
+  const auto admission = fixture.core.admit(goal(1U));
+
+  EXPECT_FALSE(admission.accepted);
+  EXPECT_EQ(admission.result.code, MissionResultCode::SafetyFault);
+  EXPECT_EQ(
+    fixture.core.state().availability,
+    RuntimeAvailability::Faulted);
+  EXPECT_TRUE(fixture.authority->operations().empty());
+}
+
 TEST(RuntimeCore, RevokedStartPermitPreventsRelativeMotionSideEffect)
 {
   Fixture fixture;

@@ -78,6 +78,16 @@ struct MotionConditioningResult
   std::chrono::steady_clock::time_point zero_proven_at{};
 };
 
+namespace detail
+{
+
+// Package-private startup seam.  Runtime uses the result to gate availability;
+// it does not add a ROS endpoint or change the public Mission interface.
+[[nodiscard]] MotionConditioningResult reconcile_motion_conditioning_startup(
+  MotionConditioningPipeline & pipeline);
+
+}  // namespace detail
+
 struct MotionConditioningCorrelationToken
 {
   std::uint64_t generation{0U};
@@ -104,6 +114,11 @@ struct MotionConditioningConfig
 {
   std::chrono::milliseconds component_rpc_timeout{2000};
   std::chrono::milliseconds writer_graph_timeout{1000};
+  std::chrono::milliseconds startup_reconciliation_timeout{4000};
+  // The production RelativeMotion Adapter invokes the package-private
+  // startup transaction from Runtime availability probing.  Standalone
+  // Pipeline users retain the safer default and reconcile from prepare().
+  bool startup_reconciliation_on_prepare{true};
   std::chrono::milliseconds prepare_open_deadline{4000};
   std::chrono::milliseconds renew_period{100};
   std::chrono::milliseconds dependency_liveness_timeout{200};
@@ -180,6 +195,8 @@ public:
   [[nodiscard]] MotionConditioningResult last_result() const;
 
 private:
+  friend MotionConditioningResult detail::reconcile_motion_conditioning_startup(
+    MotionConditioningPipeline & pipeline);
   friend void detail::begin_motion_conditioning_shutdown(
     MotionConditioningPipeline & pipeline) noexcept;
 

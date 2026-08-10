@@ -455,6 +455,7 @@ public:
       conditioning_config_.transaction_plane =
         std::make_shared<RuntimeTransactionPlane>();
     }
+    conditioning_config_.startup_reconciliation_on_prepare = false;
     conditioning_config_.transaction_generation_provider = [this]() {
         return transaction_generation_.load(std::memory_order_acquire);
       };
@@ -650,9 +651,35 @@ public:
     const auto now = std::chrono::steady_clock::now();
     bool active = false;
     MotionConditioningState conditioning_state = MotionConditioningState::Failed;
+    bool schedule_startup = false;
+    auto * self = const_cast<Impl *>(this);
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (shutting_down_ || !conditioning_ || sticky_admission_fault_) {
+        return false;
+      }
+      if (startup_state_ == StartupState::NotRequested) {
+        GateSnapshot snapshot;
+        try {
+          snapshot = authority_->snapshot();
+        } catch (...) {
+          return false;
+        }
+        const bool gate_zero = !snapshot.gate_instance_id.empty() &&
+          snapshot.endpoint_available && snapshot.state == GateState::Inhibited &&
+          snapshot.motion_inhibited && snapshot.zero_selected &&
+          snapshot.zero_published;
+        if (!gate_zero) {
+          return false;
+        }
+        self->startup_state_ = StartupState::Pending;
+        self->transaction_kind_ = TransactionKind::StartupReconcile;
+        schedule_startup = true;
+      }
+      if (startup_state_ != StartupState::Succeeded) {
+        if (schedule_startup) {
+          self->transaction_condition_.notify_one();
+        }
         return false;
       }
       active = active_;
@@ -677,6 +704,12 @@ public:
     return conditioning_state != MotionConditioningState::Failed;
   }
 
+  [[nodiscard]] bool safety_faulted() const noexcept
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return sticky_admission_fault_ || startup_state_ == StartupState::Failed;
+  }
+
   void start(
     const MotionToken & token,
     const MissionStep & step,
@@ -699,16 +732,23 @@ public:
     {
       std::lock_guard<std::mutex> lock(mutex_);
       const bool sticky_fault = sticky_admission_fault_;
+      const bool startup_failed = startup_state_ == StartupState::Failed;
+      const bool startup_pending = startup_state_ != StartupState::NotRequested &&
+        startup_state_ != StartupState::Succeeded;
       const bool fenced = !sticky_fault && !admission_allowed();
-      if (sticky_fault || fenced || shutting_down_ || active_ ||
+      if (sticky_fault || startup_pending || fenced || shutting_down_ || active_ ||
         transaction_kind_ != TransactionKind::Idle)
       {
         rejected = true;
-        if (sticky_fault) {
+        if (sticky_fault || startup_failed) {
           rejection_code = ChildResultCode::SafetyFault;
           rejection_detail = sticky_admission_fault_detail_.empty() ?
             "relative-motion admission is permanently safety-faulted" :
             sticky_admission_fault_detail_;
+        } else if (startup_pending) {
+          rejection_code = ChildResultCode::DependencyUnavailable;
+          rejection_detail =
+            "relative-motion startup reconciliation is still in progress";
         } else if (fenced) {
           rejection_code = ChildResultCode::SafetyFault;
           rejection_detail =
@@ -939,6 +979,16 @@ private:
     Idle = 0,
     Start = 1,
     Teardown = 2,
+    StartupReconcile = 3,
+  };
+
+  enum class StartupState : std::uint8_t
+  {
+    NotRequested = 0,
+    Pending = 1,
+    Running = 2,
+    Succeeded = 3,
+    Failed = 4,
   };
 
   struct TeardownRequest
@@ -1043,6 +1093,9 @@ private:
         kind = transaction_kind_;
         transaction_kind_ = TransactionKind::Idle;
         transaction_in_progress_ = true;
+        if (kind == TransactionKind::StartupReconcile) {
+          startup_state_ = StartupState::Running;
+        }
         if (kind == TransactionKind::Teardown) {
           teardown = std::move(pending_teardown_);
           pending_teardown_.reset();
@@ -1052,6 +1105,8 @@ private:
       try {
         if (kind == TransactionKind::Start) {
           run_start_transaction();
+        } else if (kind == TransactionKind::StartupReconcile) {
+          run_startup_reconciliation_transaction();
         } else if (kind == TransactionKind::Teardown && teardown.has_value()) {
           (void)run_teardown(*teardown);
         }
@@ -1113,6 +1168,43 @@ private:
     }
     if (schedule) {
       transaction_condition_.notify_one();
+    }
+  }
+
+  void run_startup_reconciliation_transaction()
+  {
+    MotionConditioningResult result;
+    try {
+      result = detail::reconcile_motion_conditioning_startup(*conditioning_);
+    } catch (const std::exception & error) {
+      result = MotionConditioningResult{
+        false, MotionConditioningState::Failed,
+        MotionConditioningFailure::SafetyFault, false, false, {}, {},
+        std::string{"startup component reconciliation raised: "} + error.what()};
+    } catch (...) {
+      result = MotionConditioningResult{
+        false, MotionConditioningState::Failed,
+        MotionConditioningFailure::SafetyFault, false, false, {}, {},
+        "startup component reconciliation raised an unknown exception"};
+    }
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (result.ok) {
+        startup_state_ = StartupState::Succeeded;
+        zero_proven_ = result.zero_proven;
+        teardown_complete_ = true;
+        teardown_safe_ = result.zero_proven;
+      } else {
+        startup_state_ = StartupState::Failed;
+        zero_proven_ = result.zero_proven;
+        teardown_complete_ = result.zero_proven;
+        teardown_safe_ = result.zero_proven;
+        latch_admission_fault_locked(
+          result.detail.empty() ?
+          "startup component reconciliation failed closed" : result.detail);
+        command_ = {};
+      }
+      condition_variable_.notify_all();
     }
   }
 
@@ -1668,6 +1760,7 @@ private:
   std::optional<TeardownRequest> pending_teardown_;
   bool transaction_stop_{false};
   bool transaction_in_progress_{false};
+  StartupState startup_state_{StartupState::NotRequested};
   bool shutting_down_{false};
   bool shutdown_delivery_requested_{false};
   bool shutdown_complete_{false};
@@ -1816,6 +1909,11 @@ bool RelativeMotionRosAdapter::owns_authority_lifecycle() const noexcept
 bool RelativeMotionRosAdapter::zero_proven() const noexcept
 {
   return impl_->zero_proven();
+}
+
+bool RelativeMotionRosAdapter::safety_faulted() const noexcept
+{
+  return impl_ && impl_->safety_faulted();
 }
 
 bool detail::RelativeMotionRosAdapterTestAccess::start_raw_producer(

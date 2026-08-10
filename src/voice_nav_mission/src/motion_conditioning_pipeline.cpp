@@ -36,6 +36,7 @@
 #include <string>
 #include <thread>
 #include <type_traits>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -529,6 +530,12 @@ private:
 
   MotionConditioningResult prepare()
   {
+    if (config_.startup_reconciliation_on_prepare) {
+      const auto startup = reconcile_startup();
+      if (!startup.ok) {
+        return startup;
+      }
+    }
     MotionConditioningResult existing;
     bool cleanup_needed = false;
     if (!begin_prepare(existing, cleanup_needed)) {
@@ -746,6 +753,15 @@ private:
     }
     finish_prepare(result);
     return result;
+  }
+
+  MotionConditioningResult reconcile_startup()
+  {
+    std::lock_guard<std::mutex> startup_lock(startup_mutex_);
+    if (startup_reconciled_ || startup_reconcile_failed_) {
+      return startup_result_;
+    }
+    return reconcile_startup_owned();
   }
 
   MotionConditioningResult start()
@@ -2675,7 +2691,8 @@ private:
 
   [[nodiscard]] bool list_nodes(
     std::vector<Component> & nodes,
-    std::chrono::steady_clock::time_point overall_deadline)
+    std::chrono::steady_clock::time_point overall_deadline,
+    const bool strict_identity = false)
   {
     const auto list_fqn = config_.container_fqn + "/_container/list_nodes";
     try {
@@ -2703,11 +2720,39 @@ private:
         return false;
       }
       nodes.clear();
+      if (strict_identity &&
+        response->full_node_names.size() != response->unique_ids.size())
+      {
+        record_cleanup_failure(
+          "list_nodes_identity", list_fqn, 0U,
+          "ListNodes returned mismatched FQN and unique_id arrays");
+        return false;
+      }
       const auto count = std::min(
         response->full_node_names.size(), response->unique_ids.size());
+      std::unordered_set<std::uint64_t> unique_ids;
+      std::unordered_set<std::string> node_fqns;
       for (std::size_t index = 0U; index < count; ++index) {
-        nodes.push_back(Component{
-            response->unique_ids[index], response->full_node_names[index]});
+        const auto unique_id = response->unique_ids[index];
+        const auto & node_fqn = response->full_node_names[index];
+        const bool allowed_fqn = node_fqn == kCollisionMonitorFqn ||
+          node_fqn == kVelocitySmootherFqn;
+        const bool unique_id_inserted = unique_ids.insert(unique_id).second;
+        const bool node_fqn_inserted = node_fqns.insert(node_fqn).second;
+        if (strict_identity &&
+          (unique_id == 0U || !allowed_fqn ||
+          !unique_id_inserted || !node_fqn_inserted))
+        {
+          record_cleanup_failure(
+            "list_nodes_identity", node_fqn, unique_id,
+            unique_id == 0U ? "ListNodes returned zero unique_id" :
+            !allowed_fqn ? "ListNodes returned an unknown component FQN" :
+            !unique_id_inserted ?
+            "ListNodes returned a duplicate unique_id" :
+            "ListNodes returned a duplicate component FQN");
+          return false;
+        }
+        nodes.push_back(Component{unique_id, node_fqn});
       }
       if (std::chrono::steady_clock::now() > overall_deadline) {
         record_cleanup_failure(
@@ -2720,6 +2765,249 @@ private:
         "list_nodes", list_fqn, 0U, "ListNodes request raised an exception");
       return false;
     }
+  }
+
+  [[nodiscard]] bool cleanup_startup_components(
+    const std::vector<Component> & listed,
+    const std::chrono::steady_clock::time_point overall_deadline)
+  {
+    if (!startup_gate_zero_proven()) {
+      record_cleanup_failure(
+        "startup_gate", config_.container_fqn, 0U,
+        "MotionGate stopped proving inhibited zero during startup cleanup");
+      return false;
+    }
+    std::vector<Component> ordered = listed;
+    std::sort(
+      ordered.begin(), ordered.end(), [](const Component & left, const Component & right) {
+        return left.node_fqn < right.node_fqn;
+      });
+    for (const auto & component : ordered) {
+      const auto state = component_state(component.node_fqn, overall_deadline);
+      if (state == lifecycle_msgs::msg::State::PRIMARY_STATE_UNKNOWN) {
+        record_cleanup_failure(
+          "startup_lifecycle_state", component.node_fqn, component.unique_id,
+          "GetState did not return a usable lifecycle state");
+        return false;
+      }
+      if (state == lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) {
+        if (!change_state(
+            component.node_fqn,
+            lifecycle_msgs::msg::Transition::TRANSITION_DEACTIVATE,
+            overall_deadline))
+        {
+          record_cleanup_failure(
+            "startup_lifecycle_deactivate", component.node_fqn,
+            component.unique_id, "active component could not be deactivated");
+          return false;
+        }
+        if (!change_state(
+            component.node_fqn,
+            lifecycle_msgs::msg::Transition::TRANSITION_CLEANUP,
+            overall_deadline))
+        {
+          record_cleanup_failure(
+            "startup_lifecycle_cleanup", component.node_fqn,
+            component.unique_id, "inactive component could not be cleaned up");
+          return false;
+        }
+      } else if (state == lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE) {
+        if (!change_state(
+            component.node_fqn,
+            lifecycle_msgs::msg::Transition::TRANSITION_CLEANUP,
+            overall_deadline))
+        {
+          record_cleanup_failure(
+            "startup_lifecycle_cleanup", component.node_fqn,
+            component.unique_id, "inactive component could not be cleaned up");
+          return false;
+        }
+      } else if (
+        state != lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED &&
+        state != lifecycle_msgs::msg::State::PRIMARY_STATE_FINALIZED)
+      {
+        record_cleanup_failure(
+          "startup_lifecycle_state", component.node_fqn, component.unique_id,
+          "component lifecycle state was not cleanup-safe");
+        return false;
+      }
+    }
+
+    if (!startup_gate_zero_proven()) {
+      record_cleanup_failure(
+        "startup_gate", config_.container_fqn, 0U,
+        "MotionGate stopped proving inhibited zero before startup UnloadNode");
+      return false;
+    }
+    for (const auto & component : ordered) {
+      if (!call_unload(component.unique_id, overall_deadline)) {
+        record_cleanup_failure(
+          "startup_unload", component.node_fqn, component.unique_id,
+          "UnloadNode failed for the discovered component");
+        return false;
+      }
+    }
+    return true;
+  }
+
+  [[nodiscard]] bool startup_candidate_writer_visible() const
+  {
+    try {
+      for (const auto & topic : node_.get_topic_names_and_types()) {
+        const auto has_twist_stamped = std::find(
+          topic.second.cbegin(), topic.second.cend(),
+          "geometry_msgs/msg/TwistStamped") != topic.second.cend();
+        if (!has_twist_stamped) {
+          continue;
+        }
+        const auto publishers = node_.get_publishers_info_by_topic(topic.first);
+        if (std::any_of(
+            publishers.cbegin(), publishers.cend(),
+            [](const auto & endpoint) {
+              return static_cast<rmw_endpoint_type_t>(endpoint.endpoint_type()) ==
+                     RMW_ENDPOINT_PUBLISHER &&
+                     endpoint.topic_type() == "geometry_msgs/msg/TwistStamped" &&
+                     endpoint.node_name() == "collision_monitor" &&
+                     endpoint.node_namespace() == "/";
+            }))
+        {
+          return true;
+        }
+      }
+    } catch (...) {
+      return true;
+    }
+    return false;
+  }
+
+  [[nodiscard]] bool startup_gate_zero_proven() const
+  {
+    try {
+      return gate_snapshot_proves_zero(authority_->snapshot());
+    } catch (...) {
+      return false;
+    }
+  }
+
+  [[nodiscard]] bool wait_for_startup_graph_change(
+    const rclcpp::Event::SharedPtr & graph_event,
+    const std::chrono::steady_clock::time_point deadline) const
+  {
+    const auto remaining = remaining_until(deadline);
+    if (remaining.count() == 0) {
+      return false;
+    }
+    try {
+      node_.wait_for_graph_change(
+        graph_event,
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::min(remaining, 10ms)));
+      graph_event->check_and_clear();
+      return true;
+    } catch (...) {
+      return false;
+    }
+  }
+
+  [[nodiscard]] bool confirm_startup_graph_clean(
+    const std::chrono::steady_clock::time_point deadline)
+  {
+    rclcpp::Event::SharedPtr graph_event;
+    try {
+      graph_event = node_.get_graph_event();
+    } catch (...) {
+      record_cleanup_failure(
+        "startup_graph", config_.container_fqn, 0U,
+        "could not create a graph event for residual confirmation");
+      return false;
+    }
+
+    std::size_t consecutive_empty = 0U;
+    while (std::chrono::steady_clock::now() < deadline) {
+      if (!startup_gate_zero_proven()) {
+        record_cleanup_failure(
+          "startup_gate", config_.container_fqn, 0U,
+          "MotionGate stopped proving inhibited zero during residual confirmation");
+        return false;
+      }
+      std::vector<Component> listed;
+      if (!list_nodes(listed, deadline, true)) {
+        return false;
+      }
+      const bool empty = listed.empty() && !startup_candidate_writer_visible();
+      if (empty) {
+        ++consecutive_empty;
+        if (consecutive_empty >= 2U) {
+          return true;
+        }
+      } else {
+        consecutive_empty = 0U;
+        if (!listed.empty() && !cleanup_startup_components(listed, deadline)) {
+          return false;
+        }
+      }
+      if (!wait_for_startup_graph_change(graph_event, deadline)) {
+        break;
+      }
+    }
+    record_cleanup_failure(
+      "startup_graph", config_.container_fqn, 0U,
+      "two consecutive empty ListNodes and writer-graph observations were not proven");
+    return false;
+  }
+
+  [[nodiscard]] MotionConditioningResult reconcile_startup_owned()
+  {
+    cleanup_failure_.reset();
+    cleanup_identity_fault_ = false;
+    cleanup_blocked_ = false;
+    const auto deadline = std::chrono::steady_clock::now() +
+      config_.startup_reconciliation_timeout;
+    std::chrono::steady_clock::time_point zero_proven_at{};
+    const auto fail_startup = [this, &zero_proven_at](std::string detail) {
+        cleanup_blocked_ = true;
+        const auto zero_proven = zero_proven_at != std::chrono::steady_clock::time_point{};
+        MotionConditioningResult result;
+        {
+          std::lock_guard<std::recursive_mutex> lock(mutex_);
+          state_ = MotionConditioningState::Failed;
+          result = remember(make_result(
+              state_, MotionConditioningFailure::SafetyFault, false,
+              zero_proven, false, {}, {}, with_cleanup_failure(std::move(detail))));
+          result.zero_proven_at = zero_proven_at;
+        }
+        startup_reconcile_failed_ = true;
+        startup_result_ = result;
+        return result;
+      };
+
+    if (!inhibit_gate(false, &zero_proven_at)) {
+      return fail_startup(
+        "startup reconciliation could not prove an inhibited zero Gate state");
+    }
+    std::vector<Component> listed;
+    if (!list_nodes(listed, deadline, true)) {
+      return fail_startup("startup ListNodes identity discovery failed");
+    }
+    if (!listed.empty() && !cleanup_startup_components(listed, deadline)) {
+      return fail_startup("startup component lifecycle or unload cleanup failed");
+    }
+    if (!confirm_startup_graph_clean(deadline)) {
+      return fail_startup("startup component residual or candidate writer cleanup failed");
+    }
+
+    MotionConditioningResult result;
+    {
+      std::lock_guard<std::recursive_mutex> lock(mutex_);
+      result = remember(make_result(
+          MotionConditioningState::Stopped, MotionConditioningFailure::None, true,
+          true, false, {}, {}, "startup component reconciliation complete"));
+      result.zero_proven_at = zero_proven_at;
+      last_result_.zero_proven_at = zero_proven_at;
+    }
+    startup_reconciled_ = true;
+    startup_result_ = result;
+    return result;
   }
 
   [[nodiscard]] bool reconcile_pending_loads(
@@ -2802,7 +3090,7 @@ private:
         }
       }
       std::vector<Component> listed;
-      if (!list_nodes(listed, confirmation_deadline)) {
+      if (!list_nodes(listed, confirmation_deadline, true)) {
         return false;
       }
       bool target_present = false;
@@ -2880,7 +3168,7 @@ private:
     std::vector<Component> listed;
     const auto list_deadline = std::chrono::steady_clock::now() +
       config_.component_rpc_timeout;
-    const bool listed_ok = list_nodes(listed, list_deadline);
+    const bool listed_ok = list_nodes(listed, list_deadline, true);
     success = listed_ok && success;
 
     std::vector<Component> actual_components;
@@ -3653,6 +3941,10 @@ private:
   std::uint64_t generation_{0U};
   std::string generation_request_id_;
   MotionConditioningCorrelationToken correlation_token_;
+  std::mutex startup_mutex_;
+  bool startup_reconciled_{false};
+  bool startup_reconcile_failed_{false};
+  MotionConditioningResult startup_result_{};
   std::mutex producer_mutex_;
   std::atomic<bool> producer_stop_proven_{false};
   std::atomic<bool> timer_enabled_{false};
@@ -3720,6 +4012,12 @@ void detail::begin_motion_conditioning_shutdown(
   MotionConditioningPipeline & pipeline) noexcept
 {
   pipeline.begin_shutdown_ingress();
+}
+
+MotionConditioningResult detail::reconcile_motion_conditioning_startup(
+  MotionConditioningPipeline & pipeline)
+{
+  return pipeline.impl_->reconcile_startup();
 }
 
 }  // namespace voice_nav_mission
