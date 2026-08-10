@@ -208,7 +208,7 @@ class ProcessIdentityTest(unittest.TestCase):
             if child.poll() is None:
                 child.wait(timeout=2)
 
-    def test_signal_boundary_precondition_runs_after_identity_validation(self):
+    def test_graph_boundary_precondition_runs_before_sigkill(self):
         child, action, event = self.make_child()
         guard = None
         calls = []
@@ -231,11 +231,8 @@ class ProcessIdentityTest(unittest.TestCase):
                 'pidfd_send_signal',
                 side_effect=traced_pidfd_send_signal,
             ):
-                guard.kill(
-                    lambda: calls.append('graph') or 1,
-                    before_signal=lambda: calls.append('precondition'),
-                )
-            self.assertEqual(calls, ['graph', 'precondition', 'sigkill'])
+                guard.kill(lambda: calls.append('graph_precondition') or 1)
+            self.assertEqual(calls, ['graph_precondition', 'sigkill'])
             self.assertNotEqual(child.wait(timeout=2), 0)
         finally:
             if guard is not None:
@@ -255,17 +252,14 @@ class ProcessIdentityTest(unittest.TestCase):
                 expected_node_name='pidfd_test_child',
             )
 
-            def reject_signal_boundary():
+            def reject_graph_boundary():
                 raise AssertionError('target stopped moving before SIGKILL')
 
             with self.assertRaisesRegex(
-                AssertionError,
-                'target stopped moving before SIGKILL',
+                support.ProcessIdentityError,
+                'ROS graph identity could not be checked',
             ):
-                guard.kill(
-                    lambda: 1,
-                    before_signal=reject_signal_boundary,
-                )
+                guard.kill(reject_graph_boundary)
             self.assertIsNone(child.poll())
         finally:
             if guard is not None:
@@ -285,17 +279,15 @@ class ProcessIdentityTest(unittest.TestCase):
                 expected_node_name='pidfd_test_child',
             )
 
-            def invalidate_recorded_identity():
+            def invalidate_recorded_identity_after_graph_proof():
                 guard.snapshot = replace(
                     guard.snapshot,
                     starttime_ticks=guard.snapshot.starttime_ticks + 1,
                 )
+                return 1
 
             with self.assertRaises(support.ProcessIdentityError):
-                guard.kill(
-                    lambda: 1,
-                    before_signal=invalidate_recorded_identity,
-                )
+                guard.kill(invalidate_recorded_identity_after_graph_proof)
             self.assertIsNone(child.poll())
         finally:
             if guard is not None:

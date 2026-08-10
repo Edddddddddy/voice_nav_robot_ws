@@ -688,6 +688,7 @@ class CrashStopProbe:
                 final_sample,
                 limited_sample,
                 clock_sample,
+                previous_clock_sample,
             )
             if any(sample is None for sample in samples):
                 raise AssertionError(
