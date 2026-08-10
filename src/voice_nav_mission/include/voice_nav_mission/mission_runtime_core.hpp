@@ -280,6 +280,16 @@ public:
   {
     return false;
   }
+
+  // A replacement MotionGate may re-establish an inhibited, published zero
+  // after the previous Gate process disappeared.  Production adapters may
+  // release only the narrowly-scoped Gate-loss latch through this seam; the
+  // default keeps deterministic ports fail-closed.
+  [[nodiscard]] virtual bool rearm_after_gate_replacement(
+    const GateSnapshot &) noexcept
+  {
+    return false;
+  }
 };
 
 struct RuntimeConfig
@@ -412,7 +422,7 @@ private:
   [[nodiscard]] std::string new_identifier() const;
   [[nodiscard]] bool rotate_epoch();
   [[nodiscard]] bool admission_allowed(std::uint64_t admission_epoch) const;
-  void set_availability_from_dependencies();
+  void set_availability_from_dependencies(bool allow_fault_rearm = false);
   void publish_state();
   void publish_feedback(
     FeedbackPhase phase,
@@ -453,6 +463,7 @@ private:
   GateSnapshot gate_snapshot_;
   bool gate_bound_{false};
   bool gate_fault_handled_{false};
+  bool gate_replacement_pending_{false};
   std::optional<GateSnapshot> gate_fault_snapshot_;
   bool relative_health_initialized_{false};
   bool last_relative_healthy_{false};
@@ -537,6 +548,11 @@ public:
   {
     return safety_faulted_;
   }
+  [[nodiscard]] bool rearm_after_gate_replacement(
+    const GateSnapshot &) noexcept override
+  {
+    return rearm_after_gate_replacement_;
+  }
   void start(
     const MotionToken & token,
     const MissionStep & step,
@@ -549,6 +565,10 @@ public:
 
   void set_healthy(bool value) {healthy_ = value;}
   void set_safety_faulted(bool value) {safety_faulted_ = value;}
+  void set_rearm_after_gate_replacement(bool value)
+  {
+    rearm_after_gate_replacement_ = value;
+  }
   void set_cancel_acknowledged(bool value) {cancel_acknowledged_ = value;}
   void set_start_completion(bool value) {start_completion_ = value;}
   void set_start_failure(std::string detail) {next_start_failure_ = std::move(detail);}
@@ -595,6 +615,7 @@ private:
 
   bool healthy_{true};
   bool safety_faulted_{false};
+  bool rearm_after_gate_replacement_{false};
   bool cancel_acknowledged_{true};
   bool start_completion_{false};
   std::string next_start_failure_;

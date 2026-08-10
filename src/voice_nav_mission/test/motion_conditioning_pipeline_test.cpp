@@ -1765,6 +1765,46 @@ TEST_F(MotionConditioningPipelineTest, StopWithoutLeaseRequiresInhibitedZeroSnap
   EXPECT_EQ(producer->stop_count, 1U);
 }
 
+TEST_F(
+  MotionConditioningPipelineTest,
+  GateLossTerminalRearmsOnlyAfterReplacementZeroProof)
+{
+  auto health_ready = std::make_shared<CallbackCounter>();
+  auto pipeline_config = config();
+  pipeline_config.after_health_callback = [health_ready]() {
+      (*health_ready)();
+    };
+  MotionConditioningPipeline pipeline(*client, authority, producer, pipeline_config);
+  const auto prepared = pipeline.prepare();
+  ASSERT_TRUE(prepared.ok) << prepared.detail;
+  health_ready->expect(4U);
+  graph->publish_health_once();
+  ASSERT_TRUE(health_ready->wait_for_target());
+  const auto started = pipeline.start();
+  ASSERT_TRUE(started.ok) << started.detail;
+  const auto token = pipeline.correlation_token();
+
+  authority->set_inhibit_zero_proof(false);
+  const auto failed = pipeline.fail(
+    token, MotionConditioningFailure::SafetyFault, "Gate process disappeared");
+  ASSERT_FALSE(failed.ok);
+  EXPECT_EQ(failed.failure, MotionConditioningFailure::SafetyFault);
+  EXPECT_FALSE(failed.zero_proven);
+  EXPECT_EQ(pipeline.state(), MotionConditioningState::Failed);
+
+  const auto replacement = authority->snapshot();
+  EXPECT_FALSE(pipeline.rearm_after_gate_replacement(replacement));
+
+  authority->set_initial_zero_proof(true);
+  const auto zero_proven_replacement = authority->snapshot();
+  EXPECT_TRUE(pipeline.rearm_after_gate_replacement(zero_proven_replacement));
+  EXPECT_EQ(pipeline.state(), MotionConditioningState::Stopped);
+  const auto rearmed = pipeline.last_result();
+  EXPECT_TRUE(rearmed.ok);
+  EXPECT_TRUE(rearmed.zero_proven);
+  EXPECT_EQ(rearmed.failure, MotionConditioningFailure::None);
+}
+
 TEST_F(MotionConditioningPipelineTest, CollisionStopIsReportedAndFailsClosed)
 {
   MotionConditioningPipeline pipeline(*client, authority, producer, config());

@@ -235,6 +235,15 @@ bool same_token(const MotionToken & left, const MotionToken & right) noexcept
          left.admission_generation == right.admission_generation;
 }
 
+bool gate_snapshot_proves_zero(const GateSnapshot & snapshot) noexcept
+{
+  return !snapshot.gate_instance_id.empty() &&
+         snapshot.endpoint_available &&
+         snapshot.state == GateState::Inhibited &&
+         snapshot.motion_inhibited && snapshot.zero_selected &&
+         snapshot.zero_published;
+}
+
 ChildResultCode child_code_for_conditioning(
   const MotionConditioningFailure failure) noexcept
 {
@@ -725,6 +734,48 @@ public:
   {
     std::lock_guard<std::mutex> lock(mutex_);
     return sticky_admission_fault_ || startup_state_ == StartupState::Failed;
+  }
+
+  [[nodiscard]] bool rearm_after_gate_replacement(
+    const GateSnapshot & snapshot) noexcept
+  {
+    try {
+      if (!gate_snapshot_proves_zero(snapshot)) {
+        return false;
+      }
+      const auto current = authority_->snapshot();
+      if (!gate_snapshot_proves_zero(current) ||
+        current.gate_instance_id != snapshot.gate_instance_id ||
+        current.control_seq < snapshot.control_seq)
+      {
+        return false;
+      }
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (
+        !gate_rearm_pending_ || startup_state_ != StartupState::Succeeded ||
+        shutting_down_ || shutdown_complete_ || active_ || starting_ ||
+        transaction_kind_ != TransactionKind::Idle ||
+        transaction_in_progress_ || emergency_stop_in_progress_ ||
+        pending_teardown_.has_value() || !teardown_complete_ ||
+        completion_record_in_progress_ || !conditioning_)
+      {
+        return false;
+      }
+      if (!conditioning_->rearm_after_gate_replacement(current)) {
+        return false;
+      }
+      sticky_admission_fault_ = false;
+      sticky_admission_fault_detail_.clear();
+      gate_rearm_pending_ = false;
+      zero_proven_ = true;
+      teardown_complete_ = true;
+      teardown_safe_ = true;
+      command_ = {};
+      condition_variable_.notify_all();
+      return true;
+    } catch (...) {
+      return false;
+    }
   }
 
   void start(
@@ -1785,6 +1836,14 @@ private:
         teardown_complete_ = true;
         teardown_safe_ = zero && stationary &&
           conditioning_result.failure != MotionConditioningFailure::SafetyFault;
+        if (!zero && final_code == ChildResultCode::SafetyFault) {
+          // A dead/unavailable Gate cannot produce the steady zero proof that
+          // normally closes this generation.  Keep a narrow rearm candidate;
+          // the explicit replacement handshake below still requires a fresh
+          // identity, current inhibited zero and a completely drained
+          // conditioning pipeline.
+          gate_rearm_pending_ = true;
+        }
         if (startup_close_requested_) {
           startup_close_teardown_terminal_ = true;
         }
@@ -1861,6 +1920,7 @@ private:
   bool teardown_complete_{true};
   bool teardown_safe_{true};
   bool sticky_admission_fault_{false};
+  bool gate_rearm_pending_{false};
   std::string sticky_admission_fault_detail_;
   MotionToken active_token_{};
   MissionStep active_step_{};
@@ -2000,6 +2060,12 @@ bool RelativeMotionRosAdapter::zero_proven() const noexcept
 bool RelativeMotionRosAdapter::safety_faulted() const noexcept
 {
   return impl_ && impl_->safety_faulted();
+}
+
+bool RelativeMotionRosAdapter::rearm_after_gate_replacement(
+  const GateSnapshot & snapshot) noexcept
+{
+  return impl_ && impl_->rearm_after_gate_replacement(snapshot);
 }
 
 bool detail::RelativeMotionRosAdapterTestAccess::start_raw_producer(

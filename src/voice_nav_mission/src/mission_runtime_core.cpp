@@ -541,6 +541,45 @@ void RuntimeCore::observe_gate(const GateSnapshot & snapshot)
   // from the prior generation must not clear the latch and make the same
   // fault rotate the Runtime epoch twice.
   if (gate_fault_handled_) {
+    if (identity_changed && is_healthy && startup_gate_is_ready(snapshot)) {
+      // The old fault latch must not hide a new Gate identity.  Treat its
+      // inhibited zero as a rearm candidate and retry on later control_seq
+      // samples if the adapter is still draining the failed generation.
+      gate_replacement_pending_ = true;
+      gate_fault_snapshot_ = snapshot;
+      if (
+        relative_motion_->rearm_after_gate_replacement(snapshot) &&
+        rotate_epoch())
+      {
+        gate_fault_handled_ = false;
+        gate_fault_snapshot_.reset();
+        gate_replacement_pending_ = false;
+        gate_bound_ = true;
+        set_availability_from_dependencies(true);
+        publish_state();
+      }
+      return;
+    }
+    if (gate_replacement_pending_) {
+      // A replacement Gate can publish its safe zero before the adapter has
+      // finished draining the failed generation.  Keep the Runtime latched
+      // until the adapter explicitly accepts this exact replacement; later
+      // samples from the same identity are retry points, not trusted recovery
+      // of the old Gate generation.
+      if (
+        is_healthy && startup_gate_is_ready(snapshot) &&
+        relative_motion_->rearm_after_gate_replacement(snapshot) &&
+        rotate_epoch())
+      {
+        gate_fault_handled_ = false;
+        gate_fault_snapshot_.reset();
+        gate_replacement_pending_ = false;
+        gate_bound_ = true;
+        set_availability_from_dependencies(true);
+        publish_state();
+      }
+      return;
+    }
     const bool trusted_recovery =
       is_healthy && gate_fault_snapshot_.has_value() &&
       !gate_fault_snapshot_->gate_instance_id.empty() &&
@@ -551,6 +590,7 @@ void RuntimeCore::observe_gate(const GateSnapshot & snapshot)
     }
     gate_fault_handled_ = false;
     gate_fault_snapshot_.reset();
+    gate_replacement_pending_ = false;
     gate_bound_ = true;
     set_availability_from_dependencies();
     publish_state();
@@ -558,6 +598,20 @@ void RuntimeCore::observe_gate(const GateSnapshot & snapshot)
   }
 
   if (identity_changed || (!is_healthy && was_healthy)) {
+    gate_replacement_pending_ = identity_changed &&
+      is_healthy && startup_gate_is_ready(snapshot);
+    if (gate_replacement_pending_ &&
+      relative_motion_->rearm_after_gate_replacement(snapshot) &&
+      rotate_epoch())
+    {
+      gate_fault_handled_ = false;
+      gate_fault_snapshot_.reset();
+      gate_replacement_pending_ = false;
+      gate_bound_ = true;
+      set_availability_from_dependencies(true);
+      publish_state();
+      return;
+    }
     gate_fault_handled_ = true;
     gate_fault_snapshot_ = snapshot;
     (void)rotate_epoch();
@@ -823,9 +877,9 @@ bool RuntimeCore::rotate_epoch()
   return true;
 }
 
-void RuntimeCore::set_availability_from_dependencies()
+void RuntimeCore::set_availability_from_dependencies(const bool allow_fault_rearm)
 {
-  if (state_.availability == RuntimeAvailability::Faulted) {
+  if (state_.availability == RuntimeAvailability::Faulted && !allow_fault_rearm) {
     return;
   }
   if (active_.has_value()) {

@@ -34,6 +34,7 @@ namespace
 constexpr char kRuntimeId[] = "0123456789abcdef0123456789abcdef";
 constexpr char kGateId[] = "fedcba9876543210fedcba9876543210";
 constexpr char kOtherGateId[] = "00112233445566778899aabbccddeeff";
+constexpr char kReplacementGateId[] = "ffeeddccbbaa99887766554433221100";
 
 MissionGoal goal(
   std::uint64_t source_seq,
@@ -754,6 +755,40 @@ TEST(RuntimeCore, GateIdentityLossRotatesEpochOnlyOnceAndFailsClosed)
   EXPECT_EQ(fixture.results.front().code, MissionResultCode::SafetyFault);
   EXPECT_EQ(fixture.core.state().admission_epoch, 2U);
   EXPECT_EQ(fixture.core.state().availability, RuntimeAvailability::Faulted);
+}
+
+TEST(RuntimeCore, ReplacementGateZeroRearmsAfterGateSafetyFault)
+{
+  Fixture fixture;
+  ASSERT_TRUE(fixture.core.admit(goal(1U)).accepted);
+
+  fixture.core.observe_gate(GateSnapshot{
+        kOtherGateId, 1U, "", GateState::Faulted, false,
+        true, true, false, "", false, false});
+
+  ASSERT_EQ(fixture.core.state().availability, RuntimeAvailability::Faulted);
+  ASSERT_EQ(fixture.core.state().admission_epoch, 2U);
+  const auto replacement = GateSnapshot{
+    kReplacementGateId, 1U, "", GateState::Inhibited,
+    true, true, true, true, "", false, false};
+  fixture.authority->set_snapshot(replacement);
+
+  fixture.core.observe_gate(replacement);
+  EXPECT_EQ(fixture.core.state().admission_epoch, 2U);
+  EXPECT_EQ(fixture.core.state().availability, RuntimeAvailability::Faulted);
+
+  fixture.relative->set_rearm_after_gate_replacement(true);
+  const auto replacement_retry = GateSnapshot{
+    kReplacementGateId, 2U, "", GateState::Inhibited,
+    true, true, true, true, "", false, false};
+  fixture.authority->set_snapshot(replacement_retry);
+  fixture.core.observe_gate(replacement_retry);
+
+  EXPECT_EQ(fixture.core.state().admission_epoch, 3U);
+  EXPECT_EQ(fixture.core.state().availability, RuntimeAvailability::Available);
+  EXPECT_EQ(fixture.core.state().gate_state, GateState::Inhibited);
+  EXPECT_TRUE(fixture.core.usable());
+  EXPECT_FALSE(fixture.core.has_active_mission());
 }
 
 TEST(RuntimeCore, ZeroProofFailureStillCancelsAndReturnsSafetyFault)
