@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from concurrent.futures import ThreadPoolExecutor
 import re
 import secrets
 import threading
@@ -51,11 +52,14 @@ from .core import (
     Decision,
     DecisionKind,
     MissionDecision,
+    MissionProposal,
+    MissionStep,
     MissionState,
     PlanningToken,
     StopDecision,
     VoiceTurn,
 )
+from .llm_adapter import LoopbackLlm
 
 
 VOICE_TURN_TOPIC = '/voice/turn'
@@ -98,6 +102,7 @@ class _MissionSlot:
     cancel_started: bool = False
     cancel_failure_spoken: bool = False
     terminal_speech_spoken: bool = False
+    last_feedback_step: int = -1
 
 
 @dataclass(slots=True)
@@ -168,6 +173,14 @@ class AgentNode(Node):
         self._speak_generation = 0
         self._speak_seq = 0
         self._stop_generation = 0
+        self._llm_generation = 0
+        self._llm_future = None
+        self._llm_operation = None
+        self._llm_executor = ThreadPoolExecutor(max_workers=1)
+        self._llm = LoopbackLlm(self.declare_parameter(
+            'llm_endpoint', 'http://127.0.0.1:8080/v1/chat/completions'
+        ).value)
+        self._llm_timer = self.create_timer(0.05, self._poll_llm)
         self._mission_slot: Optional[_MissionSlot] = None
         self._speak_operation: Optional[_SpeakOperation] = None
         self._stop_operation: Optional[_StopOperation] = None
@@ -381,6 +394,8 @@ class AgentNode(Node):
                 turn_generation,
             )
         elif decision.kind is DecisionKind.LLM_NEEDED:
+            self._start_llm(decision, turn_generation)
+            return
             self._speak_text(
                 '当前仅支持确定性导航指令。',
                 Speak.Goal.NORMAL,
@@ -388,6 +403,43 @@ class AgentNode(Node):
                 decision.token.turn_id,
                 turn_generation,
             )
+
+    def _start_llm(self, decision: Any, turn_generation: int) -> None:
+        self._llm_generation += 1
+        operation = (self._llm_generation, turn_generation, decision.token)
+        self._llm_operation = operation
+        self._llm_future = self._llm_executor.submit(
+            self._llm.plan, decision.text, decision.token.named_place_ids
+        )
+
+    def _poll_llm(self) -> None:
+        future, operation = self._llm_future, self._llm_operation
+        if future is None or operation is None or not future.done():
+            return
+        self._llm_future = None
+        try:
+            response = future.result()
+        except Exception as error:
+            self.get_logger().warning(f'LLM fallback unavailable: {error}')
+            return
+        _generation, turn_generation, token = operation
+        if operation != self._llm_operation or turn_generation != self._turn_generation:
+            return
+        if response['kind'] == 'reply':
+            self._speak_text(response.get('text', '')[:512] or '无法理解该指令。', Speak.Goal.NORMAL,
+                             token.session_id, token.turn_id, turn_generation)
+            return
+        targets = response.get('targets')
+        if not isinstance(targets, list) or not 1 <= len(targets) <= 3:
+            return
+        proposal = MissionProposal(tuple(
+            MissionStep(MissionStep.NAVIGATE_TO, target_id=target) for target in targets
+        ), token)
+        validation = self._core.validator.validate(proposal, token)
+        if validation.accepted:
+            turn = VoiceTurn(token.voice_instance_id, token.voice_seq, token.session_id,
+                             token.turn_id, VoiceTurn.COMMAND, '', 1.0, False)
+            self._handle_mission(MissionDecision(validation.mission), turn, turn_generation)
 
     def _planning_snapshot(
         self, *, require_execute_ready: bool
@@ -471,7 +523,12 @@ class AgentNode(Node):
         self._mission_slot = slot
         goal = self._mission_goal(decision.mission)
         try:
-            future = self._mission_client.send_goal_async(goal)
+            future = self._mission_client.send_goal_async(
+                goal,
+                feedback_callback=lambda feedback: self._seam.invoke(
+                    self._mission_feedback, slot, feedback.feedback
+                ),
+            )
         except Exception as error:
             self.get_logger().warning(
                 f'Mission Goal transport failed before submission: {error}'
@@ -502,6 +559,18 @@ class AgentNode(Node):
             message.target_id = step.target_id
             goal.steps.append(message)
         return goal
+
+    def _mission_feedback(self, slot: _MissionSlot, feedback: Any) -> None:
+        """Project only current Mission feedback into the Agent operation."""
+        if not self._mission_matches(slot):
+            return
+        step_index = int(getattr(feedback, 'step_index', -1))
+        progress = float(getattr(feedback, 'progress', 0.0))
+        if step_index != slot.last_feedback_step:
+            slot.last_feedback_step = step_index
+            self.get_logger().info(
+                f'Mission step {step_index + 1} started (progress={progress:.2f})'
+            )
 
     def _mission_send_timeout(self, slot: _MissionSlot) -> None:
         if not self._mission_matches(slot) or slot.state != (
