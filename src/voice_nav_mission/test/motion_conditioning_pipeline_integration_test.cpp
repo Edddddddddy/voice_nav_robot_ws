@@ -74,15 +74,15 @@ TEST(MotionAuthoritySnapshotWatermark, RejectsDelayedStateAfterIdentitySwitch)
   detail::GateSnapshotWatermark watermark;
   GateSnapshot accepted;
   const auto gate_a = GateSnapshot{
-    "gate-a", 3U, "lease-a", GateState::Armed,
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 3U, "lease-a", GateState::Armed,
     true, false, false, false, "/candidate/a", true, true};
   ASSERT_TRUE(watermark.merge(gate_a, accepted));
 
   const auto gate_b = GateSnapshot{
-    "gate-b", 1U, "", GateState::Inhibited,
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 1U, "", GateState::Inhibited,
     true, true, true, true, "", false, false};
   ASSERT_TRUE(watermark.merge(gate_b, accepted));
-  EXPECT_EQ(accepted.gate_instance_id, "gate-b");
+  EXPECT_EQ(accepted.gate_instance_id, gate_b.gate_instance_id);
 
   auto lost_zero_proof_gate_b = gate_b;
   lost_zero_proof_gate_b.zero_published = false;
@@ -97,7 +97,7 @@ TEST(MotionAuthoritySnapshotWatermark, RejectsDelayedStateAfterIdentitySwitch)
   auto delayed_gate_a = gate_a;
   delayed_gate_a.control_seq = 4U;
   EXPECT_FALSE(watermark.merge(delayed_gate_a, accepted));
-  EXPECT_EQ(watermark.snapshot().gate_instance_id, "gate-b");
+  EXPECT_EQ(watermark.snapshot().gate_instance_id, gate_b.gate_instance_id);
   EXPECT_EQ(watermark.snapshot().control_seq, 1U);
 
   auto newer_gate_b = gate_b;
@@ -106,6 +106,32 @@ TEST(MotionAuthoritySnapshotWatermark, RejectsDelayedStateAfterIdentitySwitch)
   EXPECT_EQ(accepted.control_seq, 2U);
   EXPECT_FALSE(watermark.merge(gate_b, accepted));
   EXPECT_EQ(watermark.snapshot().control_seq, 2U);
+}
+
+TEST(MotionAuthoritySnapshotWatermark, BoundsAndValidatesRetiredIdentities)
+{
+  detail::GateSnapshotWatermark watermark;
+  GateSnapshot accepted;
+  const auto snapshot_for = [](const std::size_t index) {
+      constexpr char kHex[] = "0123456789abcdef";
+      std::string identity(32U, '0');
+      identity[30] = kHex[(index / 16U) % 16U];
+      identity[31] = kHex[index % 16U];
+      return GateSnapshot{
+      identity, 1U, "", GateState::Inhibited,
+      true, true, true, true, "", false, false};
+    };
+
+  auto invalid = snapshot_for(0U);
+  invalid.gate_instance_id = "not-a-gate-id";
+  EXPECT_FALSE(watermark.merge(invalid, accepted));
+
+  ASSERT_TRUE(watermark.merge(snapshot_for(0U), accepted));
+  for (std::size_t index = 1U; index <= 16U; ++index) {
+    ASSERT_TRUE(watermark.merge(snapshot_for(index), accepted)) << index;
+  }
+  EXPECT_FALSE(watermark.merge(snapshot_for(17U), accepted));
+  EXPECT_EQ(watermark.snapshot().gate_instance_id, snapshot_for(16U).gate_instance_id);
 }
 
 class SyntheticProducer final : public MotionProducerPort

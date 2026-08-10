@@ -16,6 +16,7 @@
 
 #include <rmw/qos_profiles.h>
 
+#include <algorithm>
 #include <future>
 #include <optional>
 #include <string>
@@ -31,6 +32,16 @@ using GateStateMessage = voice_nav_mission::msg::InternalMotionGateState;
 
 constexpr char kGateControlService[] = "/motion_gate/internal/control";
 constexpr char kGateStateTopic[] = "/motion_gate/internal/state";
+constexpr std::size_t kMaximumRetiredGateIdentities = 16U;
+
+bool valid_gate_instance_id(const std::string & value)
+{
+  return value.size() == 32U && std::all_of(
+    value.cbegin(), value.cend(), [](const char character) {
+      return (character >= '0' && character <= '9') ||
+             (character >= 'a' && character <= 'f');
+    });
+}
 
 GateState gate_state_from_message(std::uint8_t state)
 {
@@ -52,7 +63,7 @@ bool detail::GateSnapshotWatermark::merge(
   const GateSnapshot & incoming,
   GateSnapshot & accepted)
 {
-  if (incoming.gate_instance_id.empty()) {
+  if (!valid_gate_instance_id(incoming.gate_instance_id)) {
     return false;
   }
   if (snapshot_.gate_instance_id.empty()) {
@@ -61,7 +72,10 @@ bool detail::GateSnapshotWatermark::merge(
     return true;
   }
   if (incoming.gate_instance_id != snapshot_.gate_instance_id) {
-    if (retired_gate_instance_ids_.count(incoming.gate_instance_id) != 0U) {
+    if (
+      retired_gate_instance_ids_.count(incoming.gate_instance_id) != 0U ||
+      retired_gate_instance_ids_.size() >= kMaximumRetiredGateIdentities)
+    {
       return false;
     }
     retired_gate_instance_ids_.insert(snapshot_.gate_instance_id);
