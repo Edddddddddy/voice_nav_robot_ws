@@ -50,6 +50,7 @@ from rclpy.qos import (
 )
 from rosgraph_msgs.msg import Clock
 from sensor_msgs.msg import JointState
+from sensor_msgs.msg import LaserScan
 from voice_nav_interfaces.action import ExecuteMission
 from voice_nav_interfaces.msg import MissionState, MissionStep
 from voice_nav_mission.msg import InternalMotionGateState
@@ -59,6 +60,7 @@ from voice_nav_mission.srv import InternalMotionGateControl
 FINAL_COMMAND_TOPIC = '/diff_drive_controller/cmd_vel'
 LIMITED_COMMAND_TOPIC = '/diff_drive_controller/cmd_vel_out'
 ODOMETRY_TOPIC = '/odom'
+SCAN_TOPIC = '/scan'
 JOINT_STATE_TOPIC = '/joint_states'
 CLOCK_TOPIC = '/clock'
 MISSION_STATE_TOPIC = '/mission/state'
@@ -78,6 +80,7 @@ STATIONARY_DEADLINE_NS = 1_200_000_000
 STATIONARY_HOLD_NS = 200_000_000
 NO_GOAL_WINDOW_NS = 1_000_000_000
 WALL_WATCHDOG_SECONDS = 5.0
+DEPENDENCY_FRESHNESS_NS = 200_000_000
 
 
 def _load_gazebo_shutdown():
@@ -246,6 +249,26 @@ def restart_product_node(
     return record
 
 
+def process_startup_summary(
+    role: str,
+    process: ExactPidfdProcess,
+    capture: ProcessStartedCapture,
+) -> dict[str, Any]:
+    """Summarize one launch-owned process start without selecting a process."""
+    return {
+        'role': role,
+        'process_started_monotonic_ns': capture.started_monotonic_ns,
+        'expected_node_name': process.expected_node_name,
+        'expected_executable': process.expected_executable,
+        'expected_executable_path': process.expected_executable_path,
+        'event_cmd': list(process.event_command),
+        'pid': process.snapshot.pid,
+        'starttime_ticks': process.snapshot.starttime_ticks,
+        'executable': process.snapshot.executable,
+        'cmdline': list(process.snapshot.cmdline),
+    }
+
+
 def _stamp_ns(message: Any) -> int:
     stamp = message.header.stamp
     return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
@@ -301,6 +324,7 @@ class CrashStopProbe:
         self.final_commands = deque(maxlen=8000)
         self.limited_commands = deque(maxlen=8000)
         self.odometry = deque(maxlen=4000)
+        self.scan_samples = deque(maxlen=4000)
         self.joint_states = deque(maxlen=4000)
         self.clock_samples = deque(maxlen=4000)
         state_qos = QoSProfile(
@@ -345,6 +369,12 @@ class CrashStopProbe:
                 ODOMETRY_TOPIC,
                 lambda message: self._append(self.odometry, message),
                 100,
+            ),
+            self.node.create_subscription(
+                LaserScan,
+                SCAN_TOPIC,
+                lambda message: self._append(self.scan_samples, message),
+                qos_profile_sensor_data,
             ),
             self.node.create_subscription(
                 JointState,
@@ -1014,14 +1044,27 @@ class CrashStopProbe:
                 return {
                     'runtime': message.runtime_instance_id,
                     'epoch': int(message.admission_epoch),
+                    'operating_mode': int(message.operating_mode),
                     'availability': int(message.availability),
                     'gate_state': int(message.gate_state),
+                    'active_step': int(message.active_step),
+                    'supported_step_mask': int(message.supported_step_mask),
+                    'max_steps': int(message.max_steps),
+                    'named_place_ids': list(message.named_place_ids),
                 }
             if isinstance(message, TwistStamped):
                 return {
                     'stamp_ns': _stamp_ns(message),
                     'linear_x': float(message.twist.linear.x),
                     'angular_z': float(message.twist.angular.z),
+                }
+            if isinstance(message, LaserScan):
+                return {
+                    'stamp_ns': _stamp_ns(message),
+                    'frame_id': message.header.frame_id,
+                    'range_count': len(message.ranges),
+                    'range_min': float(message.range_min),
+                    'range_max': float(message.range_max),
                 }
             if isinstance(message, Odometry):
                 return {
@@ -1040,21 +1083,68 @@ class CrashStopProbe:
                 for receipt_ns, message in self._snapshot(collection)[-5:]
             ]
 
+        def stream_freshness(
+            collection: deque,
+            stamp_getter: Callable[[Any], int],
+        ):
+            sample = self.latest(collection)
+            if sample is None:
+                return {
+                    'observed': False,
+                    'receipt_monotonic_ns': None,
+                    'age_monotonic_ns': None,
+                    'fresh_steady_200ms': False,
+                    'stamp_ns': None,
+                }
+            receipt_ns, message = sample
+            age_ns = max(0, time.monotonic_ns() - receipt_ns)
+            try:
+                stamp_ns = int(stamp_getter(message))
+            except Exception:
+                stamp_ns = None
+            return {
+                'observed': True,
+                'receipt_monotonic_ns': receipt_ns,
+                'age_monotonic_ns': age_ns,
+                'fresh_steady_200ms': age_ns <= DEPENDENCY_FRESHNESS_NS,
+                'stamp_ns': stamp_ns,
+            }
+
+        mission_health_transitions = []
+        previous_health = None
+        for receipt_ns, message in self._snapshot(self.mission_states):
+            current_health = {
+                'availability': int(message.availability),
+                'gate_state': int(message.gate_state),
+                'epoch': int(message.admission_epoch),
+            }
+            if current_health != previous_health:
+                mission_health_transitions.append({
+                    'receipt_monotonic_ns': receipt_ns,
+                    'from': previous_health,
+                    'to': current_health,
+                })
+            previous_health = current_health
+
+        clock_snapshot = self._snapshot(self.clock_samples)
+        clock_advanced = (
+            len(clock_snapshot) >= 2
+            and clock_snapshot[-1][1] > clock_snapshot[-2][1]
+        )
+        try:
+            ros_time_active = bool(self.node.get_clock().ros_time_is_active())
+            ros_time_now_ns = int(self.node.get_clock().now().nanoseconds)
+        except Exception:
+            ros_time_active = False
+            ros_time_now_ns = 0
+
         return {
-            'gate': [
-                message_summary(message)
-                for _, message in self._snapshot(self.gate_states)[-5:]
-            ],
-            'mission': [
-                message_summary(message)
-                for _, message in self._snapshot(self.mission_states)[-5:]
-            ],
+            'gate': sample_summary(self.gate_states),
+            'mission': sample_summary(self.mission_states),
             'final': sample_summary(self.final_commands),
             'limited': sample_summary(self.limited_commands),
-            'odom': [
-                message_summary(message)
-                for _, message in self._snapshot(self.odometry)[-5:]
-            ],
+            'scan': sample_summary(self.scan_samples),
+            'odom': sample_summary(self.odometry),
             'clock': [
                 value for _, value in self._snapshot(self.clock_samples)[-5:]
             ],
@@ -1067,6 +1157,17 @@ class CrashStopProbe:
                     self.clock_samples
                 )[-5:]
             ],
+            'freshness': {
+                'scan': stream_freshness(self.scan_samples, _stamp_ns),
+                'odom': stream_freshness(self.odometry, _stamp_ns),
+                'clock': stream_freshness(
+                    self.clock_samples, lambda value: value
+                ),
+                'ros_time_active': ros_time_active,
+                'ros_time_now_ns': ros_time_now_ns,
+                'clock_advanced': clock_advanced,
+            },
+            'mission_health_transitions': mission_health_transitions[-8:],
         }
 
 

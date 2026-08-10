@@ -80,6 +80,17 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
             runtime_capture
         )
         self.gate_process = self.probe.wait_process_capture(gate_capture)
+        self.startup_order = sorted(
+            [
+                support.process_startup_summary(
+                    'runtime', self.runtime_process, runtime_capture
+                ),
+                support.process_startup_summary(
+                    'gate', self.gate_process, gate_capture
+                ),
+            ],
+            key=lambda item: item['process_started_monotonic_ns'] or 0,
+        )
         self.addCleanup(self.probe.destroy)
         self.addCleanup(self.restarts.close)
         self.addCleanup(runtime_capture.close)
@@ -259,6 +270,8 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                 pidfd_kill=pidfd_kill,
                 pre_kill_observation=pre_kill_observation,
                 post_kill_observation=post_kill_observation,
+                startup_order=self.startup_order,
+                diagnostics=self.probe.diagnostic(),
                 cleanup='launch handles, structured Gazebo stop, and zero cleanup registered',
             )
         except Exception as error:
@@ -271,6 +284,7 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                 pidfd_kill=pidfd_kill,
                 pre_kill_observation=pre_kill_observation,
                 post_kill_observation=post_kill_observation,
+                startup_order=getattr(self, 'startup_order', []),
                 diagnostics=self.probe.diagnostic(),
             )
             raise

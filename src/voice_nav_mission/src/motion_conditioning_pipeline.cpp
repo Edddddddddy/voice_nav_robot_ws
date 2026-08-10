@@ -23,6 +23,7 @@
 #include <chrono>
 #include <cstdint>
 #include <condition_variable>
+#include <cinttypes>
 #include <exception>
 #include <future>
 #include <iomanip>
@@ -1365,6 +1366,23 @@ private:
     return detail;
   }
 
+  void log_startup_diagnostic(
+    const char * phase,
+    const char * result,
+    const std::string & detail,
+    const std::string & fields = {}) const
+  {
+    const auto steady_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+    const auto cleanup_detail = cleanup_failure_detail();
+    RCLCPP_DEBUG(
+      node_.get_logger(),
+      "VOICE_NAV_DIAGNOSTIC marker=startup phase=%s result=%s "
+      "steady_ns=%" PRId64 " result_detail=%s cleanup_failure_detail=%s fields=%s",
+      phase, result, static_cast<std::int64_t>(steady_ns), detail.c_str(),
+      cleanup_detail.c_str(), fields.c_str());
+  }
+
   [[nodiscard]] MotionConditioningResult start_busy_result() const
   {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -2702,13 +2720,32 @@ private:
     const bool strict_identity = false)
   {
     const auto list_fqn = config_.container_fqn + "/_container/list_nodes";
+    const auto rpc_started = std::chrono::steady_clock::now();
+    const auto log_list = [this, &list_fqn, rpc_started](
+      const char * result,
+      const std::string & detail,
+      const std::size_t fqn_count,
+      const std::size_t unique_id_count,
+      const std::string & pairs) {
+        std::ostringstream fields;
+        fields << "service_fqn=" << list_fqn
+               << " elapsed_ms=" << std::chrono::duration_cast<
+          std::chrono::milliseconds>(
+          std::chrono::steady_clock::now() - rpc_started).count()
+               << " fqn_count=" << fqn_count
+               << " unique_id_count=" << unique_id_count
+               << " fqn_unique_ids=" << pairs;
+        log_startup_diagnostic("list_nodes", result, detail, fields.str());
+      };
     try {
       const auto rpc_deadline = std::min(
         overall_deadline,
         std::chrono::steady_clock::now() + config_.component_rpc_timeout);
       if (!list_nodes_client_->wait_for_service(remaining_until(rpc_deadline))) {
+        const std::string detail = "ListNodes service unavailable";
         record_cleanup_failure(
-          "list_nodes", list_fqn, 0U, "ListNodes service unavailable");
+          "list_nodes", list_fqn, 0U, detail);
+        log_list("service_unavailable", detail, 0U, 0U, {});
         return false;
       }
       auto future = list_nodes_client_->async_send_request(
@@ -2716,23 +2753,54 @@ private:
       if (future.wait_for(remaining_until(rpc_deadline)) !=
         std::future_status::ready)
       {
+        const std::string detail = "ListNodes response timed out";
         record_cleanup_failure(
-          "list_nodes", list_fqn, 0U, "ListNodes response timed out");
+          "list_nodes", list_fqn, 0U, detail);
+        log_list("response_timeout", detail, 0U, 0U, {});
         return false;
       }
       const auto response = future.get();
       if (!response) {
+        const std::string detail = "ListNodes returned no response";
         record_cleanup_failure(
-          "list_nodes", list_fqn, 0U, "ListNodes returned no response");
+          "list_nodes", list_fqn, 0U, detail);
+        log_list("response_empty", detail, 0U, 0U, {});
         return false;
       }
+      const auto pair_summary = [&response]() {
+          std::ostringstream pairs;
+          const auto count = std::min(
+            response->full_node_names.size(), response->unique_ids.size());
+          const auto bounded_count = std::min<std::size_t>(count, 16U);
+          pairs << "[";
+          for (std::size_t index = 0U; index < bounded_count; ++index) {
+            if (index > 0U) {
+              pairs << ",";
+            }
+            pairs << response->full_node_names[index] << ":" <<
+              response->unique_ids[index];
+          }
+          if (count > bounded_count) {
+            pairs << ",...";
+          }
+          pairs << "]";
+          return pairs.str();
+        }();
+      log_list(
+        "response_received", "ListNodes response received",
+        response->full_node_names.size(), response->unique_ids.size(),
+        pair_summary);
       nodes.clear();
       if (strict_identity &&
         response->full_node_names.size() != response->unique_ids.size())
       {
+        const std::string detail =
+          "ListNodes returned mismatched FQN and unique_id arrays";
         record_cleanup_failure(
-          "list_nodes_identity", list_fqn, 0U,
-          "ListNodes returned mismatched FQN and unique_id arrays");
+          "list_nodes_identity", list_fqn, 0U, detail);
+        log_list(
+          "identity_rejected", detail, response->full_node_names.size(),
+          response->unique_ids.size(), pair_summary);
         return false;
       }
       const auto count = std::min(
@@ -2750,26 +2818,41 @@ private:
           (unique_id == 0U || !allowed_fqn ||
           !unique_id_inserted || !node_fqn_inserted))
         {
-          record_cleanup_failure(
-            "list_nodes_identity", node_fqn, unique_id,
+          const std::string detail =
             unique_id == 0U ? "ListNodes returned zero unique_id" :
             !allowed_fqn ? "ListNodes returned an unknown component FQN" :
             !unique_id_inserted ?
             "ListNodes returned a duplicate unique_id" :
-            "ListNodes returned a duplicate component FQN");
+            "ListNodes returned a duplicate component FQN";
+          record_cleanup_failure(
+            "list_nodes_identity", node_fqn, unique_id,
+            detail);
+          log_list(
+            "identity_rejected", detail, response->full_node_names.size(),
+            response->unique_ids.size(), pair_summary);
           return false;
         }
         nodes.push_back(Component{unique_id, node_fqn});
       }
       if (std::chrono::steady_clock::now() > overall_deadline) {
+        const std::string detail = "ListNodes response exceeded deadline";
         record_cleanup_failure(
-          "list_nodes", list_fqn, 0U, "ListNodes response exceeded deadline");
+          "list_nodes", list_fqn, 0U, detail);
+        log_list(
+          "deadline_exceeded", detail, response->full_node_names.size(),
+          response->unique_ids.size(), pair_summary);
         return false;
       }
+      log_list(
+        "success", "ListNodes identity discovery complete",
+        response->full_node_names.size(), response->unique_ids.size(),
+        pair_summary);
       return true;
     } catch (...) {
+      const std::string detail = "ListNodes request raised an exception";
       record_cleanup_failure(
-        "list_nodes", list_fqn, 0U, "ListNodes request raised an exception");
+        "list_nodes", list_fqn, 0U, detail);
+      log_list("exception", detail, 0U, 0U, {});
       return false;
     }
   }
@@ -2778,10 +2861,28 @@ private:
     const std::vector<Component> & listed,
     const std::chrono::steady_clock::time_point overall_deadline)
   {
+    {
+      std::ostringstream fields;
+      fields << "listed_count=" << listed.size();
+      log_startup_diagnostic(
+        "component_lifecycle", "begin", "", fields.str());
+    }
+    const auto log_component = [this](
+      const char * phase,
+      const char * result,
+      const Component & component,
+      const std::string & detail) {
+        std::ostringstream fields;
+        fields << "fqn=" << component.node_fqn
+               << " unique_id=" << component.unique_id;
+        log_startup_diagnostic(phase, result, detail, fields.str());
+      };
     if (!startup_gate_zero_proven()) {
+      const std::string detail =
+        "MotionGate stopped proving inhibited zero during startup cleanup";
       record_cleanup_failure(
-        "startup_gate", config_.container_fqn, 0U,
-        "MotionGate stopped proving inhibited zero during startup cleanup");
+        "startup_gate", config_.container_fqn, 0U, detail);
+      log_startup_diagnostic("first_gate_zero", "failed", detail);
       return false;
     }
     std::vector<Component> ordered = listed;
@@ -2792,68 +2893,106 @@ private:
     for (const auto & component : ordered) {
       const auto state = component_state(component.node_fqn, overall_deadline);
       if (state == lifecycle_msgs::msg::State::PRIMARY_STATE_UNKNOWN) {
+        const std::string detail =
+          "GetState did not return a usable lifecycle state";
         record_cleanup_failure(
           "startup_lifecycle_state", component.node_fqn, component.unique_id,
-          "GetState did not return a usable lifecycle state");
+          detail);
+        log_component("component_lifecycle", "state_unusable", component, detail);
         return false;
       }
+      log_component(
+        "component_lifecycle", "state_observed", component,
+        "lifecycle_state=" + std::to_string(static_cast<unsigned int>(state)));
       const bool state_is_cleanup_safe =
         state == lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED ||
         state == lifecycle_msgs::msg::State::PRIMARY_STATE_FINALIZED;
       if (state == lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE) {
-        if (!change_state(
+        const bool deactivated = change_state(
             component.node_fqn,
             lifecycle_msgs::msg::Transition::TRANSITION_DEACTIVATE,
-            overall_deadline))
-        {
+            overall_deadline);
+        if (!deactivated) {
+          const std::string detail =
+            "active component could not be deactivated";
           record_cleanup_failure(
             "startup_lifecycle_deactivate", component.node_fqn,
-            component.unique_id, "active component could not be deactivated");
+            component.unique_id, detail);
+          log_component("component_lifecycle", "deactivate_failed", component, detail);
           return false;
         }
-        if (!change_state(
+        log_component(
+          "component_lifecycle", "deactivate_ok", component,
+          "active component deactivated");
+        const bool cleaned = change_state(
             component.node_fqn,
             lifecycle_msgs::msg::Transition::TRANSITION_CLEANUP,
-            overall_deadline))
-        {
+            overall_deadline);
+        if (!cleaned) {
+          const std::string detail =
+            "inactive component could not be cleaned up";
           record_cleanup_failure(
             "startup_lifecycle_cleanup", component.node_fqn,
-            component.unique_id, "inactive component could not be cleaned up");
+            component.unique_id, detail);
+          log_component("component_lifecycle", "cleanup_failed", component, detail);
           return false;
         }
+        log_component(
+          "component_lifecycle", "cleanup_ok", component,
+          "inactive component cleaned up");
       } else if (state == lifecycle_msgs::msg::State::PRIMARY_STATE_INACTIVE) {
-        if (!change_state(
+        const bool cleaned = change_state(
             component.node_fqn,
             lifecycle_msgs::msg::Transition::TRANSITION_CLEANUP,
-            overall_deadline))
-        {
+            overall_deadline);
+        if (!cleaned) {
+          const std::string detail =
+            "inactive component could not be cleaned up";
           record_cleanup_failure(
             "startup_lifecycle_cleanup", component.node_fqn,
-            component.unique_id, "inactive component could not be cleaned up");
+            component.unique_id, detail);
+          log_component("component_lifecycle", "cleanup_failed", component, detail);
           return false;
         }
+        log_component(
+          "component_lifecycle", "cleanup_ok", component,
+          "inactive component cleaned up");
       } else if (!state_is_cleanup_safe) {
+        const std::string detail =
+          "component lifecycle state was not cleanup-safe";
         record_cleanup_failure(
           "startup_lifecycle_state", component.node_fqn, component.unique_id,
-          "component lifecycle state was not cleanup-safe");
+          detail);
+        log_component("component_lifecycle", "state_unsafe", component, detail);
         return false;
       }
     }
 
     if (!startup_gate_zero_proven()) {
+      const std::string detail =
+        "MotionGate stopped proving inhibited zero before startup UnloadNode";
       record_cleanup_failure(
-        "startup_gate", config_.container_fqn, 0U,
-        "MotionGate stopped proving inhibited zero before startup UnloadNode");
+        "startup_gate", config_.container_fqn, 0U, detail);
+      log_startup_diagnostic("component_lifecycle", "unload_gate_failed", detail);
       return false;
     }
     for (const auto & component : ordered) {
-      if (!call_unload(component.unique_id, overall_deadline)) {
+      const bool unloaded = call_unload(component.unique_id, overall_deadline);
+      if (!unloaded) {
+        const std::string detail =
+          "UnloadNode failed for the discovered component";
         record_cleanup_failure(
           "startup_unload", component.node_fqn, component.unique_id,
-          "UnloadNode failed for the discovered component");
+          detail);
+        log_component("component_lifecycle", "unload_failed", component, detail);
         return false;
       }
+      log_component(
+        "component_lifecycle", "unload_ok", component,
+        "UnloadNode completed");
     }
+    log_startup_diagnostic(
+      "component_lifecycle", "success", "startup components cleaned up");
     return true;
   }
 
@@ -2947,47 +3086,81 @@ private:
   [[nodiscard]] bool confirm_startup_graph_clean(
     const std::chrono::steady_clock::time_point deadline)
   {
+    log_startup_diagnostic(
+      "graph_clean", "begin", "startup graph reconciliation started");
     rclcpp::Event::SharedPtr graph_event;
     try {
       graph_event = node_.get_graph_event();
     } catch (...) {
+      const std::string detail =
+        "could not create a graph event for residual confirmation";
       record_cleanup_failure(
-        "startup_graph", config_.container_fqn, 0U,
-        "could not create a graph event for residual confirmation");
+        "startup_graph", config_.container_fqn, 0U, detail);
+      log_startup_diagnostic("graph_clean", "event_failed", detail);
       return false;
     }
 
     std::size_t consecutive_empty = 0U;
     while (std::chrono::steady_clock::now() < deadline) {
       if (!startup_gate_zero_proven()) {
+        const std::string detail =
+          "MotionGate stopped proving inhibited zero during residual confirmation";
         record_cleanup_failure(
-          "startup_gate", config_.container_fqn, 0U,
-          "MotionGate stopped proving inhibited zero during residual confirmation");
+          "startup_gate", config_.container_fqn, 0U, detail);
+        log_startup_diagnostic("graph_clean", "gate_zero_failed", detail);
         return false;
       }
       std::vector<Component> listed;
       if (!list_nodes(listed, deadline, true)) {
+        log_startup_diagnostic(
+          "graph_clean", "list_nodes_failed", "ListNodes failed during graph confirmation");
         return false;
       }
-      const bool empty = listed.empty() && !startup_candidate_writer_visible();
+      const bool writer_visible = startup_candidate_writer_visible();
+      const bool empty = listed.empty() && !writer_visible;
       if (empty) {
         ++consecutive_empty;
+        {
+          std::ostringstream fields;
+          fields << "listed_count=" << listed.size()
+                 << " writer_visible=" << (writer_visible ? 1 : 0)
+                 << " consecutive_empty=" << consecutive_empty;
+          log_startup_diagnostic(
+            "graph_clean", "observation", "empty graph observation", fields.str());
+        }
         if (consecutive_empty >= 2U) {
+          log_startup_diagnostic(
+            "graph_clean", "success", "two consecutive empty graph observations");
           return true;
         }
       } else {
         consecutive_empty = 0U;
+        {
+          std::ostringstream fields;
+          fields << "listed_count=" << listed.size()
+                 << " writer_visible=" << (writer_visible ? 1 : 0)
+                 << " consecutive_empty=" << consecutive_empty;
+          log_startup_diagnostic(
+            "graph_clean", "observation", "residual graph observed", fields.str());
+        }
         if (!listed.empty() && !cleanup_startup_components(listed, deadline)) {
+          log_startup_diagnostic(
+            "graph_clean", "component_cleanup_failed",
+            "startup component cleanup failed during graph confirmation");
           return false;
         }
       }
       if (!wait_for_startup_graph_change(graph_event, deadline)) {
+        log_startup_diagnostic(
+          "graph_clean", "graph_wait_ended", "graph change wait ended before confirmation");
         break;
       }
     }
+    const std::string detail =
+      "two consecutive empty ListNodes and writer-graph observations were not proven";
     record_cleanup_failure(
-      "startup_graph", config_.container_fqn, 0U,
-      "two consecutive empty ListNodes and writer-graph observations were not proven");
+      "startup_graph", config_.container_fqn, 0U, detail);
+    log_startup_diagnostic("graph_clean", "timeout", detail);
     return false;
   }
 
@@ -3013,10 +3186,21 @@ private:
         }
         startup_reconcile_failed_ = true;
         startup_result_ = result;
+        std::ostringstream fields;
+        fields << "ok=" << (result.ok ? 1 : 0)
+               << " zero_proven=" << (result.zero_proven ? 1 : 0)
+               << " failure=" << static_cast<unsigned int>(result.failure);
+        log_startup_diagnostic(
+          "startup_result", "failed", result.detail, fields.str());
         return result;
       };
 
-    if (!startup_gate_zero_reassert()) {
+    const bool first_gate_zero = startup_gate_zero_reassert();
+    log_startup_diagnostic(
+      "first_gate_zero", first_gate_zero ? "proven" : "failed",
+      first_gate_zero ? "initial inhibited zero Gate state proven" :
+      "initial inhibited zero Gate state not proven");
+    if (!first_gate_zero) {
       return fail_startup(
         "startup reconciliation could not prove an inhibited zero Gate state");
     }
@@ -3032,7 +3216,12 @@ private:
     }
 
     std::chrono::steady_clock::time_point zero_proven_at{};
-    if (!startup_gate_zero_reassert(&zero_proven_at)) {
+    const bool final_gate_zero = startup_gate_zero_reassert(&zero_proven_at);
+    log_startup_diagnostic(
+      "final_gate_zero", final_gate_zero ? "proven" : "failed",
+      final_gate_zero ? "final inhibited zero Gate state proven" :
+      "final inhibited zero Gate state not proven");
+    if (!final_gate_zero) {
       return fail_startup(
         "startup reconciliation could not reassert the current inhibited zero Gate state");
     }
@@ -3048,6 +3237,9 @@ private:
     }
     startup_reconciled_ = true;
     startup_result_ = result;
+    log_startup_diagnostic(
+      "startup_result", "success", result.detail,
+      "ok=1 zero_proven=1 failure=0");
     return result;
   }
 
@@ -3822,6 +4014,34 @@ private:
         RuntimeHealthReason::ComponentUnavailable,
         "conditioning components are not loaded"};
     }
+    bool clock_seen = false;
+    bool clock_fresh = false;
+    bool scan_fresh = false;
+    bool odom_fresh = false;
+    bool clock_advanced = false;
+    std::int64_t health_steady_ns = 0;
+    {
+      std::lock_guard<std::mutex> lock(health_mutex_);
+      const auto now = std::chrono::steady_clock::now();
+      health_steady_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        now.time_since_epoch()).count();
+      clock_seen = clock_seen_;
+      clock_fresh = clock_freshness_.fresh_at(now);
+      scan_fresh = scan_freshness_.fresh_at(now);
+      odom_fresh = odom_freshness_.fresh_at(now);
+      clock_advanced = clock_progress_freshness_.fresh_at(now);
+    }
+    const bool ros_time_active = node_.get_clock()->ros_time_is_active();
+    const auto ros_time_now_ns = node_.get_clock()->now().nanoseconds();
+    RCLCPP_DEBUG(
+      node_.get_logger(),
+      "VOICE_NAV_DIAGNOSTIC marker=health phase=snapshot result=observed "
+      "steady_ns=%" PRId64 " ros_time_active=%d ros_time_now_ns=%" PRId64 " clock_seen=%d "
+      "clock_advanced=%d clock_fresh=%d scan_fresh=%d odom_fresh=%d",
+      static_cast<std::int64_t>(health_steady_ns), ros_time_active ? 1 : 0,
+      static_cast<std::int64_t>(ros_time_now_ns), clock_seen ? 1 : 0,
+      clock_advanced ? 1 : 0, clock_fresh ? 1 : 0, scan_fresh ? 1 : 0,
+      odom_fresh ? 1 : 0);
     // OPEN performs the full lifecycle graph check.  During the running
     // renew path, the 100 ms health budget must also leave time for the
     // authority RPC; the candidate writer, dependency freshness, and

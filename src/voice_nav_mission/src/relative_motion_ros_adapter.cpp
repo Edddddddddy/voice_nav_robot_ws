@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cinttypes>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
@@ -1229,6 +1230,15 @@ private:
 
   void run_startup_reconciliation_transaction()
   {
+    const auto startup_started = std::chrono::steady_clock::now();
+    const auto startup_started_ns =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+      startup_started.time_since_epoch()).count();
+    RCLCPP_DEBUG(
+      node_.get_logger(),
+      "VOICE_NAV_DIAGNOSTIC marker=startup actor=mission_runtime_node "
+      "phase=startup_reconciliation_begin steady_ns=%" PRId64,
+      static_cast<std::int64_t>(startup_started_ns));
     MotionConditioningResult result;
     try {
       result = detail::reconcile_motion_conditioning_startup(*conditioning_);
@@ -1243,6 +1253,19 @@ private:
         MotionConditioningFailure::SafetyFault, false, false, {}, {},
         "startup component reconciliation raised an unknown exception"};
     }
+    const auto startup_elapsed_ms = std::chrono::duration_cast<
+      std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - startup_started).count();
+    RCLCPP_DEBUG(
+      node_.get_logger(),
+      "VOICE_NAV_DIAGNOSTIC marker=startup actor=mission_runtime_node "
+      "phase=startup_reconciliation_result result=%s elapsed_ms=%" PRId64 " "
+      "ok=%d state=%u failure=%u zero_proven=%d result_detail=%s",
+      result.ok ? "success" : "failed",
+      static_cast<std::int64_t>(startup_elapsed_ms), result.ok ? 1 : 0,
+      static_cast<unsigned int>(result.state),
+      static_cast<unsigned int>(result.failure), result.zero_proven ? 1 : 0,
+      result.detail.c_str());
     {
       std::lock_guard<std::mutex> lock(mutex_);
       const bool close_requested = startup_close_requested_;
