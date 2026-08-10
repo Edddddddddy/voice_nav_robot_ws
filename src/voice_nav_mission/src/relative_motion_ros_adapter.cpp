@@ -1322,12 +1322,12 @@ private:
         false, MotionConditioningState::Failed,
         MotionConditioningFailure::SafetyFault, false, false, {}, {},
         std::string{"startup component reconciliation raised: "} + error.what(),
-        {}, {}};
+        {}, {}, {}};
     } catch (...) {
       result = MotionConditioningResult{
         false, MotionConditioningState::Failed,
         MotionConditioningFailure::SafetyFault, false, false, {}, {},
-        "startup component reconciliation raised an unknown exception", {}, {}};
+        "startup component reconciliation raised an unknown exception", {}, {}, {}};
     }
     const auto startup_elapsed_ms = std::chrono::duration_cast<
       std::chrono::milliseconds>(
@@ -1390,7 +1390,7 @@ private:
       prepared = MotionConditioningResult{
         false, MotionConditioningState::Failed,
         MotionConditioningFailure::InternalError, false, false, {}, {},
-        "conditioning PREPARE raised", {}, {}};
+        "conditioning PREPARE raised", {}, {}, {}};
     }
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -1410,7 +1410,7 @@ private:
       started = MotionConditioningResult{
         false, MotionConditioningState::Failed,
         MotionConditioningFailure::InternalError, false, false, {}, {},
-        "conditioning OPEN raised", {}, {}};
+        "conditioning OPEN raised", {}, {}, {}};
     }
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -1783,7 +1783,7 @@ private:
       conditioning_result = MotionConditioningResult{
         false, MotionConditioningState::Failed,
         MotionConditioningFailure::SafetyFault, false, false, {}, {},
-        "conditioning teardown raised", {}, {}};
+        "conditioning teardown raised", {}, {}, {}};
     }
 
     const auto zero_proven_at = conditioning_result.zero_proven_at;
@@ -1872,6 +1872,15 @@ private:
           // conditioning pipeline.
           gate_rearm_pending_ = true;
         }
+        if (
+          conditioning_result.failure == MotionConditioningFailure::SafetyFault &&
+          !conditioning_result.gate_loss_candidate_instance_id.empty())
+        {
+          // A RENEW transport failure alone is not proof of Gate loss.  It is
+          // recoverable only through the same different-identity, fresh-zero
+          // handshake used by a confirmed Gate loss.
+          gate_rearm_pending_ = true;
+        }
         if (startup_close_requested_) {
           startup_close_teardown_terminal_ = true;
         }
@@ -1900,12 +1909,14 @@ private:
       RCLCPP_ERROR(
         node_.get_logger(),
         "Relative motion teardown failed: zero=%d stationary=%d conditioning_failure=%u "
-        "conditioning_detail=%s gate_loss_instance_id=%s detail=%s",
+        "conditioning_detail=%s gate_loss_instance_id=%s "
+        "gate_loss_candidate_instance_id=%s detail=%s",
         zero ? 1 : 0,
         stationary ? 1 : 0,
         static_cast<unsigned int>(conditioning_result.failure),
         conditioning_result.detail.c_str(),
         conditioning_result.gate_loss_instance_id.c_str(),
+        conditioning_result.gate_loss_candidate_instance_id.c_str(),
         final_detail.c_str());
     }
     return safe;

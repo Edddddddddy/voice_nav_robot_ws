@@ -181,6 +181,10 @@ struct AuthorityResult
   std::string lease_id;
   std::string detail;
   bool tuple_stale{false};
+  // The control transport did not yield an authoritative Gate response.
+  // This is only a candidate loss signal: a different Gate identity and a
+  // fresh inhibited-zero transaction are still required before recovery.
+  bool transport_unavailable{false};
 };
 
 class SteadyClockPort

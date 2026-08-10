@@ -474,8 +474,10 @@ AuthorityResult RosMotionAuthorityPort::unavailable(
   if (endpoint_changed && callback_) {
     callback_(snapshot);
   }
-  return AuthorityResult{
+  auto result = AuthorityResult{
     false, false, retryable, snapshot, {}, std::move(detail)};
+  result.transport_unavailable = true;
+  return result;
 }
 
 }  // namespace voice_nav_mission

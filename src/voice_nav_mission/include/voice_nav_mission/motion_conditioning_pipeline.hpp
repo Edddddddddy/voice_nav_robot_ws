@@ -81,6 +81,11 @@ struct MotionConditioningResult
   // disappears before it can acknowledge zero.  Generic SafetyFault results
   // leave this empty and can never enter the replacement rearm path.
   std::string gate_loss_instance_id;
+  // A failed RENEW transport can race DDS graph convergence after a Gate
+  // process loss.  Keep the old identity as a narrow recovery candidate while
+  // the terminal remains SafetyFault.  It cannot authorize recovery without a
+  // different identity and a fresh inhibited-zero transaction.
+  std::string gate_loss_candidate_instance_id;
 };
 
 namespace detail
