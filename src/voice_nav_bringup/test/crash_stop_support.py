@@ -446,10 +446,19 @@ class CrashStopProbe:
     def wait_runtime_ready(
         self,
         previous_runtime_id: str | None = None,
+        *,
+        after_monotonic_ns: int | None = None,
         timeout: float = 45.0,
     ):
         def ready():
-            for _, message in reversed(self._snapshot(self.mission_states)):
+            for receipt_ns, message in reversed(
+                self._snapshot(self.mission_states)
+            ):
+                if (
+                    after_monotonic_ns is not None
+                    and receipt_ns < after_monotonic_ns
+                ):
+                    continue
                 if (
                     message.availability == MissionState.AVAILABLE
                     and message.gate_state == MissionState.GATE_INHIBITED
