@@ -487,7 +487,7 @@ void RuntimeCore::observe_gate(const GateSnapshot & snapshot)
   const bool pending_rearm_retry =
     gate_replacement_pending_ && same_generation &&
     snapshot.control_seq == gate_snapshot_.control_seq &&
-    startup_gate_is_ready(snapshot);
+    replacement_gate_can_reassert(snapshot);
   const bool stale_same_generation =
     same_generation && snapshot.control_seq < gate_snapshot_.control_seq;
   if (stale_same_generation) {
@@ -828,6 +828,14 @@ bool RuntimeCore::startup_gate_is_ready(const GateSnapshot & snapshot) const
          snapshot.state == GateState::Inhibited && zero_is_proven(snapshot);
 }
 
+bool RuntimeCore::replacement_gate_can_reassert(
+  const GateSnapshot & snapshot) const
+{
+  return snapshot.endpoint_available && !snapshot.gate_instance_id.empty() &&
+         snapshot.state == GateState::Inhibited &&
+         snapshot.motion_inhibited && snapshot.zero_selected;
+}
+
 bool RuntimeCore::zero_is_proven(const GateSnapshot & snapshot) const
 {
   return snapshot.endpoint_available && snapshot.motion_inhibited &&
@@ -838,8 +846,7 @@ bool RuntimeCore::try_rearm_pending_gate_replacement()
 {
   if (
     !gate_replacement_pending_ || active_.has_value() ||
-    !gate_is_healthy(gate_snapshot_) ||
-    !startup_gate_is_ready(gate_snapshot_))
+    !replacement_gate_can_reassert(gate_snapshot_))
   {
     return false;
   }

@@ -147,6 +147,14 @@ bool gate_snapshot_proves_zero(const GateSnapshot & snapshot)
          snapshot.zero_published;
 }
 
+bool gate_snapshot_can_reassert_zero(const GateSnapshot & snapshot)
+{
+  return !snapshot.gate_instance_id.empty() &&
+         snapshot.endpoint_available &&
+         snapshot.state == GateState::Inhibited &&
+         snapshot.motion_inhibited && snapshot.zero_selected;
+}
+
 WriterGid endpoint_writer_gid(const rclcpp::TopicEndpointInfo & endpoint)
 {
   WriterGid gid{};
@@ -1280,7 +1288,7 @@ private:
     const GateSnapshot & snapshot,
     GateSnapshot * accepted_snapshot) noexcept
   {
-    if (!gate_snapshot_proves_zero(snapshot)) {
+    if (!gate_snapshot_can_reassert_zero(snapshot)) {
       return false;
     }
     const auto candidate_is_authorized = [this, &snapshot]() {

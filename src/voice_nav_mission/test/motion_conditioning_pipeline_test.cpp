@@ -1850,6 +1850,54 @@ TEST_F(
 
 TEST_F(
   MotionConditioningPipelineTest,
+  GateLossReplacementReassertsZeroWhenCachedProofIsUnavailable)
+{
+  auto health_ready = std::make_shared<CallbackCounter>();
+  auto pipeline_config = config();
+  pipeline_config.after_health_callback = [health_ready]() {
+      (*health_ready)();
+    };
+  MotionConditioningPipeline pipeline(*client, authority, producer, pipeline_config);
+  const auto prepared = pipeline.prepare();
+  ASSERT_TRUE(prepared.ok) << prepared.detail;
+  health_ready->expect(4U);
+  graph->publish_health_once();
+  ASSERT_TRUE(health_ready->wait_for_target());
+  const auto started = pipeline.start();
+  ASSERT_TRUE(started.ok) << started.detail;
+  const auto token = pipeline.correlation_token();
+
+  authority->set_inhibit_zero_proof(false);
+  authority->set_gate_identity("gate-test", false);
+  const auto failed = pipeline.fail(
+    token, MotionConditioningFailure::GateLoss, "Gate process disappeared");
+  ASSERT_EQ(failed.failure, MotionConditioningFailure::GateLoss);
+  ASSERT_FALSE(failed.zero_proven);
+
+  authority->set_gate_identity("replacement-gate");
+  authority->set_initial_zero_proof(false);
+  const auto replacement_without_cached_zero = authority->snapshot();
+  ASSERT_EQ(replacement_without_cached_zero.state, GateState::Inhibited);
+  ASSERT_TRUE(replacement_without_cached_zero.motion_inhibited);
+  ASSERT_TRUE(replacement_without_cached_zero.zero_selected);
+  ASSERT_FALSE(replacement_without_cached_zero.zero_published);
+
+  EXPECT_FALSE(pipeline.rearm_after_gate_replacement(
+      replacement_without_cached_zero));
+  EXPECT_EQ(pipeline.state(), MotionConditioningState::Failed);
+
+  authority->set_inhibit_zero_proof(true);
+  EXPECT_TRUE(pipeline.rearm_after_gate_replacement(
+      replacement_without_cached_zero));
+  EXPECT_EQ(pipeline.state(), MotionConditioningState::Stopped);
+  EXPECT_TRUE(pipeline.last_result().zero_proven);
+  const auto calls = authority->calls();
+  ASSERT_FALSE(calls.empty());
+  EXPECT_EQ(calls.back(), AuthorityOperationKind::Inhibit);
+}
+
+TEST_F(
+  MotionConditioningPipelineTest,
   RenewEndpointLossRearmsOnlyAfterReplacementZeroProof)
 {
   auto pipeline_config = config();
