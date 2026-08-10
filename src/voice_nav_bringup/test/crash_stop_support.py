@@ -139,6 +139,21 @@ ExactPidfdProcess = process_identity.ExactPidfdProcess
 ProcessStartedCapture = process_identity.ProcessStartedCapture
 
 
+def _load_state_observation():
+    support_path = Path(__file__).with_name('state_observation.py')
+    specification = importlib.util.spec_from_file_location(
+        'voice_nav_crash_stop_state_observation', support_path
+    )
+    if specification is None or specification.loader is None:
+        raise RuntimeError('could not load state observation support')
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
+state_observation = _load_state_observation()
+
+
 @dataclass
 class RestartRecord:
     """One explicitly restarted launch action and its exact pidfd capture."""
@@ -1005,7 +1020,9 @@ class CrashStopProbe:
             'reason',
         )
         for field in stable_fields:
-            if getattr(after[1], field) != getattr(before[1], field):
+            if not state_observation.values_equal(
+                getattr(after[1], field), getattr(before[1], field)
+            ):
                 raise AssertionError(
                     f'stale replay changed Gate field {field}'
                 )
