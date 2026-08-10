@@ -98,6 +98,11 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
         gate,
         restarts,
     ):
+        pidfd_identity = None
+        pidfd_kill = None
+        pre_kill_observation = None
+        post_kill_observation = None
+        last_nonzero_sim_ns = None
         try:
             old_runtime = self.probe.wait_runtime_ready()
             self.probe.wait_gate_instance()
@@ -110,6 +115,24 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
             moving = self.probe.wait_for_armed_motion()
             old_gate = moving['gate']
             final_gid = self.probe.assert_unique_final_owner()
+
+            pidfd_identity = {
+                'action': support.GATE_NODE,
+                'expected_node_name': self.gate_process.expected_node_name,
+                'expected_executable': self.gate_process.expected_executable,
+                'expected_executable_path': (
+                    self.gate_process.expected_executable_path
+                ),
+                'event_cmd': list(self.gate_process.event_command),
+                'pid': self.gate_process.snapshot.pid,
+                'starttime_ticks': (
+                    self.gate_process.snapshot.starttime_ticks
+                ),
+                'executable': self.gate_process.snapshot.executable,
+                'cmdline': list(self.gate_process.snapshot.cmdline),
+                'graph_owner_gid': final_gid,
+            }
+            pre_kill_observation = self.probe.diagnostic()
             latest_final_nonzero = self.probe._latest_nonzero(
                 self.probe.final_commands
             )
@@ -118,10 +141,17 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                     'non-zero final command disappeared before kill'
                 )
             last_nonzero_sim_ns = support._stamp_ns(latest_final_nonzero[1])
-
-            kill_ack_ns = self.gate_process.kill(
-                lambda: self.probe.count_fqn('/motion_gate_node')
-            )
+            pidfd_kill = {
+                'call_before_monotonic_ns': time.monotonic_ns(),
+            }
+            try:
+                kill_ack_ns = self.gate_process.kill(
+                    lambda: self.probe.count_fqn('/motion_gate_node')
+                )
+            finally:
+                pidfd_kill['call_after_monotonic_ns'] = time.monotonic_ns()
+            pidfd_kill['ack_monotonic_ns'] = kill_ack_ns
+            post_kill_observation = self.probe.diagnostic()
             proc_info.assertWaitForShutdown(gate, timeout=10.0)
             consumer_zero = self.probe.wait_consumer_zero(
                 kill_ack_ns,
@@ -208,6 +238,7 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                 new_gate_instance=new_gate_sample.gate_instance_id,
                 runtime_fault_epoch=int(runtime_fault.admission_epoch),
                 old_lease=old_gate.lease_id,
+                last_nonzero_sim_ns=last_nonzero_sim_ns,
                 final_owner_gid=final_gid,
                 consumer_timeout_s=consumer_zero['delta_ns'] / 1e9,
                 stationarity_settle_ms=stationarity['settle_ns'] / 1e6,
@@ -224,6 +255,10 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                 replacement_starttime_ticks=(
                     replacement_process.snapshot.starttime_ticks
                 ),
+                pidfd_identity=pidfd_identity,
+                pidfd_kill=pidfd_kill,
+                pre_kill_observation=pre_kill_observation,
+                post_kill_observation=post_kill_observation,
                 cleanup='launch handles, structured Gazebo stop, and zero cleanup registered',
             )
         except Exception as error:
@@ -231,6 +266,11 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                 'motion_gate_consumer_deadman',
                 status='failed',
                 error=str(error),
+                last_nonzero_sim_ns=last_nonzero_sim_ns,
+                pidfd_identity=pidfd_identity,
+                pidfd_kill=pidfd_kill,
+                pre_kill_observation=pre_kill_observation,
+                post_kill_observation=post_kill_observation,
                 diagnostics=self.probe.diagnostic(),
             )
             raise

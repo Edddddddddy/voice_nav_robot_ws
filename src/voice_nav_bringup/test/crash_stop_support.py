@@ -1031,6 +1031,15 @@ class CrashStopProbe:
                 }
             return message
 
+        def sample_summary(collection: deque):
+            return [
+                {
+                    **message_summary(message),
+                    'observer_receipt_monotonic_ns': receipt_ns,
+                }
+                for receipt_ns, message in self._snapshot(collection)[-5:]
+            ]
+
         return {
             'gate': [
                 message_summary(message)
@@ -1040,19 +1049,24 @@ class CrashStopProbe:
                 message_summary(message)
                 for _, message in self._snapshot(self.mission_states)[-5:]
             ],
-            'final': [
-                message_summary(message)
-                for _, message in self._snapshot(self.final_commands)[-5:]
-            ],
-            'limited': [
-                message_summary(message)
-                for _, message in self._snapshot(self.limited_commands)[-5:]
-            ],
+            'final': sample_summary(self.final_commands),
+            'limited': sample_summary(self.limited_commands),
             'odom': [
                 message_summary(message)
                 for _, message in self._snapshot(self.odometry)[-5:]
             ],
-            'clock': [value for _, value in self._snapshot(self.clock_samples)[-5:]],
+            'clock': [
+                value for _, value in self._snapshot(self.clock_samples)[-5:]
+            ],
+            'clock_samples': [
+                {
+                    'stamp_ns': value,
+                    'observer_receipt_monotonic_ns': receipt_ns,
+                }
+                for receipt_ns, value in self._snapshot(
+                    self.clock_samples
+                )[-5:]
+            ],
         }
 
 
