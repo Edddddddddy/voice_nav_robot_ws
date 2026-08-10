@@ -456,11 +456,26 @@ AuthorityResult RosMotionAuthorityPort::send_once(
 
 AuthorityResult RosMotionAuthorityPort::unavailable(
   std::string detail,
-  bool retryable) const
+  bool retryable)
 {
-  std::lock_guard<std::mutex> lock(mutex_);
+  const bool endpoint_available = graph_endpoint_available();
+  GateSnapshot snapshot;
+  bool endpoint_changed = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!endpoint_available) {
+      endpoint_changed = snapshot_watermark_.set_endpoint_available(
+        false, snapshot);
+    }
+    if (!endpoint_changed) {
+      snapshot = snapshot_watermark_.snapshot();
+    }
+  }
+  if (endpoint_changed && callback_) {
+    callback_(snapshot);
+  }
   return AuthorityResult{
-    false, false, retryable, snapshot_watermark_.snapshot(), {}, std::move(detail)};
+    false, false, retryable, snapshot, {}, std::move(detail)};
 }
 
 }  // namespace voice_nav_mission
