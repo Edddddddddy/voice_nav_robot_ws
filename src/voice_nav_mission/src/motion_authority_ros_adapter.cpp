@@ -72,13 +72,15 @@ bool detail::GateSnapshotWatermark::merge(
     return true;
   }
   if (incoming.gate_instance_id != snapshot_.gate_instance_id) {
-    if (
-      retired_gate_instance_ids_.count(incoming.gate_instance_id) != 0U ||
-      retired_gate_instance_ids_.size() >= kMaximumRetiredGateIdentities)
-    {
+    if (retired_gate_instance_ids_.count(incoming.gate_instance_id) != 0U) {
       return false;
     }
+    if (retired_gate_instance_order_.size() >= kMaximumRetiredGateIdentities) {
+      retired_gate_instance_ids_.erase(retired_gate_instance_order_.front());
+      retired_gate_instance_order_.pop_front();
+    }
     retired_gate_instance_ids_.insert(snapshot_.gate_instance_id);
+    retired_gate_instance_order_.push_back(snapshot_.gate_instance_id);
     snapshot_ = incoming;
     accepted = snapshot_;
     return true;

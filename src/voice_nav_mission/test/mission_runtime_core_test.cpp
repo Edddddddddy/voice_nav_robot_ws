@@ -836,6 +836,8 @@ TEST(RuntimeCore, ReplacementGateCanBecomeReadyAfterUnavailableDiscovery)
   const auto unavailable_replacement = GateSnapshot{
     kReplacementGateId, 1U, "", GateState::Faulted, false,
     true, true, false, "", false, false};
+  fixture.authority->set_snapshot(unavailable_replacement);
+  fixture.authority->set_next_failure("replacement Gate is unavailable");
   fixture.core.observe_gate(unavailable_replacement);
   ASSERT_EQ(fixture.core.state().admission_epoch, 2U);
   ASSERT_EQ(fixture.core.state().availability, RuntimeAvailability::Faulted);
@@ -845,6 +847,7 @@ TEST(RuntimeCore, ReplacementGateCanBecomeReadyAfterUnavailableDiscovery)
   const auto ready_replacement = GateSnapshot{
     kReplacementGateId, 2U, "", GateState::Inhibited, true,
     true, true, true, "", false, false};
+  fixture.authority->set_snapshot(ready_replacement);
   fixture.core.observe_gate(ready_replacement);
 
   EXPECT_EQ(fixture.relative->rearm_after_gate_replacement_count(), 1U);
@@ -859,15 +862,19 @@ TEST(RuntimeCore, NewerReplacementSupersedesUnavailableReplacementCandidate)
   Fixture fixture;
   ASSERT_TRUE(fixture.core.admit(goal(1U)).accepted);
 
-  fixture.core.observe_gate(GateSnapshot{
-        kReplacementGateId, 1U, "", GateState::Faulted, false,
-        true, true, false, "", false, false});
+  const auto unavailable_replacement = GateSnapshot{
+    kReplacementGateId, 1U, "", GateState::Faulted, false,
+    true, true, false, "", false, false};
+  fixture.authority->set_snapshot(unavailable_replacement);
+  fixture.authority->set_next_failure("replacement Gate is unavailable");
+  fixture.core.observe_gate(unavailable_replacement);
   ASSERT_EQ(fixture.core.state().admission_epoch, 2U);
 
   fixture.relative->set_rearm_after_gate_replacement(true);
   const auto newer_replacement = GateSnapshot{
     kOtherGateId, 1U, "", GateState::Inhibited, true,
     true, true, true, "", false, false};
+  fixture.authority->set_snapshot(newer_replacement);
   fixture.core.observe_gate(newer_replacement);
 
   EXPECT_EQ(fixture.relative->rearm_after_gate_replacement_count(), 1U);
