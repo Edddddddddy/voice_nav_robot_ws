@@ -50,7 +50,7 @@ support = _load_support()
 @launch_testing.markers.keep_alive
 def generate_test_description():
     return support.generate_product_test_description(
-        'l0011a_motion_gate_consumer_deadman'
+        'l0011a_motion_gate_deadman'
     )
 
 
