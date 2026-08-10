@@ -238,6 +238,23 @@ TEST(RuntimeEventQueueTest, ControlFullUsesExternalEmergencyFenceBeforeNormalWor
   EXPECT_FALSE(fence.pending());
 }
 
+TEST(RuntimeEmergencyFenceTest, CoreEpochAdvanceCannotReopenEmergencyBlock)
+{
+  RuntimeEmergencyFence fence(1U);
+
+  EXPECT_TRUE(fence.advance_epoch(1U, 2U));
+  EXPECT_FALSE(fence.admission_allowed(1U));
+  EXPECT_TRUE(fence.admission_allowed(2U));
+
+  ASSERT_TRUE(fence.raise("ordinary emergency"));
+  EXPECT_EQ(fence.admission_epoch(), 3U);
+  EXPECT_TRUE(fence.blocked());
+  EXPECT_FALSE(fence.advance_epoch(3U, 4U));
+  EXPECT_EQ(fence.admission_epoch(), 3U);
+  EXPECT_FALSE(fence.admission_allowed(3U));
+  EXPECT_FALSE(fence.admission_allowed(4U));
+}
+
 TEST(RuntimeEventQueueTest, CloseDrainsAcceptedCompletionBeforeWorkerExit)
 {
   RuntimeEventQueue<int> queue([] {return 9999;});

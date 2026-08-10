@@ -206,6 +206,25 @@ public:
     const AuthorityOperation & operation) = 0;
   [[nodiscard]] virtual AuthorityResult inhibit(
     const AuthorityOperation & operation) = 0;
+  [[nodiscard]] virtual std::optional<GateSnapshot> accept_rearm_snapshot(
+    const GateSnapshot & candidate) const noexcept
+  {
+    try {
+      const auto current = snapshot();
+      if (
+        current.gate_instance_id != candidate.gate_instance_id ||
+        current.control_seq < candidate.control_seq ||
+        !current.endpoint_available || current.state != GateState::Inhibited ||
+        !current.motion_inhibited || !current.zero_selected ||
+        !current.zero_published)
+      {
+        return std::nullopt;
+      }
+      return current;
+    } catch (...) {
+      return std::nullopt;
+    }
+  }
 };
 
 struct MotionToken
@@ -286,7 +305,8 @@ public:
   // release only the narrowly-scoped Gate-loss latch through this seam; the
   // default keeps deterministic ports fail-closed.
   [[nodiscard]] virtual bool rearm_after_gate_replacement(
-    const GateSnapshot &) noexcept
+    const GateSnapshot &,
+    GateSnapshot * = nullptr) noexcept
   {
     return false;
   }
@@ -312,6 +332,7 @@ struct RuntimeConfig
   std::vector<std::string> named_place_ids;
   std::string runtime_instance_id;
   std::function<std::string()> identifier_generator;
+  std::function<bool(std::uint64_t, std::uint64_t)> admission_epoch_advance;
 };
 
 struct AdmissionResult
@@ -420,9 +441,12 @@ private:
   [[nodiscard]] AuthorityOperation make_operation(
     const std::string & lease_id = {}) const;
   [[nodiscard]] std::string new_identifier() const;
+  [[nodiscard]] bool commit_next_epoch();
   [[nodiscard]] bool rotate_epoch();
   [[nodiscard]] bool admission_allowed(std::uint64_t admission_epoch) const;
-  void set_availability_from_dependencies(bool allow_fault_rearm = false);
+  void set_availability_from_dependencies(
+    bool allow_fault_rearm = false,
+    const GateSnapshot * accepted_gate_snapshot = nullptr);
   void publish_state();
   void publish_feedback(
     FeedbackPhase phase,
@@ -549,8 +573,12 @@ public:
     return safety_faulted_;
   }
   [[nodiscard]] bool rearm_after_gate_replacement(
-    const GateSnapshot &) noexcept override
+    const GateSnapshot & candidate,
+    GateSnapshot * accepted_snapshot = nullptr) noexcept override
   {
+    if (rearm_after_gate_replacement_ && accepted_snapshot != nullptr) {
+      *accepted_snapshot = candidate;
+    }
     return rearm_after_gate_replacement_;
   }
   void start(

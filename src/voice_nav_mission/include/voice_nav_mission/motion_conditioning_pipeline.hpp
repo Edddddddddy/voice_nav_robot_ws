@@ -59,6 +59,7 @@ enum class MotionConditioningFailure : std::uint8_t
   ExecutionFailed = 3,
   InternalError = 4,
   Timeout = 5,
+  GateLoss = 6,
 };
 
 struct MotionConditioningResult
@@ -76,6 +77,10 @@ struct MotionConditioningResult
   // stationarity window at the actual zero proof rather than after component
   // cleanup has completed.
   std::chrono::steady_clock::time_point zero_proven_at{};
+  // Present only for the typed terminal created when an active Gate identity
+  // disappears before it can acknowledge zero.  Generic SafetyFault results
+  // leave this empty and can never enter the replacement rearm path.
+  std::string gate_loss_instance_id;
 };
 
 namespace detail
@@ -93,6 +98,7 @@ struct MotionConditioningCorrelationToken
   std::uint64_t generation{0U};
   std::string lease_id;
   std::string request_id;
+  std::string gate_instance_id;
 };
 
 // A terminal result crosses the RelativeMotion Adapter's worker seam as pure
@@ -193,7 +199,8 @@ public:
   // current inhibited zero.  This is an internal rearm seam; generic
   // SafetyFault and cleanup-residual terminals remain non-reusable.
   [[nodiscard]] bool rearm_after_gate_replacement(
-    const GateSnapshot & snapshot) noexcept;
+    const GateSnapshot & snapshot,
+    GateSnapshot * accepted_snapshot = nullptr) noexcept;
 
   [[nodiscard]] MotionConditioningCorrelationToken correlation_token() const;
 
