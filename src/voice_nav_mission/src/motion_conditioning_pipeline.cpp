@@ -1019,6 +1019,20 @@ private:
         MotionConditioningFailure::SafetyFault,
         "Collision Monitor activation failed after MotionGate OPEN");
     }
+    if (!renew_for_activation(
+        generation, expected_lease, open_operation.gate_instance_id, &*open_lease))
+    {
+      return abort_activation(
+        generation,
+        MotionConditioningFailure::SafetyFault,
+        activation_failure_detail());
+    }
+    if (!open_lease->current() || !activation_token_current(generation)) {
+      return abort_activation(
+        generation,
+        MotionConditioningFailure::SafetyFault,
+        activation_failure_detail());
+    }
     if (!change_state(
         kVelocitySmootherFqn,
         lifecycle_msgs::msg::Transition::TRANSITION_ACTIVATE,
@@ -1031,9 +1045,9 @@ private:
         MotionConditioningFailure::SafetyFault,
         "Velocity Smoother activation failed after MotionGate OPEN");
     }
-    const auto second_renew_ok = renew_for_activation(
+    const auto final_renew_ok = renew_for_activation(
       generation, expected_lease, open_operation.gate_instance_id, &*open_lease);
-    const auto graph_health = second_renew_ok ?
+    const auto graph_health = final_renew_ok ?
       runtime_graph_health(handover_deadline, expected_candidate) :
       RuntimeHealthAssessment{
       RuntimeHealthReason::ComponentUnavailable,

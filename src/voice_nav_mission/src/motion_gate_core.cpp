@@ -334,6 +334,9 @@ ControlResult MotionGateCore::renew(
 
   const auto authority_lease = config_.authority_lease;
   authority_deadline_ = now + authority_lease;
+  if (!candidate_fresh_) {
+    candidate_deadline_ = now + config_.candidate_freshness;
+  }
   reason_ = Reason::None;
   detail_ = "authority renewed";
   advance_state_seq();
