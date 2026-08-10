@@ -110,7 +110,14 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
             moving = self.probe.wait_for_armed_motion()
             old_gate = moving['gate']
             final_gid = self.probe.assert_unique_final_owner()
-            last_nonzero_sim_ns = support._stamp_ns(moving['final'][1])
+            latest_final_nonzero = self.probe._latest_nonzero(
+                self.probe.final_commands
+            )
+            if latest_final_nonzero is None:
+                raise AssertionError(
+                    'non-zero final command disappeared before kill'
+                )
+            last_nonzero_sim_ns = support._stamp_ns(latest_final_nonzero[1])
 
             kill_ack_ns = self.gate_process.kill(
                 lambda: self.probe.count_fqn('/motion_gate_node')
