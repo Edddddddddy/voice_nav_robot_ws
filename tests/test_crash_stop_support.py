@@ -16,11 +16,14 @@
 
 from __future__ import annotations
 
+from collections import deque
 import importlib.util
 from pathlib import Path
 import sys
+import threading
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 
 def _load_support():
@@ -100,6 +103,50 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
                 zero_sim_ns=4_449_000_000,
                 zero_receipt_ns=30,
             )
+
+    def test_quiescence_fence_observes_final_added_after_first_snapshot(self):
+        probe = support.CrashStopProbe.__new__(support.CrashStopProbe)
+        probe.lock = threading.Lock()
+        probe.final_commands = deque(
+            ((10, command(3_994_000_000, 0.01)),),
+            maxlen=20,
+        )
+        probe.clock_samples = deque(((0, 4_500_000_000),), maxlen=20)
+
+        class FakeTime:
+
+            def __init__(self):
+                self.now_ns = 0
+                self.sleep_count = 0
+
+            def monotonic(self):
+                return self.now_ns / 1_000_000_000
+
+            def monotonic_ns(self):
+                return self.now_ns
+
+            def sleep(self, seconds):
+                self.now_ns += 100_000_000
+                with probe.lock:
+                    if self.sleep_count == 0:
+                        probe.final_commands.append(
+                            (50, command(4_120_000_000, 0.03))
+                        )
+                    probe.clock_samples.append(
+                        (self.now_ns, 4_500_000_000 + self.now_ns)
+                    )
+                self.sleep_count += 1
+
+        with mock.patch.object(support, 'time', FakeTime()):
+            with self.assertRaisesRegex(AssertionError, '0.329000 s'):
+                probe.wait_confirm_consumer_timeout(
+                    3_994_000_000,
+                    {
+                        'zero_sim_ns': 4_449_000_000,
+                        'zero_receipt_ns': 30,
+                    },
+                    timeout=1.0,
+                )
 
     def test_rejects_missing_eligible_nonzero_final(self):
         samples = (
