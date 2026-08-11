@@ -220,8 +220,10 @@ public:
     });
     sensor_timer_ = create_wall_timer(50ms, [this]() {
           const auto stamp = get_clock()->now();
+          const auto scan_stamp = stamp - rclcpp::Duration::from_nanoseconds(
+            scan_source_age_ns_.load());
           sensor_msgs::msg::LaserScan scan;
-          scan.header.stamp = stamp;
+          scan.header.stamp = scan_stamp;
           scan.header.frame_id = "base_footprint";
           scan.angle_min = -1.0F;
           scan.angle_max = 1.0F;
@@ -231,6 +233,7 @@ public:
           const auto range = collision_stop_.load() ? 0.10F : 10.0F;
           scan.ranges = {range, range, range};
           scan_publisher_->publish(scan);
+          scan_publish_count_.fetch_add(1U);
 
           nav_msgs::msg::Odometry odom;
           odom.header.stamp = stamp;
@@ -252,6 +255,16 @@ public:
     nonstationary_odom_.store(enabled);
   }
 
+  void set_scan_source_age(const std::chrono::nanoseconds age)
+  {
+    scan_source_age_ns_.store(age.count());
+  }
+
+  std::size_t scan_publish_count() const
+  {
+    return scan_publish_count_.load();
+  }
+
 private:
   rclcpp::Publisher<rosgraph_msgs::msg::Clock>::SharedPtr clock_publisher_;
   rclcpp::Publisher<sensor_msgs::msg::LaserScan>::SharedPtr scan_publisher_;
@@ -262,6 +275,8 @@ private:
   rclcpp::TimerBase::SharedPtr sensor_timer_;
   std::atomic<bool> collision_stop_{false};
   std::atomic<bool> nonstationary_odom_{false};
+  std::atomic<std::int64_t> scan_source_age_ns_{0};
+  std::atomic<std::size_t> scan_publish_count_{0U};
 };
 
 class ControllerObservationNode final : public rclcpp::Node
@@ -737,6 +752,34 @@ TEST(MotionConditioningPipelineIntegration, RealComponentsHandoverTwoLeases)
         return pipeline_node->get_publishers_info_by_topic(
           prepared_two.candidate_topic).empty();
       }, 2s));
+
+  const auto prepared_three = pipeline.prepare();
+  ASSERT_TRUE(prepared_three.ok) << prepared_three.detail;
+  const auto third_generation_baseline = controller->nonzero_count.load();
+  const auto started_three = pipeline.start();
+  ASSERT_TRUE(started_three.ok) << started_three.detail;
+  ASSERT_TRUE(wait_for(
+      [&controller, third_generation_baseline]() {
+        return controller->nonzero_count.load() > third_generation_baseline;
+      }, 3s));
+  const auto source_age_scan_baseline = graph->scan_publish_count();
+  graph->set_scan_source_age(301ms);
+  ASSERT_TRUE(wait_for(
+      [&pipeline]() {
+        return pipeline.state() == MotionConditioningState::Failed;
+      }, 2s));
+  const auto source_age_failure = pipeline.last_result();
+  EXPECT_GE(
+    graph->scan_publish_count(), source_age_scan_baseline + 3U);
+  EXPECT_FALSE(source_age_failure.collision_stop);
+  EXPECT_EQ(
+    source_age_failure.failure,
+    MotionConditioningFailure::SafetyFault);
+  EXPECT_TRUE(source_age_failure.zero_proven);
+  EXPECT_NE(
+    source_age_failure.detail.find(
+      "MotionGate RENEW failed closed"),
+    std::string::npos);
 }
 
 TEST(

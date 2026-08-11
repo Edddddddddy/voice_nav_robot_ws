@@ -88,6 +88,8 @@ EXPECTED_BRIDGES = {
         "ros_type_name": "sensor_msgs/msg/LaserScan",
         "gz_type_name": "gz.msgs.LaserScan",
         "direction": "GZ_TO_ROS",
+        "subscriber_queue": "1",
+        "publisher_queue": "1",
         "qos_profile": "SENSOR_DATA",
     },
 }
@@ -217,6 +219,39 @@ def validate_world(path: Path) -> None:
     if world.get("name") != "voice_nav_test_world":
         raise SimulationContractError(
             "simulation world name must be voice_nav_test_world"
+        )
+
+    physics_profiles = direct_children(world, "physics")
+    if len(physics_profiles) != 1:
+        raise SimulationContractError(
+            "simulation world must define exactly one physics profile"
+        )
+    physics = physics_profiles[0]
+    if physics.get("name") != "default_physics":
+        raise SimulationContractError(
+            "simulation physics name must be default_physics"
+        )
+    if physics.get("type") != "ode":
+        raise SimulationContractError(
+            "simulation physics type must be ode"
+        )
+    max_step_size = required_text(
+        physics,
+        "max_step_size",
+        "simulation physics",
+    )
+    if max_step_size != "0.001":
+        raise SimulationContractError(
+            "simulation physics max_step_size must be 0.001"
+        )
+    real_time_update_rate = required_text(
+        physics,
+        "real_time_update_rate",
+        "simulation physics",
+    )
+    if real_time_update_rate != "500":
+        raise SimulationContractError(
+            "simulation physics real_time_update_rate must be 500"
         )
 
     uri_nodes = list(descendants(world, "uri"))
