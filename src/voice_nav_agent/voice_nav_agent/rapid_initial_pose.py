@@ -1,7 +1,8 @@
 """Repeated initial-pose publisher for the fast Nav2 simulation path."""
 
-import rclpy
 from geometry_msgs.msg import PoseWithCovarianceStamped
+
+import rclpy
 from rclpy.node import Node
 
 
@@ -11,13 +12,14 @@ class RapidInitialPose(Node):
         self.publisher = self.create_publisher(
             PoseWithCovarianceStamped, '/initialpose', 10
         )
-        self.remaining = 30
-        self.timer = self.create_timer(1.0, self.publish)
+        self.remaining = 3
+        self.timer = self.create_timer(0.5, self.publish)
 
     def publish(self):
+        if self.publisher.get_subscription_count() == 0:
+            return
         message = PoseWithCovarianceStamped()
         message.header.frame_id = 'map'
-        message.header.stamp = self.get_clock().now().to_msg()
         message.pose.pose.orientation.w = 1.0
         message.pose.covariance[0] = 0.25
         message.pose.covariance[7] = 0.25
@@ -25,7 +27,7 @@ class RapidInitialPose(Node):
         self.publisher.publish(message)
         self.remaining -= 1
         if self.remaining == 0:
-            self.get_logger().info('Initial pose published for Nav2 startup')
+            self.get_logger().info('Initial pose burst published for Nav2 startup')
             self.timer.cancel()
 
 

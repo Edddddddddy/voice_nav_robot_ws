@@ -45,6 +45,12 @@ parser maps it to `kitchen`).  The voice endpoint uses Vosk when its model and
 Python path are available, and still accepts terminal text when standard input
 is attached.
 
+For predictable WSL performance, this launch waits for Gazebo/odometry before
+starting Nav2, uses Regulated Pure Pursuit instead of the heavier default MPPI
+controller, and allows two seconds for Behavior Tree action acknowledgement.
+The rapid-only velocity relay forwards stamped `/cmd_vel_nav` output directly
+to the simulated base; it deliberately bypasses the product safety chain.
+
 The rapid wake phrase is `小智`. For example, say or type `小智，去厨房，然后去书房`.
 
 The navigation launch now starts the provisioned loopback Qwen server by
@@ -99,4 +105,5 @@ python3 -m py_compile src/voice_nav_agent/voice_nav_agent/rapid_*.py
 colcon build --packages-select voice_nav_agent voice_nav_bringup --symlink-install \
   --cmake-args -DBUILD_TESTING=OFF
 ros2 launch voice_nav_bringup navigation_sim.launch.py --show-args
+bash scripts/rapid-navigation-smoke.sh
 ```

@@ -55,13 +55,23 @@ def generate_launch_description():
                 [bringup_share, 'launch', 'rapid_agent_stack.launch.py']
             )
         ),
-        launch_arguments={'mode': 'mapping'}.items(),
+        launch_arguments={
+            'mode': 'mapping',
+            'llm_enabled': LaunchConfiguration('llm_enabled'),
+            'map_output_root': LaunchConfiguration('map_output_root'),
+        }.items(),
     )
     return LaunchDescription([
         SetEnvironmentVariable(name='RMW_IMPLEMENTATION', value='rmw_fastrtps_cpp'),
         DeclareLaunchArgument(
             'headless', default_value='true', choices=['true', 'false'],
             description='Run Gazebo server-only when true.',
+        ),
+        DeclareLaunchArgument(
+            'llm_enabled', default_value='true', choices=['true', 'false'],
+        ),
+        DeclareLaunchArgument(
+            'map_output_root', default_value='/tmp/voice_nav_rapid_maps',
         ),
         product,
         slam,

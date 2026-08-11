@@ -1,10 +1,10 @@
 """Small direct Mission executor for the explicitly non-safe rapid demo."""
 
 import math
+from pathlib import Path
 import re
 import secrets
 import time
-from pathlib import Path
 
 from action_msgs.msg import GoalStatus
 
@@ -33,8 +33,8 @@ from voice_nav_interfaces.srv import StopMission
 
 PLACES = {
     'home': (0.0, 0.0, 0.0),
-    'study': (-2.0, 1.8, math.pi),
-    'kitchen': (1.5, -1.8, -math.pi / 2.0),
+    'study': (-1.2, 0.0, math.pi),
+    'kitchen': (0.6, 0.0, 0.0),
 }
 MAPPING_MASK = 0b1011
 NAVIGATION_MASK = 0b0100
@@ -116,7 +116,11 @@ class RapidMissionBridge(Node):
             if self.mode == 'mapping'
             else MissionState.NAVIGATION
         )
-        state.availability = MissionState.AVAILABLE
+        state.availability = (
+            MissionState.AVAILABLE
+            if self.mode == 'mapping' or self.nav.server_is_ready()
+            else MissionState.UNAVAILABLE
+        )
         state.gate_state = MissionState.GATE_INHIBITED
         state.supported_step_mask = (
             MAPPING_MASK if self.mode == 'mapping' else NAVIGATION_MASK
@@ -200,7 +204,9 @@ class RapidMissionBridge(Node):
             self.active_nav = None
 
     async def _navigate(self, handle, target, execution_epoch):
-        if not self.nav.server_is_ready():
+        if not self.nav.server_is_ready() and not self.nav.wait_for_server(
+            timeout_sec=5.0
+        ):
             return (
                 ExecuteMission.Result.DEPENDENCY_UNAVAILABLE,
                 'Nav2 action unavailable',
