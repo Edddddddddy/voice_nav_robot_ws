@@ -4,7 +4,11 @@
 """Reusable rapid Agent, local model, voice, and Mission bridge stack."""
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
+from launch.actions import (
+    DeclareLaunchArgument,
+    ExecuteProcess,
+    OpaqueFunction,
+)
 from launch.conditions import IfCondition
 from launch.substitutions import (
     EnvironmentVariable,
@@ -51,6 +55,8 @@ def generate_launch_description():
     llm_bundle = LaunchConfiguration('llm_bundle')
     llm_enabled = LaunchConfiguration('llm_enabled')
     voice_root = LaunchConfiguration('voice_deps_root')
+    audio_enabled = LaunchConfiguration('audio_enabled')
+    use_sim_time = LaunchConfiguration('use_sim_time')
     capture_fifo = LaunchConfiguration('capture_fifo')
     playback_fifo = LaunchConfiguration('playback_fifo')
     mission = Node(
@@ -65,7 +71,7 @@ def generate_launch_description():
             'state_topic': '/rapid/mission/state',
             'stop_service': '/rapid/mission/stop',
             'enforce_runtime_token': False,
-            'use_sim_time': True,
+            'use_sim_time': use_sim_time,
         }],
     )
     agent = Node(
@@ -110,6 +116,7 @@ def generate_launch_description():
         package='voice_nav_audio',
         executable='audio_engine_node',
         output='screen',
+        condition=IfCondition(audio_enabled),
         parameters=[{
             'capture_fifo': capture_fifo,
             'playback_fifo': playback_fifo,
@@ -140,12 +147,19 @@ def generate_launch_description():
             'llm_enabled', default_value='true', choices=['true', 'false']
         ),
         DeclareLaunchArgument(
+            'audio_enabled', default_value='true', choices=['true', 'false']
+        ),
+        DeclareLaunchArgument(
+            'use_sim_time', default_value='true', choices=['true', 'false']
+        ),
+        DeclareLaunchArgument(
             'llm_bundle',
             default_value=EnvironmentVariable(
                 'VOICE_NAV_LLM_BUNDLE',
                 default_value=(
                     '/home/ubuntu/.local/share/voice-nav-llm/bundles/'
-                    '8bd4d412079a162ecca022943900d47bb17e5c6f363bbe65a8e7c6909936fdfc'
+                    '8bd4d412079a162ecca022943900d47bb'
+                    '17e5c6f363bbe65a8e7c6909936fdfc'
                 ),
             ),
         ),

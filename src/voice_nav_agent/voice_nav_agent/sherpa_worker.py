@@ -14,12 +14,26 @@ SAMPLE_RATE = 16000
 
 def _chunks(path):
     """Yield small normalized frames from the AudioEngine private FIFO."""
+    pending = bytearray()
     with Path(path).open('rb', buffering=0) as stream:
         while True:
-            pcm = stream.read(2048)
+            pcm = stream.read(2048 - len(pending))
             if not pcm:
+                if pending:
+                    pending.extend(bytes((-len(pending)) % 2))
+                    yield (
+                        np.frombuffer(pending, dtype=np.int16)
+                        .astype(np.float32) / 32768
+                    )
                 return
-            yield np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768
+            pending.extend(pcm)
+            if len(pending) < 2048:
+                continue
+            yield (
+                np.frombuffer(pending, dtype=np.int16).astype(np.float32) /
+                32768
+            )
+            pending.clear()
 
 
 def _keyword_spotter(model, keywords):
@@ -77,6 +91,13 @@ def _finish(recognizer, stream):
     return recognizer.get_result(stream).strip()
 
 
+def _without_wake(text):
+    for wake in ('小智', '小志', '晓智'):
+        if text.startswith(wake):
+            return text[len(wake):].lstrip(' ,，。')
+    return text
+
+
 def run(arguments):
     """Emit one JSON record for each wake-authorized final transcript."""
     spotter = _keyword_spotter(arguments.kws_model, arguments.keywords_file)
@@ -108,8 +129,11 @@ def run(arguments):
                 continue
             detector.reset()
             asr_stream = recognizer.create_stream()
-            speech_started = False
-            turn_samples = 0
+            detector.accept_waveform(samples)
+            asr_stream.accept_waveform(SAMPLE_RATE, samples)
+            _drain(recognizer, asr_stream)
+            speech_started = detector.is_speech_detected()
+            turn_samples = len(samples)
             wake = json.dumps({'wake': keyword})
             print(wake, flush=True)
             print(wake, file=sys.stderr, flush=True)
@@ -127,7 +151,10 @@ def run(arguments):
         )
         if not endpoint and not timed_out:
             continue
-        text = _finish(recognizer, asr_stream) if speech_started else ''
+        text = (
+            _without_wake(_finish(recognizer, asr_stream))
+            if speech_started else ''
+        )
         if text:
             print(
                 json.dumps({'text': text, 'wake_authorized': True}),
