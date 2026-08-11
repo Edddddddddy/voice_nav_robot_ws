@@ -44,7 +44,21 @@ def test_loopback_adapter_returns_closed_mission_json():
     response_format = payload['response_format']
     assert response_format['type'] == 'json_schema'
     assert response_format['json_schema']['strict'] is True
-    assert payload['messages'][1]['content'].startswith('/no_think\n{')
+    system_prompt = payload['messages'][0]['content']
+    assert '决策顺序：' in system_prompt
+    assert '输出契约：' in system_prompt
+    assert '权限边界：' in system_prompt
+    assert '去做饭的地方' not in system_prompt
+    user_content = payload['messages'][1]['content']
+    assert user_content.startswith('/no_think\n{')
+    request = json.loads(user_content.split('\n', 1)[1])
+    assert request == {
+        'text': '去做饭的地方',
+        'mode': 'navigation',
+        'supported_kinds': ['NAVIGATE_TO'],
+        'max_steps': 3,
+        'named_place_ids': ['kitchen'],
+    }
 
 
 def test_loopback_adapter_rejects_remote_and_extra_fields():
@@ -60,7 +74,7 @@ def test_loopback_adapter_rejects_remote_and_extra_fields():
 
 
 def test_loopback_adapter_rejects_unknown_or_duplicate_targets():
-    """Transport validation rejects model output outside the runtime snapshot."""
+    """Reject model output outside the runtime snapshot."""
     client = LoopbackLlm('http://127.0.0.1:8080/v1/chat/completions')
     client.opener = _Opener(
         '{"mission":{"steps":['
