@@ -39,6 +39,7 @@ import launch_testing.actions
 from nav_msgs.msg import Odometry
 import rclpy
 from rclpy.action import ActionClient
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.parameter import Parameter
 from rclpy.qos import (
@@ -470,6 +471,15 @@ class CrashStopProbe:
         self.scan_samples = deque(maxlen=4000)
         self.joint_states = deque(maxlen=4000)
         self.clock_samples = deque(maxlen=4000)
+        # Keep the 1 kHz /clock and sensor diagnostics from serializing the
+        # safety-observation callbacks behind the Node's default mutually
+        # exclusive group.  Cross-topic receipt latency is part of the
+        # crash-stop proof, so Gate/final/limited commands share their own
+        # ordered lane while MissionState and high-rate sensors use separate
+        # lanes on the existing four-thread executor.
+        self.state_observation_group = MutuallyExclusiveCallbackGroup()
+        self.safety_observation_group = MutuallyExclusiveCallbackGroup()
+        self.sensor_observation_group = MutuallyExclusiveCallbackGroup()
         state_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
@@ -484,12 +494,14 @@ class CrashStopProbe:
                     self.mission_states, message
                 ),
                 state_qos,
+                callback_group=self.state_observation_group,
             ),
             self.node.create_subscription(
                 interfaces.gate_state,
                 GATE_STATE_TOPIC,
                 lambda message: self._append(self.gate_states, message),
                 state_qos,
+                callback_group=self.safety_observation_group,
             ),
             self.node.create_subscription(
                 TwistStamped,
@@ -498,6 +510,7 @@ class CrashStopProbe:
                     self.final_commands, message
                 ),
                 100,
+                callback_group=self.safety_observation_group,
             ),
             self.node.create_subscription(
                 TwistStamped,
@@ -506,18 +519,21 @@ class CrashStopProbe:
                     self.limited_commands, message
                 ),
                 100,
+                callback_group=self.safety_observation_group,
             ),
             self.node.create_subscription(
                 Odometry,
                 ODOMETRY_TOPIC,
                 lambda message: self._append(self.odometry, message),
                 100,
+                callback_group=self.sensor_observation_group,
             ),
             self.node.create_subscription(
                 LaserScan,
                 SCAN_TOPIC,
                 lambda message: self._append(self.scan_samples, message),
                 qos_profile_sensor_data,
+                callback_group=self.sensor_observation_group,
             ),
             self.node.create_subscription(
                 JointState,
@@ -526,6 +542,7 @@ class CrashStopProbe:
                     self.joint_states, message
                 ),
                 100,
+                callback_group=self.sensor_observation_group,
             ),
             self.node.create_subscription(
                 Clock,
@@ -534,6 +551,7 @@ class CrashStopProbe:
                     self.clock_samples, _clock_ns(message)
                 ),
                 qos_profile_sensor_data,
+                callback_group=self.sensor_observation_group,
             ),
         ]
         self.action_client = ActionClient(

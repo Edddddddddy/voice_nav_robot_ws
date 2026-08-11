@@ -1020,6 +1020,21 @@ public:
       [this](
         const std::shared_ptr<ListControllers::Request>,
         std::shared_ptr<ListControllers::Response> response) {
+        {
+          std::unique_lock<std::mutex> lock(controller_mutex_);
+          if (controller_barrier_armed_) {
+            if (controller_calls_until_block_ > 0U) {
+              --controller_calls_until_block_;
+            }
+            if (controller_calls_until_block_ == 0U) {
+              controller_barrier_entered_ = true;
+              controller_cv_.notify_all();
+              controller_cv_.wait(
+                lock, [this]() {return controller_barrier_released_;});
+              controller_barrier_armed_ = false;
+            }
+          }
+        }
         controller_manager_msgs::msg::ControllerState controller;
         controller.name = "diff_drive_controller";
         controller.state = controller_active_ ? "active" : "inactive";
@@ -1300,6 +1315,30 @@ public:
     controller_active_ = value;
   }
 
+  void arm_controller_barrier(std::size_t calls_until_block)
+  {
+    std::lock_guard<std::mutex> lock(controller_mutex_);
+    controller_calls_until_block_ = calls_until_block;
+    controller_barrier_entered_ = false;
+    controller_barrier_released_ = false;
+    controller_barrier_armed_ = true;
+  }
+
+  bool wait_for_controller_barrier(std::chrono::milliseconds timeout = 2s)
+  {
+    std::unique_lock<std::mutex> lock(controller_mutex_);
+    return controller_cv_.wait_for(lock, timeout, [this]() {
+               return controller_barrier_entered_;
+      });
+  }
+
+  void release_controller_barrier()
+  {
+    std::lock_guard<std::mutex> lock(controller_mutex_);
+    controller_barrier_released_ = true;
+    controller_cv_.notify_all();
+  }
+
 private:
   static std::string parameter_string(
     const std::shared_ptr<LoadNode::Request> & request,
@@ -1427,6 +1466,12 @@ private:
   bool freeze_clock_{false};
   rclcpp::Time frozen_clock_;
   mutable std::mutex health_mutex_;
+  std::mutex controller_mutex_;
+  std::condition_variable controller_cv_;
+  std::size_t controller_calls_until_block_{0U};
+  bool controller_barrier_armed_{false};
+  bool controller_barrier_entered_{false};
+  bool controller_barrier_released_{false};
   std::mutex activation_mutex_;
   std::condition_variable activation_cv_;
   bool activation_barrier_{false};
@@ -2205,15 +2250,70 @@ TEST_F(
   EXPECT_EQ(
     std::count(
       calls.cbegin(), calls.cend(),
-      AuthorityOperationKind::Renew), 3);
+      AuthorityOperationKind::Renew), 4);
   const std::vector<std::string> expected_events{
     "renew",
     "activate:/collision_monitor",
     "renew",
     "activate:/velocity_smoother",
+    "renew",
     "renew"};
   std::lock_guard<std::mutex> lock(*event_mutex);
   EXPECT_EQ(*events, expected_events);
+}
+
+TEST_F(
+  MotionConditioningPipelineTest,
+  CommitRenewFollowsPostActivationHealthChecks)
+{
+  graph->set_activation_observer([this](const std::string & fqn) {
+      if (fqn == "/velocity_smoother") {
+        // start() performs two full graph-health passes after lifecycle
+        // activation.  Hold the second controller query so the test can
+        // inspect whether the final authority renewal already happened.
+        graph->arm_controller_barrier(2U);
+      }
+    });
+  auto health_ready = std::make_shared<CallbackCounter>();
+  auto pipeline_config = config();
+  pipeline_config.renew_period = 10s;
+  pipeline_config.after_health_callback = [health_ready]() {
+      (*health_ready)();
+    };
+  MotionConditioningPipeline pipeline(
+    *client, authority, producer, pipeline_config);
+  ASSERT_TRUE(pipeline.prepare().ok);
+  health_ready->expect(4U);
+  graph->publish_health_once();
+  ASSERT_TRUE(health_ready->wait_for_target());
+
+  auto start_future = std::async(std::launch::async, [&pipeline]() {
+        return pipeline.start();
+    });
+  if (!graph->wait_for_controller_barrier()) {
+    graph->release_controller_barrier();
+    (void)start_future.get();
+    FAIL() << "post-activation health barrier was not reached";
+  }
+
+  const auto blocked_calls = authority->calls();
+  EXPECT_EQ(
+    std::count(
+      blocked_calls.cbegin(), blocked_calls.cend(),
+      AuthorityOperationKind::Renew),
+    3);
+  EXPECT_EQ(producer->start_count, 0U);
+
+  graph->release_controller_barrier();
+  const auto result = start_future.get();
+  ASSERT_TRUE(result.ok) << result.detail;
+  const auto calls = authority->calls();
+  EXPECT_EQ(
+    std::count(
+      calls.cbegin(), calls.cend(),
+      AuthorityOperationKind::Renew),
+    4);
+  EXPECT_EQ(producer->start_count, 1U);
 }
 
 TEST_F(
