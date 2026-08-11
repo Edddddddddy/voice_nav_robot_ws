@@ -463,8 +463,12 @@ class RelativeMotionProductTest(unittest.TestCase):
             commands_zero = bool(recent_commands) and all(
                 is_zero(sample[1]) for sample in recent_commands
             )
-            gate_zero = bool(gate) and gate[1].motion_inhibited and (
-                gate[1].zero_selected and gate[1].zero_publish_seq > 0
+            gate_zero = (
+                bool(gate)
+                and gate[1].motion_inhibited
+                and gate[1].zero_selected
+                and gate[1].zero_publish_seq > 0
+                and gate[1].zero_publish_seq >= gate[1].output_publish_seq
             )
             return stationary and commands_zero and gate_zero
 
@@ -516,6 +520,8 @@ class RelativeMotionProductTest(unittest.TestCase):
                     and sample[1].motion_inhibited
                     and sample[1].zero_selected
                     and sample[1].zero_publish_seq > 0
+                    and sample[1].zero_publish_seq
+                    >= sample[1].output_publish_seq
                 ),
                 None,
             )
@@ -576,6 +582,7 @@ class RelativeMotionProductTest(unittest.TestCase):
             'StopMission Gate zero and stationary hold contract',
         )
         self.assertLessEqual(evidence['gate_zero_latency_ms'], 300.0)
+        self.assertLessEqual(evidence['final_zero_latency_ms'], 300.0)
         self.assertLessEqual(evidence['stationary_settle_ms'], 1200.0)
         self.assertGreaterEqual(evidence['stationary_hold_ms'], 200.0)
         return evidence
