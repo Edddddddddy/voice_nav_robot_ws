@@ -53,6 +53,16 @@ controller, and allows two seconds for Behavior Tree action acknowledgement.
 The rapid-only velocity relay forwards stamped `/cmd_vel_nav` output directly
 to the simulated base; it deliberately bypasses the product safety chain.
 
+To navigate with a package saved in Mapping Mode, bind the whole package
+instead of passing occupancy and Named Place files separately. Launch verifies
+the manifest, all five SHA-256 entries, `map_id`, relative occupancy image, and
+Named Place schema before constructing AMCL/Nav2 actions:
+
+```bash
+ros2 launch voice_nav_bringup navigation_sim.launch.py \
+  map_package:=/tmp/voice_nav_rapid_maps/house_new map_id:=house_new
+```
+
 The rapid wake phrase is `小智`. For example, say or type `小智，去厨房，然后去书房`.
 
 The navigation launch now starts the provisioned loopback Qwen server by

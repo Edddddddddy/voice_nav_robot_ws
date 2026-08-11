@@ -4,6 +4,7 @@ import hashlib
 import math
 from pathlib import Path
 import re
+from typing import NamedTuple
 
 import yaml
 
@@ -15,6 +16,14 @@ DATA_FILES = (
     'map.data',
     'named_places.yaml',
 )
+
+
+class MapPackage(NamedTuple):
+    """Verified paths that must be loaded together in Navigation Mode."""
+
+    map_id: str
+    occupancy_yaml: Path
+    named_places: Path
 
 
 def load_places(path, expected_map_id=None):
@@ -32,7 +41,10 @@ def load_places(path, expected_map_id=None):
         raise ValueError('places must be a list with at most 32 items')
     places = {}
     for entry in entries:
-        if not isinstance(entry, dict) or set(entry) != {'id', 'x', 'y', 'yaw'}:
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != {'id', 'x', 'y', 'yaw'}
+        ):
             raise ValueError('invalid named place fields')
         place_id = entry['id']
         values = entry['x'], entry['y'], entry['yaw']
@@ -100,4 +112,57 @@ def finish_map_package(directory, map_id, places=()):
     }
     (directory / 'manifest.yaml').write_text(
         yaml.safe_dump(manifest, sort_keys=False), encoding='utf-8'
+    )
+
+
+def verify_map_package(directory, expected_map_id=None):
+    """Verify one rapid Map Package before AMCL/Nav2 consumes any file."""
+    directory = Path(directory)
+    if not directory.is_dir() or directory.is_symlink():
+        raise ValueError('Map Package directory missing or invalid')
+    directory = directory.resolve()
+    manifest_path = directory / 'manifest.yaml'
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        raise ValueError('Map Package manifest missing or invalid')
+    manifest = yaml.safe_load(manifest_path.read_text(encoding='utf-8'))
+    if not isinstance(manifest, dict) or manifest.get('schema_version') != 1:
+        raise ValueError('manifest schema_version must be 1')
+    map_id = manifest.get('map_id')
+    if not isinstance(map_id, str) or not LOGICAL_ID.fullmatch(map_id):
+        raise ValueError('invalid manifest map_id')
+    if expected_map_id and map_id != expected_map_id:
+        raise ValueError('manifest map_id mismatch')
+    expected_files = {
+        'occupancy_yaml': 'map.yaml',
+        'occupancy_image': 'map.pgm',
+        'posegraph': 'map.posegraph',
+        'posegraph_data': 'map.data',
+        'manifest': 'manifest.yaml',
+        'named_places': 'named_places.yaml',
+    }
+    if manifest.get('files') != expected_files:
+        raise ValueError('manifest file mapping is invalid')
+    expected_hashes = manifest.get('sha256')
+    if (
+        not isinstance(expected_hashes, dict)
+        or set(expected_hashes) != set(DATA_FILES)
+    ):
+        raise ValueError('manifest hashes are incomplete')
+    for name in DATA_FILES:
+        path = directory / name
+        if not path.is_file() or path.is_symlink() or path.stat().st_size == 0:
+            raise ValueError('Map Package file missing or invalid: ' + name)
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if expected_hashes[name] != actual:
+            raise ValueError('Map Package hash mismatch: ' + name)
+    occupancy = yaml.safe_load(
+        (directory / 'map.yaml').read_text(encoding='utf-8')
+    )
+    if not isinstance(occupancy, dict) or occupancy.get('image') != 'map.pgm':
+        raise ValueError('map.yaml must reference map.pgm')
+    load_places(directory / 'named_places.yaml', expected_map_id=map_id)
+    return MapPackage(
+        map_id=map_id,
+        occupancy_yaml=directory / 'map.yaml',
+        named_places=directory / 'named_places.yaml',
     )
