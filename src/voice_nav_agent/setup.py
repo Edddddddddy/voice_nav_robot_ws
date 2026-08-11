@@ -1,3 +1,5 @@
+from glob import glob
+
 from setuptools import find_packages, setup
 
 package_name = 'voice_nav_agent'
@@ -11,6 +13,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/config', ['config/rapid_keywords_raw.txt']),
+        ('share/' + package_name + '/web', glob('web/*')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -30,6 +33,7 @@ setup(
             'rapid_initial_pose = voice_nav_agent.rapid_initial_pose:main',
             'rapid_cmd_vel_relay = voice_nav_agent.rapid_cmd_vel_relay:main',
             'rapid_voice_node = voice_nav_agent.rapid_voice_node:main',
+            'rapid_web_console = voice_nav_agent.rapid_web_console_node:main',
         ],
     },
 )

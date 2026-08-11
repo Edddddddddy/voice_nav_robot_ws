@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#07110f">
+  <title>VoiceNav Rapid Control</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">VN</span>
+        <div><strong>VoiceNav</strong><small>RAPID CONTROL / LOCAL</small></div>
+      </div>
+      <div class="connection"><i id="statusDot"></i><span id="connection">连接中</span></div>
+      <time id="clock">--:--:--</time>
+    </header>
+
+    <section class="grid">
+      <article class="panel map-panel">
+        <div class="panel-head">
+          <div><span class="eyebrow">LIVE OCCUPANCY</span><h1>空间态势</h1></div>
+          <div class="coordinates" id="coordinates">X -- · Y --</div>
+        </div>
+        <div class="map-stage">
+          <canvas id="map" width="900" height="560" aria-label="机器人占用栅格地图"></canvas>
+          <div class="scanline"></div>
+          <div class="map-empty" id="mapEmpty">等待 /map 数据</div>
+        </div>
+      </article>
+
+      <aside class="side">
+        <article class="panel state-panel">
+          <span class="eyebrow">MISSION RUNTIME</span>
+          <div class="runtime-row"><h2 id="mode">UNKNOWN</h2><span class="pill" id="availability">OFFLINE</span></div>
+          <dl class="metrics">
+            <div><dt>Gate</dt><dd id="gate">--</dd></div>
+            <div><dt>Epoch</dt><dd id="epoch">--</dd></div>
+            <div><dt>Active step</dt><dd id="activeStep">--</dd></div>
+            <div><dt>Runtime</dt><dd id="runtimeId">--</dd></div>
+          </dl>
+          <div class="event"><span>LAST EVENT</span><p id="lastEvent">等待系统状态</p></div>
+        </article>
+
+        <article class="panel motion-panel">
+          <div class="panel-head compact"><div><span class="eyebrow">QUICK MOTION</span><h2>手动指令</h2></div></div>
+          <div class="dpad">
+            <button data-command="前进 0.5 米" class="forward" aria-label="前进 0.5 米">↑</button>
+            <button data-command="左转 45 度" aria-label="左转 45 度">↺</button>
+            <button id="stop" class="stop" aria-label="停止机器人"><span>STOP</span><small>立即停止</small></button>
+            <button data-command="右转 45 度" aria-label="右转 45 度">↻</button>
+            <button data-command="后退 0.5 米" class="back" aria-label="后退 0.5 米">↓</button>
+          </div>
+        </article>
+      </aside>
+
+      <article class="panel command-panel">
+        <div><span class="eyebrow">NATURAL LANGUAGE</span><h2>任务指令</h2></div>
+        <form id="commandForm">
+          <input id="command" maxlength="512" autocomplete="off" placeholder="例如：去厨房，然后回到 home" aria-label="机器人任务指令">
+          <button type="submit">发送任务 <b>↗</b></button>
+        </form>
+        <div class="places" id="places"><span>Named places</span></div>
+      </article>
+    </section>
+
+    <footer><span>Rapid demo · 非功能安全控制界面</span><span>HTTP/JSON · VoiceTurn → Agent → Runtime</span></footer>
+  </main>
+  <div class="toast" id="toast" role="status"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

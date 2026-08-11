@@ -20,6 +20,15 @@ The rapid navigation launch publishes a short burst of `/initialpose` samples
 from a ROS node after Gazebo starts, so AMCL can acquire its starting pose
 without a hand-written CLI YAML message.
 
+The shared rapid stack also serves a dependency-free control console at
+`http://127.0.0.1:8088`. It renders `/map` and `/amcl_pose`, shows the latest
+Mission snapshot, and sends text/quick controls through `VoiceTurn -> Agent ->
+Runtime`. Its STOP button first calls `/mission/stop` and then publishes the
+same STOP identity for the Agent's idempotent retry. For LAN access, launch
+with `web_bind_host:=0.0.0.0` (or set `VOICE_NAV_WEB_BIND=0.0.0.0`) and open
+`http://<wsl-ip>:8088` from the remote browser. This rapid console has no
+authentication or TLS: do not expose it directly to the public Internet.
+
 ## Start
 
 From WSL Ubuntu 24.04 with ROS 2 Jazzy and the repository dependencies

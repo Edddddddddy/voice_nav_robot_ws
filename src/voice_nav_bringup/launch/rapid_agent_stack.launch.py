@@ -17,6 +17,7 @@ from launch.substitutions import (
 )
 
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
 from voice_nav_agent.rapid_map_package import load_places
@@ -59,6 +60,8 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time')
     capture_fifo = LaunchConfiguration('capture_fifo')
     playback_fifo = LaunchConfiguration('playback_fifo')
+    web_enabled = LaunchConfiguration('web_enabled')
+    web_port = LaunchConfiguration('web_port')
     mission = Node(
         package='voice_nav_agent',
         executable='rapid_mission_bridge',
@@ -129,6 +132,16 @@ def generate_launch_description():
             'playback_fifo': playback_fifo,
         }],
     )
+    web = Node(
+        package='voice_nav_agent',
+        executable='rapid_web_console',
+        output='screen',
+        condition=IfCondition(web_enabled),
+        parameters=[{
+            'bind_host': LaunchConfiguration('web_bind_host'),
+            'port': ParameterValue(web_port, value_type=int),
+        }],
+    )
     llm = ExecuteProcess(
         cmd=[
             PathJoinSubstitution([llm_bundle, 'bin', 'llama-server']),
@@ -156,6 +169,16 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'audio_enabled', default_value='true', choices=['true', 'false']
         ),
+        DeclareLaunchArgument(
+            'web_enabled', default_value='true', choices=['true', 'false']
+        ),
+        DeclareLaunchArgument(
+            'web_bind_host',
+            default_value=EnvironmentVariable(
+                'VOICE_NAV_WEB_BIND', default_value='127.0.0.1'
+            ),
+        ),
+        DeclareLaunchArgument('web_port', default_value='8088'),
         DeclareLaunchArgument(
             'use_sim_time', default_value='true', choices=['true', 'false']
         ),
@@ -196,4 +219,5 @@ def generate_launch_description():
         OpaqueFunction(function=_runtime_node),
         agent,
         voice,
+        web,
     ])
