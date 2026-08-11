@@ -1,13 +1,24 @@
 """Write final Vosk microphone transcripts, one per stdout line."""
 
+import argparse
 import json
 import os
+from pathlib import Path
 import shutil
 import subprocess
 import sys
-from pathlib import Path
 
 from vosk import KaldiRecognizer, Model
+
+
+def _fifo_chunks(path):
+    """Read 16 kHz signed PCM produced by the C++ AudioEngine worker."""
+    with Path(path).open('rb', buffering=0) as stream:
+        while True:
+            chunk = stream.read(8000)
+            if not chunk:
+                return
+            yield chunk
 
 
 def _pulse_chunks():
@@ -60,12 +71,20 @@ def _portaudio_chunks():
 
 def main():
     """Run Vosk over the best local capture source."""
-    if len(sys.argv) != 2 or not Path(sys.argv[1]).is_dir():
-        raise SystemExit('usage: vosk_worker.py MODEL_DIRECTORY')
-    recognizer = KaldiRecognizer(Model(sys.argv[1]), 16000)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('model_directory', type=Path)
+    parser.add_argument('--pcm-fifo', type=Path)
+    arguments = parser.parse_args()
+    if not arguments.model_directory.is_dir():
+        raise SystemExit('Vosk model directory does not exist')
+    recognizer = KaldiRecognizer(Model(str(arguments.model_directory)), 16000)
     use_pulse = bool(os.environ.get('PULSE_SERVER')) and shutil.which('parec')
-    chunks = _pulse_chunks() if use_pulse else _portaudio_chunks()
-    source = 'pulse' if use_pulse else 'portaudio'
+    if arguments.pcm_fifo is not None:
+        chunks, source = _fifo_chunks(arguments.pcm_fifo), 'audio_engine_fifo'
+    elif use_pulse:
+        chunks, source = _pulse_chunks(), 'pulse'
+    else:
+        chunks, source = _portaudio_chunks(), 'portaudio'
     print(json.dumps({'audio_source': source}), file=sys.stderr, flush=True)
     for chunk in chunks:
         if recognizer.AcceptWaveform(chunk):

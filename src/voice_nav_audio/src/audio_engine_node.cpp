@@ -14,9 +14,15 @@
 
 #include <portaudio.h>
 
+#include <fcntl.h>
+#include <signal.h>
+#include <unistd.h>
+
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
@@ -41,6 +47,8 @@ public:
   AudioEngineNode()
   : Node("voice_audio_engine")
   {
+    capture_fifo_ = declare_parameter<std::string>("capture_fifo", "");
+    ::signal(SIGPIPE, SIG_IGN);
     check(Pa_Initialize(), "PortAudio initialization");
     initialized_ = true;
     check(
@@ -55,8 +63,11 @@ public:
       std::chrono::seconds(2),
       [this]() {
         RCLCPP_INFO(
-          get_logger(), "audio blocks=%lu capture_overflow=%lu playback_underflow=%lu",
-          blocks_.load(), capture_overflow_.load(), playback_underflow_.load());
+          get_logger(),
+          "audio blocks=%lu fifo_frames=%lu fifo_drops=%lu capture_overflow=%lu "
+          "playback_underflow=%lu",
+          blocks_.load(), fifo_frames_.load(), fifo_drops_.load(),
+          capture_overflow_.load(), playback_underflow_.load());
       });
     RCLCPP_INFO(get_logger(), "48 kHz mono full-duplex AudioEngine started");
   }
@@ -67,6 +78,7 @@ public:
     if (worker_.joinable()) {
       worker_.join();
     }
+    close_capture_fifo();
     if (stream_ != nullptr) {
       Pa_StopStream(stream_);
       Pa_CloseStream(stream_);
@@ -122,10 +134,51 @@ private:
       }
       if (count == capture.size() && render_count == render.size()) {
         // AEC/KWS/VAD/ASR adapters consume these paired 10 ms frames here.
+        write_capture_frame(capture);
         blocks_.fetch_add(1U, std::memory_order_relaxed);
       } else {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
+    }
+  }
+
+  void write_capture_frame(const std::array<float, kFramesPerBuffer> & capture)
+  {
+    if (capture_fifo_.empty()) {
+      return;
+    }
+    if (capture_fifo_fd_ < 0) {
+      capture_fifo_fd_ = open(
+        capture_fifo_.c_str(), O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+      if (capture_fifo_fd_ < 0) {
+        fifo_drops_.fetch_add(1U, std::memory_order_relaxed);
+        return;
+      }
+    }
+    std::array<std::int16_t, kFramesPerBuffer / 3U> output{};
+    for (std::size_t index = 0U; index < output.size(); ++index) {
+      const auto offset = index * 3U;
+      const float averaged = (
+        capture[offset] + capture[offset + 1U] + capture[offset + 2U]) / 3.0F;
+      const float bounded = std::clamp(averaged, -1.0F, 1.0F);
+      output[index] = static_cast<std::int16_t>(
+        std::lrint(bounded * 32767.0F));
+    }
+    const auto bytes = output.size() * sizeof(output.front());
+    const auto written = ::write(capture_fifo_fd_, output.data(), bytes);
+    if (written == static_cast<ssize_t>(bytes)) {
+      fifo_frames_.fetch_add(1U, std::memory_order_relaxed);
+      return;
+    }
+    fifo_drops_.fetch_add(1U, std::memory_order_relaxed);
+    close_capture_fifo();
+  }
+
+  void close_capture_fifo()
+  {
+    if (capture_fifo_fd_ >= 0) {
+      close(capture_fifo_fd_);
+      capture_fifo_fd_ = -1;
     }
   }
 
@@ -145,6 +198,10 @@ private:
   std::atomic<std::uint64_t> capture_overflow_{0U};
   std::atomic<std::uint64_t> playback_underflow_{0U};
   std::atomic<std::uint64_t> blocks_{0U};
+  std::atomic<std::uint64_t> fifo_frames_{0U};
+  std::atomic<std::uint64_t> fifo_drops_{0U};
+  std::string capture_fifo_;
+  int capture_fifo_fd_{-1};
   std::thread worker_;
   rclcpp::TimerBase::SharedPtr timer_;
 };

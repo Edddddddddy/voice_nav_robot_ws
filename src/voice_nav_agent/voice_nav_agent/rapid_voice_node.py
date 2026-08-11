@@ -1,7 +1,9 @@
 """Wake-gated terminal/Vosk input and Piper output for the rapid demo."""
 
+import os
 from pathlib import Path
 import secrets
+import stat
 import subprocess
 import threading
 import time
@@ -32,6 +34,8 @@ class RapidVoiceNode(Node):
         self.model = self.declare_parameter('piper_model', '').value
         self.vosk_python = self.declare_parameter('vosk_python', '').value
         self.vosk_model = self.declare_parameter('vosk_model', '').value
+        self.pcm_fifo = self.declare_parameter('pcm_fifo', '').value
+        self.owns_pcm_fifo = False
         self.vosk = None
         self.work_group = ReentrantCallbackGroup()
         self.playback = PiperPlayback(self.get_logger(), self.piper, self.model)
@@ -58,9 +62,16 @@ class RapidVoiceNode(Node):
         )
         threading.Thread(target=self._read_terminal, daemon=True).start()
         if Path(self.vosk_python).is_file() and Path(self.vosk_model).is_dir():
-            worker = Path(__file__).with_name('vosk_worker.py')
+            worker_arguments = [
+                self.vosk_python,
+                '-u',
+                str(Path(__file__).with_name('vosk_worker.py')),
+                self.vosk_model,
+            ]
+            if self._prepare_pcm_fifo():
+                worker_arguments.extend(['--pcm-fifo', self.pcm_fifo])
             self.vosk = subprocess.Popen(
-                [self.vosk_python, '-u', str(worker), self.vosk_model],
+                worker_arguments,
                 stdout=subprocess.PIPE,
                 text=True,
             )
@@ -68,6 +79,19 @@ class RapidVoiceNode(Node):
         self.get_logger().info(
             'Rapid voice ready. Say the wake word before a command.'
         )
+
+    def _prepare_pcm_fifo(self):
+        if not self.pcm_fifo:
+            return False
+        path = Path(self.pcm_fifo)
+        if path.exists():
+            if not stat.S_ISFIFO(path.stat().st_mode):
+                self.get_logger().error('pcm_fifo exists but is not a FIFO')
+                return False
+            return True
+        os.mkfifo(path, mode=0o600)
+        self.owns_pcm_fifo = True
+        return True
 
     def _read_terminal(self):
         while rclpy.ok():
@@ -131,6 +155,13 @@ class RapidVoiceNode(Node):
         self.playback.close()
         if self.vosk is not None and self.vosk.poll() is None:
             self.vosk.terminate()
+            try:
+                self.vosk.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.vosk.kill()
+                self.vosk.wait(timeout=2)
+        if self.owns_pcm_fifo:
+            Path(self.pcm_fifo).unlink(missing_ok=True)
         return super().destroy_node()
 
 

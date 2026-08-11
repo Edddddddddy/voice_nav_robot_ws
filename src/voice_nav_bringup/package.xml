@@ -21,6 +21,7 @@
   <exec_depend>rmw_fastrtps_cpp</exec_depend>
   <exec_depend>voice_nav_mission</exec_depend>
   <exec_depend>voice_nav_agent</exec_depend>
+  <exec_depend>voice_nav_audio</exec_depend>
   <exec_depend>voice_nav_sim</exec_depend>
 
   <test_depend>ament_index_python</test_depend>

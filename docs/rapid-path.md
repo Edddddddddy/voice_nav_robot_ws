@@ -82,11 +82,13 @@ This local workspace uses untracked assets under `.deps/voice/`:
 - `vosk-model-small-cn-0.22` for offline Mandarin ASR;
 - Piper's `zh_CN-huayan-medium` voice model for local TTS.
 
-On WSLg, the Vosk worker automatically captures 16 kHz mono PCM with `parec`
-through `PULSE_SERVER`; it falls back to PyAudio/PortAudio elsewhere. This
-avoids the common WSL failure where PulseAudio is available but ALSA has no
-`default` device. Transcript wake matching accepts `小 智` and the common Vosk
-`小志`/`晓智` forms. Piper playback continues through `paplay`.
+The rapid stack starts `voice_nav_audio/audio_engine_node`. Its PortAudio
+callback moves 48 kHz full-duplex samples through fixed SPSC rings; the worker
+performs a small 48→16 kHz conversion and writes private PCM frames to a FIFO
+consumed by Vosk. When the voice node is started alone without a FIFO, Vosk
+still falls back to WSLg `parec` or PyAudio. Transcript wake matching accepts
+`小 智` and the common Vosk `小志`/`晓智` forms. Piper playback continues through
+`paplay`.
 The rapid Speak server now keeps a real PlaybackScope: it reports elapsed
 feedback, waits for `paplay` to finish, and returns canceled/barged-in results
 instead of claiming completion when playback merely starts. An accepted wake
@@ -94,11 +96,10 @@ can interrupt an allowed scope, while `小智停止` always interrupts playback,
 calls `/mission/stop` directly with the Voice Turn ID, and then publishes the
 same STOP turn for the Agent's idempotent retry.
 
-`voice_nav_audio/audio_engine_node` is the first C++ full-duplex seam: 48 kHz
-mono PortAudio callback, bounded capture/playback/final-render SPSC rings, and
-10 ms worker frames. It is not launched beside the rapid Vosk endpoint yet;
-locked WebRTC AEC and sherpa-onnx KWS/VAD/ASR/TTS worker adapters remain the
-next production integration layer.
+This makes the C++ capture worker the real rapid ASR source, without exposing
+PCM as a ROS interface. Piper output is still a separate Pulse stream, so it
+is not yet placed into the AudioEngine playback/final-reference rings. Locked
+WebRTC AEC and sherpa-onnx KWS/VAD/ASR/TTS remain production gaps.
 
 Set `VOICE_NAV_VOICE_ROOT` for a different clone or speech asset root. Missing
 speech assets do not prevent
@@ -118,4 +119,6 @@ ros2 launch voice_nav_bringup navigation_sim.launch.py --show-args
 bash scripts/rapid-navigation-smoke.sh
 bash scripts/rapid-mapping-smoke.sh
 bash scripts/rapid-voice-smoke.sh
+bash scripts/rapid-audio-smoke.sh
+bash scripts/rapid-speech-input-smoke.sh
 ```

@@ -21,6 +21,7 @@ def generate_launch_description():
     llm_bundle = LaunchConfiguration('llm_bundle')
     llm_enabled = LaunchConfiguration('llm_enabled')
     voice_root = LaunchConfiguration('voice_deps_root')
+    capture_fifo = LaunchConfiguration('capture_fifo')
     mission = Node(
         package='voice_nav_agent',
         executable='rapid_mission_bridge',
@@ -52,7 +53,14 @@ def generate_launch_description():
             'vosk_model': PathJoinSubstitution(
                 [voice_root, 'models', 'vosk-model-small-cn-0.22']
             ),
+            'pcm_fifo': capture_fifo,
         }],
+    )
+    audio = Node(
+        package='voice_nav_audio',
+        executable='audio_engine_node',
+        output='screen',
+        parameters=[{'capture_fifo': capture_fifo}],
     )
     llm = ExecuteProcess(
         cmd=[
@@ -102,7 +110,11 @@ def generate_launch_description():
             'map_output_root', default_value='/tmp/voice_nav_rapid_maps'
         ),
         DeclareLaunchArgument('named_places_file', default_value=''),
+        DeclareLaunchArgument(
+            'capture_fifo', default_value='/tmp/voice_nav_rapid_capture.pcm'
+        ),
         llm,
+        audio,
         mission,
         agent,
         voice,
