@@ -1,4 +1,4 @@
-"""Bounded Piper/paplay PlaybackScope for the rapid voice endpoint."""
+"""Bounded local-TTS PlaybackScope for the rapid voice endpoint."""
 
 import audioop
 import errno
@@ -19,27 +19,38 @@ from voice_nav_interfaces.action import Speak
 class PiperPlayback:
     """Own synthesis, playback, feedback, cancellation, and barge-in."""
 
-    def __init__(self, logger, piper, model, playback_fifo=''):
+    def __init__(
+        self, logger, piper, model, playback_fifo='',
+        tts_python='', tts_model=''
+    ):
         """Configure local synthesis and the optional AudioEngine FIFO."""
         self.logger = logger
         self.piper = piper
         self.model = model
         self.playback_fifo = playback_fifo
+        self.tts_python = tts_python
+        self.tts_model = tts_model
         self.lock = threading.Lock()
         self.generation = 0
         self.process = None
         self.active = False
         self.allows_barge_in = False
+        self.logger.info(
+            'Rapid TTS backend=%s'
+            % ('chaowen_int8' if self.tts_model else 'piper')
+        )
 
     def execute(self, handle):
         """Execute one Speak goal to its real terminal playback state."""
         self.logger.info('SPEAK: %s' % handle.request.text)
         generation = self._begin(handle.request.allow_barge_in)
-        if not (
-            self.piper
-            and Path(self.piper).is_file()
-            and Path(self.model).is_file()
-        ):
+        synthesis_command = self._synthesis_command(wav=None)
+        if synthesis_command is None:
+            if self.tts_model:
+                return self._finish(
+                    handle, generation, Speak.Result.FAILED,
+                    'locked Chaowen assets are unavailable'
+                )
             return self._finish(
                 handle, generation, Speak.Result.COMPLETED,
                 'printed because rapid speech assets are unavailable'
@@ -51,11 +62,7 @@ class PiperPlayback:
             synthesized = False
             for attempt in range(2):
                 synth = subprocess.Popen(
-                    [
-                        self.piper,
-                        '--model', self.model,
-                        '--output_file', str(wav),
-                    ],
+                    self._synthesis_command(wav),
                     stdin=subprocess.PIPE,
                     text=True,
                     stdout=subprocess.DEVNULL,
@@ -72,7 +79,7 @@ class PiperPlayback:
                     synthesized = True
                     break
                 self.logger.warning(
-                    'Piper attempt %d failed code=%d: %s'
+                    'TTS attempt %d failed code=%d: %s'
                     % (attempt + 1, synth.returncode, error[-300:].strip())
                 )
                 if not self._is_current(generation):
@@ -91,10 +98,38 @@ class PiperPlayback:
                 return self._barged(handle, generation, 'before playback')
             return self._play(handle, generation, player)
         except (OSError, subprocess.SubprocessError) as error:
-            self.logger.warning('Piper playback failed: %s' % error)
+            self.logger.warning('Local TTS playback failed: %s' % error)
             return self._interrupted_or_failed(handle, generation)
         finally:
             wav.unlink(missing_ok=True)
+
+    def _synthesis_command(self, wav):
+        if self.tts_model:
+            worker = Path(__file__).with_name('sherpa_tts_worker.py')
+            if (
+                not Path(self.tts_python).is_file()
+                or not Path(self.tts_model).is_dir()
+                or not worker.is_file()
+            ):
+                return None
+            if wav is None:
+                return ['configured']
+            return [
+                self.tts_python, '-u', str(worker), self.tts_model, str(wav)
+            ]
+        if not (
+            self.piper
+            and Path(self.piper).is_file()
+            and Path(self.model).is_file()
+        ):
+            return None
+        if wav is None:
+            return ['configured']
+        return [
+            self.piper,
+            '--model', self.model,
+            '--output_file', str(wav),
+        ]
 
     def _play(self, handle, generation, player):
         started = time.monotonic()
@@ -131,7 +166,7 @@ class PiperPlayback:
         elif channels != 1:
             return self._finish(
                 handle, generation, Speak.Result.FAILED,
-                'unsupported Piper channel count'
+                'unsupported TTS channel count'
             )
         if width != 2:
             pcm = audioop.lin2lin(pcm, width, 2)
@@ -285,7 +320,8 @@ class PiperPlayback:
         if not current:
             return self._barged(handle, generation, 'during synthesis')
         return self._finish(
-            handle, generation, Speak.Result.FAILED, 'Piper synthesis failed'
+            handle, generation, Speak.Result.FAILED,
+            'local TTS synthesis failed'
         )
 
     def _barged(self, handle, generation, when):

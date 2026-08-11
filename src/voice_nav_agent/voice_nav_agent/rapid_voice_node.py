@@ -36,6 +36,8 @@ class RapidVoiceNode(Node):
         self.piper = self.declare_parameter('piper_path', '').value
         self.model = self.declare_parameter('piper_model', '').value
         self.speech_python = self.declare_parameter('vosk_python', '').value
+        self.tts_python = self.declare_parameter('tts_python', '').value
+        self.tts_model = self.declare_parameter('tts_model', '').value
         self.vosk_model = self.declare_parameter('vosk_model', '').value
         self.kws_model = self.declare_parameter('kws_model', '').value
         self.vad_model = self.declare_parameter('vad_model', '').value
@@ -57,7 +59,8 @@ class RapidVoiceNode(Node):
             ) else ''
         )
         self.playback = PiperPlayback(
-            self.get_logger(), self.piper, self.model, playback_fifo
+            self.get_logger(), self.piper, self.model, playback_fifo,
+            self.tts_python, self.tts_model
         )
         self.wake_gate = WakeGate(
             self.declare_parameter('wake_word', '\u5c0f\u667a').value,

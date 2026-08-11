@@ -16,7 +16,7 @@ download() {
 mkdir -p "$models"
 "$root/bin/pip" install \
   click==8.1.8 pypinyin==0.53.0 sentencepiece==0.2.0 \
-  sherpa-onnx==1.13.5
+  sherpa-onnx==1.13.4
 
 kws=sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20
 if [[ ! -d "$models/$kws" ]]; then
@@ -42,6 +42,15 @@ if [[ ! -d "$models/$asr" ]]; then
     "$scratch/asr.tar.bz2" \
     5a2832047ea1f97dd0dc595b816c230c4bafad65cfc0341fa57517cadc50afd0
   tar xjf "$scratch/asr.tar.bz2" -C "$models"
+fi
+
+tts=vits-piper-zh_CN-chaowen-medium-int8
+if [[ ! -d "$models/$tts" ]]; then
+  download \
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/$tts.tar.bz2" \
+    "$scratch/tts.tar.bz2" \
+    f5f7c8628427fbb259ea4b7ec1a9a822a0c04e3f267071f0abfa0610371d9e0c
+  tar xjf "$scratch/tts.tar.bz2" -C "$models"
 fi
 
 "$root/bin/sherpa-onnx-cli" text2token \

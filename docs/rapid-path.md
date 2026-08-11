@@ -13,7 +13,7 @@ PortAudio -> WebRTC AEC -> sherpa KWS + Silero VAD + streaming ASR
   -> C++ Mission Runtime (session fencing, feedback, queue, cancel, timeout)
   -> private rapid bridge (relative motion, Nav2, or SLAM map save)
   -> Gazebo house + LiDAR
-  -> Piper speech output
+  -> locked Chaowen int8 TTS -> 48 kHz AudioEngine playback
 ```
 
 The rapid navigation launch publishes a short burst of `/initialpose` samples
@@ -101,10 +101,10 @@ This local workspace uses untracked assets under `.deps/voice/`:
 - `silero_vad.int8.onnx` for endpoint detection;
 - `sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30` for streaming ASR;
 - `vosk-model-small-cn-0.22` for offline Mandarin ASR;
-- Piper's `zh_CN-huayan-medium` voice model for local TTS.
+- sherpa-onnx `vits-piper-zh_CN-chaowen-medium-int8` for local TTS.
 
 Run `bash scripts/provision-rapid-speech.sh` to install the pinned sherpa
-runtime, verify the three model downloads, and generate the custom `小智`
+runtime, verify the four model downloads, and generate the custom `小智`
 and direct `紧急停止` keyword tokens. Vosk remains only a missing-asset
 fallback.
 
@@ -114,7 +114,7 @@ performs a small 48→16 kHz conversion and writes private PCM frames to a FIFO
 consumed by the sherpa worker. The worker keeps KWS/VAD decisions and partial
 ASR private, rotates the active speech scope on a new wake, and emits only a
 bounded final command. When sherpa assets are absent, Vosk retains its WSLg
-`parec` or PyAudio fallback. Piper output is converted to
+`parec` or PyAudio fallback. Chaowen's 22.05 kHz output is converted to
 48 kHz mono in its worker and written through a second private FIFO into the
 AudioEngine playback ring.
 The rapid Speak server now keeps a real PlaybackScope: it reports elapsed
@@ -132,9 +132,10 @@ The worker pairs that reference with each 10 ms capture frame and runs the
 system WebRTC AudioProcessing 0.3.1 echo canceller before the 16 kHz speech FIFO.
 Install it with `sudo apt install libwebrtc-audio-processing-dev`. This is a
 real rapid AEC path, but it is not the production-pinned WebRTC APM 2.1 design.
-The rapid input now uses the locked sherpa-onnx KWS/VAD/ASR models. The
-production 2.1 APM upgrade and the locked Chaowen TTS model remain gaps; rapid
-TTS uses the real local Piper Huayan model.
+The rapid input now uses the locked sherpa-onnx KWS/VAD/ASR models and the
+locked Chaowen int8 TTS model. The production 2.1 APM upgrade remains a gap.
+The older Piper Huayan parameters remain only as a compatibility fallback for
+launches that do not configure the locked TTS model.
 
 Set `VOICE_NAV_VOICE_ROOT` for a different clone or speech asset root. Missing
 speech assets do not prevent

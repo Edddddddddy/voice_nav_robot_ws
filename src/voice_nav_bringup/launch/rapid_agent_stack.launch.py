@@ -88,6 +88,13 @@ def generate_launch_description():
             'piper_model': PathJoinSubstitution(
                 [voice_root, 'models', 'zh_CN-huayan-medium.onnx']
             ),
+            'tts_python': PathJoinSubstitution(
+                [voice_root, 'bin', 'python']
+            ),
+            'tts_model': PathJoinSubstitution([
+                voice_root, 'models',
+                'vits-piper-zh_CN-chaowen-medium-int8',
+            ]),
             'vosk_python': PathJoinSubstitution(
                 [voice_root, 'bin', 'python']
             ),

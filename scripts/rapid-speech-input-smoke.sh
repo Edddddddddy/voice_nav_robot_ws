@@ -30,6 +30,7 @@ for _ in $(seq 1 400); do
   sleep 0.1
 done
 grep -q '"audio_source": "audio_engine_fifo"' "$log"
+grep -q 'Rapid TTS backend=chaowen_int8' "$log"
 
 ros2 action send_goal --feedback /voice/speak \
   voice_nav_interfaces/action/Speak \
@@ -46,7 +47,7 @@ done
 grep -Eq 'fifo_frames=[1-9][0-9]*' "$log"
 grep -Eq 'playback_frames=[1-9][0-9]*' "$log"
 echo 'SPEECH_FULL_DUPLEX=PASS source=audio_engine_fifo'
-grep -E 'audio_source|full-duplex AudioEngine started|audio blocks=' "$log" | \
+grep -E 'audio_source|Rapid TTS backend|full-duplex AudioEngine started|audio blocks=' "$log" | \
   tail -n 6
 grep -E 'Feedback:|code:|detail:' \
   /tmp/voice-nav-engine-playback-action.log | tail -n 5
