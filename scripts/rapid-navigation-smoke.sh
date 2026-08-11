@@ -30,7 +30,7 @@ done
 
 ros2 topic pub --once --qos-durability transient_local \
   /voice/turn voice_nav_interfaces/msg/VoiceTurn \
-  '{voice_instance_id: probe, voice_seq: 1, session_id: probe-session, turn_id: probe-turn, kind: 1, text: "去kitchen", confidence: 1.0, during_playback: false}' \
+  '{voice_instance_id: probe, voice_seq: 1, session_id: probe-session, turn_id: probe-turn, kind: 1, text: "去kitchen然后去home", confidence: 1.0, during_playback: false}' \
   >/tmp/voice-nav-navigation-publish.log 2>&1
 
 outcome=TIMEOUT
@@ -47,6 +47,7 @@ for _ in $(seq 1 55); do
 done
 
 echo "NAVIGATION_E2E=$outcome"
+test "$(grep -c 'Goal succeeded' "$log")" -ge 2
 grep -E 'Rapid demo bypass|First Nav2 velocity|Begin navigating|Forwarded rapid|Goal succeeded|Failed to make progress|SPEAK:|Received a goal|Passing new path|Goal failed' \
   "$log" | tail -n 40
 test "$outcome" = PASS

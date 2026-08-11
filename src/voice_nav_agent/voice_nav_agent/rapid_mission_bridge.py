@@ -61,6 +61,9 @@ class RapidMissionBridge(Node):
                 'map_output_root', '/tmp/voice_nav_rapid_maps'
             ).value
         ).expanduser()
+        self.navigation_timeout = float(
+            self.declare_parameter('navigation_timeout_s', 60.0).value
+        )
         self.runtime_id = secrets.token_hex(16)
         self.epoch = 1
         self.active_handle = None
@@ -177,7 +180,11 @@ class RapidMissionBridge(Node):
                 self._feedback(handle, index, len(goal.steps), 0.0)
                 if step.kind == MissionStep.NAVIGATE_TO:
                     code, detail = await self._navigate(
-                        handle, step.target_id, execution_epoch
+                        handle,
+                        step.target_id,
+                        execution_epoch,
+                        index,
+                        len(goal.steps),
                     )
                 elif step.kind == MissionStep.SAVE_MAP:
                     code, detail = await self._save_map(step.target_id)
@@ -208,7 +215,9 @@ class RapidMissionBridge(Node):
             self.active_handle = None
             self.active_nav = None
 
-    async def _navigate(self, handle, target, execution_epoch):
+    async def _navigate(
+        self, handle, target, execution_epoch, index, total
+    ):
         if not self.nav.server_is_ready() and not self.nav.wait_for_server(
             timeout_sec=5.0
         ):
@@ -216,11 +225,42 @@ class RapidMissionBridge(Node):
                 ExecuteMission.Result.DEPENDENCY_UNAVAILABLE,
                 'Nav2 action unavailable',
             )
-        self.active_nav = await self.nav.send_goal_async(self._nav_goal(target))
+        progress = {'initial': None, 'last': 0.0}
+
+        def feedback(message):
+            remaining = float(message.feedback.distance_remaining)
+            if (
+                self._stopped(handle, execution_epoch)
+                or not math.isfinite(remaining)
+                or remaining < 0.0
+            ):
+                return
+            if progress['initial'] is None:
+                progress['initial'] = max(remaining, 0.01)
+            within_step = max(
+                progress['last'],
+                min(1.0 - remaining / progress['initial'], 0.99),
+            )
+            progress['last'] = within_step
+            self._feedback(handle, index, total, within_step)
+
+        self.active_nav = await self.nav.send_goal_async(
+            self._nav_goal(target), feedback_callback=feedback
+        )
         if not self.active_nav.accepted:
             return ExecuteMission.Result.EXECUTION_FAILED, 'Nav2 rejected goal'
         self.get_logger().info(f'Forwarded rapid Nav2 goal place={target}')
-        nav_result = await self.active_nav.get_result_async()
+        result_future = self.active_nav.get_result_async()
+        deadline = time.monotonic() + self.navigation_timeout
+        while not result_future.done():
+            if self._stopped(handle, execution_epoch):
+                self.active_nav.cancel_goal_async()
+                return ExecuteMission.Result.CANCELED, 'Nav2 goal canceled'
+            if time.monotonic() >= deadline:
+                self.active_nav.cancel_goal_async()
+                return ExecuteMission.Result.TIMEOUT, 'Nav2 goal timed out'
+            await self._sleep(0.1)
+        nav_result = result_future.result()
         self.active_nav = None
         if self._stopped(handle, execution_epoch):
             return ExecuteMission.Result.CANCELED, 'Nav2 goal canceled'
