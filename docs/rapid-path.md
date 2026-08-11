@@ -157,6 +157,7 @@ bash scripts/rapid-mapping-smoke.sh
 bash scripts/rapid-voice-smoke.sh
 bash scripts/rapid-audio-smoke.sh
 bash scripts/rapid-speech-input-smoke.sh
+bash scripts/rapid-kws-barge-stop-smoke.sh
 bash scripts/rapid-spoken-mission-smoke.sh
 PYTHONPATH=src/voice_nav_agent .deps/voice/bin/python \
   scripts/rapid-sherpa-model-smoke.py .deps/voice
