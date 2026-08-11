@@ -105,7 +105,8 @@ This local workspace uses untracked assets under `.deps/voice/`:
 
 Run `bash scripts/provision-rapid-speech.sh` to install the pinned sherpa
 runtime, verify the three model downloads, and generate the custom `小智`
-keyword tokens. Vosk remains only a missing-asset fallback.
+and direct `紧急停止` keyword tokens. Vosk remains only a missing-asset
+fallback.
 
 The rapid stack starts `voice_nav_audio/audio_engine_node`. Its PortAudio
 callback moves 48 kHz full-duplex samples through fixed SPSC rings; the worker
@@ -132,8 +133,8 @@ system WebRTC AudioProcessing 0.3.1 echo canceller before the 16 kHz speech FIFO
 Install it with `sudo apt install libwebrtc-audio-processing-dev`. This is a
 real rapid AEC path, but it is not the production-pinned WebRTC APM 2.1 design.
 The rapid input now uses the locked sherpa-onnx KWS/VAD/ASR models. The
-production 2.1 APM upgrade and sherpa TTS replacement remain gaps; rapid TTS
-uses Piper.
+production 2.1 APM upgrade and the locked Chaowen TTS model remain gaps; rapid
+TTS uses the real local Piper Huayan model.
 
 Set `VOICE_NAV_VOICE_ROOT` for a different clone or speech asset root. Missing
 speech assets do not prevent

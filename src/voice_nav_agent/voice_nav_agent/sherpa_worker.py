@@ -95,13 +95,22 @@ def run(arguments):
         keyword_stream.accept_waveform(SAMPLE_RATE, samples)
         while spotter.is_ready(keyword_stream):
             spotter.decode_stream(keyword_stream)
-        if spotter.get_result(keyword_stream):
+        keyword = spotter.get_result(keyword_stream)
+        if keyword:
             spotter.reset_stream(keyword_stream)
+            if keyword == '紧急停止':
+                print(json.dumps({
+                    'text': keyword,
+                    'wake_authorized': True,
+                }), flush=True)
+                asr_stream = None
+                detector.reset()
+                continue
             detector.reset()
             asr_stream = recognizer.create_stream()
             speech_started = False
             turn_samples = 0
-            wake = json.dumps({'wake': '小智'})
+            wake = json.dumps({'wake': keyword})
             print(wake, flush=True)
             print(wake, file=sys.stderr, flush=True)
             continue
