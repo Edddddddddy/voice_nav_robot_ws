@@ -88,6 +88,20 @@ def generate_launch_description():
             'vosk_model': PathJoinSubstitution(
                 [voice_root, 'models', 'vosk-model-small-cn-0.22']
             ),
+            'kws_model': PathJoinSubstitution([
+                voice_root, 'models',
+                'sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20',
+            ]),
+            'vad_model': PathJoinSubstitution(
+                [voice_root, 'models', 'silero_vad.int8.onnx']
+            ),
+            'asr_model': PathJoinSubstitution([
+                voice_root, 'models',
+                'sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30',
+            ]),
+            'keywords_file': PathJoinSubstitution(
+                [voice_root, 'models', 'rapid_keywords.txt']
+            ),
             'pcm_fifo': capture_fifo,
             'playback_fifo': playback_fifo,
         }],

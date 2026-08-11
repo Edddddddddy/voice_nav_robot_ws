@@ -3,15 +3,16 @@
 import audioop
 import errno
 import os
-from pathlib import Path
 import secrets
 import subprocess
 import tempfile
 import threading
 import time
 import wave
+from pathlib import Path
 
 from rclpy.action import CancelResponse
+
 from voice_nav_interfaces.action import Speak
 
 
@@ -19,6 +20,7 @@ class PiperPlayback:
     """Own synthesis, playback, feedback, cancellation, and barge-in."""
 
     def __init__(self, logger, piper, model, playback_fifo=''):
+        """Configure local synthesis and the optional AudioEngine FIFO."""
         self.logger = logger
         self.piper = piper
         self.model = model
@@ -46,21 +48,37 @@ class PiperPlayback:
             'voice-nav-' + secrets.token_hex(8) + '.wav'
         )
         try:
-            synth = subprocess.Popen(
-                [
-                    self.piper,
-                    '--model', self.model,
-                    '--output_file', str(wav),
-                ],
-                stdin=subprocess.PIPE,
-                text=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            if not self._adopt(generation, synth):
-                return self._barged(handle, generation, 'before synthesis')
-            synth.communicate(input=handle.request.text, timeout=30)
-            if synth.returncode != 0:
+            synthesized = False
+            for attempt in range(2):
+                synth = subprocess.Popen(
+                    [
+                        self.piper,
+                        '--model', self.model,
+                        '--output_file', str(wav),
+                    ],
+                    stdin=subprocess.PIPE,
+                    text=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
+                if not self._adopt(generation, synth):
+                    return self._barged(
+                        handle, generation, 'before synthesis'
+                    )
+                _, error = synth.communicate(
+                    input=handle.request.text, timeout=30
+                )
+                if synth.returncode == 0:
+                    synthesized = True
+                    break
+                self.logger.warning(
+                    'Piper attempt %d failed code=%d: %s'
+                    % (attempt + 1, synth.returncode, error[-300:].strip())
+                )
+                if not self._is_current(generation):
+                    break
+                time.sleep(0.1)
+            if not synthesized:
                 return self._interrupted_or_failed(handle, generation)
             if self.playback_fifo:
                 return self._play_fifo(handle, generation, wav)
@@ -144,7 +162,8 @@ class PiperPlayback:
                     offset += os.write(descriptor, pcm[offset:offset + 960])
                 except BlockingIOError:
                     time.sleep(0.01)
-                self._feedback(handle, min(time.monotonic() - started, duration))
+                elapsed = min(time.monotonic() - started, duration)
+                self._feedback(handle, elapsed)
             while time.monotonic() - started < duration:
                 terminal = self._terminal_during_playback(handle, generation)
                 if terminal is not None:
@@ -199,7 +218,7 @@ class PiperPlayback:
         handle.publish_feedback(feedback)
 
     def interrupt(self, force=False):
-        """Interrupt an allowed scope and report whether playback was active."""
+        """Interrupt an allowed scope and report if playback was active."""
         with self.lock:
             active = self._active_locked()
             if active and (force or self.allows_barge_in):

@@ -8,7 +8,7 @@ make a MotionGate, collision-monitor, recovery, or real-robot safety claim.
 ## Components
 
 ```text
-Vosk microphone transcript -> wake phrase gate
+PortAudio -> WebRTC AEC -> sherpa KWS + Silero VAD + streaming ASR
   -> Agent deterministic parser + loopback Qwen fallback
   -> C++ Mission Runtime (session fencing, feedback, queue, cancel, timeout)
   -> private rapid bridge (relative motion, Nav2, or SLAM map save)
@@ -45,9 +45,9 @@ private child Action Adapter. Named places are `home`,
 `study`, and `kitchen`; try a Mandarin command such as `去厨房` (the local
 parser maps it to `kitchen`). Their poses are loaded from the installed
 `house_demo_places.yaml`, validated once at startup, and published in the
-MissionState snapshot. The voice endpoint uses Vosk when its model and Python
-path are available, and still accepts terminal text when standard input is
-attached.
+MissionState snapshot. The voice endpoint prefers the provisioned sherpa
+speech pipeline, falls back to Vosk when those assets are absent, and still
+accepts terminal text when standard input is attached.
 
 For predictable WSL performance, this launch waits for Gazebo/odometry before
 starting Nav2, uses Regulated Pure Pursuit instead of the heavier default MPPI
@@ -72,8 +72,9 @@ default.  It reads `VOICE_NAV_LLM_BUNDLE` when set, otherwise it uses the
 bundle created by `scripts/llm/provision.sh --root
 /home/ubuntu/.local/share/voice-nav-llm`.  Set `llm_enabled:=false` to run the
 deterministic rules without the model.
-The resulting Mission executes its two Nav2 goals in order. This is a simple
-Vosk-transcript gate, not the dedicated low-latency KWS planned for #56.
+The resulting Mission executes its two Nav2 goals in order. Speech uses the
+Issue #56 model set through a private worker; only one wake-authorized final
+transcript crosses into the ROS VoiceTurn interface.
 
 The mapping launch starts the same Agent/voice/model stack in Mapping mode.
 It accepts MOVE, ROTATE, and SAVE_MAP Missions. A command such as
@@ -96,15 +97,23 @@ It does not claim the production MotionGate lease or fail-closed guarantees.
 
 This local workspace uses untracked assets under `.deps/voice/`:
 
+- `sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20` for real `小智` KWS;
+- `silero_vad.int8.onnx` for endpoint detection;
+- `sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30` for streaming ASR;
 - `vosk-model-small-cn-0.22` for offline Mandarin ASR;
 - Piper's `zh_CN-huayan-medium` voice model for local TTS.
+
+Run `bash scripts/provision-rapid-speech.sh` to install the pinned sherpa
+runtime, verify the three model downloads, and generate the custom `小智`
+keyword tokens. Vosk remains only a missing-asset fallback.
 
 The rapid stack starts `voice_nav_audio/audio_engine_node`. Its PortAudio
 callback moves 48 kHz full-duplex samples through fixed SPSC rings; the worker
 performs a small 48→16 kHz conversion and writes private PCM frames to a FIFO
-consumed by Vosk. When the voice node is started alone without a FIFO, Vosk
-still falls back to WSLg `parec` or PyAudio. Transcript wake matching accepts
-`小 智` and the common Vosk `小志`/`晓智` forms. Piper output is converted to
+consumed by the sherpa worker. The worker keeps KWS/VAD decisions and partial
+ASR private, rotates the active speech scope on a new wake, and emits only a
+bounded final command. When sherpa assets are absent, Vosk retains its WSLg
+`parec` or PyAudio fallback. Piper output is converted to
 48 kHz mono in its worker and written through a second private FIFO into the
 AudioEngine playback ring.
 The rapid Speak server now keeps a real PlaybackScope: it reports elapsed
@@ -119,11 +128,12 @@ This makes the C++ capture worker the real rapid ASR source and the same
 full-duplex callback the real TTS render sink, without exposing PCM as a ROS
 interface. Every callback render sample is copied to the exact-reference ring.
 The worker pairs that reference with each 10 ms capture frame and runs the
-system WebRTC AudioProcessing 0.3.1 echo canceller before the 16 kHz Vosk FIFO.
+system WebRTC AudioProcessing 0.3.1 echo canceller before the 16 kHz speech FIFO.
 Install it with `sudo apt install libwebrtc-audio-processing-dev`. This is a
 real rapid AEC path, but it is not the production-pinned WebRTC APM 2.1 design.
-Dedicated sherpa-onnx KWS/VAD/ASR/TTS remain production gaps; rapid mode still
-uses Vosk wake/transcription and Piper.
+The rapid input now uses the locked sherpa-onnx KWS/VAD/ASR models. The
+production 2.1 APM upgrade and sherpa TTS replacement remain gaps; rapid TTS
+uses Piper.
 
 Set `VOICE_NAV_VOICE_ROOT` for a different clone or speech asset root. Missing
 speech assets do not prevent
@@ -145,4 +155,6 @@ bash scripts/rapid-mapping-smoke.sh
 bash scripts/rapid-voice-smoke.sh
 bash scripts/rapid-audio-smoke.sh
 bash scripts/rapid-speech-input-smoke.sh
+PYTHONPATH=src/voice_nav_agent .deps/voice/bin/python \
+  scripts/rapid-sherpa-model-smoke.py .deps/voice
 ```
