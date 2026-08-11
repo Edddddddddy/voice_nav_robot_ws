@@ -37,6 +37,10 @@
 
 #include "voice_nav_audio/spsc_audio_ring.hpp"
 
+#ifndef VOICE_NAV_WEBRTC_APM_VERSION
+#define VOICE_NAV_WEBRTC_APM_VERSION "unknown"
+#endif
+
 namespace voice_nav_audio
 {
 namespace
@@ -54,6 +58,10 @@ public:
     capture_fifo_ = declare_parameter<std::string>("capture_fifo", "");
     playback_fifo_ = declare_parameter<std::string>("playback_fifo", "");
     aec_enabled_ = declare_parameter<bool>("aec_enabled", true);
+    aec_delay_ms_ = declare_parameter<int>("aec_delay_ms", 100);
+    if (aec_delay_ms_ < 40 || aec_delay_ms_ > 250) {
+      throw std::invalid_argument("aec_delay_ms must be within 40..250");
+    }
     configure_aec();
     ::signal(SIGPIPE, SIG_IGN);
     check(Pa_Initialize(), "PortAudio initialization");
@@ -81,8 +89,10 @@ public:
       });
     RCLCPP_INFO(
       get_logger(),
-      "48 kHz mono full-duplex AudioEngine started; legacy WebRTC APM AEC=%s",
-      aec_ ? "enabled" : "disabled");
+      "48 kHz mono full-duplex AudioEngine started; WebRTC APM %s AEC=%s "
+      "delay_ms=%d",
+      VOICE_NAV_WEBRTC_APM_VERSION, aec_ ? "enabled" : "disabled",
+      aec_delay_ms_);
   }
 
   ~AudioEngineNode() override
@@ -165,13 +175,13 @@ private:
     }
     aec_.reset(webrtc::AudioProcessing::Create());
     if (!aec_) {
-      throw std::runtime_error("legacy WebRTC APM creation failed");
+      throw std::runtime_error("WebRTC APM creation failed");
     }
     aec_->echo_cancellation()->enable_drift_compensation(false);
     if (aec_->echo_cancellation()->Enable(true) !=
       webrtc::AudioProcessing::kNoError)
     {
-      throw std::runtime_error("legacy WebRTC APM AEC enable failed");
+      throw std::runtime_error("WebRTC APM AEC enable failed");
     }
   }
 
@@ -199,7 +209,7 @@ private:
       static_cast<int>(kSampleRate), webrtc::AudioFrame::kNormalSpeech,
       webrtc::AudioFrame::kVadUnknown, 1);
     const auto reverse_result = aec_->ProcessReverseStream(&render_frame);
-    const auto delay_result = aec_->set_stream_delay_ms(10);
+    const auto delay_result = aec_->set_stream_delay_ms(aec_delay_ms_);
     const auto capture_result = aec_->ProcessStream(&capture_frame);
     if (
       reverse_result != webrtc::AudioProcessing::kNoError ||
@@ -337,6 +347,7 @@ private:
   std::atomic<std::uint64_t> aec_frames_{0U};
   std::atomic<std::uint64_t> aec_errors_{0U};
   bool aec_enabled_{true};
+  int aec_delay_ms_{100};
   std::unique_ptr<webrtc::AudioProcessing> aec_;
   std::string capture_fifo_;
   std::string playback_fifo_;

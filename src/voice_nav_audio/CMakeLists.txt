@@ -25,6 +25,10 @@ target_link_libraries(
   PkgConfig::WEBRTC_APM
   Threads::Threads
 )
+target_compile_definitions(
+  audio_engine_node PRIVATE
+  "VOICE_NAV_WEBRTC_APM_VERSION=\"${WEBRTC_APM_VERSION}\""
+)
 
 install(TARGETS audio_engine_node DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)

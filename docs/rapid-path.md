@@ -108,6 +108,12 @@ runtime, verify the four model downloads, and generate the custom `小智`
 and direct `紧急停止` keyword tokens. Vosk remains only a missing-asset
 fallback.
 
+Run `bash scripts/provision-rapid-audio.sh --check` to verify the local
+PortAudio and WebRTC APM development packages without changing the machine.
+Use `--install` once when they are absent. The AudioEngine logs the linked APM
+version and uses a configurable `aec_delay_ms` in the accepted 40..250 ms
+range; rapid defaults to 100 ms.
+
 The rapid stack starts `voice_nav_audio/audio_engine_node`. Its PortAudio
 callback moves 48 kHz full-duplex samples through fixed SPSC rings; the worker
 performs a small 48→16 kHz conversion and writes private PCM frames to a FIFO
