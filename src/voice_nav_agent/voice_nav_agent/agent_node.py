@@ -16,14 +16,14 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
-from concurrent.futures import ThreadPoolExecutor
 import re
 import secrets
 import threading
-from typing import Any, Callable, Optional
 import unicodedata
+from typing import Any, Callable, Optional
 
 from action_msgs.srv import CancelGoal
 import rclpy
@@ -53,8 +53,8 @@ from .core import (
     DecisionKind,
     MissionDecision,
     MissionProposal,
-    MissionStep,
     MissionState,
+    MissionStep,
     PlanningToken,
     StopDecision,
     VoiceTurn,
@@ -102,7 +102,9 @@ class _MissionSlot:
     cancel_started: bool = False
     cancel_failure_spoken: bool = False
     terminal_speech_spoken: bool = False
+    last_feedback_phase: int = 0
     last_feedback_step: int = -1
+    last_feedback_progress: float = 0.0
 
 
 @dataclass(slots=True)
@@ -230,6 +232,19 @@ class AgentNode(Node):
     def core(self) -> AgentCore:
         """Return the single Agent Core instance owned by this node."""
         return self._core
+
+    def destroy_node(self) -> Any:
+        """Invalidate pending language work before releasing ROS resources."""
+        self._llm_generation += 1
+        self._llm_operation = None
+        future = self._llm_future
+        self._llm_future = None
+        if future is not None:
+            future.cancel()
+        shutdown = getattr(self._llm_executor, 'shutdown', None)
+        if shutdown is not None:
+            shutdown(wait=False, cancel_futures=True)
+        return super().destroy_node()
 
     def _on_state_message(
         self,
@@ -395,21 +410,18 @@ class AgentNode(Node):
             )
         elif decision.kind is DecisionKind.LLM_NEEDED:
             self._start_llm(decision, turn_generation)
-            return
-            self._speak_text(
-                '当前仅支持确定性导航指令。',
-                Speak.Goal.NORMAL,
-                decision.token.session_id,
-                decision.token.turn_id,
-                turn_generation,
-            )
 
     def _start_llm(self, decision: Any, turn_generation: int) -> None:
         self._llm_generation += 1
         operation = (self._llm_generation, turn_generation, decision.token)
         self._llm_operation = operation
         self._llm_future = self._llm_executor.submit(
-            self._llm.plan, decision.text, decision.token.named_place_ids
+            self._llm.plan,
+            decision.text,
+            decision.token.operating_mode,
+            decision.token.supported_step_mask,
+            decision.token.max_steps,
+            decision.token.named_place_ids,
         )
 
     def _poll_llm(self) -> None:
@@ -417,13 +429,26 @@ class AgentNode(Node):
         if future is None or operation is None or not future.done():
             return
         self._llm_future = None
+        error = None
         try:
             response = future.result()
-        except Exception as error:
-            self.get_logger().warning(f'LLM fallback unavailable: {error}')
-            return
+        except Exception as caught:
+            error = caught
         _generation, turn_generation, token = operation
-        if operation != self._llm_operation or turn_generation != self._turn_generation:
+        if (
+            operation != self._llm_operation
+            or turn_generation != self._turn_generation
+        ):
+            return
+        if error is not None:
+            self.get_logger().warning(f'LLM fallback unavailable: {error}')
+            self._speak_text(
+                '本地语言模型暂时无法完成该指令，请使用明确指令。',
+                Speak.Goal.NORMAL,
+                token.session_id,
+                token.turn_id,
+                turn_generation,
+            )
             return
         snapshot = self._planning_snapshot(require_execute_ready=True)
         if (
@@ -432,21 +457,54 @@ class AgentNode(Node):
             or snapshot.admission_epoch != token.admission_epoch
         ):
             return
-        if response['kind'] == 'reply':
-            self._speak_text(response.get('text', '')[:512] or '无法理解该指令。', Speak.Goal.NORMAL,
-                             token.session_id, token.turn_id, turn_generation)
+        response_kind = next(iter(response), '')
+        if response_kind in {'clarify', 'reply'}:
+            self._speak_text(
+                response[response_kind].get('text', '')[:160]
+                or '无法理解该指令。',
+                Speak.Goal.NORMAL,
+                token.session_id,
+                token.turn_id,
+                turn_generation,
+            )
             return
-        targets = response.get('targets')
-        if not isinstance(targets, list) or not 1 <= len(targets) <= 3:
+        raw_steps = response.get('mission', {}).get('steps')
+        if not isinstance(raw_steps, list):
             return
-        proposal = MissionProposal(tuple(
-            MissionStep(MissionStep.NAVIGATE_TO, target_id=target) for target in targets
-        ), token)
+        steps = []
+        for raw_step in raw_steps:
+            step = _llm_mission_step(raw_step)
+            if step is None:
+                return
+            steps.append(step)
+        proposal = MissionProposal(tuple(steps), token)
         validation = self._core.validator.validate(proposal, token)
         if validation.accepted:
-            turn = VoiceTurn(token.voice_instance_id, token.voice_seq, token.session_id,
-                             token.turn_id, VoiceTurn.COMMAND, '', 1.0, False)
-            self._handle_mission(MissionDecision(validation.mission), turn, turn_generation)
+            turn = VoiceTurn(
+                token.voice_instance_id,
+                token.voice_seq,
+                token.session_id,
+                token.turn_id,
+                VoiceTurn.COMMAND,
+                '',
+                1.0,
+                False,
+            )
+            self._handle_mission(
+                MissionDecision(validation.mission), turn, turn_generation
+            )
+            return
+        self.get_logger().warning(
+            'LLM Mission rejected by semantic validator: %s'
+            % validation.rejection.reason
+        )
+        self._speak_text(
+            '无法安全解析该指令，请使用明确的距离、角度或地点。',
+            Speak.Goal.NORMAL,
+            token.session_id,
+            token.turn_id,
+            turn_generation,
+        )
 
     def _planning_snapshot(
         self, *, require_execute_ready: bool
@@ -571,12 +629,22 @@ class AgentNode(Node):
         """Project only current Mission feedback into the Agent operation."""
         if not self._mission_matches(slot):
             return
+        phase = int(getattr(feedback, 'phase', 0))
         step_index = int(getattr(feedback, 'step_index', -1))
         progress = float(getattr(feedback, 'progress', 0.0))
-        if step_index != slot.last_feedback_step:
-            slot.last_feedback_step = step_index
+        if not 0.0 <= progress <= 1.0:
+            return
+        changed = (
+            phase != slot.last_feedback_phase
+            or step_index != slot.last_feedback_step
+        )
+        slot.last_feedback_phase = phase
+        slot.last_feedback_step = step_index
+        slot.last_feedback_progress = progress
+        if changed:
             self.get_logger().info(
-                f'Mission step {step_index + 1} started (progress={progress:.2f})'
+                'Mission feedback phase=%s step=%s progress=%.2f'
+                % (phase, step_index + 1, progress)
             )
 
     def _mission_send_timeout(self, slot: _MissionSlot) -> None:
@@ -1090,6 +1158,32 @@ class AgentNode(Node):
         )
         holder['timer'] = timer
         return timer
+
+
+def _llm_mission_step(raw_step: Any) -> Optional[MissionStep]:
+    """Convert one schema-checked private LLM step into the typed Core union."""
+    kind = raw_step.get('kind') if isinstance(raw_step, dict) else None
+    if kind == 'MOVE_DISTANCE':
+        return MissionStep(
+            MissionStep.MOVE_DISTANCE,
+            distance_m=float(raw_step['distance_m']),
+        )
+    if kind == 'ROTATE_ANGLE':
+        return MissionStep(
+            MissionStep.ROTATE_ANGLE,
+            angle_rad=float(raw_step['angle_rad']),
+        )
+    if kind == 'NAVIGATE_TO':
+        return MissionStep(
+            MissionStep.NAVIGATE_TO,
+            target_id=raw_step['target_id'],
+        )
+    if kind == 'SAVE_MAP':
+        return MissionStep(
+            MissionStep.SAVE_MAP,
+            target_id=raw_step['target_id'],
+        )
+    return None
 
 
 def _new_agent_instance_id() -> str:

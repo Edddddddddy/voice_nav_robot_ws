@@ -18,6 +18,7 @@ from action_msgs.srv import CancelGoal
 import pytest
 import rclpy
 from voice_nav_agent.agent_node import (
+    _llm_mission_step,
     _publisher_signature,
     AgentNode,
 )
@@ -53,6 +54,9 @@ class ScriptedFuture:
         if self._error is not None:
             raise self._error
         return self._result
+
+    def done(self):
+        return self._done
 
     def resolve(self, result):
         self._finish(result=result)
@@ -99,13 +103,15 @@ class FakeActionClient:
         self.goals = []
         self.handles = []
         self.send_futures = []
+        self.feedback_callbacks = []
         self._ready = ready
 
     def server_is_ready(self):
         return self._ready
 
-    def send_goal_async(self, goal):
+    def send_goal_async(self, goal, feedback_callback=None):
         self.goals.append(goal)
+        self.feedback_callbacks.append(feedback_callback)
         handle = FakeGoalHandle()
         self.handles.append(handle)
         future = ScriptedFuture()
@@ -129,6 +135,18 @@ class FakeStopClient:
         self.requests.append(request)
         self.futures.append(future)
         return future
+
+
+class FakeExecutor:
+    """Capture one LLM request without starting a worker thread."""
+
+    def __init__(self):
+        self.calls = []
+        self.future = ScriptedFuture()
+
+    def submit(self, callback, *args):
+        self.calls.append((callback, args))
+        return self.future
 
 
 class ScriptedTimer:
@@ -271,6 +289,64 @@ def test_rule_mission_maps_typed_goal_and_terminal_speech(monkeypatch):
         assert node._speak_client.goals[-1].text == '任务已完成。'
     finally:
         node.destroy_node()
+
+
+def test_mission_feedback_updates_only_current_slot(monkeypatch):
+    """A feedback callback cannot mutate a retired Mission slot."""
+    node = _make_node(monkeypatch)
+    try:
+        node._on_turn_message(_make_turn('前进 1 米'))
+        callback = node._mission_client.feedback_callbacks[0]
+        slot = node._mission_slot
+        feedback = ExecuteMission.Feedback()
+        feedback.phase = ExecuteMission.Feedback.EXECUTING
+        feedback.step_index = 1
+        feedback.progress = 0.5
+        callback(SimpleNamespace(feedback=feedback))
+        assert slot.last_feedback_phase == ExecuteMission.Feedback.EXECUTING
+        assert slot.last_feedback_step == 1
+        assert slot.last_feedback_progress == 0.5
+
+        node._clear_mission_slot(slot)
+        feedback.step_index = 2
+        callback(SimpleNamespace(feedback=feedback))
+        assert slot.last_feedback_step == 1
+    finally:
+        node.destroy_node()
+
+
+def test_llm_result_adapts_all_typed_step_fields(monkeypatch):
+    """A current LLM Mission crosses the same typed semantic validator."""
+    node = _make_node(monkeypatch)
+    executor = FakeExecutor()
+    node._llm_executor = executor
+    try:
+        node._on_turn_message(_make_turn('往前挪一米'))
+        assert len(executor.calls) == 1
+        executor.future.resolve(
+            {
+                'mission': {
+                    'steps': [
+                        {'kind': 'MOVE_DISTANCE', 'distance_m': 1.0},
+                        {'kind': 'ROTATE_ANGLE', 'angle_rad': -1.5707963},
+                    ]
+                }
+            }
+        )
+
+        node._poll_llm()
+
+        goal = node._mission_client.goals[0]
+        assert [step.kind for step in goal.steps] == [1, 2]
+        assert goal.steps[0].distance_m == pytest.approx(1.0)
+        assert goal.steps[1].angle_rad == pytest.approx(-1.5707963)
+    finally:
+        node.destroy_node()
+
+
+def test_llm_private_step_conversion_is_closed():
+    """Unknown private step kinds cannot become a ROS Mission step."""
+    assert _llm_mission_step({'kind': 'FLY', 'target_id': 'roof'}) is None
 
 
 def test_state_sample_requires_exact_publisher_gid_after_restart(monkeypatch):
