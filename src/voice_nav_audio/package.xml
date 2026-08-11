@@ -10,6 +10,7 @@
   <buildtool_depend>ament_cmake</buildtool_depend>
 
   <depend>portaudio19-dev</depend>
+  <depend>libwebrtc-audio-processing-dev</depend>
   <depend>rclcpp</depend>
 
   <test_depend>ament_cmake_gtest</test_depend>

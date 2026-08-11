@@ -11,12 +11,20 @@ find_package(PkgConfig REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(Threads REQUIRED)
 pkg_check_modules(PORTAUDIO REQUIRED IMPORTED_TARGET portaudio-2.0)
+pkg_check_modules(
+  WEBRTC_APM REQUIRED IMPORTED_TARGET webrtc-audio-processing
+)
 
 add_executable(audio_engine_node src/audio_engine_node.cpp)
 target_compile_features(audio_engine_node PUBLIC cxx_std_17)
 target_include_directories(audio_engine_node PUBLIC include)
 ament_target_dependencies(audio_engine_node rclcpp)
-target_link_libraries(audio_engine_node PkgConfig::PORTAUDIO Threads::Threads)
+target_link_libraries(
+  audio_engine_node
+  PkgConfig::PORTAUDIO
+  PkgConfig::WEBRTC_APM
+  Threads::Threads
+)
 
 install(TARGETS audio_engine_node DESTINATION lib/${PROJECT_NAME})
 install(DIRECTORY include/ DESTINATION include)

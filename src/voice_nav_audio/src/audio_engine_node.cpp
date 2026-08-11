@@ -13,6 +13,8 @@
 // limitations under the License.
 
 #include <portaudio.h>
+#include <webrtc/modules/audio_processing/include/audio_processing.h>
+#include <webrtc/modules/interface/module_common_types.h>
 
 #include <fcntl.h>
 #include <signal.h>
@@ -21,9 +23,11 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -49,6 +53,8 @@ public:
   {
     capture_fifo_ = declare_parameter<std::string>("capture_fifo", "");
     playback_fifo_ = declare_parameter<std::string>("playback_fifo", "");
+    aec_enabled_ = declare_parameter<bool>("aec_enabled", true);
+    configure_aec();
     ::signal(SIGPIPE, SIG_IGN);
     check(Pa_Initialize(), "PortAudio initialization");
     initialized_ = true;
@@ -66,12 +72,17 @@ public:
         RCLCPP_INFO(
           get_logger(),
           "audio blocks=%lu fifo_frames=%lu fifo_drops=%lu capture_overflow=%lu "
-          "playback_frames=%lu playback_drops=%lu playback_underflow=%lu",
+          "playback_frames=%lu playback_drops=%lu playback_underflow=%lu "
+          "aec_frames=%lu aec_errors=%lu",
           blocks_.load(), fifo_frames_.load(), fifo_drops_.load(),
           capture_overflow_.load(), playback_frames_.load(),
-          playback_drops_.load(), playback_underflow_.load());
+          playback_drops_.load(), playback_underflow_.load(),
+          aec_frames_.load(), aec_errors_.load());
       });
-    RCLCPP_INFO(get_logger(), "48 kHz mono full-duplex AudioEngine started");
+    RCLCPP_INFO(
+      get_logger(),
+      "48 kHz mono full-duplex AudioEngine started; legacy WebRTC APM AEC=%s",
+      aec_ ? "enabled" : "disabled");
   }
 
   ~AudioEngineNode() override
@@ -137,13 +148,77 @@ private:
         render[render_count++] = sample;
       }
       if (count == capture.size() && render_count == render.size()) {
-        // AEC/KWS/VAD/ASR adapters consume these paired 10 ms frames here.
+        process_aec(capture, render);
+        // KWS/VAD/ASR adapters consume the processed 10 ms capture here.
         write_capture_frame(capture);
         blocks_.fetch_add(1U, std::memory_order_relaxed);
       } else {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
     }
+  }
+
+  void configure_aec()
+  {
+    if (!aec_enabled_) {
+      return;
+    }
+    aec_.reset(webrtc::AudioProcessing::Create());
+    if (!aec_) {
+      throw std::runtime_error("legacy WebRTC APM creation failed");
+    }
+    aec_->echo_cancellation()->enable_drift_compensation(false);
+    if (aec_->echo_cancellation()->Enable(true) !=
+      webrtc::AudioProcessing::kNoError)
+    {
+      throw std::runtime_error("legacy WebRTC APM AEC enable failed");
+    }
+  }
+
+  void process_aec(
+    std::array<float, kFramesPerBuffer> & capture,
+    const std::array<float, kFramesPerBuffer> & render)
+  {
+    if (!aec_) {
+      return;
+    }
+    std::array<std::int16_t, kFramesPerBuffer> capture_pcm{};
+    std::array<std::int16_t, kFramesPerBuffer> render_pcm{};
+    for (std::size_t index = 0U; index < kFramesPerBuffer; ++index) {
+      capture_pcm[index] = float_to_pcm(capture[index]);
+      render_pcm[index] = float_to_pcm(render[index]);
+    }
+    webrtc::AudioFrame render_frame;
+    render_frame.UpdateFrame(
+      -1, 0U, render_pcm.data(), kFramesPerBuffer,
+      static_cast<int>(kSampleRate), webrtc::AudioFrame::kNormalSpeech,
+      webrtc::AudioFrame::kVadUnknown, 1);
+    webrtc::AudioFrame capture_frame;
+    capture_frame.UpdateFrame(
+      -1, 0U, capture_pcm.data(), kFramesPerBuffer,
+      static_cast<int>(kSampleRate), webrtc::AudioFrame::kNormalSpeech,
+      webrtc::AudioFrame::kVadUnknown, 1);
+    const auto reverse_result = aec_->ProcessReverseStream(&render_frame);
+    const auto delay_result = aec_->set_stream_delay_ms(10);
+    const auto capture_result = aec_->ProcessStream(&capture_frame);
+    if (
+      reverse_result != webrtc::AudioProcessing::kNoError ||
+      delay_result != webrtc::AudioProcessing::kNoError ||
+      capture_result != webrtc::AudioProcessing::kNoError)
+    {
+      aec_errors_.fetch_add(1U, std::memory_order_relaxed);
+      return;
+    }
+    for (std::size_t index = 0U; index < kFramesPerBuffer; ++index) {
+      capture[index] = static_cast<float>(capture_frame.data_[index]) / 32768.0F;
+    }
+    aec_frames_.fetch_add(1U, std::memory_order_relaxed);
+  }
+
+  static std::int16_t float_to_pcm(const float sample)
+  {
+    const auto bounded = std::clamp(sample, -1.0F, 1.0F);
+    return static_cast<std::int16_t>(std::lrint(bounded * 32767.0F));
   }
 
   void write_capture_frame(const std::array<float, kFramesPerBuffer> & capture)
@@ -201,20 +276,32 @@ private:
         return;
       }
     }
-    std::array<std::int16_t, kFramesPerBuffer> input{};
-    const auto bytes = input.size() * sizeof(input.front());
-    const auto received = ::read(playback_fifo_fd_, input.data(), bytes);
-    if (received == static_cast<ssize_t>(bytes)) {
+    constexpr auto bytes = kFramesPerBuffer * sizeof(std::int16_t);
+    const auto received = ::read(
+      playback_fifo_fd_,
+      playback_pending_.data() + playback_pending_bytes_,
+      bytes - playback_pending_bytes_);
+    if (received > 0) {
+      playback_pending_bytes_ += static_cast<std::size_t>(received);
+    }
+    if (playback_pending_bytes_ == bytes) {
+      std::array<std::int16_t, kFramesPerBuffer> input{};
+      std::memcpy(input.data(), playback_pending_.data(), bytes);
       for (const auto sample : input) {
         playback_ring_.push(static_cast<float>(sample) / 32768.0F);
       }
+      playback_pending_bytes_ = 0U;
       playback_frames_.fetch_add(1U, std::memory_order_relaxed);
       return;
     }
-    if (received > 0) {
-      playback_drops_.fetch_add(1U, std::memory_order_relaxed);
+    if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+      return;
     }
-    if (received >= 0) {
+    if (received == 0 || received < 0) {
+      if (playback_pending_bytes_ > 0U) {
+        playback_drops_.fetch_add(1U, std::memory_order_relaxed);
+        playback_pending_bytes_ = 0U;
+      }
       close_playback_fifo();
     }
   }
@@ -247,8 +334,15 @@ private:
   std::atomic<std::uint64_t> fifo_drops_{0U};
   std::atomic<std::uint64_t> playback_frames_{0U};
   std::atomic<std::uint64_t> playback_drops_{0U};
+  std::atomic<std::uint64_t> aec_frames_{0U};
+  std::atomic<std::uint64_t> aec_errors_{0U};
+  bool aec_enabled_{true};
+  std::unique_ptr<webrtc::AudioProcessing> aec_;
   std::string capture_fifo_;
   std::string playback_fifo_;
+  std::array<std::uint8_t, kFramesPerBuffer * sizeof(std::int16_t)>
+  playback_pending_{};
+  std::size_t playback_pending_bytes_{0U};
   int capture_fifo_fd_{-1};
   int playback_fifo_fd_{-1};
   std::thread worker_;

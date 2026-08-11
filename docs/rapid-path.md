@@ -117,9 +117,13 @@ idempotent retry.
 
 This makes the C++ capture worker the real rapid ASR source and the same
 full-duplex callback the real TTS render sink, without exposing PCM as a ROS
-interface. Every callback render sample is also copied to the existing exact
-reference ring. Locked WebRTC AEC and sherpa-onnx KWS/VAD/ASR/TTS remain
-production gaps; rapid mode still uses Vosk wake/transcription and Piper.
+interface. Every callback render sample is copied to the exact-reference ring.
+The worker pairs that reference with each 10 ms capture frame and runs the
+system WebRTC AudioProcessing 0.3.1 echo canceller before the 16 kHz Vosk FIFO.
+Install it with `sudo apt install libwebrtc-audio-processing-dev`. This is a
+real rapid AEC path, but it is not the production-pinned WebRTC APM 2.1 design.
+Dedicated sherpa-onnx KWS/VAD/ASR/TTS remain production gaps; rapid mode still
+uses Vosk wake/transcription and Piper.
 
 Set `VOICE_NAV_VOICE_ROOT` for a different clone or speech asset root. Missing
 speech assets do not prevent
