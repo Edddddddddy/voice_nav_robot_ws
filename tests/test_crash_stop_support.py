@@ -62,6 +62,97 @@ def command(stamp_ns: int, linear_x: float):
 
 class ConsumerTimeoutAnchorTest(unittest.TestCase):
 
+    def test_probe_isolates_safety_observers_from_high_rate_sensors(self):
+        callback_groups = {}
+
+        class FakeNode:
+
+            def create_subscription(
+                self,
+                _message_type,
+                topic,
+                _callback,
+                _qos,
+                *,
+                callback_group=None,
+            ):
+                callback_groups[topic] = callback_group
+                return object()
+
+            def create_client(self, *_args, **_kwargs):
+                return object()
+
+        class FakeExecutor:
+
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def add_node(self, _node):
+                pass
+
+            def spin(self):
+                pass
+
+        class FakeThread:
+
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def start(self):
+                pass
+
+        interfaces = support.WorkspaceInterfaceTypes(
+            execute_mission=object(),
+            mission_state=object(),
+            mission_step=object(),
+            gate_state=object(),
+            gate_control=object(),
+        )
+        with (
+            mock.patch.object(
+                support,
+                '_get_workspace_interface_types',
+                return_value=interfaces,
+            ),
+            mock.patch.object(
+                support.rclpy,
+                'create_node',
+                return_value=FakeNode(),
+            ),
+            mock.patch.object(
+                support,
+                'Parameter',
+                side_effect=lambda *_args, **_kwargs: object(),
+            ),
+            mock.patch.object(
+                support,
+                'MultiThreadedExecutor',
+                FakeExecutor,
+            ),
+            mock.patch.object(
+                support,
+                'ActionClient',
+                return_value=object(),
+            ),
+            mock.patch.object(support.threading, 'Thread', FakeThread),
+        ):
+            support.CrashStopProbe()
+
+        safety_group = callback_groups[support.GATE_STATE_TOPIC]
+        self.assertIsNotNone(safety_group)
+        self.assertIs(
+            safety_group,
+            callback_groups[support.FINAL_COMMAND_TOPIC],
+        )
+        self.assertIs(
+            safety_group,
+            callback_groups[support.LIMITED_COMMAND_TOPIC],
+        )
+        self.assertIsNot(
+            safety_group,
+            callback_groups[support.CLOCK_TOPIC],
+        )
+
     def test_pure_helpers_load_before_workspace_interfaces_are_built(self):
         original_import = __import__
 

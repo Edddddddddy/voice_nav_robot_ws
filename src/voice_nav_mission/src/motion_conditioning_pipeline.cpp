@@ -1054,9 +1054,9 @@ private:
         MotionConditioningFailure::SafetyFault,
         "Velocity Smoother activation failed after MotionGate OPEN");
     }
-    const auto final_renew_ok = renew_for_activation(
+    const auto activation_renew_ok = renew_for_activation(
       generation, expected_lease, open_operation.gate_instance_id, &*open_lease);
-    const auto graph_health = final_renew_ok ?
+    const auto graph_health = activation_renew_ok ?
       runtime_graph_health(handover_deadline, expected_candidate) :
       RuntimeHealthAssessment{
       RuntimeHealthReason::ComponentUnavailable,
@@ -1106,6 +1106,28 @@ private:
         generation,
         MotionConditioningFailure::SafetyFault,
         "activation fence was cancelled before producer start");
+    }
+
+    // The periodic renew timer is intentionally stopped until Running is
+    // committed.  Renew again after the final graph-health RPCs so their
+    // latency cannot consume the authority lease before the timer's first
+    // callback.  Candidate freshness remains independent and is never
+    // extended by this control-plane renewal.
+    if (!renew_for_activation(
+        generation, expected_lease, open_operation.gate_instance_id, &*open_lease))
+    {
+      producer_lock.unlock();
+      return abort_activation(
+        generation,
+        MotionConditioningFailure::SafetyFault,
+        activation_failure_detail());
+    }
+    if (!open_lease->current() || !activation_token_current(generation)) {
+      producer_lock.unlock();
+      return abort_activation(
+        generation,
+        MotionConditioningFailure::SafetyFault,
+        activation_failure_detail());
     }
 
     GateSnapshot final_snapshot;
