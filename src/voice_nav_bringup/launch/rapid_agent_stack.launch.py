@@ -28,6 +28,7 @@ def generate_launch_description():
         parameters=[{
             'mode': mode,
             'map_output_root': LaunchConfiguration('map_output_root'),
+            'named_places_file': LaunchConfiguration('named_places_file'),
             'use_sim_time': True,
         }],
     )
@@ -100,6 +101,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'map_output_root', default_value='/tmp/voice_nav_rapid_maps'
         ),
+        DeclareLaunchArgument('named_places_file', default_value=''),
         llm,
         mission,
         agent,

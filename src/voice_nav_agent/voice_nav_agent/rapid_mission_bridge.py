@@ -4,6 +4,8 @@ import math
 from pathlib import Path
 import re
 import secrets
+import shutil
+import tempfile
 import time
 
 from action_msgs.msg import GoalStatus
@@ -30,12 +32,8 @@ from voice_nav_interfaces.action import ExecuteMission
 from voice_nav_interfaces.msg import MissionState, MissionStep
 from voice_nav_interfaces.srv import StopMission
 
+from .rapid_map_package import finish_map_package, load_places
 
-PLACES = {
-    'home': (0.0, 0.0, 0.0),
-    'study': (-1.2, 0.0, math.pi),
-    'kitchen': (0.6, 0.0, 0.0),
-}
 MAPPING_MASK = 0b1011
 NAVIGATION_MASK = 0b0100
 LINEAR_SPEED = 0.25
@@ -51,6 +49,13 @@ class RapidMissionBridge(Node):
         self.mode = self.declare_parameter('mode', 'navigation').value
         if self.mode not in {'mapping', 'navigation'}:
             raise ValueError('mode must be mapping or navigation')
+        places_file = self.declare_parameter('named_places_file', '').value
+        self.places = (
+            load_places(places_file)
+            if self.mode == 'navigation' and places_file else {}
+        )
+        if self.mode == 'navigation' and not self.places:
+            raise ValueError('navigation mode requires named_places_file')
         self.map_root = Path(
             self.declare_parameter(
                 'map_output_root', '/tmp/voice_nav_rapid_maps'
@@ -127,7 +132,7 @@ class RapidMissionBridge(Node):
         )
         state.max_steps = 3
         state.named_place_ids = (
-            [] if self.mode == 'mapping' else sorted(PLACES)
+            [] if self.mode == 'mapping' else sorted(self.places)
         )
         self.publisher.publish(state)
 
@@ -259,32 +264,40 @@ class RapidMissionBridge(Node):
                 ExecuteMission.Result.DEPENDENCY_UNAVAILABLE,
                 'SLAM Toolbox save services unavailable',
             )
+        self.map_root.mkdir(parents=True, exist_ok=True)
         target = self.map_root / map_id
-        try:
-            target.mkdir(parents=True, exist_ok=False)
-        except FileExistsError:
+        if target.exists():
             return ExecuteMission.Result.INVALID_PLAN, 'map already exists'
-        base = target / 'map'
-        save_request = SaveMap.Request()
-        save_request.name.data = str(base)
-        save_response = await self.save_map.call_async(save_request)
-        if save_response.result != SaveMap.Response.RESULT_SUCCESS:
-            return ExecuteMission.Result.EXECUTION_FAILED, 'occupancy save failed'
-        graph_request = SerializePoseGraph.Request()
-        graph_request.filename = str(base)
-        graph_response = await self.serialize_map.call_async(graph_request)
-        if graph_response.result != SerializePoseGraph.Response.RESULT_SUCCESS:
-            return ExecuteMission.Result.EXECUTION_FAILED, 'posegraph save failed'
-        expected = [
-            base.with_suffix('.yaml'),
-            base.with_suffix('.pgm'),
-            base.with_suffix('.posegraph'),
-            base.with_suffix('.data'),
-        ]
-        if not all(path.is_file() and path.stat().st_size for path in expected):
-            return ExecuteMission.Result.EXECUTION_FAILED, 'map files incomplete'
-        self.get_logger().info(f'Saved rapid map files under {target}')
-        return ExecuteMission.Result.SUCCEEDED, f'map saved as {map_id}'
+        staging = Path(tempfile.mkdtemp(prefix=f'.{map_id}-', dir=self.map_root))
+        committed = False
+        try:
+            base = staging / 'map'
+            save_request = SaveMap.Request()
+            save_request.name.data = str(base)
+            save_response = await self.save_map.call_async(save_request)
+            if save_response.result != SaveMap.Response.RESULT_SUCCESS:
+                return (
+                    ExecuteMission.Result.EXECUTION_FAILED,
+                    'occupancy save failed',
+                )
+            graph_request = SerializePoseGraph.Request()
+            graph_request.filename = str(base)
+            graph_response = await self.serialize_map.call_async(graph_request)
+            if graph_response.result != SerializePoseGraph.Response.RESULT_SUCCESS:
+                return (
+                    ExecuteMission.Result.EXECUTION_FAILED,
+                    'posegraph save failed',
+                )
+            finish_map_package(staging, map_id)
+            if target.exists():
+                return ExecuteMission.Result.INVALID_PLAN, 'map already exists'
+            staging.rename(target)
+            committed = True
+            self.get_logger().info(f'Saved rapid Map Package under {target}')
+            return ExecuteMission.Result.SUCCEEDED, f'map saved as {map_id}'
+        finally:
+            if not committed:
+                shutil.rmtree(staging, ignore_errors=True)
 
     def _invalid_step(self, steps):
         if not 1 <= len(steps) <= 3:
@@ -301,7 +314,7 @@ class RapidMissionBridge(Node):
                         index,
                         'navigation mode accepts NAVIGATE_TO only',
                     )
-                if step.target_id not in PLACES:
+                if step.target_id not in self.places:
                     return (
                         ExecuteMission.Result.UNKNOWN_TARGET,
                         index,
@@ -333,7 +346,7 @@ class RapidMissionBridge(Node):
         handle.publish_feedback(feedback)
 
     def _nav_goal(self, target):
-        x, y, yaw = PLACES[target]
+        x, y, yaw = self.places[target]
         goal = NavigateToPose.Goal()
         goal.pose = PoseStamped()
         goal.pose.header.frame_id = 'map'

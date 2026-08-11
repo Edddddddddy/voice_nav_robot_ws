@@ -88,6 +88,9 @@ def generate_launch_description():
         launch_arguments={
             'mode': 'navigation',
             'llm_enabled': LaunchConfiguration('llm_enabled'),
+            'named_places_file': PathJoinSubstitution(
+                [bringup_share, 'maps', 'house_demo_places.yaml']
+            ),
         }.items(),
     )
     direct_cmd_vel = Node(

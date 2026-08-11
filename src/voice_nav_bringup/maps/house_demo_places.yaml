@@ -1,0 +1,15 @@
+schema_version: 1
+map_id: house_demo
+places:
+  - id: home
+    x: 0.0
+    y: 0.0
+    yaw: 0.0
+  - id: kitchen
+    x: 0.6
+    y: 0.0
+    yaw: 0.0
+  - id: study
+    x: -1.2
+    y: 0.0
+    yaw: 3.141592653589793

@@ -41,9 +41,11 @@ ros2 launch voice_nav_bringup navigation_sim.launch.py headless:=true
 The navigation launch starts Gazebo, AMCL, Nav2, `rapid_mission_bridge`, the
 existing Agent, and the rapid voice endpoint.  Named places are `home`,
 `study`, and `kitchen`; try a Mandarin command such as `去厨房` (the local
-parser maps it to `kitchen`).  The voice endpoint uses Vosk when its model and
-Python path are available, and still accepts terminal text when standard input
-is attached.
+parser maps it to `kitchen`). Their poses are loaded from the installed
+`house_demo_places.yaml`, validated once at startup, and published in the
+MissionState snapshot. The voice endpoint uses Vosk when its model and Python
+path are available, and still accepts terminal text when standard input is
+attached.
 
 For predictable WSL performance, this launch waits for Gazebo/odometry before
 starting Nav2, uses Regulated Pure Pursuit instead of the heavier default MPPI
@@ -65,11 +67,13 @@ The mapping launch starts the same Agent/voice/model stack in Mapping mode.
 It accepts MOVE, ROTATE, and SAVE_MAP Missions. A command such as
 `保存地图为 house_new` calls SLAM Toolbox's SaveMap and SerializePoseGraph
 services and writes `map.yaml`, `map.pgm`, `map.posegraph`, and `map.data`
-under `/tmp/voice_nav_rapid_maps/house_new/`. Pass `map_output_root:=...` to
-change that trusted root. Mapping and navigation rapid launches explicitly
-disable the production MotionGate chain because they publish directly to the
-simulated controller; `product_sim.launch.py` remains safe-by-default with the
-chain enabled.
+plus `named_places.yaml` and a SHA-256 `manifest.yaml` under
+`/tmp/voice_nav_rapid_maps/house_new/`. The six files are first assembled in a
+same-root staging directory and exposed by one rename. Pass
+`map_output_root:=...` to change that trusted root. Mapping and navigation
+rapid launches explicitly disable the production MotionGate chain because
+they publish directly to the simulated controller; `product_sim.launch.py`
+remains safe-by-default with the chain enabled.
 
 ## Local speech assets
 
@@ -112,5 +116,6 @@ colcon build --packages-select voice_nav_agent voice_nav_bringup --symlink-insta
   --cmake-args -DBUILD_TESTING=OFF
 ros2 launch voice_nav_bringup navigation_sim.launch.py --show-args
 bash scripts/rapid-navigation-smoke.sh
+bash scripts/rapid-mapping-smoke.sh
 bash scripts/rapid-voice-smoke.sh
 ```
