@@ -57,6 +57,10 @@ EXPECTED_TESTS = {
             "source": "test_motion_gate_consumer_deadman.py",
             "timeout": 300.0,
         },
+        "test_test_relative_motion_product.py": {
+            "source": "test_relative_motion_product.py",
+            "timeout": 300.0,
+        },
     },
 }
 EXPECTED_LABELS = ["launch_test"]

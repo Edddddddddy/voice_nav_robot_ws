@@ -2304,9 +2304,15 @@ def validate_bringup_cmake(path: Path) -> None:
             "test/test_motion_gate_product.py",
             "test/test_mission_runtime_crash_stop.py",
             "test/test_motion_gate_consumer_deadman.py",
+            "test/test_relative_motion_product.py",
         ),
-        (180, 300, 300),
-        (None, "mission_runtime_crash_stop", "motion_gate_consumer_deadman"),
+        (180, 300, 300, 300),
+        (
+            None,
+            "mission_runtime_crash_stop",
+            "motion_gate_consumer_deadman",
+            None,
+        ),
     )
     install_match = re.search(
         r"install\s*\(\s*DIRECTORY(?P<body>.*?)"

@@ -23,6 +23,10 @@ VALID_WORLD = """\
             name="gz::sim::systems::Sensors">
       <render_engine>ogre2</render_engine>
     </plugin>
+    <physics name="default_physics" type="ode">
+      <max_step_size>0.001</max_step_size>
+      <real_time_update_rate>500</real_time_update_rate>
+    </physics>
     <model name="ground_plane">
       <static>true</static>
       <link name="ground_link">
@@ -115,6 +119,8 @@ VALID_BRIDGE = """\
   ros_type_name: sensor_msgs/msg/LaserScan
   gz_type_name: gz.msgs.LaserScan
   direction: GZ_TO_ROS
+  subscriber_queue: 1
+  publisher_queue: 1
   qos_profile: SENSOR_DATA
 """
 
@@ -398,6 +404,38 @@ class SimulationContractTest(unittest.TestCase):
             "world name must be voice_nav_test_world",
             completed.stderr,
         )
+
+    def test_headless_physics_pacing_is_exact(self) -> None:
+        mutations = (
+            (
+                'physics name="default_physics"',
+                'physics name="other_physics"',
+                "physics name must be default_physics",
+            ),
+            (
+                'type="ode"',
+                'type="bullet"',
+                "physics type must be ode",
+            ),
+            (
+                "<max_step_size>0.001</max_step_size>",
+                "<max_step_size>0.002</max_step_size>",
+                "max_step_size must be 0.001",
+            ),
+            (
+                "<real_time_update_rate>500</real_time_update_rate>",
+                "<real_time_update_rate>1000</real_time_update_rate>",
+                "real_time_update_rate must be 500",
+            ),
+        )
+        for old, new, diagnostic in mutations:
+            with self.subTest(old=old):
+                completed = self.run_checker(
+                    world=VALID_WORLD.replace(old, new)
+                )
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(diagnostic, completed.stderr)
 
     def test_missing_direct_runtime_dependency_is_rejected(self) -> None:
         mutations = (
@@ -1030,6 +1068,22 @@ class SimulationContractTest(unittest.TestCase):
                 self.assertNotEqual(completed.returncode, 0)
                 self.assertIn(
                     f"{topic} bridge qos_profile",
+                    completed.stderr,
+                )
+
+    def test_scan_bridge_queues_are_exactly_one(self) -> None:
+        for field in ("subscriber_queue", "publisher_queue"):
+            with self.subTest(field=field):
+                completed = self.run_checker(
+                    bridge=VALID_BRIDGE.replace(
+                        f"  {field}: 1",
+                        f"  {field}: 2",
+                    )
+                )
+
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(
+                    f"/scan bridge {field} must be 1",
                     completed.stderr,
                 )
 
