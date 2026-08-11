@@ -72,6 +72,18 @@ This local workspace uses untracked assets under `.deps/voice/`:
 - `vosk-model-small-cn-0.22` for offline Mandarin ASR;
 - Piper's `zh_CN-huayan-medium` voice model for local TTS.
 
+On WSLg, the Vosk worker automatically captures 16 kHz mono PCM with `parec`
+through `PULSE_SERVER`; it falls back to PyAudio/PortAudio elsewhere. This
+avoids the common WSL failure where PulseAudio is available but ALSA has no
+`default` device. Transcript wake matching accepts `小 智` and the common Vosk
+`小志`/`晓智` forms. Piper playback continues through `paplay`.
+
+`voice_nav_audio/audio_engine_node` is the first C++ full-duplex seam: 48 kHz
+mono PortAudio callback, bounded capture/playback/final-render SPSC rings, and
+10 ms worker frames. It is not launched beside the rapid Vosk endpoint yet;
+locked WebRTC AEC and sherpa-onnx KWS/VAD/ASR/TTS worker adapters remain the
+next production integration layer.
+
 Set `VOICE_NAV_VOICE_ROOT` for a different clone or speech asset root. Missing
 speech assets do not prevent
 simulation and navigation from starting; the endpoint logs speech to the

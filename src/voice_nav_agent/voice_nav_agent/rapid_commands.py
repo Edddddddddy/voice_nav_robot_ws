@@ -1,5 +1,6 @@
 """Small pure helpers used by the local rapid voice endpoint."""
 
+import re
 from dataclasses import dataclass
 
 PLACE_ALIASES = {
@@ -27,11 +28,15 @@ class WakeGate:
     deadline: float = 0.0
 
     def accept(self, text, now):
+        """Return an authorized command or retain one short wake window."""
         text = text.strip()
-        index = text.find(self.wake_word)
-        if index >= 0:
+        pattern = re.escape(self.wake_word)
+        if self.wake_word == '\u5c0f\u667a':
+            pattern = r'(?:\u5c0f\s*[\u667a\u5fd7]|\u6653\s*\u667a)'
+        match = re.search(pattern, text)
+        if match is not None:
             self.deadline = now + self.timeout_s
-            command = text[index + len(self.wake_word):].lstrip(' ,\uFF0C\u3002')
+            command = text[match.end():].lstrip(' ,\uFF0C\u3002')
             return command or None
         if now <= self.deadline:
             self.deadline = 0.0

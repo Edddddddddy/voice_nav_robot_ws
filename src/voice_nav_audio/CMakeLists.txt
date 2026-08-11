@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.22)
 project(voice_nav_audio)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -7,20 +7,26 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
-# uncomment the following section in order to fill in
-# further dependencies manually.
-# find_package(<dependency> REQUIRED)
+find_package(PkgConfig REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(Threads REQUIRED)
+pkg_check_modules(PORTAUDIO REQUIRED IMPORTED_TARGET portaudio-2.0)
+
+add_executable(audio_engine_node src/audio_engine_node.cpp)
+target_compile_features(audio_engine_node PUBLIC cxx_std_17)
+target_include_directories(audio_engine_node PUBLIC include)
+ament_target_dependencies(audio_engine_node rclcpp)
+target_link_libraries(audio_engine_node PkgConfig::PORTAUDIO Threads::Threads)
+
+install(TARGETS audio_engine_node DESTINATION lib/${PROJECT_NAME})
+install(DIRECTORY include/ DESTINATION include)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
-  # the following line skips the linter which checks for copyrights
-  # comment the line when a copyright and license is added to all source files
-  set(ament_cmake_copyright_FOUND TRUE)
-  # the following line skips cpplint (only works in a git repo)
-  # comment the line when this package is in a git repo and when
-  # a copyright and license is added to all source files
-  set(ament_cmake_cpplint_FOUND TRUE)
+  find_package(ament_cmake_gtest REQUIRED)
   ament_lint_auto_find_test_dependencies()
+  ament_add_gtest(spsc_audio_ring_test test/spsc_audio_ring_test.cpp)
+  target_include_directories(spsc_audio_ring_test PRIVATE include)
 endif()
 
 ament_package()
