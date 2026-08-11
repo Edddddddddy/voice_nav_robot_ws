@@ -272,7 +272,7 @@ TEST(RuntimeEventIngressTest, ProductionWorkerFencePreemptsChildResult)
     worker_config(),
     clock,
     authority,
-    relative,
+    RuntimePorts{relative, {}, {}},
     {},
     {},
     [&results](std::uint64_t, const MissionResult & result) {
@@ -411,7 +411,7 @@ TEST(RuntimeEventIngressTest, PopBeforeDispatchFenceSkipsCoreSideEffect)
     worker_config(),
     clock,
     authority,
-    relative,
+    RuntimePorts{relative, {}, {}},
     {},
     {},
     [&results](std::uint64_t, const MissionResult & result) {
@@ -535,7 +535,7 @@ TEST(RuntimeEventIngressTest, CoreBeforePortStartFenceRejectsNextStep)
     worker_config(),
     clock,
     authority,
-    relative,
+    RuntimePorts{relative, {}, {}},
     {},
     {},
     [&results](std::uint64_t, const MissionResult & result) {

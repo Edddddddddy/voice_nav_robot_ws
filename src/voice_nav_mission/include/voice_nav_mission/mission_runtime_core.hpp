@@ -31,7 +31,9 @@ namespace voice_nav_mission
 
 inline constexpr std::uint32_t kNoActiveMissionStep =
   std::numeric_limits<std::uint32_t>::max();
-inline constexpr std::uint32_t kSupportedMissionStepMask = 3U;
+inline constexpr std::uint32_t kRelativeMissionStepMask = 0x03U;
+inline constexpr std::uint32_t kNavigateMissionStepMask = 0x04U;
+inline constexpr std::uint32_t kSaveMapMissionStepMask = 0x08U;
 
 enum class OperatingMode : std::uint8_t
 {
@@ -144,7 +146,7 @@ struct RuntimeState
   RuntimeAvailability availability{RuntimeAvailability::Unavailable};
   GateState gate_state{GateState::Faulted};
   std::uint32_t active_step{kNoActiveMissionStep};
-  std::uint32_t supported_step_mask{kSupportedMissionStepMask};
+  std::uint32_t supported_step_mask{kRelativeMissionStepMask};
   std::uint8_t max_steps{3U};
   std::vector<std::string> named_place_ids;
 };
@@ -233,13 +235,13 @@ struct ChildResult
   std::string detail;
 };
 
-class RelativeMotionPort
+class MissionChildPort
 {
 public:
   using FeedbackCallback = std::function<void(const MotionToken &, double)>;
   using ResultCallback = std::function<void(const MotionToken &, const ChildResult &)>;
 
-  virtual ~RelativeMotionPort() = default;
+  virtual ~MissionChildPort() = default;
   [[nodiscard]] virtual bool healthy() const = 0;
   virtual void start(
     const MotionToken & token,
@@ -271,6 +273,25 @@ public:
   {
     return true;
   }
+};
+
+class RelativeMotionPort : public MissionChildPort
+{
+};
+
+class NavigationPort : public MissionChildPort
+{
+};
+
+class MapStorePort : public MissionChildPort
+{
+};
+
+struct RuntimePorts
+{
+  std::shared_ptr<RelativeMotionPort> relative_motion;
+  std::shared_ptr<NavigationPort> navigation;
+  std::shared_ptr<MapStorePort> map_store;
 };
 
 struct RuntimeConfig
@@ -325,7 +346,7 @@ public:
     RuntimeConfig config,
     std::shared_ptr<SteadyClockPort> clock,
     std::shared_ptr<MotionAuthorityPort> authority,
-    std::shared_ptr<RelativeMotionPort> relative_motion,
+    RuntimePorts ports,
     StateCallback state_callback = {},
     FeedbackCallback feedback_callback = {},
     ResultCallback result_callback = {},
@@ -369,6 +390,7 @@ private:
     StartPermitCheck start_permit_check;
     bool child_started{false};
     bool terminal_selected{false};
+    MissionChildPort * child_port{nullptr};
   };
 
   struct StopCacheEntry
@@ -392,6 +414,8 @@ private:
   [[nodiscard]] bool validate_step(
     const MissionStep & step,
     MissionResult & result) const;
+  [[nodiscard]] MissionChildPort * port_for(const MissionStep & step) const;
+  [[nodiscard]] bool dependencies_healthy() const;
   [[nodiscard]] bool consume_source_sequence(
     const MissionGoal & goal,
     MissionResult & result);
@@ -431,7 +455,7 @@ private:
   RuntimeConfig config_;
   std::shared_ptr<SteadyClockPort> clock_;
   std::shared_ptr<MotionAuthorityPort> authority_;
-  std::shared_ptr<RelativeMotionPort> relative_motion_;
+  RuntimePorts ports_;
   StateCallback state_callback_;
   FeedbackCallback feedback_callback_;
   ResultCallback result_callback_;
@@ -444,8 +468,8 @@ private:
   GateSnapshot gate_snapshot_;
   bool gate_bound_{false};
   bool gate_fault_handled_{false};
-  bool relative_health_initialized_{false};
-  bool last_relative_healthy_{false};
+  bool dependency_health_initialized_{false};
+  bool last_dependencies_healthy_{false};
   SteadyClockPort::TimePoint gate_discovery_started_at_{};
   bool gate_discovery_timed_out_{false};
   std::map<std::string, std::uint64_t> source_sequences_;

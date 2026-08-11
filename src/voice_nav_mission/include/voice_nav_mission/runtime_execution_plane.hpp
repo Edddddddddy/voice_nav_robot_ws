@@ -81,7 +81,7 @@ public:
       std::move(config),
       std::move(clock),
       std::move(authority),
-      std::move(relative_motion),
+      RuntimePorts{std::move(relative_motion), {}, {}},
       std::move(state_callback),
       std::move(feedback_callback),
       std::move(result_callback),

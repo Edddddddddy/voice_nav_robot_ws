@@ -76,7 +76,7 @@ struct Fixture
     config(),
     clock,
     authority,
-    relative,
+    RuntimePorts{relative, {}, {}},
     {},
     [this](std::uint64_t, const MissionFeedback & item) {
       feedback.push_back(item);
@@ -90,6 +90,64 @@ struct Fixture
     core.observe_gate(authority->snapshot());
   }
 };
+
+template<typename Port>
+class ScriptedChildPort final : public Port
+{
+public:
+  [[nodiscard]] bool healthy() const override {return healthy_;}
+
+  void start(
+    const MotionToken & token,
+    const MissionStep & step,
+    MissionChildPort::FeedbackCallback feedback,
+    MissionChildPort::ResultCallback result) override
+  {
+    token_ = token;
+    started_steps_.push_back(step);
+    feedback_ = std::move(feedback);
+    result_ = std::move(result);
+  }
+
+  [[nodiscard]] bool cancel(
+    const MotionToken &, SteadyClockPort::TimePoint) override
+  {
+    ++cancel_count_;
+    return true;
+  }
+
+  void tick(SteadyClockPort::TimePoint) override {}
+
+  void feedback(double progress)
+  {
+    if (token_ && feedback_) {
+      feedback_(*token_, progress);
+    }
+  }
+
+  void complete()
+  {
+    if (token_ && result_) {
+      result_(*token_, ChildResult{ChildResultCode::Succeeded, {}});
+    }
+  }
+
+  [[nodiscard]] const std::vector<MissionStep> & started_steps() const
+  {
+    return started_steps_;
+  }
+
+private:
+  bool healthy_{true};
+  std::optional<MotionToken> token_;
+  MissionChildPort::FeedbackCallback feedback_;
+  MissionChildPort::ResultCallback result_;
+  std::vector<MissionStep> started_steps_;
+  std::size_t cancel_count_{0U};
+};
+
+using ScriptedNavigationPort = ScriptedChildPort<NavigationPort>;
+using ScriptedMapStorePort = ScriptedChildPort<MapStorePort>;
 
 TEST(RuntimeCore, InvalidPlanIsRejectedBeforeDependenciesAndConsumesSequence)
 {
@@ -181,7 +239,7 @@ TEST(RuntimeCore, ChildCallbacksCanBeQueuedAndAppliedByTheRuntimeWorker)
   std::vector<std::pair<MotionToken, double>> queued_feedback;
   std::vector<std::pair<MotionToken, ChildResult>> queued_results;
   RuntimeCore core(
-    config(), clock, authority, relative,
+    config(), clock, authority, RuntimePorts{relative, {}, {}},
     {},
     [&feedback](std::uint64_t, const MissionFeedback & item) {
       feedback.push_back(item);
@@ -296,7 +354,7 @@ TEST(RuntimeCore, ActiveStopEpochExhaustionFailsTheWholeTransaction)
     std::numeric_limits<std::uint64_t>::max();
   std::vector<MissionResult> results;
   RuntimeCore core(
-    max_epoch_config, clock, authority, relative, {}, {},
+    max_epoch_config, clock, authority, RuntimePorts{relative, {}, {}}, {}, {},
     [&results](std::uint64_t, const MissionResult & result) {
       results.push_back(result);
     });
@@ -322,8 +380,17 @@ TEST(RuntimeCore, ActiveStopEpochExhaustionFailsTheWholeTransaction)
 
 TEST(RuntimeCore, UnsupportedUnionIsDistinguishedFromInvalidUnion)
 {
-  Fixture fixture;
-  const auto unsupported = fixture.core.admit(goal(
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  auto navigation_config = config();
+  navigation_config.operating_mode = OperatingMode::Navigation;
+  navigation_config.named_place_ids = {"place-a"};
+  RuntimeCore core(
+    navigation_config, clock, authority, RuntimePorts{relative, {}, {}});
+  core.observe_gate(authority->snapshot());
+
+  const auto unsupported = core.admit(goal(
     1U,
         {MissionStep{
             static_cast<std::uint8_t>(MissionStepKind::NavigateTo), 0.0F, 0.0F,
@@ -331,13 +398,98 @@ TEST(RuntimeCore, UnsupportedUnionIsDistinguishedFromInvalidUnion)
   EXPECT_FALSE(unsupported.accepted);
   EXPECT_EQ(unsupported.result.code, MissionResultCode::UnsupportedStep);
 
-  const auto invalid = fixture.core.admit(goal(
+  const auto invalid = core.admit(goal(
     2U,
         {MissionStep{
             static_cast<std::uint8_t>(MissionStepKind::NavigateTo), 0.1F, 0.0F,
             "place-a"}}));
   EXPECT_FALSE(invalid.accepted);
   EXPECT_EQ(invalid.result.code, MissionResultCode::InvalidPlan);
+}
+
+TEST(RuntimeCore, NavigationUsesNamedPlacePortAndRejectsWrongContext)
+{
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  auto navigation = std::make_shared<ScriptedNavigationPort>();
+  auto map_store = std::make_shared<ScriptedMapStorePort>();
+  auto navigation_config = config();
+  navigation_config.operating_mode = OperatingMode::Navigation;
+  navigation_config.named_place_ids = {"kitchen"};
+  std::vector<MissionResult> results;
+  RuntimeCore core(
+    navigation_config, clock, authority,
+    RuntimePorts{relative, navigation, map_store}, {}, {},
+    [&results](std::uint64_t, const MissionResult & result) {
+      results.push_back(result);
+    });
+  core.observe_gate(authority->snapshot());
+
+  EXPECT_EQ(
+    core.state().supported_step_mask,
+    kRelativeMissionStepMask | kNavigateMissionStepMask);
+  const auto wrong_mode = core.admit(goal(
+    1U,
+        {MissionStep{
+            static_cast<std::uint8_t>(MissionStepKind::SaveMap),
+            0.0F, 0.0F, "house_new"}}));
+  EXPECT_EQ(wrong_mode.result.code, MissionResultCode::ModeMismatch);
+  const auto unknown = core.admit(goal(
+    2U,
+        {MissionStep{
+            static_cast<std::uint8_t>(MissionStepKind::NavigateTo),
+            0.0F, 0.0F, "study"}}));
+  EXPECT_EQ(unknown.result.code, MissionResultCode::UnknownTarget);
+
+  const auto admitted = core.admit(goal(
+    3U,
+        {MissionStep{
+            static_cast<std::uint8_t>(MissionStepKind::NavigateTo),
+            0.0F, 0.0F, "kitchen"}}));
+  ASSERT_TRUE(admitted.accepted);
+  ASSERT_EQ(navigation->started_steps().size(), 1U);
+  navigation->feedback(0.5);
+  navigation->complete();
+  ASSERT_EQ(results.size(), 1U);
+  EXPECT_EQ(results.front().code, MissionResultCode::Succeeded);
+}
+
+TEST(RuntimeCore, MappingQueueRoutesRelativeMotionThenMapStore)
+{
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  auto map_store = std::make_shared<ScriptedMapStorePort>();
+  std::vector<MissionResult> results;
+  RuntimeCore core(
+    config(), clock, authority, RuntimePorts{relative, {}, map_store}, {}, {},
+    [&results](std::uint64_t, const MissionResult & result) {
+      results.push_back(result);
+    });
+  core.observe_gate(authority->snapshot());
+
+  EXPECT_EQ(
+    core.state().supported_step_mask,
+    kRelativeMissionStepMask | kSaveMapMissionStepMask);
+  const auto admitted = core.admit(goal(
+    1U,
+      {
+        MissionStep{
+          static_cast<std::uint8_t>(MissionStepKind::MoveDistance),
+          0.5F, 0.0F, ""},
+        MissionStep{
+          static_cast<std::uint8_t>(MissionStepKind::SaveMap),
+          0.0F, 0.0F, "house_new"},
+      }));
+  ASSERT_TRUE(admitted.accepted);
+  ASSERT_EQ(relative->started_steps().size(), 1U);
+  EXPECT_TRUE(map_store->started_steps().empty());
+  relative->complete();
+  ASSERT_EQ(map_store->started_steps().size(), 1U);
+  map_store->complete();
+  ASSERT_EQ(results.size(), 1U);
+  EXPECT_EQ(results.front().code, MissionResultCode::Succeeded);
 }
 
 TEST(RuntimeCore, StartupConvergesLegacyPreparedGateToCurrentZeroProof)
@@ -348,7 +500,7 @@ TEST(RuntimeCore, StartupConvergesLegacyPreparedGateToCurrentZeroProof)
         kGateId, 7U, std::string(32U, 'l'), GateState::Prepared,
         true, false, false, false});
   auto relative = std::make_shared<ScriptedRelativeMotionPort>();
-  RuntimeCore core(config(), clock, authority, relative);
+  RuntimeCore core(config(), clock, authority, RuntimePorts{relative, {}, {}});
 
   core.observe_gate(authority->snapshot());
 
@@ -367,7 +519,7 @@ TEST(RuntimeCore, StartupLegacyLeaseFailureRemainsFaultedAndUnbound)
         true, false, false, false});
   authority->set_inhibit_failure("startup zero convergence failed");
   auto relative = std::make_shared<ScriptedRelativeMotionPort>();
-  RuntimeCore core(config(), clock, authority, relative);
+  RuntimeCore core(config(), clock, authority, RuntimePorts{relative, {}, {}});
 
   core.observe_gate(authority->snapshot());
 
@@ -646,8 +798,10 @@ TEST(RuntimeCore, RestartCreatesNewRuntimeIdentityAtEpochOne)
   auto restart_config = config();
   restart_config.runtime_instance_id.clear();
   restart_config.identifier_generator = {};
-  RuntimeCore first(restart_config, clock, authority, relative);
-  RuntimeCore second(restart_config, clock, authority, relative);
+  RuntimeCore first(
+    restart_config, clock, authority, RuntimePorts{relative, {}, {}});
+  RuntimeCore second(
+    restart_config, clock, authority, RuntimePorts{relative, {}, {}});
 
   EXPECT_NE(first.state().runtime_instance_id, second.state().runtime_instance_id);
   EXPECT_EQ(first.state().admission_epoch, 1U);
@@ -695,7 +849,7 @@ TEST(RuntimeCore, FullStopCacheFailsClosedAndCleansTheActiveMission)
   small_config.stop_cache_size = 1U;
   std::vector<MissionResult> results;
   RuntimeCore core(
-    small_config, clock, authority, relative, {}, {},
+    small_config, clock, authority, RuntimePorts{relative, {}, {}}, {}, {},
     [&results](std::uint64_t, const MissionResult & result) {
       results.push_back(result);
     });

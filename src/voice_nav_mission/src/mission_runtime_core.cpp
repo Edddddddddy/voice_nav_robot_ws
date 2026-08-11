@@ -90,7 +90,7 @@ RuntimeCore::RuntimeCore(
   RuntimeConfig config,
   std::shared_ptr<SteadyClockPort> clock,
   std::shared_ptr<MotionAuthorityPort> authority,
-  std::shared_ptr<RelativeMotionPort> relative_motion,
+  RuntimePorts ports,
   StateCallback state_callback,
   FeedbackCallback feedback_callback,
   ResultCallback result_callback,
@@ -102,7 +102,7 @@ RuntimeCore::RuntimeCore(
 : config_(std::move(config)),
   clock_(std::move(clock)),
   authority_(std::move(authority)),
-  relative_motion_(std::move(relative_motion)),
+  ports_(std::move(ports)),
   state_callback_(std::move(state_callback)),
   feedback_callback_(std::move(feedback_callback)),
   result_callback_(std::move(result_callback)),
@@ -112,7 +112,7 @@ RuntimeCore::RuntimeCore(
   child_result_registrar_(std::move(child_result_registrar)),
   child_result_unregistrar_(std::move(child_result_unregistrar))
 {
-  if (!clock_ || !authority_ || !relative_motion_) {
+  if (!clock_ || !authority_ || !ports_.relative_motion) {
     throw std::invalid_argument("Runtime Core requires clock and all ports");
   }
   if (
@@ -144,6 +144,13 @@ RuntimeCore::RuntimeCore(
   }
 
   state_.operating_mode = config_.operating_mode;
+  state_.supported_step_mask = kRelativeMissionStepMask;
+  if (config_.operating_mode == OperatingMode::Navigation && ports_.navigation) {
+    state_.supported_step_mask |= kNavigateMissionStepMask;
+  }
+  if (config_.operating_mode == OperatingMode::Mapping && ports_.map_store) {
+    state_.supported_step_mask |= kSaveMapMissionStepMask;
+  }
   state_.admission_epoch = config_.initial_admission_epoch;
   state_.max_steps = config_.max_steps;
   state_.named_place_ids = config_.named_place_ids;
@@ -159,8 +166,8 @@ RuntimeCore::RuntimeCore(
   state_.gate_state = gate_snapshot_.endpoint_available ?
     gate_snapshot_.state : GateState::Faulted;
   state_.availability = RuntimeAvailability::Unavailable;
-  last_relative_healthy_ = relative_motion_->healthy();
-  relative_health_initialized_ = true;
+  last_dependencies_healthy_ = dependencies_healthy();
+  dependency_health_initialized_ = true;
   publish_state();
 }
 
@@ -208,10 +215,18 @@ AdmissionResult RuntimeCore::admit(
       MissionResultCode::SafetyFault,
       "Runtime is faulted and remains fail-closed")};
   }
-  if (!relative_motion_->healthy()) {
+  for (const auto & step : goal.steps) {
+    const auto * port = port_for(step);
+    if (!port || !port->healthy()) {
+      return AdmissionResult{0U, false, reject(
+        MissionResultCode::DependencyUnavailable,
+        "Mission child port is unavailable")};
+    }
+  }
+  if (!dependencies_healthy()) {
     return AdmissionResult{0U, false, reject(
       MissionResultCode::DependencyUnavailable,
-      "RelativeMotionPort is unavailable")};
+      "a configured Mission child port is unavailable")};
   }
   gate_snapshot_ = authority_->snapshot();
   if (gate_snapshot_.state == GateState::Faulted &&
@@ -256,7 +271,7 @@ AdmissionResult RuntimeCore::admit(
       "Mission generation exhausted")};
   }
 
-  if (!relative_motion_->owns_authority_lifecycle()) {
+  if (!ports_.relative_motion->owns_authority_lifecycle()) {
     const auto prepare = authority_->prepare(make_operation());
     if (!prepare.applied) {
       return AdmissionResult{0U, false, reject(
@@ -359,11 +374,11 @@ StopResponse RuntimeCore::stop(const StopRequest & request)
       }
       bool zero = false;
       bool canceled = true;
-      if (relative_motion_->owns_authority_lifecycle()) {
+      if (ports_.relative_motion->owns_authority_lifecycle()) {
         try {
-          canceled = relative_motion_->cancel(
+          canceled = ports_.relative_motion->cancel(
             MotionToken{}, clock_->now() + config_.stationarity_deadline);
-          zero = canceled && relative_motion_->zero_proven();
+          zero = canceled && ports_.relative_motion->zero_proven();
         } catch (...) {
           canceled = false;
         }
@@ -523,20 +538,22 @@ void RuntimeCore::observe_gate(const GateSnapshot & snapshot)
 
 void RuntimeCore::observe_dependencies()
 {
-  const bool healthy = relative_motion_->healthy();
-  if (relative_health_initialized_ && last_relative_healthy_ && !healthy) {
+  const bool healthy = dependencies_healthy();
+  if (
+    dependency_health_initialized_ && last_dependencies_healthy_ && !healthy)
+  {
     (void)rotate_epoch();
     if (active_.has_value()) {
       select_terminal_and_stop(
         MissionResultCode::SafetyFault,
-        "RelativeMotionPort became unhealthy during Mission");
+        "a configured Mission child port became unhealthy during Mission");
     } else {
       state_.availability = RuntimeAvailability::Faulted;
       publish_state();
     }
   }
-  last_relative_healthy_ = healthy;
-  relative_health_initialized_ = true;
+  last_dependencies_healthy_ = healthy;
+  dependency_health_initialized_ = true;
   if (!active_.has_value() && state_.availability != RuntimeAvailability::Faulted) {
     set_availability_from_dependencies();
     publish_state();
@@ -556,7 +573,13 @@ void RuntimeCore::on_tick()
     state_.availability = RuntimeAvailability::Unavailable;
     publish_state();
   }
-  relative_motion_->tick(now);
+  ports_.relative_motion->tick(now);
+  if (ports_.navigation) {
+    ports_.navigation->tick(now);
+  }
+  if (ports_.map_store) {
+    ports_.map_store->tick(now);
+  }
   if (!active_.has_value()) {
     return;
   }
@@ -566,7 +589,7 @@ void RuntimeCore::on_tick()
       "Mission deadline elapsed on the injected steady clock");
     return;
   }
-  if (!relative_motion_->owns_authority_lifecycle()) {
+  if (!ports_.relative_motion->owns_authority_lifecycle()) {
     const auto renewed = authority_->renew(make_operation(current_lease_id_));
     if (!renewed.applied) {
       select_terminal_and_stop(
@@ -619,10 +642,60 @@ bool RuntimeCore::validate_goal(
       return false;
     }
     const auto kind = goal.steps[index].kind;
-    if (kind == kNavigateToKind || kind == kSaveMapKind) {
+    if (kind == kNavigateToKind) {
+      if (config_.operating_mode != OperatingMode::Navigation) {
+        result = reject(
+          MissionResultCode::ModeMismatch,
+          "NAVIGATE_TO requires Navigation Mode");
+        return false;
+      }
+      if (!ports_.navigation) {
+        result = reject(
+          MissionResultCode::UnsupportedStep,
+          "NavigationPort is not configured");
+        return false;
+      }
+      if (std::find(
+          config_.named_place_ids.begin(), config_.named_place_ids.end(),
+          goal.steps[index].target_id) == config_.named_place_ids.end())
+      {
+        result = reject(
+          MissionResultCode::UnknownTarget,
+          "NAVIGATE_TO target_id is not a configured Named Place");
+        return false;
+      }
+    }
+    if (kind == kSaveMapKind) {
+      if (config_.operating_mode != OperatingMode::Mapping) {
+        result = reject(
+          MissionResultCode::ModeMismatch,
+          "SAVE_MAP requires Mapping Mode");
+        return false;
+      }
+      if (!ports_.map_store) {
+        result = reject(
+          MissionResultCode::UnsupportedStep,
+          "MapStorePort is not configured");
+        return false;
+      }
+      const auto & id = goal.steps[index].target_id;
+      const bool valid_map_id = !id.empty() && id.size() <= 32U &&
+        id.front() >= 'a' && id.front() <= 'z' &&
+        std::all_of(id.begin() + 1, id.end(), [](const char value) {
+            return (value >= 'a' && value <= 'z') ||
+                   (value >= '0' && value <= '9') || value == '_' || value == '-';
+        });
+      if (!valid_map_id) {
+        result = reject(
+          MissionResultCode::InvalidPlan,
+          "SAVE_MAP target_id is not a valid logical Map ID");
+        return false;
+      }
+    }
+    if (!port_for(goal.steps[index])) {
       result = reject(
         MissionResultCode::UnsupportedStep,
-        "NAVIGATE_TO and SAVE_MAP are not implemented in this Runtime slice");
+        "Mission step has no configured child port");
       return false;
     }
   }
@@ -691,6 +764,37 @@ bool RuntimeCore::validate_step(
   }
   result = reject(MissionResultCode::InvalidPlan, "unknown Mission step kind");
   return false;
+}
+
+MissionChildPort * RuntimeCore::port_for(const MissionStep & step) const
+{
+  const auto move = static_cast<std::uint8_t>(MissionStepKind::MoveDistance);
+  const auto rotate = static_cast<std::uint8_t>(MissionStepKind::RotateAngle);
+  if (step.kind == move || step.kind == rotate) {
+    return ports_.relative_motion.get();
+  }
+  if (step.kind == kNavigateToKind) {
+    return ports_.navigation.get();
+  }
+  if (step.kind == kSaveMapKind) {
+    return ports_.map_store.get();
+  }
+  return nullptr;
+}
+
+bool RuntimeCore::dependencies_healthy() const
+{
+  if (!ports_.relative_motion->healthy()) {
+    return false;
+  }
+  if (
+    config_.operating_mode == OperatingMode::Navigation &&
+    ports_.navigation && !ports_.navigation->healthy())
+  {
+    return false;
+  }
+  return config_.operating_mode != OperatingMode::Mapping ||
+         !ports_.map_store || ports_.map_store->healthy();
 }
 
 bool RuntimeCore::consume_source_sequence(
@@ -783,7 +887,7 @@ void RuntimeCore::set_availability_from_dependencies()
     state_.availability = RuntimeAvailability::Unavailable;
   } else if (gate_requires_fault) {
     state_.availability = RuntimeAvailability::Faulted;
-  } else if (!gate_is_healthy(gate_snapshot_) || !relative_motion_->healthy()) {
+  } else if (!gate_is_healthy(gate_snapshot_) || !dependencies_healthy()) {
     state_.availability = RuntimeAvailability::Unavailable;
   } else {
     state_.availability = RuntimeAvailability::Available;
@@ -846,6 +950,14 @@ void RuntimeCore::start_step()
     active_->step_generation,
     active_->admission_generation};
   active_->child_token = token;
+  auto * child_port = port_for(active_->steps[active_->step_index]);
+  if (!child_port) {
+    select_terminal_and_stop(
+      MissionResultCode::UnsupportedStep,
+      "Mission step has no configured child port");
+    return;
+  }
+  active_->child_port = child_port;
   if (!admission_allowed(token.admission_epoch)) {
     select_terminal_and_stop(
       MissionResultCode::SafetyFault,
@@ -854,7 +966,7 @@ void RuntimeCore::start_step()
   }
   bool completion_registered = false;
   try {
-    if (relative_motion_->uses_external_completion_registry()) {
+    if (child_port->uses_external_completion_registry()) {
       if (!child_result_registrar_ || !child_result_registrar_(
           token,
           [this](const MotionToken & callback_token, const ChildResult & result) {
@@ -870,7 +982,7 @@ void RuntimeCore::start_step()
     }
     active_->child_started = true;
     RelativeMotionPort::ResultCallback result_callback;
-    if (!relative_motion_->uses_external_completion_registry()) {
+    if (!child_port->uses_external_completion_registry()) {
       result_callback = [this](
         const MotionToken & callback_token, const ChildResult & result) {
           if (child_result_dispatcher_) {
@@ -880,7 +992,7 @@ void RuntimeCore::start_step()
           }
         };
     }
-    relative_motion_->start(
+    child_port->start(
       token,
       active_->steps[active_->step_index],
       [this](const MotionToken & callback_token, double progress) {
@@ -965,7 +1077,7 @@ void RuntimeCore::on_child_result(
     }
     select_terminal_and_stop(
       result_code,
-      result.detail.empty() ? "relative-motion child failed" : result.detail);
+      result.detail.empty() ? "Mission child failed" : result.detail);
     return;
   }
   // The completed child contributes its terminal progress exactly once. The
@@ -1037,18 +1149,20 @@ RuntimeCore::TerminalOutcome RuntimeCore::select_terminal_and_stop(
   publish_feedback(FeedbackPhase::SafeStopping, active_->step_index, 0.0);
   bool canceled = true;
   bool zero = false;
-  if (relative_motion_->owns_authority_lifecycle()) {
+  auto * child_port = active_->child_port ?
+    active_->child_port : ports_.relative_motion.get();
+  if (ports_.relative_motion->owns_authority_lifecycle()) {
     try {
-      canceled = relative_motion_->cancel(
+      canceled = child_port->cancel(
         token, clock_->now() + config_.stationarity_deadline);
-      zero = canceled && relative_motion_->zero_proven();
+      zero = canceled && ports_.relative_motion->zero_proven();
     } catch (...) {
       canceled = false;
     }
   } else {
     zero = inhibit_and_prove_zero();
     try {
-      canceled = relative_motion_->cancel(
+      canceled = child_port->cancel(
         token, clock_->now() + config_.cancel_grace);
     } catch (...) {
       canceled = false;
@@ -1060,7 +1174,7 @@ RuntimeCore::TerminalOutcome RuntimeCore::select_terminal_and_stop(
         MissionResultCode::SafetyFault,
         child_started ? static_cast<std::int32_t>(active_->step_index) : -1,
         !zero ? "terminal barrier could not prove Gate inhibit and zero" :
-        "relative-motion cancel did not acknowledge before its deadline"});
+        "Mission child cancel did not acknowledge before its deadline"});
     return TerminalOutcome{zero, canceled, epoch_advanced};
   }
   const auto failed_step = child_started && code != MissionResultCode::Succeeded ?
