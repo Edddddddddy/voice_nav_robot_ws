@@ -56,6 +56,14 @@ public:
     tail_.store(head_.load(std::memory_order_acquire), std::memory_order_release);
   }
 
+  std::size_t write_available() const noexcept
+  {
+    const auto head = head_.load(std::memory_order_relaxed);
+    const auto tail = tail_.load(std::memory_order_acquire);
+    const auto used = head >= tail ? head - tail : Capacity - (tail - head);
+    return Capacity - 1U - used;
+  }
+
 private:
   static constexpr std::size_t increment(const std::size_t value) noexcept
   {

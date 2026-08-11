@@ -35,10 +35,20 @@ class RapidVoiceNode(Node):
         self.vosk_python = self.declare_parameter('vosk_python', '').value
         self.vosk_model = self.declare_parameter('vosk_model', '').value
         self.pcm_fifo = self.declare_parameter('pcm_fifo', '').value
+        self.playback_fifo = self.declare_parameter('playback_fifo', '').value
         self.owns_pcm_fifo = False
+        self.owns_playback_fifo = False
         self.vosk = None
         self.work_group = ReentrantCallbackGroup()
-        self.playback = PiperPlayback(self.get_logger(), self.piper, self.model)
+        playback_fifo = (
+            self.playback_fifo
+            if self._prepare_fifo(
+                self.playback_fifo, 'owns_playback_fifo'
+            ) else ''
+        )
+        self.playback = PiperPlayback(
+            self.get_logger(), self.piper, self.model, playback_fifo
+        )
         self.wake_gate = WakeGate(
             self.declare_parameter('wake_word', '\u5c0f\u667a').value,
             float(self.declare_parameter('wake_timeout_s', 8.0).value),
@@ -68,7 +78,7 @@ class RapidVoiceNode(Node):
                 str(Path(__file__).with_name('vosk_worker.py')),
                 self.vosk_model,
             ]
-            if self._prepare_pcm_fifo():
+            if self._prepare_fifo(self.pcm_fifo, 'owns_pcm_fifo'):
                 worker_arguments.extend(['--pcm-fifo', self.pcm_fifo])
             self.vosk = subprocess.Popen(
                 worker_arguments,
@@ -80,17 +90,17 @@ class RapidVoiceNode(Node):
             'Rapid voice ready. Say the wake word before a command.'
         )
 
-    def _prepare_pcm_fifo(self):
-        if not self.pcm_fifo:
+    def _prepare_fifo(self, fifo, ownership_attribute):
+        if not fifo:
             return False
-        path = Path(self.pcm_fifo)
+        path = Path(fifo)
         if path.exists():
             if not stat.S_ISFIFO(path.stat().st_mode):
                 self.get_logger().error('pcm_fifo exists but is not a FIFO')
                 return False
             return True
         os.mkfifo(path, mode=0o600)
-        self.owns_pcm_fifo = True
+        setattr(self, ownership_attribute, True)
         return True
 
     def _read_terminal(self):
@@ -162,6 +172,8 @@ class RapidVoiceNode(Node):
                 self.vosk.wait(timeout=2)
         if self.owns_pcm_fifo:
             Path(self.pcm_fifo).unlink(missing_ok=True)
+        if self.owns_playback_fifo:
+            Path(self.playback_fifo).unlink(missing_ok=True)
         return super().destroy_node()
 
 

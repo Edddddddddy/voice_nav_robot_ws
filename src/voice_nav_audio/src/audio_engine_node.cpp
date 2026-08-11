@@ -48,6 +48,7 @@ public:
   : Node("voice_audio_engine")
   {
     capture_fifo_ = declare_parameter<std::string>("capture_fifo", "");
+    playback_fifo_ = declare_parameter<std::string>("playback_fifo", "");
     ::signal(SIGPIPE, SIG_IGN);
     check(Pa_Initialize(), "PortAudio initialization");
     initialized_ = true;
@@ -65,9 +66,10 @@ public:
         RCLCPP_INFO(
           get_logger(),
           "audio blocks=%lu fifo_frames=%lu fifo_drops=%lu capture_overflow=%lu "
-          "playback_underflow=%lu",
+          "playback_frames=%lu playback_drops=%lu playback_underflow=%lu",
           blocks_.load(), fifo_frames_.load(), fifo_drops_.load(),
-          capture_overflow_.load(), playback_underflow_.load());
+          capture_overflow_.load(), playback_frames_.load(),
+          playback_drops_.load(), playback_underflow_.load());
       });
     RCLCPP_INFO(get_logger(), "48 kHz mono full-duplex AudioEngine started");
   }
@@ -79,6 +81,7 @@ public:
       worker_.join();
     }
     close_capture_fifo();
+    close_playback_fifo();
     if (stream_ != nullptr) {
       Pa_StopStream(stream_);
       Pa_CloseStream(stream_);
@@ -123,6 +126,7 @@ private:
     std::array<float, kFramesPerBuffer> capture{};
     std::array<float, kFramesPerBuffer> render{};
     while (running_.load(std::memory_order_acquire)) {
+      read_playback_frame();
       std::size_t count = 0U;
       float sample = 0.0F;
       while (count < capture.size() && capture_ring_.pop(sample)) {
@@ -182,6 +186,47 @@ private:
     }
   }
 
+  void read_playback_frame()
+  {
+    if (
+      playback_fifo_.empty() ||
+      playback_ring_.write_available() < kFramesPerBuffer)
+    {
+      return;
+    }
+    if (playback_fifo_fd_ < 0) {
+      playback_fifo_fd_ = open(
+        playback_fifo_.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+      if (playback_fifo_fd_ < 0) {
+        return;
+      }
+    }
+    std::array<std::int16_t, kFramesPerBuffer> input{};
+    const auto bytes = input.size() * sizeof(input.front());
+    const auto received = ::read(playback_fifo_fd_, input.data(), bytes);
+    if (received == static_cast<ssize_t>(bytes)) {
+      for (const auto sample : input) {
+        playback_ring_.push(static_cast<float>(sample) / 32768.0F);
+      }
+      playback_frames_.fetch_add(1U, std::memory_order_relaxed);
+      return;
+    }
+    if (received > 0) {
+      playback_drops_.fetch_add(1U, std::memory_order_relaxed);
+    }
+    if (received >= 0) {
+      close_playback_fifo();
+    }
+  }
+
+  void close_playback_fifo()
+  {
+    if (playback_fifo_fd_ >= 0) {
+      close(playback_fifo_fd_);
+      playback_fifo_fd_ = -1;
+    }
+  }
+
   static void check(const PaError error, const std::string & operation)
   {
     if (error != paNoError) {
@@ -200,8 +245,12 @@ private:
   std::atomic<std::uint64_t> blocks_{0U};
   std::atomic<std::uint64_t> fifo_frames_{0U};
   std::atomic<std::uint64_t> fifo_drops_{0U};
+  std::atomic<std::uint64_t> playback_frames_{0U};
+  std::atomic<std::uint64_t> playback_drops_{0U};
   std::string capture_fifo_;
+  std::string playback_fifo_;
   int capture_fifo_fd_{-1};
+  int playback_fifo_fd_{-1};
   std::thread worker_;
   rclcpp::TimerBase::SharedPtr timer_;
 };

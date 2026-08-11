@@ -19,13 +19,16 @@
 TEST(SpscAudioRing, PreservesOrderAndBoundsCapacity)
 {
   voice_nav_audio::SpscAudioRing<4U> ring;
+  EXPECT_EQ(ring.write_available(), 3U);
   EXPECT_TRUE(ring.push(1.0F));
   EXPECT_TRUE(ring.push(2.0F));
   EXPECT_TRUE(ring.push(3.0F));
+  EXPECT_EQ(ring.write_available(), 0U);
   EXPECT_FALSE(ring.push(4.0F));
   float sample = 0.0F;
   EXPECT_TRUE(ring.pop(sample));
   EXPECT_FLOAT_EQ(sample, 1.0F);
+  EXPECT_EQ(ring.write_available(), 1U);
   EXPECT_TRUE(ring.push(4.0F));
   EXPECT_TRUE(ring.pop(sample));
   EXPECT_FLOAT_EQ(sample, 2.0F);

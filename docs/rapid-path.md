@@ -87,19 +87,22 @@ callback moves 48 kHz full-duplex samples through fixed SPSC rings; the worker
 performs a small 48→16 kHz conversion and writes private PCM frames to a FIFO
 consumed by Vosk. When the voice node is started alone without a FIFO, Vosk
 still falls back to WSLg `parec` or PyAudio. Transcript wake matching accepts
-`小 智` and the common Vosk `小志`/`晓智` forms. Piper playback continues through
-`paplay`.
+`小 智` and the common Vosk `小志`/`晓智` forms. Piper output is converted to
+48 kHz mono in its worker and written through a second private FIFO into the
+AudioEngine playback ring.
 The rapid Speak server now keeps a real PlaybackScope: it reports elapsed
-feedback, waits for `paplay` to finish, and returns canceled/barged-in results
-instead of claiming completion when playback merely starts. An accepted wake
-can interrupt an allowed scope, while `小智停止` always interrupts playback,
-calls `/mission/stop` directly with the Voice Turn ID, and then publishes the
-same STOP turn for the Agent's idempotent retry.
+feedback, waits for AudioEngine playback (or standalone `paplay` fallback) to
+finish, and returns canceled/barged-in results instead of claiming completion
+when playback merely starts. An accepted wake can interrupt an allowed scope,
+while `小智停止` always interrupts playback, calls `/mission/stop` directly with
+the Voice Turn ID, and then publishes the same STOP turn for the Agent's
+idempotent retry.
 
-This makes the C++ capture worker the real rapid ASR source, without exposing
-PCM as a ROS interface. Piper output is still a separate Pulse stream, so it
-is not yet placed into the AudioEngine playback/final-reference rings. Locked
-WebRTC AEC and sherpa-onnx KWS/VAD/ASR/TTS remain production gaps.
+This makes the C++ capture worker the real rapid ASR source and the same
+full-duplex callback the real TTS render sink, without exposing PCM as a ROS
+interface. Every callback render sample is also copied to the existing exact
+reference ring. Locked WebRTC AEC and sherpa-onnx KWS/VAD/ASR/TTS remain
+production gaps; rapid mode still uses Vosk wake/transcription and Piper.
 
 Set `VOICE_NAV_VOICE_ROOT` for a different clone or speech asset root. Missing
 speech assets do not prevent
