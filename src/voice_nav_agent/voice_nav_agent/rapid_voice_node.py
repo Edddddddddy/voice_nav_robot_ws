@@ -1,25 +1,30 @@
 """Wake-gated terminal/Vosk input and Piper output for the rapid demo."""
 
+from pathlib import Path
 import secrets
 import subprocess
-import tempfile
 import threading
 import time
-from pathlib import Path
 
 import rclpy
 from rclpy.action import ActionServer
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
 from voice_nav_interfaces.action import Speak
 from voice_nav_interfaces.msg import VoiceTurn
+from voice_nav_interfaces.srv import StopMission
 
-from .rapid_commands import WakeGate, normalize_rapid_command
+from .rapid_commands import normalize_rapid_command, WakeGate
+from .rapid_playback import PiperPlayback
 
 STOP_PHRASES = ('\u505c\u6b62', '\u7d27\u6025\u505c\u6b62')
 
 
 class RapidVoiceNode(Node):
+    """Connect local wake-gated speech to the formal Voice interfaces."""
+
     def __init__(self):
         super().__init__('rapid_voice_node')
         self.instance_id, self.sequence = secrets.token_hex(16), 0
@@ -27,23 +32,42 @@ class RapidVoiceNode(Node):
         self.model = self.declare_parameter('piper_model', '').value
         self.vosk_python = self.declare_parameter('vosk_python', '').value
         self.vosk_model = self.declare_parameter('vosk_model', '').value
+        self.vosk = None
+        self.work_group = ReentrantCallbackGroup()
+        self.playback = PiperPlayback(self.get_logger(), self.piper, self.model)
         self.wake_gate = WakeGate(
             self.declare_parameter('wake_word', '\u5c0f\u667a').value,
             float(self.declare_parameter('wake_timeout_s', 8.0).value),
         )
-        qos = QoSProfile(history=HistoryPolicy.KEEP_LAST, depth=1,
-                         reliability=ReliabilityPolicy.RELIABLE)
+        qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
         self.turns = self.create_publisher(VoiceTurn, '/voice/turn', qos)
-        self.speak = ActionServer(self, Speak, '/voice/speak', self._speak)
+        self.stop = self.create_client(
+            StopMission, '/mission/stop', callback_group=self.work_group
+        )
+        self.speak = ActionServer(
+            self,
+            Speak,
+            '/voice/speak',
+            self.playback.execute,
+            cancel_callback=self.playback.cancel,
+            callback_group=self.work_group,
+        )
         threading.Thread(target=self._read_terminal, daemon=True).start()
         if Path(self.vosk_python).is_file() and Path(self.vosk_model).is_dir():
             worker = Path(__file__).with_name('vosk_worker.py')
             self.vosk = subprocess.Popen(
                 [self.vosk_python, '-u', str(worker), self.vosk_model],
-                stdout=subprocess.PIPE, text=True,
+                stdout=subprocess.PIPE,
+                text=True,
             )
             threading.Thread(target=self._read_vosk, daemon=True).start()
-        self.get_logger().info('Rapid voice ready. Say the wake word before a command.')
+        self.get_logger().info(
+            'Rapid voice ready. Say the wake word before a command.'
+        )
 
     def _read_terminal(self):
         while rclpy.ok():
@@ -62,36 +86,64 @@ class RapidVoiceNode(Node):
         if command is None:
             return
         command = normalize_rapid_command(command)
+        is_stop = command in STOP_PHRASES
+        during_playback = self.playback.interrupt(force=is_stop)
         self.sequence += 1
         turn = VoiceTurn()
         turn.voice_instance_id, turn.voice_seq = self.instance_id, self.sequence
         turn.session_id, turn.turn_id = self.instance_id, secrets.token_hex(16)
-        turn.kind = VoiceTurn.STOP if command in STOP_PHRASES else VoiceTurn.COMMAND
-        turn.text, turn.confidence, turn.during_playback = command, 1.0, False
+        turn.kind = VoiceTurn.STOP if is_stop else VoiceTurn.COMMAND
+        turn.text = command
+        turn.confidence = 1.0
+        turn.during_playback = during_playback
+        if is_stop:
+            self._send_stop(turn)
         self.turns.publish(turn)
         self.get_logger().info('Accepted voice command: %s' % command)
 
-    def _speak(self, handle):
-        self.get_logger().info('SPEAK: %s' % handle.request.text)
-        if self.piper and Path(self.piper).is_file() and Path(self.model).is_file():
-            wav = Path(tempfile.gettempdir()) / ('voice-nav-' + secrets.token_hex(8) + '.wav')
-            try:
-                subprocess.run([self.piper, '--model', self.model, '--output_file', str(wav)], input=handle.request.text, text=True, check=True, timeout=30)
-                subprocess.Popen(['paplay', str(wav)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except (OSError, subprocess.SubprocessError) as error:
-                self.get_logger().warning('Piper playback failed: %s' % error)
-        result = Speak.Result()
-        result.code, result.detail = Speak.Result.COMPLETED, 'printed by rapid voice node'
-        handle.succeed()
-        return result
+    def _send_stop(self, turn):
+        if not self.stop.service_is_ready() and not self.stop.wait_for_service(
+            timeout_sec=0.25
+        ):
+            self.get_logger().warning(
+                'Direct voice STOP unavailable; Agent retry remains active'
+            )
+            return
+        request = StopMission.Request()
+        request.request_id = turn.turn_id
+        request.source_instance_id = turn.voice_instance_id
+        request.source_seq = turn.voice_seq
+        request.reason = 'voice_stop'
+        future = self.stop.call_async(request)
+        future.add_done_callback(self._stop_done)
+
+    def _stop_done(self, future):
+        try:
+            response = future.result()
+            self.get_logger().info(
+                'Direct voice STOP result code=%d inhibited=%s'
+                % (response.code, response.motion_inhibited)
+            )
+        except Exception as error:
+            self.get_logger().warning('Direct voice STOP failed: %s' % error)
+
+    def destroy_node(self):
+        self.playback.close()
+        if self.vosk is not None and self.vosk.poll() is None:
+            self.vosk.terminate()
+        return super().destroy_node()
 
 
 def main():
+    """Run the rapid voice endpoint with concurrent action/service callbacks."""
     rclpy.init()
     node = RapidVoiceNode()
+    executor = MultiThreadedExecutor(num_threads=3)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     finally:
+        executor.shutdown()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

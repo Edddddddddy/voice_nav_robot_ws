@@ -83,6 +83,12 @@ through `PULSE_SERVER`; it falls back to PyAudio/PortAudio elsewhere. This
 avoids the common WSL failure where PulseAudio is available but ALSA has no
 `default` device. Transcript wake matching accepts `小 智` and the common Vosk
 `小志`/`晓智` forms. Piper playback continues through `paplay`.
+The rapid Speak server now keeps a real PlaybackScope: it reports elapsed
+feedback, waits for `paplay` to finish, and returns canceled/barged-in results
+instead of claiming completion when playback merely starts. An accepted wake
+can interrupt an allowed scope, while `小智停止` always interrupts playback,
+calls `/mission/stop` directly with the Voice Turn ID, and then publishes the
+same STOP turn for the Agent's idempotent retry.
 
 `voice_nav_audio/audio_engine_node` is the first C++ full-duplex seam: 48 kHz
 mono PortAudio callback, bounded capture/playback/final-render SPSC rings, and
@@ -106,4 +112,5 @@ colcon build --packages-select voice_nav_agent voice_nav_bringup --symlink-insta
   --cmake-args -DBUILD_TESTING=OFF
 ros2 launch voice_nav_bringup navigation_sim.launch.py --show-args
 bash scripts/rapid-navigation-smoke.sh
+bash scripts/rapid-voice-smoke.sh
 ```
