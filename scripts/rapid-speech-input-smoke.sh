@@ -8,6 +8,7 @@ cd "$workspace"
 source /opt/ros/jazzy/setup.bash
 source install/setup.bash
 : >"$log"
+: >/tmp/voice-nav-engine-playback-action.log
 
 setsid ros2 launch voice_nav_bringup rapid_agent_stack.launch.py \
   mode:=mapping llm_enabled:=false >"$log" 2>&1 &
@@ -20,7 +21,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for _ in $(seq 1 150); do
+for _ in $(seq 1 400); do
   if grep -q '"audio_source": "audio_engine_fifo"' "$log" && \
       ros2 action info /voice/speak 2>/dev/null | \
         grep -q 'Action servers: 1'; then
