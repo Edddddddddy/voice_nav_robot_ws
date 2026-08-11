@@ -219,7 +219,7 @@ public:
           before_dispatch(event);
         })),
     plane_(std::make_unique<RuntimeExecutionPlane>(
-      make_config(), clock_, authority_, relative_,
+      make_config(), clock_, authority_, RuntimePorts{relative_, {}, {}},
         [](const RuntimeState &) {},
         [](std::uint64_t, const MissionFeedback &) {},
         [this](std::uint64_t, const MissionResult & result) {

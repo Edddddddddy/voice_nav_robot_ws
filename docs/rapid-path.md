@@ -8,11 +8,11 @@ make a MotionGate, collision-monitor, recovery, or real-robot safety claim.
 ## Components
 
 ```text
-Gazebo house + LiDAR
-  -> SLAM Toolbox (mapping) or AMCL + Nav2 (navigation)
-  -> rapid mission bridge (motion/map save or up to three ordered places)
+Vosk microphone transcript -> wake phrase gate
   -> Agent deterministic parser + loopback Qwen fallback
-  -> Vosk microphone transcript -> wake phrase gate
+  -> C++ Mission Runtime (session fencing, feedback, queue, cancel, timeout)
+  -> private rapid bridge (relative motion, Nav2, or SLAM map save)
+  -> Gazebo house + LiDAR
   -> Piper speech output
 ```
 
@@ -38,8 +38,10 @@ ros2 launch voice_nav_bringup mapping_sim.launch.py headless:=true
 ros2 launch voice_nav_bringup navigation_sim.launch.py headless:=true
 ```
 
-The navigation launch starts Gazebo, AMCL, Nav2, `rapid_mission_bridge`, the
-existing Agent, and the rapid voice endpoint.  Named places are `home`,
+The navigation launch starts Gazebo, AMCL, Nav2, `mission_runtime_node`, the
+private `rapid_mission_bridge`, the Agent, and the rapid voice endpoint. The
+public `/mission/*` Interface belongs only to the C++ Runtime; the bridge is a
+private child Action Adapter. Named places are `home`,
 `study`, and `kitchen`; try a Mandarin command such as `去厨房` (the local
 parser maps it to `kitchen`). Their poses are loaded from the installed
 `house_demo_places.yaml`, validated once at startup, and published in the
@@ -84,6 +86,11 @@ same-root staging directory and exposed by one rename. Pass
 rapid launches explicitly disable the production MotionGate chain because
 they publish directly to the simulated controller; `product_sim.launch.py`
 remains safe-by-default with the chain enabled.
+
+Rapid Runtime mode uses an explicitly unsafe in-memory authority Adapter. It
+keeps Runtime admission epochs, typed feedback, cancellation, timeout, and
+late-result fencing real without creating a competing zero-velocity writer.
+It does not claim the production MotionGate lease or fail-closed guarantees.
 
 ## Local speech assets
 

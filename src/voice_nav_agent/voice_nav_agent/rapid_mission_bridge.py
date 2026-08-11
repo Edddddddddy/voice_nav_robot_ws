@@ -17,6 +17,7 @@ from nav2_msgs.action import NavigateToPose
 import rclpy
 from rclpy.action import ActionClient, ActionServer, CancelResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy,
@@ -35,7 +36,7 @@ from voice_nav_interfaces.srv import StopMission
 from .rapid_map_package import finish_map_package, load_places
 
 MAPPING_MASK = 0b1011
-NAVIGATION_MASK = 0b0100
+NAVIGATION_MASK = 0b0111
 LINEAR_SPEED = 0.25
 ANGULAR_SPEED = 0.6
 
@@ -66,6 +67,18 @@ class RapidMissionBridge(Node):
         )
         self.runtime_id = secrets.token_hex(16)
         self.epoch = 1
+        self.enforce_runtime_token = self.declare_parameter(
+            'enforce_runtime_token', True
+        ).value
+        action_name = self.declare_parameter(
+            'action_name', '/mission/execute'
+        ).value
+        state_topic = self.declare_parameter(
+            'state_topic', '/mission/state'
+        ).value
+        stop_service = self.declare_parameter(
+            'stop_service', '/mission/stop'
+        ).value
         self.active_handle = None
         self.active_nav = None
         self.work_group = ReentrantCallbackGroup()
@@ -95,19 +108,19 @@ class RapidMissionBridge(Node):
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
         self.publisher = self.create_publisher(
-            MissionState, '/mission/state', qos
+            MissionState, state_topic, qos
         )
         self.server = ActionServer(
             self,
             ExecuteMission,
-            '/mission/execute',
+            action_name,
             self.execute,
             cancel_callback=self.cancel,
             callback_group=self.work_group,
         )
         self.stop = self.create_service(
             StopMission,
-            '/mission/stop',
+            stop_service,
             self.stop_goal,
             callback_group=self.work_group,
         )
@@ -151,7 +164,7 @@ class RapidMissionBridge(Node):
                 -1,
                 'another rapid Mission is active',
             )
-        if (
+        if self.enforce_runtime_token and (
             goal.runtime_instance_id != self.runtime_id
             or goal.admission_epoch != self.epoch
         ):
@@ -314,8 +327,19 @@ class RapidMissionBridge(Node):
             base = staging / 'map'
             save_request = SaveMap.Request()
             save_request.name.data = str(base)
-            save_response = await self.save_map.call_async(save_request)
-            if save_response.result != SaveMap.Response.RESULT_SUCCESS:
+            save_response = None
+            for attempt in range(3):
+                save_response = await self.save_map.call_async(save_request)
+                if save_response.result == SaveMap.Response.RESULT_SUCCESS:
+                    break
+                self.get_logger().warning(
+                    f'SaveMap attempt {attempt + 1} missed /map; retrying'
+                )
+                await self._sleep(2.0)
+            if (
+                save_response is None
+                or save_response.result != SaveMap.Response.RESULT_SUCCESS
+            ):
                 return (
                     ExecuteMission.Result.EXECUTION_FAILED,
                     'occupancy save failed',
@@ -348,17 +372,32 @@ class RapidMissionBridge(Node):
             )
         for index, step in enumerate(steps):
             if self.mode == 'navigation':
-                if step.kind != MissionStep.NAVIGATE_TO:
+                if step.kind == MissionStep.NAVIGATE_TO:
+                    if step.target_id not in self.places:
+                        return (
+                            ExecuteMission.Result.UNKNOWN_TARGET,
+                            index,
+                            'unknown place',
+                        )
+                elif step.kind == MissionStep.MOVE_DISTANCE:
+                    if not 0.05 <= abs(step.distance_m) <= 2.0:
+                        return (
+                            ExecuteMission.Result.INVALID_PLAN,
+                            index,
+                            'bad distance',
+                        )
+                elif step.kind == MissionStep.ROTATE_ANGLE:
+                    if not 0.05 <= abs(step.angle_rad) <= math.pi:
+                        return (
+                            ExecuteMission.Result.INVALID_PLAN,
+                            index,
+                            'bad angle',
+                        )
+                else:
                     return (
                         ExecuteMission.Result.UNSUPPORTED_STEP,
                         index,
-                        'navigation mode accepts NAVIGATE_TO only',
-                    )
-                if step.target_id not in self.places:
-                    return (
-                        ExecuteMission.Result.UNKNOWN_TARGET,
-                        index,
-                        'unknown place',
+                        'navigation mode accepts MOVE, ROTATE, and NAVIGATE_TO',
                     )
             elif step.kind == MissionStep.MOVE_DISTANCE:
                 if not 0.05 <= abs(step.distance_m) <= 2.0:
@@ -468,6 +507,11 @@ def main():
     node = RapidMissionBridge()
     try:
         rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
+        pass
+    except Exception:
+        if rclpy.ok():
+            raise
     finally:
         node.destroy_node()
         if rclpy.ok():

@@ -44,6 +44,7 @@
 #include "voice_nav_mission/action_admission_tracker.hpp"
 #include "voice_nav_mission/mission_action_result_router.hpp"
 #include "voice_nav_mission/motion_authority_ros_adapter.hpp"
+#include "voice_nav_mission/rapid_mission_ros_adapters.hpp"
 #include "voice_nav_mission/relative_motion_ros_adapter.hpp"
 #include "voice_nav_mission/runtime_admission_gate.hpp"
 #include "voice_nav_mission/runtime_emergency_fence.hpp"
@@ -246,6 +247,79 @@ public:
   }
 };
 
+// Explicitly non-safe authority used only when rapid_delegate_action is set.
+// It preserves Runtime sequencing without creating a second velocity writer;
+// the delegated rapid bridge remains the sole simulation command source.
+class RapidUnsafeMotionAuthority final : public MotionAuthorityPort
+{
+public:
+  RapidUnsafeMotionAuthority()
+  : snapshot_{
+      "rapid-unsafe-authority", 1U, "", GateState::Inhibited,
+      true, true, true, true, "", true, true}
+  {
+  }
+
+  [[nodiscard]] GateSnapshot snapshot() const override
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return snapshot_;
+  }
+
+  [[nodiscard]] AuthorityResult prepare(
+    const AuthorityOperation &) override
+  {
+    return transition(GateState::Prepared, true, std::string(32U, 'r'));
+  }
+
+  [[nodiscard]] AuthorityResult open(const AuthorityOperation &) override
+  {
+    return transition(GateState::Armed, false, snapshot().lease_id);
+  }
+
+  [[nodiscard]] AuthorityResult renew(const AuthorityOperation &) override
+  {
+    const auto current = snapshot();
+    return AuthorityResult{
+      current.state == GateState::Armed,
+      false,
+      false,
+      current,
+      current.lease_id,
+      "rapid unsafe authority renewed",
+      false};
+  }
+
+  [[nodiscard]] AuthorityResult inhibit(const AuthorityOperation &) override
+  {
+    return transition(GateState::Inhibited, true, "");
+  }
+
+private:
+  [[nodiscard]] AuthorityResult transition(
+    const GateState state, const bool inhibited, std::string lease)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++snapshot_.control_seq;
+    snapshot_.state = state;
+    snapshot_.lease_id = std::move(lease);
+    snapshot_.motion_inhibited = inhibited;
+    snapshot_.zero_selected = inhibited;
+    snapshot_.zero_published = inhibited;
+    return AuthorityResult{
+      true,
+      inhibited,
+      false,
+      snapshot_,
+      snapshot_.lease_id,
+      "rapid unsafe authority applied",
+      false};
+  }
+
+  mutable std::mutex mutex_;
+  GateSnapshot snapshot_;
+};
+
 }  // namespace
 
 class MissionRuntimeNode final : public rclcpp::Node
@@ -290,39 +364,62 @@ public:
     auto state_qos = rclcpp::QoS(rclcpp::KeepLast(1));
     state_qos.reliable().transient_local();
     state_publisher_ = create_publisher<MissionStateMessage>(kStateTopic, state_qos);
-    authority_ = std::make_shared<RosMotionAuthorityPort>(
-      *this,
-      config_.control_response_deadline,
-      config_.stop_barrier,
-      [this](const GateSnapshot & snapshot) {
-        (void)enqueue_internal_event(RuntimeEvent{0U, GateSnapshotEvent{snapshot}});
-      });
+    const auto rapid_delegate_action = declare_parameter<std::string>(
+      "rapid_delegate_action", "");
+    RuntimePorts runtime_ports;
+    if (!rapid_delegate_action.empty()) {
+      authority_ = std::make_shared<RapidUnsafeMotionAuthority>();
+      auto delegate = std::make_shared<RapidMissionDelegate>(
+        *this, rapid_delegate_action);
+      runtime_ports.relative_motion =
+        std::make_shared<RapidRelativeMotionPort>(delegate);
+      if (config_.operating_mode == OperatingMode::Navigation) {
+        runtime_ports.navigation =
+          std::make_shared<RapidNavigationPort>(delegate);
+      } else {
+        runtime_ports.map_store =
+          std::make_shared<RapidMapStorePort>(delegate);
+      }
+    } else {
+      ros_authority_ = std::make_shared<RosMotionAuthorityPort>(
+        *this,
+        config_.control_response_deadline,
+        config_.stop_barrier,
+        [this](const GateSnapshot & snapshot) {
+          (void)enqueue_internal_event(
+            RuntimeEvent{0U, GateSnapshotEvent{snapshot}});
+        });
+      authority_ = ros_authority_;
+      RelativeMotionPolicy motion_policy;
+      motion_policy.stationarity_deadline = config_.stationarity_deadline;
+      MotionConditioningConfig conditioning_config;
+      conditioning_config.stop_barrier = config_.stop_barrier;
+      conditioning_config.collision_source_timeout = std::chrono::milliseconds(
+        kTrustedCollisionSourceTimeoutMs);
+      conditioning_config.transaction_plane = admission_gate_.transaction_plane();
+      conditioning_config.admission_fence_check =
+        [this](const std::uint64_t epoch) {
+          return admission_gate_.admission_allowed(
+            epoch,
+            [this](const std::uint64_t value) {
+              return event_ingress_.admission_allowed(value);
+            });
+        };
+      conditioning_config.completion_relay =
+        [this](RelativeMotionCompletionRecordPtr record) {
+          return execution_plane_ &&
+                 execution_plane_->completion_mailbox().relay(std::move(record));
+        };
+      relative_motion_ = std::make_shared<RelativeMotionRosAdapter>(
+        *this, authority_, motion_policy, conditioning_config);
+      runtime_ports.relative_motion = relative_motion_;
+    }
     const auto initial_gate_snapshot = authority_->snapshot();
-    RelativeMotionPolicy motion_policy;
-    motion_policy.stationarity_deadline = config_.stationarity_deadline;
-    MotionConditioningConfig conditioning_config;
-    conditioning_config.stop_barrier = config_.stop_barrier;
-    conditioning_config.collision_source_timeout = std::chrono::milliseconds(
-      kTrustedCollisionSourceTimeoutMs);
-    conditioning_config.transaction_plane = admission_gate_.transaction_plane();
-    conditioning_config.admission_fence_check = [this](const std::uint64_t epoch) {
-        return admission_gate_.admission_allowed(
-          epoch,
-          [this](const std::uint64_t value) {
-            return event_ingress_.admission_allowed(value);
-          });
-      };
-    conditioning_config.completion_relay = [this](RelativeMotionCompletionRecordPtr record) {
-        return execution_plane_ &&
-               execution_plane_->completion_mailbox().relay(std::move(record));
-      };
-    relative_motion_ = std::make_shared<RelativeMotionRosAdapter>(
-      *this, authority_, motion_policy, conditioning_config);
     execution_plane_ = std::make_unique<RuntimeExecutionPlane>(
       config_,
       clock_,
       authority_,
-      relative_motion_,
+      std::move(runtime_ports),
       [this](const RuntimeState & state) {publish_state(state);},
       [this](std::uint64_t mission_id, const MissionFeedback & feedback) {
         publish_feedback(mission_id, feedback);
@@ -523,6 +620,7 @@ private:
       execution_plane_.reset();
     }
     relative_motion_.reset();
+    ros_authority_.reset();
     authority_.reset();
 
     {
@@ -536,11 +634,12 @@ private:
   [[nodiscard]] bool wait_for_shutdown_conditions(
     const RuntimeShutdownCoordinator::TimePoint deadline) noexcept
   {
-    bool internal_complete = false;
+    bool internal_complete = relative_motion_ == nullptr;
     try {
-      internal_complete = relative_motion_ &&
-        detail::wait_for_relative_motion_internal_completion(
-        *relative_motion_, deadline);
+      if (relative_motion_) {
+        internal_complete = detail::wait_for_relative_motion_internal_completion(
+          *relative_motion_, deadline);
+      }
     } catch (...) {
       internal_complete = false;
     }
@@ -550,7 +649,7 @@ private:
     bool gate_safe = false;
     try {
       const auto snapshot = authority_ ? authority_->snapshot() : GateSnapshot{};
-      gate_safe = relative_motion_ && relative_motion_->zero_proven() &&
+      gate_safe = (!relative_motion_ || relative_motion_->zero_proven()) &&
         snapshot.state == GateState::Inhibited && snapshot.motion_inhibited &&
         snapshot.zero_selected && snapshot.zero_published;
     } catch (...) {
@@ -865,7 +964,9 @@ private:
   void process_event(TickEvent & event)
   {
     (void)action_admission_tracker_.revoke_expired(event.now);
-    authority_->refresh_endpoint();
+    if (ros_authority_) {
+      ros_authority_->refresh_endpoint();
+    }
     execution_plane_->core()->on_tick();
   }
 
@@ -1047,7 +1148,8 @@ private:
   std::shared_ptr<RosSteadyClock> clock_;
   ActionAdmissionTracker action_admission_tracker_;
   RuntimeAdmissionGate admission_gate_;
-  std::shared_ptr<RosMotionAuthorityPort> authority_;
+  std::shared_ptr<MotionAuthorityPort> authority_;
+  std::shared_ptr<RosMotionAuthorityPort> ros_authority_;
   std::shared_ptr<RelativeMotionRosAdapter> relative_motion_;
   std::unique_ptr<RuntimeExecutionPlane> execution_plane_;
   RuntimeEventQueueType event_queue_;

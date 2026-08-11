@@ -4,7 +4,7 @@
 """Reusable rapid Agent, local model, voice, and Mission bridge stack."""
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.substitutions import (
     EnvironmentVariable,
@@ -13,6 +13,36 @@ from launch.substitutions import (
 )
 
 from launch_ros.actions import Node
+from launch_ros.substitutions import FindPackageShare
+
+from voice_nav_agent.rapid_map_package import load_places
+
+
+def _runtime_node(context):
+    """Create the public Runtime with mode-specific rapid child ports."""
+    mode = LaunchConfiguration('mode').perform(context)
+    places_file = LaunchConfiguration('named_places_file').perform(context)
+    runtime_overrides = {
+        'operating_mode': mode,
+        'rapid_delegate_action': '/rapid/mission/execute',
+    }
+    if mode == 'navigation':
+        runtime_overrides['named_place_ids'] = sorted(
+            load_places(places_file)
+        )
+    return [Node(
+        package='voice_nav_mission',
+        executable='mission_runtime_node',
+        output='screen',
+        parameters=[
+            PathJoinSubstitution([
+                FindPackageShare('voice_nav_bringup'),
+                'config',
+                'mission_runtime.yaml',
+            ]),
+            runtime_overrides,
+        ],
+    )]
 
 
 def generate_launch_description():
@@ -31,6 +61,10 @@ def generate_launch_description():
             'mode': mode,
             'map_output_root': LaunchConfiguration('map_output_root'),
             'named_places_file': LaunchConfiguration('named_places_file'),
+            'action_name': '/rapid/mission/execute',
+            'state_topic': '/rapid/mission/state',
+            'stop_service': '/rapid/mission/stop',
+            'enforce_runtime_token': False,
             'use_sim_time': True,
         }],
     )
@@ -124,6 +158,7 @@ def generate_launch_description():
         llm,
         audio,
         mission,
+        OpaqueFunction(function=_runtime_node),
         agent,
         voice,
     ])

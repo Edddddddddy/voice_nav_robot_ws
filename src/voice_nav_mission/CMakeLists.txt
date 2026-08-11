@@ -123,6 +123,7 @@ target_link_libraries(
 add_executable(
   mission_runtime_node
   src/mission_runtime_node.cpp
+  src/rapid_mission_ros_adapters.cpp
 )
 target_compile_features(mission_runtime_node PUBLIC cxx_std_17)
 target_include_directories(

@@ -722,7 +722,7 @@ TEST(
     runtime_config,
     std::make_shared<IntegrationSteadyClock>(),
     authority,
-    adapter,
+    RuntimePorts{adapter, {}, {}},
         [&core_running](const RuntimeState & state) {
           if (state.active_step != kNoActiveMissionStep) {
             core_running.observe();
@@ -989,7 +989,7 @@ TEST(
     runtime_config,
     std::make_shared<IntegrationSteadyClock>(),
     authority,
-    adapter,
+    RuntimePorts{adapter, {}, {}},
         [&core_running](const RuntimeState & state) {
           if (state.active_step != kNoActiveMissionStep) {
             core_running.observe();
