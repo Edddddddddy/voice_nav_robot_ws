@@ -33,6 +33,7 @@ def generate_launch_description():
     world = LaunchConfiguration('world')
     world_name = LaunchConfiguration('world_name')
     runtime_enabled = LaunchConfiguration('runtime_enabled')
+    safety_chain_enabled = LaunchConfiguration('safety_chain_enabled')
     simulation = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution(
@@ -63,12 +64,14 @@ def generate_launch_description():
         name='motion_gate_node',
         output='screen',
         parameters=[gate_config],
+        condition=IfCondition(safety_chain_enabled),
     )
     motion_conditioning_container = Node(
         package='rclcpp_components',
         executable='component_container_mt',
         name='motion_conditioning_container',
         output='screen',
+        condition=IfCondition(safety_chain_enabled),
     )
     runtime_config = PathJoinSubstitution(
         [
@@ -118,6 +121,12 @@ def generate_launch_description():
                 description='Gazebo world name declared by the selected SDF.',
             ),
             DeclareLaunchArgument('runtime_enabled', default_value='true'),
+            DeclareLaunchArgument(
+                'safety_chain_enabled',
+                default_value='true',
+                choices=['true', 'false'],
+                description='Start the production MotionGate chain.',
+            ),
             simulation,
             motion_conditioning_container,
             motion_gate,

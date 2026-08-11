@@ -6,7 +6,7 @@ slam_toolbox:
     odom_frame: odom
     base_frame: base_footprint
     scan_topic: /scan
-    use_map_saver: false
+    use_map_saver: true
     throttle_scans: 1
     scan_queue_size: 1
     transform_publish_period: 0.02

@@ -17,11 +17,13 @@ from launch.actions import (
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+
 from launch_ros.actions import Node, SetRemap
 from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
+    """Launch the fixed map Nav2 demo and shared rapid Agent stack."""
     headless = LaunchConfiguration('headless')
     bringup_share = FindPackageShare('voice_nav_bringup')
     product = IncludeLaunchDescription(
@@ -34,6 +36,7 @@ def generate_launch_description():
             'world': 'voice_nav_house_world.sdf',
             'world_name': 'voice_nav_house_world',
             'runtime_enabled': 'false',
+            'safety_chain_enabled': 'false',
         }.items(),
     )
     nav2 = IncludeLaunchDescription(
@@ -57,16 +60,13 @@ def generate_launch_description():
         package='voice_nav_agent', executable='rapid_initial_pose', output='screen',
         parameters=[{'use_sim_time': True}],
     )
-    rapid_mission = Node(package='voice_nav_agent', executable='rapid_mission_bridge', output='screen')
-    agent = Node(package='voice_nav_agent', executable='agent_node', output='screen')
-    voice = Node(
-        package='voice_nav_agent', executable='rapid_voice_node', output='screen',
-        parameters=[{
-            'piper_path': '/mnt/c/Users/lcy/code/ros2/voice_nav_robot_ws_rapid/.deps/voice/bin/piper',
-            'piper_model': '/mnt/c/Users/lcy/code/ros2/voice_nav_robot_ws_rapid/.deps/voice/models/zh_CN-huayan-medium.onnx',
-            'vosk_python': '/mnt/c/Users/lcy/code/ros2/voice_nav_robot_ws_rapid/.deps/voice/bin/python',
-            'vosk_model': '/mnt/c/Users/lcy/code/ros2/voice_nav_robot_ws_rapid/.deps/voice/models/vosk-model-small-cn-0.22',
-        }],
+    rapid_stack = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution(
+                [bringup_share, 'launch', 'rapid_agent_stack.launch.py']
+            )
+        ),
+        launch_arguments={'mode': 'navigation'}.items(),
     )
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -79,7 +79,5 @@ def generate_launch_description():
             nav2,
         ]),
         initial_pose,
-        rapid_mission,
-        agent,
-        voice,
+        rapid_stack,
     ])
