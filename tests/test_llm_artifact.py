@@ -25,8 +25,9 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 class _Response:
-    def __init__(self, payload: bytes) -> None:
+    def __init__(self, payload: bytes, status: int = 200) -> None:
         self.payload = payload
+        self.status = status
 
     def __enter__(self) -> _Response:
         return self
@@ -48,6 +49,18 @@ class _Opener:
 
     def open(self, url: str, timeout: float) -> _Response:
         return _Response(self.payload)
+
+
+class _SchemaSmokeOpener:
+    def __init__(self) -> None:
+        self.request = None
+
+    def open(self, request: object, timeout: float) -> _Response:
+        self.request = request
+        payload = {
+            "choices": [{"message": {"content": '{"status":"ok"}'}}]
+        }
+        return _Response(json.dumps(payload).encode("utf-8"))
 
 
 class _FakeProcess:
@@ -232,6 +245,26 @@ class ProcessTerminationTest(unittest.TestCase):
             ],
         )
         self.assertEqual(process.wait_calls, [llm.PROCESS_TERM_SECONDS] * 2)
+
+
+class SchemaSmokeTest(unittest.TestCase):
+    def test_smoke_uses_openai_json_schema_envelope(self) -> None:
+        opener = _SchemaSmokeOpener()
+        manifest = llm.load_lock_manifest()
+
+        with mock.patch.object(llm, "_loopback_opener", return_value=opener):
+            llm._post_schema_smoke(manifest)
+
+        request_body = json.loads(opener.request.data)
+        response_format = request_body["response_format"]
+        self.assertEqual(response_format["type"], "json_schema")
+        envelope = response_format["json_schema"]
+        self.assertEqual(envelope["name"], "voice_nav_smoke")
+        self.assertTrue(envelope["strict"])
+        self.assertEqual(
+            envelope["schema"]["properties"]["status"],
+            {"type": "string", "const": "ok"},
+        )
 
 
 @unittest.skipUnless(os.name == "posix", "flock concurrency is a Linux provisioning seam")
@@ -569,6 +602,39 @@ class LlmDownloadAndExtractionTest(unittest.TestCase):
             self.assertEqual(destination.read_bytes(), payload)
             self.assertFalse(destination.with_name("model.bin.part").exists())
 
+    def test_short_eof_uses_bounded_retry_before_identity_failure(self) -> None:
+        payload = b"complete fixture"
+        expected_hash = hashlib.sha256(payload).hexdigest()
+
+        class ShortFirstOpener:
+            calls = 0
+
+            def open(self, url: str, timeout: float) -> _Response:
+                self.calls += 1
+                if self.calls == 1:
+                    return _Response(payload[:4])
+                self.assert_range(url)
+                return _Response(payload[4:], status=206)
+
+            @staticmethod
+            def assert_range(request: object) -> None:
+                if request.get_header("Range") != "bytes=4-":
+                    raise AssertionError("resume request did not preserve offset")
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            destination = Path(temporary_directory) / "model.bin"
+            opener = ShortFirstOpener()
+            llm.download_verified(
+                "https://example.test/model.bin",
+                destination,
+                len(payload),
+                expected_hash,
+                opener=opener,
+                retries=2,
+            )
+            self.assertEqual(opener.calls, 2)
+            self.assertEqual(destination.read_bytes(), payload)
+
     def test_missing_bundle_verification_does_not_create_a_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory) / "llm"
@@ -587,6 +653,21 @@ class LlmDownloadAndExtractionTest(unittest.TestCase):
         request = llm.Request("https://example.test/source")
         with self.assertRaises(llm.ManifestError):
             handler.redirect_request(request, None, 302, "redirect", {}, "http://example.test/source")
+
+    def test_redirect_handler_preserves_resume_range(self) -> None:
+        handler = llm._HttpsRedirectHandler()
+        request = llm.Request(
+            "https://example.test/source", headers={"Range": "bytes=1024-"}
+        )
+        redirected = handler.redirect_request(
+            request,
+            None,
+            302,
+            "redirect",
+            {},
+            "https://cdn.example.test/source",
+        )
+        self.assertEqual(redirected.get_header("Range"), "bytes=1024-")
 
     def test_safe_extraction_rejects_links_and_path_traversal(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

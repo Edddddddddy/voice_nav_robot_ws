@@ -581,7 +581,10 @@ class _HttpsRedirectHandler(HTTPRedirectHandler):
     def redirect_request(self, req: Request, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Request | None:
         target = urljoin(req.full_url, newurl)
         _require_https_url(target, "redirect URL")
-        return super().redirect_request(req, fp, code, msg, headers, target)
+        redirected = super().redirect_request(req, fp, code, msg, headers, target)
+        if redirected is not None and req.has_header("Range"):
+            redirected.add_unredirected_header("Range", req.get_header("Range"))
+        return redirected
 
 
 def _default_https_opener() -> Any:
@@ -616,9 +619,18 @@ def download_verified(
     last_error: Exception | None = None
     for attempt in range(retries):
         try:
-            with opener.open(url, timeout=timeout) as response:
-                with part.open("xb") as stream:
+            observed = part.stat().st_size if part.exists() else 0
+            source: str | Request = url
+            if observed:
+                source = Request(url, headers={"Range": f"bytes={observed}-"})
+            with opener.open(source, timeout=timeout) as response:
+                status = getattr(response, "status", None)
+                append = observed > 0 and status == 206
+                if observed and not append:
+                    _remove_path(part)
                     observed = 0
+                mode = "ab" if append else "xb"
+                with part.open(mode) as stream:
                     while True:
                         chunk = response.read(CHUNK_SIZE)
                         if not chunk:
@@ -633,16 +645,25 @@ def download_verified(
             os.replace(part, destination)
             verify_file_identity(destination, expected_size, expected_sha256, "published download")
             return
-        except ArtifactError:
+        except ArtifactError as error:
+            last_error = error
+            retryable_identity_error = str(error) in {
+                "download size mismatch",
+                "download SHA-256 mismatch",
+            }
+            if retryable_identity_error and attempt + 1 < retries:
+                if "SHA-256" in str(error) and part.exists():
+                    _remove_path(part)
+                continue
             if part.exists() or os.path.lexists(str(part)):
                 _remove_path(part)
             raise
         except (OSError, HTTPError, URLError, IncompleteRead) as error:
             last_error = error
-            if part.exists() or os.path.lexists(str(part)):
-                _remove_path(part)
             if attempt + 1 < retries:
                 continue
+            if part.exists() or os.path.lexists(str(part)):
+                _remove_path(part)
     raise ArtifactError("HTTPS download failed after bounded retries") from last_error
 
 
@@ -1389,7 +1410,14 @@ def _post_schema_smoke(manifest: LockManifest) -> None:
         ],
         "stream": manifest.runtime["stream"],
         "max_tokens": manifest.runtime["max_output"],
-        "response_format": {"type": "json_schema", "schema": schema},
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "voice_nav_smoke",
+                "strict": True,
+                "schema": schema,
+            },
+        },
     }
     request = Request(
         url,
