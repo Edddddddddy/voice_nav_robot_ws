@@ -1085,6 +1085,61 @@ TEST(RuntimeCore, PendingReplacementGateRearmsOnTickWithoutDuplicateSnapshot)
   EXPECT_TRUE(fixture.core.usable());
 }
 
+TEST(RuntimeCore, ReplacementGateWaitsForAcceptedZeroProofBeforeAdvancingAdmission)
+{
+  Fixture fixture;
+
+  fixture.core.observe_gate(GateSnapshot{
+        kOtherGateId, 1U, "", GateState::Faulted, false,
+        true, true, false, "", false, false});
+  ASSERT_EQ(fixture.core.state().admission_epoch, 2U);
+  ASSERT_EQ(fixture.core.state().availability, RuntimeAvailability::Faulted);
+
+  const auto replacement = GateSnapshot{
+    kReplacementGateId, 7U, "", GateState::Inhibited,
+    true, true, true, false, "", false, false};
+  fixture.authority->set_snapshot(replacement);
+  fixture.relative->set_rearm_after_gate_replacement(true);
+
+  // A successful Adapter call is not itself enough to publish a new Runtime
+  // admission epoch.  Its accepted snapshot must linearize the same
+  // replacement identity with an actually published zero proof.
+  auto accepted_without_zero = replacement;
+  ++accepted_without_zero.control_seq;
+  fixture.relative->set_rearm_accepted_snapshot(accepted_without_zero);
+  fixture.core.observe_gate(replacement);
+
+  EXPECT_EQ(fixture.core.state().admission_epoch, 2U);
+  EXPECT_EQ(fixture.core.state().availability, RuntimeAvailability::Faulted);
+  EXPECT_FALSE(fixture.core.admit(goal(1U)).accepted);
+
+  auto accepted_reused_identity = accepted_without_zero;
+  ++accepted_reused_identity.control_seq;
+  accepted_reused_identity.gate_instance_id = kOtherGateId;
+  accepted_reused_identity.zero_published = true;
+  fixture.relative->set_rearm_accepted_snapshot(accepted_reused_identity);
+  fixture.core.on_tick();
+
+  EXPECT_EQ(fixture.core.state().admission_epoch, 2U);
+  EXPECT_EQ(fixture.core.state().availability, RuntimeAvailability::Faulted);
+
+  auto accepted_with_zero = accepted_without_zero;
+  ++accepted_with_zero.control_seq;
+  accepted_with_zero.zero_published = true;
+  fixture.relative->set_rearm_accepted_snapshot(accepted_with_zero);
+  fixture.authority->set_snapshot(accepted_with_zero);
+  fixture.core.on_tick();
+
+  EXPECT_EQ(fixture.core.state().admission_epoch, 3U);
+  EXPECT_EQ(fixture.core.state().availability, RuntimeAvailability::Available);
+  auto recovery_goal = goal(2U);
+  recovery_goal.admission_epoch = fixture.core.state().admission_epoch;
+  ASSERT_TRUE(fixture.core.admit(recovery_goal).accepted);
+  fixture.relative->complete();
+  ASSERT_EQ(fixture.results.size(), 1U);
+  EXPECT_EQ(fixture.results.front().code, MissionResultCode::Succeeded);
+}
+
 TEST(RuntimeCore, ReplacementGateWaitsForActiveMissionTerminalBeforeRearm)
 {
   Fixture fixture;
