@@ -1,22 +1,21 @@
-# Engineering resources
+# 工程资源
 
-Primary documentation is preferred for implementation decisions. Community
-sources help diagnosis but do not override the target contracts.
+实现决策优先采用第一方文档；社区来源可辅助诊断，但不能覆盖目标契约。
 
-## Platform and ROS 2
+## 平台与 ROS 2
 
-- [Developing a ROS 2 package](https://docs.ros.org/en/jazzy/How-To-Guides/Developing-a-ROS-2-Package.html)
-- [ROS 2 Topics, Services, and Actions](https://docs.ros.org/en/jazzy/How-To-Guides/Topics-Services-Actions.html)
-- [colcon quick start](https://colcon.readthedocs.io/en/main/user/quick-start.html)
-- [URDF with robot_state_publisher](https://docs.ros.org/en/jazzy/Tutorials/Intermediate/URDF/Using-URDF-with-Robot-State-Publisher.html)
+- [开发 ROS 2 package](https://docs.ros.org/en/jazzy/How-To-Guides/Developing-a-ROS-2-Package.html)
+- [ROS 2 Topic、Service 与 Action](https://docs.ros.org/en/jazzy/How-To-Guides/Topics-Services-Actions.html)
+- [colcon 快速入门](https://colcon.readthedocs.io/en/main/user/quick-start.html)
+- [使用 robot_state_publisher 的 URDF](https://docs.ros.org/en/jazzy/Tutorials/Intermediate/URDF/Using-URDF-with-Robot-State-Publisher.html)
 - [xacro](https://docs.ros.org/en/jazzy/p/xacro/)
-- [URDF physical properties](https://docs.ros.org/en/humble/Tutorials/Intermediate/URDF/Adding-Physical-and-Collision-Properties-to-the-URDF-Model.html)
+- [URDF 物理属性](https://docs.ros.org/en/humble/Tutorials/Intermediate/URDF/Adding-Physical-and-Collision-Properties-to-the-URDF-Model.html)
 
-## Gazebo, control, TF, SLAM, and navigation
+## Gazebo、控制、TF、SLAM 与导航
 
 - [Gazebo Harmonic](https://gazebosim.org/docs/harmonic/getstarted/)
-- [Launch Gazebo from ROS 2](https://gazebosim.org/docs/harmonic/ros2_launch_gazebo/)
-- [Spawn a Gazebo model](https://gazebosim.org/docs/harmonic/ros2_spawn_model/)
+- [从 ROS 2 启动 Gazebo](https://gazebosim.org/docs/harmonic/ros2_launch_gazebo/)
+- [生成 Gazebo 模型](https://gazebosim.org/docs/harmonic/ros2_spawn_model/)
 - [gz_ros2_control](https://control.ros.org/jazzy/doc/gz_ros2_control/doc/index.html)
 - [diff_drive_controller](https://control.ros.org/jazzy/doc/ros2_controllers/diff_drive_controller/doc/userdoc.html)
 - [ros_gz_bridge](https://docs.ros.org/en/ros2_packages/jazzy/api/ros_gz_bridge/index.html)
@@ -26,25 +25,24 @@ sources help diagnosis but do not override the target contracts.
 - [Nav2 transform setup](https://docs.nav2.org/setup_guides/transformation/setup_transforms.html)
 - [slam_toolbox](https://docs.ros.org/en/ros2_packages/jazzy/api/slam_toolbox/)
 
-The historical native-DiffDrive implementation used the
-[Gazebo Sim 8 DiffDrive system](https://gazebosim.org/api/sim/8/classgz_1_1sim_1_1systems_1_1DiffDrive.html).
-It is historical evidence, not the v1.0 control target.
+历史 native-DiffDrive 实现使用
+[Gazebo Sim 8 DiffDrive system](https://gazebosim.org/api/sim/8/classgz_1_1sim_1_1systems_1_1DiffDrive.html)。
+它是历史证据，不是 v1.0 控制目标。
 
-## Local audio and models
+## 本地音频与模型
 
-- [PortAudio callback constraints](https://portaudio.com/docs/v19-doxydocs/writing_a_callback.html)
+- [PortAudio callback 约束](https://portaudio.com/docs/v19-doxydocs/writing_a_callback.html)
 - [webrtc-audio-processing](https://gitlab.freedesktop.org/pulseaudio/webrtc-audio-processing)
 - [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx)
-- [sherpa-onnx KWS model catalog](https://k2-fsa.github.io/sherpa/onnx/kws/pretrained_models/index.html)
+- [sherpa-onnx KWS 模型目录](https://k2-fsa.github.io/sherpa/onnx/kws/pretrained_models/index.html)
 - [Piper](https://github.com/rhasspy/piper)
 - [llama.cpp](https://github.com/ggml-org/llama.cpp)
-- [llama.cpp server schema output](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)
-- [Official Qwen3-0.6B-GGUF](https://huggingface.co/Qwen/Qwen3-0.6B-GGUF)
+- [llama.cpp server schema 输出](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md)
+- [官方 Qwen3-0.6B-GGUF](https://huggingface.co/Qwen/Qwen3-0.6B-GGUF)
 
-Runtime versions and models are accepted only through pinned manifests with
-exact SHA-256 and license metadata; a repository link alone is not a pin.
+运行时版本和模型只可通过具有精确 SHA-256 与许可证元数据的 pinned manifest 接受；仓库链接本身不是 pin。
 
-## Engineering governance
+## 工程治理
 
 - [REP-2004](https://reps.openrobotics.org/rep-2004/)
 - [gitignore](https://git-scm.com/docs/gitignore)
@@ -52,7 +50,7 @@ exact SHA-256 and license metadata; a repository link alone is not a pin.
 - [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/)
 - [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
-## Community diagnosis
+## 社区诊断
 
 - [ROS Discourse](https://discourse.ros.org/)
 - [Robotics Stack Exchange](https://robotics.stackexchange.com/)

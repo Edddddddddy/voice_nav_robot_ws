@@ -865,10 +865,8 @@ class CiReadinessContractTest(unittest.TestCase):
         documentation = MISSION_RUNTIME_INTERFACE_DOC.read_text(
             encoding="utf-8"
         )
-        self.assertIn(
-            "is the single audited\npolicy record",
-            documentation,
-        )
+        normalized_documentation = " ".join(documentation.split())
+        self.assertIn("单一已审计策略记录", normalized_documentation)
         for key in policy:
             with self.subTest(documented_parameter=key):
                 self.assertIn(f"`{key}`", documentation)

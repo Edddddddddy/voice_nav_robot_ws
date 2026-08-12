@@ -1,35 +1,30 @@
-# Security Policy
+# 安全策略
 
-VoiceNav Robot is a simulation-only project. Its operational stop is not a
-certified emergency-stop or functional-safety system, and no deployment on a
-physical robot is supported.
+VoiceNav Robot 是仅用于仿真的项目。其运行停止不是认证的紧急停止或功能安全系统，且不支持
+部署到真实机器人。
 
-## Supported versions
+## 支持版本
 
-Only the latest released version receives security fixes. Development branches
-and recovery archives are not supported releases.
+仅最新正式发布版本接收安全修复；开发分支和恢复归档不是受支持发布版本。
 
-## Reporting a vulnerability
+## 报告漏洞
 
-Do not open a public issue for a suspected vulnerability, exposed credential,
-or unsafe motion-bypass defect. Report it privately to `983166955@qq.com` with:
+对于疑似漏洞、泄露凭据或不安全的运动绕过缺陷，请不要创建公开 Issue。请私下发送至
+`983166955@qq.com`，并附上：
 
-- the affected commit or release;
-- a minimal reproduction;
-- the expected and observed behavior;
-- any known impact; and
-- whether details have already been disclosed elsewhere.
+- 受影响的提交或发布版本；
+- 最小复现；
+- 预期和实际行为；
+- 已知影响；以及
+- 是否已在其他位置披露。
 
-Do not include real credentials, private audio, maps, bags, or model files in a
-report. The maintainer will acknowledge receipt within seven days, assess
-scope, and coordinate remediation and disclosure.
+报告中不得包含真实凭据、私有音频、地图、bag 或模型文件。维护者会在七天内确认收到、
+评估范围，并协调修复与披露。
 
-## Security boundaries
+## 安全边界
 
-Local LLM output, ASR text, voice input, map IDs, and Named Place requests are
-untrusted. They must not bypass Mission validation, admission fencing,
-MotionGate, configured limits, or the consumer-side velocity timeout.
+本地 LLM 输出、ASR 文本、语音输入、地图 ID 和 Named Place 请求均不可信。它们不得绕过
+Mission 验证、准入围栏、MotionGate、配置限制或消费者侧速度超时。
 
-The project makes no safety claim for real hardware. Deploying this code on a
-physical robot, exposing local model servers to a network, or treating
-operational stop as a certified safety function is outside the supported scope.
+本项目不对真实硬件做安全声明。将代码部署到真实机器人、向网络暴露本地模型服务器，或把
+运行停止当作认证安全功能，均不在支持范围内。

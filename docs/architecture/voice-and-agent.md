@@ -1,155 +1,94 @@
-# Voice and Agent contract
+# Voice 与 Agent 契约
 
-**Status:** Target v1.0 contract
+**状态：**目标 v1.0 契约。
 
-`voice_node` owns the full-duplex device, real-time audio boundary, AEC, KWS,
-VAD, ASR, TTS, playback, and barge-in. `agent_node` owns deterministic command
-rules, clarification, constrained local-LLM fallback, and Mission submission.
-Neither process has final motion authority.
+`voice_node` 负责 full-duplex device、real-time audio boundary、AEC、KWS、VAD、ASR、TTS、playback 与
+barge-in。`agent_node` 负责 deterministic command rule、clarification、受约束 local-LLM fallback 与 Mission
+submission。两个 process 均没有最终运动权限。
 
-## Issue #46 Agent Core boundary
+## Issue #46 Agent Core 边界
 
-`voice_nav_agent` 的 Core 是无 ROS I/O、无 HTTP、可注入 steady clock 的纯
-Python Module。它的行为 seam 是一次 `handle_turn(VoiceTurn,
-MissionState-or-none)` 和一个共享的 `SemanticValidator`；Normalizer、封闭
-规则解析、澄清表与 Voice sequence fencing 都留在 Core 内部。Core 输出封闭的
-`MISSION`、`CANCEL`、`STOP`、`CLARIFY`、`REPLY`、`LLM_NEEDED` 或 `IGNORE`
-Decision，未来 LLM proposal 与规则 proposal 必须经过同一 Validator。
+`voice_nav_agent` 的 Core 是无 ROS I/O、无 HTTP、可注入 steady clock 的 pure Python Module。其 behavior seam
+为一次 `handle_turn(VoiceTurn, MissionState-or-none)` 和共享 `SemanticValidator`；normalizer、closed rule parser、
+clarification table 与 Voice sequence fencing 都保留在 Core 内。Core 输出 closed
+`MISSION`、`CANCEL`、`STOP`、`CLARIFY`、`REPLY`、`LLM_NEEDED` 或 `IGNORE` Decision；未来 LLM proposal 与 rule
+proposal 必须经过相同 Validator。
 
-非 STOP 的 Mission/LLM planning token 在 turn 开始时固定 Agent source
-identity、Voice turn identity、generation 与 Runtime ID/epoch/mode/capability/
-Named Place 快照；不会在规划过程中刷新。STOP 遵循 D-046-003B：request ID
-等于 `turn_id`，source instance/sequence 直接复用 Voice Turn 的
-`voice_instance_id`/`voice_seq`，reason 固定为 `voice_stop`。
+非 STOP 的 Mission/LLM planning token 在 turn 开始时固定 Agent source identity、Voice turn identity、generation、
+Runtime ID/epoch/mode/capability/Named Place snapshot，planning 期间不 refresh。STOP 遵循 D-046-003B：request ID
+等于 `turn_id`，source instance/sequence 直接复用 Voice Turn 的 `voice_instance_id`/`voice_seq`，reason 固定为
+`voice_stop`。
 
-`SemanticValidator.validate()` 必须同时接收 proposal 与产生它的原始不可变
-planning token；缺少或不匹配该 context 的 proposal 不能进入 Mission。Voice
-fencing 的 retired-instance 容量耗尽后锁存为 fail-closed，直到建立新的 Core/
-Voice 生命周期；锁存期间 COMMAND 一律拒绝，STOP 仍走 D-046-003B 快路径。
-Core 在 STOP 扫描前保留 `，,；;。！!?、` 与 `然后`、`再` 的 clause 边界；
-单个句末 `。！!?` 可结束最后一个非空 clause，重复或内部空 clause 拒绝。称呼
-和批准请求词最多消费一个批准边界，不会吞掉后续重复 separator。完整收集
-clause 后再分类，只有单独 unknown 表达进入 LLM-needed，unknown 与规则或缺参
-混合时确定性拒绝。含缺参 clause 的 Turn 在创建澄清 pending 前，先用同一
-planning token 和 SemanticValidator 校验全部完整 sibling steps；失败直接
-REPLY，不保留该 Turn 的 pending。旋转角度以 Runtime 冻结的 float32 `6.283185F` 作为 wire
-上限；中文 `±360°` 显式映射为相应 binary32 值，外部 proposal 的 wire 表示
-超过该上限时拒绝。pending 的创建和覆盖统一经过 Core 内部私有 commit seam；
-它在当前不可变 token 下复核全部完整 sibling 后才写回。澄清答案若单位或结构
-仍不完整可以再次 CLARIFY；已完整但 range、wire range、数值或 Place/Map ID
-非法则直接 REPLY 并结束 pending，后续裸回答不得续接。复核使用当前 snapshot，
-因此 capability、Named Place、`max_steps` 或 mode 的变化会在再次澄清前确定性拒绝。
+`SemanticValidator.validate()` 必须同时接收 proposal 与产生它的原始 immutable planning token；缺失或 context 不匹配
+的 proposal 不得进入 Mission。Voice fencing 的 retired-instance capacity 耗尽后 latch fail-closed，直到建立新的
+Core/Voice lifetime；latch 期间 COMMAND 一律 reject，STOP 仍走 D-046-003B fast path。
 
-## Public ROS surface
+Core 在 STOP 扫描前保留 `，,；;。！!?、` 与 `然后`、`再` 的 clause 边界；单个句末 `。！!?` 只能结束最后一个
+非空 clause，重复或内部空 clause 都 reject。称呼与批准 request word 最多消耗一个 approval boundary，
+不能吞掉后续重复 separator。完成 collection 后再 classify：只有单独 unknown expression 进入 LLM-needed；
+unknown 与 rule 或缺参混合时 deterministic reject。含缺参 clause 的 Turn 在创建 clarification pending 前，先以同一
+planning token 和 `SemanticValidator` 验证全部完整 sibling step；失败直接 `REPLY`，不保留该 Turn pending。
+rotate angle 使用 Runtime 冻结的 `float32 6.283185F` 作为 wire upper bound；中文 `±360°` 显式映射为对应 binary32
+value，外部 proposal 的 wire representation 超出上限则 reject。pending 的创建与覆盖经由 Core private commit seam，
+它仅在当前未撤销 token 下重新验证全部完整 sibling 后写回。clarification answer 若 unit 或 result 仍不完整可再次
+`CLARIFY`；完整但 range、wire range、numeric 或 Place/Map ID 非法时直接 `REPLY` 并终止 pending，后续裸回答不得
+续接。重新验证使用当前 snapshot，因此 capability、Named Place、`max_steps` 或 mode 变化会在再次 clarification 前
+deterministic reject。
 
-Voice exposes only:
+## 公共 ROS surface
+
+Voice 仅暴露：
 
 ```text
 /voice/turn   voice_nav_interfaces/msg/VoiceTurn
 /voice/speak  voice_nav_interfaces/action/Speak
 ```
 
-Partial ASR, VAD, KWS decisions, 10 ms frames, PCM, device state, and
-model-specific tokens remain private to `voice_node`.
+partial ASR、VAD、KWS decision、`10 ms` frame、PCM、device state 与 model-specific token 均为 `voice_node` private
+detail。精确 public field、constant、QoS 和 type boundary 见[Voice Interface 契约](voice-interface.md)。
 
-### `VoiceTurn.msg`
+`voice_instance_id` 在每次 Voice start 时变化，`voice_seq` 在 instance 内严格递增；`session_id` 聚合普通
+follow-up turn，`turn_id` 标识一条 accepted utterance。STOP turn 以其 `turn_id` 作为幂等
+`StopMission.request_id`，因此 Voice 与 Agent 不会创造两个 identity。仅最终 endpointed Mandarin transcript 会发布，
+QoS 为 `RELIABLE + VOLATILE + KEEP_LAST(1)`：Voice Turn 是 live work，不是给迟到 process 的 retained authority。
 
-```text
-uint8 COMMAND=1
-uint8 STOP=2
+ROS Action cancel、新 PlaybackScope 或 accepted barge-in 通过有界 fade-to-silence drain queued speech。每个 accepted
+Speak Goal 获得一个 Result；cancel speech 永不意味着 cancel Mission。
 
-string<=36 voice_instance_id
-uint64 voice_seq
-string<=36 session_id
-string<=36 turn_id
-uint8 kind
-string<=512 text
-float32 confidence
-bool during_playback
-```
+## 交互 scope
 
-`voice_instance_id` changes whenever Voice starts. `voice_seq` strictly
-increases within that instance. `session_id` groups ordinary follow-up turns;
-`turn_id` identifies one accepted utterance. A STOP turn uses its `turn_id` as
-the idempotent `StopMission.request_id`, so Voice and Agent can make the same
-request without inventing two identities.
+Voice 维护三种不同 lifetime：
 
-Only a final endpointed Mandarin transcript is published. QoS is
-`RELIABLE + VOLATILE + KEEP_LAST(1)`: a Voice Turn is live work, not retained
-authority for a process that joins later.
+- **PlaybackScope**：一个 active Speak synthesis/playback generation；
+- **TurnScope**：wake、capture、endpointing、ASR 与 resulting turn generation；
+- **MissionScope**：由 Mission Runtime 拥有，而非 Voice。
 
-### `Speak.action`
+playback 中普通“**小智**” wake 会 cancel 较早的 PlaybackScope 与 TurnScope，再打开新的 TurnScope；它**不会**
+cancel 正在运行的 Mission。playback 期间只有 wake word 与固定 STOP phrase 可 interrupt；任意 VAD energy 不足，
+因为 speaker echo 会制造 false barge-in。
 
-```text
-# Goal
-uint8 NORMAL=1
-uint8 URGENT=2
+## 固定 STOP 快路径
 
-string<=36 source_instance_id
-uint64 source_seq
-string<=36 session_id
-string<=36 turn_id
-uint8 priority
-string<=512 text
-bool allow_barge_in
----
-# Result
-uint16 COMPLETED=0
-uint16 CANCELED=1
-uint16 BARGED_IN=2
-uint16 FAILED=10
-
-uint16 code
-string<=160 detail
----
-# Feedback
-builtin_interfaces/Duration played
-```
-
-ROS Action cancel, a newer PlaybackScope, or an accepted barge-in drains
-queued speech through a bounded fade to silence. Every accepted Speak Goal
-receives one Result. Canceling speech never implies Mission cancel.
-
-## Interaction scopes
-
-Voice maintains three distinct lifetimes:
-
-- **PlaybackScope**: one active Speak synthesis/playback generation;
-- **TurnScope**: wake, capture, endpointing, ASR, and the resulting turn
-  generation;
-- **MissionScope**: owned by Mission Runtime, not by Voice.
-
-An ordinary “小智” wake during playback cancels the older PlaybackScope and
-TurnScope, then opens a new TurnScope. It does **not** cancel the running
-Mission. During playback, only the wake word and the fixed STOP phrases are
-allowed to interrupt; arbitrary VAD energy is not sufficient because speaker
-echo would create false barge-in.
-
-## Fixed STOP fast path
-
-The fixed phrases are:
+固定 phrase：
 
 ```text
 小智停止
 紧急停止
 ```
 
-When either phrase is accepted, Voice:
+接受任一 phrase 时，Voice：
 
-1. creates the STOP Voice Turn and fixes its `turn_id`;
-2. calls `/mission/stop` directly using `turn_id` as `request_id`, without
-   waiting for Agent or LLM;
-3. publishes the same turn as `kind=STOP`;
-4. retains the response or timeout as turn-local evidence.
+1. 创建 STOP Voice Turn 并固定 `turn_id`；
+2. 以 `turn_id` 为 `request_id` 直接调用 `/mission/stop`，不等待 Agent 或 LLM；
+3. 发布同一 turn，`kind=STOP`；
+4. 将 response 或 timeout 留作 turn-local evidence。
 
-Agent receives the STOP turn, retries `StopMission` with the same
-`request_id`, and produces the spoken reply. Runtime idempotency makes a lost
-Service response or this intentional retry safe. The phrase is an operational
-simulation stop, not a claim of certified emergency-stop recognition.
+Agent 接收 STOP turn，以同一 `request_id` retry `StopMission` 并生成 spoken reply。Runtime idempotency 使丢失的
+Service response 与该有意 retry 安全。该 phrase 是仿真 Operational Stop，不声称认证 emergency-stop recognition。
 
-## Audio ownership and real-time boundary
+## Audio ownership 与 real-time boundary
 
-`voice_node` opens exactly one **48 kHz, mono, PortAudio full-duplex stream**:
+`voice_node` 严格打开一个 **48 kHz、mono、PortAudio full-duplex stream**：
 
 ```text
 device capture -> callback -> bounded capture SPSC -> DSP worker
@@ -157,30 +96,26 @@ device render  <- callback <- bounded playback SPSC <- TTS worker
                            \-> bounded exact-render-reference SPSC
 ```
 
-Every SPSC ring is fixed-capacity and preallocated. Overflow and underflow
-increment lock-free counters and choose a documented bounded fallback, such as
-dropping the oldest capture frame or rendering silence. Queues cannot grow.
+每个 SPSC ring 都是 fixed-capacity、preallocated。overflow 和 underflow 增加 lock-free counter，并选择有文档的
+bounded fallback，例如丢弃最旧 capture frame 或 render silence；queue 不能增长。
 
-The real-time callback must not:
+real-time callback 不得：
 
-- allocate or free;
-- acquire a blocking lock, wait, or perform file/network I/O;
-- log or call ROS;
-- run DSP, model inference, or dynamic reconfiguration;
-- throw across the callback boundary.
+- allocate/free；
+- 获取 blocking lock、wait 或执行 file/network I/O；
+- log 或调用 ROS；
+- 执行 DSP、model inference 或 dynamic reconfiguration；
+- 跨 callback boundary throw。
 
-It only copies bounded samples, applies already-prepared constant-time output
-state, updates lock-free indices/counters, and returns.
+它只复制 bounded sample、应用已准备的 constant-time output state、更新 lock-free index/counter 并返回。
 
-## Exact AEC reference and DSP order
+## 精确 AEC reference 与 DSP 顺序
 
-The render reference is the PCM that the PortAudio callback **actually writes
-to the device**, copied in that callback after every application-side
-resample, mix, gain, fade, saturation, and short-buffer truncation decision.
-Pre-resample TTS PCM, a queued buffer before a later fade, text, or an audio
-file is not a valid reference.
+render reference 是 PortAudio callback **实际写入 device 的 PCM**，在该 callback 中完成每项 application-side
+resample、mix、gain、fade、saturation 与 short-buffer truncation 决策后复制。pre-resample TTS PCM、稍后才 fade 的
+queued buffer、text 或 audio file 都不是有效 reference。
 
-The DSP thread consumes synchronized 10 ms / 480-sample frames in this order:
+DSP thread 按以下顺序消费同步的 `10 ms / 480-sample` frame：
 
 ```text
 1. exact final render-reference frame
@@ -190,50 +125,34 @@ The DSP thread consumes synchronized 10 ms / 480-sample frames in this order:
 5. KWS, VAD/endpointing, and streaming ASR
 ```
 
-Device discontinuity, xrun, unrecoverable ring loss, or stream restart rotates
-the audio generation and resets delay/AEC state. No late TTS PCM may enter a
-new PlaybackScope or become its reference.
+device discontinuity、xrun、unrecoverable ring loss 或 stream restart 都 rotate audio generation 并 reset delay/AEC state。
+late TTS PCM 不得进入新 PlaybackScope 或成为其 reference。
 
-## Locked DSP dependency
+## 锁定 DSP dependency 与本地模型
 
-The implementation uses WebRTC AudioProcessing **2.1** and one compatible
-Abseil revision as a single reviewed dependency set. Its lock manifest records
-the exact upstream revision/version, URL, SHA-256, license, patches, build
-options, and supported compiler. Both are built below ignored `.deps/`; the
-build may not silently use a floating system Abseil or Ubuntu's old
-`webrtc-audio-processing` 0.3.1 package.
+Implementation 使用 WebRTC AudioProcessing **2.1** 与一个 compatible Abseil revision，作为一组已审查 dependency。
+其 lock manifest 记录精确 upstream revision/version、URL、SHA-256、license、patch、build option 与支持 compiler。
+二者在忽略的 `.deps/` 下构建；build 不得静默使用 floating system Abseil 或 Ubuntu 旧
+`webrtc-audio-processing` `0.3.1` package。compatible Abseil revision 在 v0.6 dependency Issue 中从
+AudioProcessing 2.1 upstream build metadata 选择并验证；v0.1 architecture document 不会杜撰未验证 tag。
 
-The concrete compatible Abseil revision is selected and verified in the v0.6
-dependency Issue from AudioProcessing 2.1's upstream build metadata; the v0.1
-architecture document does not fabricate an unverified tag.
+每个 model 有审查过的 manifest，记录 immutable source revision、URL、SHA-256、file size、license、sample rate、
+runtime version 与固定 Mandarin acceptance corpus。weight 是本地 artifact，永不 commit。默认 policy：
 
-## Locked local models
+- KWS：`sherpa-onnx-kws-zipformer-zh-en-3M`；
+- ASR：先用 `14M Chinese Streaming Zipformer`；若未通过 fixed-corpus gate，自动选 locked
+  `2025-06-30 int8` model；
+- TTS：`vits-piper-zh_CN-chaowen-medium`；
+- LLM：官方 `Qwen3-0.6B-GGUF` `Q8_0`。
 
-Each model has a reviewed manifest with immutable source revision, URL,
-SHA-256, file sizes, license, sample rate, runtime version, and fixed Mandarin
-acceptance corpus. Weights are local artifacts and are never committed.
+model selection 是可复现 policy，不是 online “latest” lookup。runtime 不会静默 download 或 upgrade model。
+`llama-server` 是由固定 llama.cpp commit 构建的独立 dependency process：只 bind loopback，加载 locked GGUF，并使用
+bounded context、output、concurrency 与 request deadline。v1.0 acceptance 没有 cloud fallback。
 
-The default model policy is:
+## Agent 决策顺序
 
-- KWS: `sherpa-onnx-kws-zipformer-zh-en-3M`;
-- ASR: the 14M Chinese Streaming Zipformer first; if it misses the fixed-corpus
-  gate, automatically select the locked 2025-06-30 int8 model;
-- TTS: `vits-piper-zh_CN-chaowen-medium`;
-- LLM: official `Qwen3-0.6B-GGUF` `Q8_0`.
-
-Model selection is reproducible policy, not an online “latest” lookup. No
-model is silently downloaded or upgraded at runtime.
-
-`llama-server` is an independent dependency process built from a fixed
-llama.cpp commit. It binds only to loopback, loads the locked GGUF, and uses
-bounded context, output, concurrency, and request deadlines. There is no cloud
-fallback in v1.0 acceptance.
-
-## Agent decision order
-
-For every `COMMAND` turn, Agent first allocates its source sequence and
-snapshots `runtime_instance_id` plus `admission_epoch` from `/mission/state`.
-That snapshot is immutable for the entire planning attempt:
+每个 `COMMAND` turn，Agent 先分配 source sequence，并从 `/mission/state` snapshot `runtime_instance_id` 与
+`admission_epoch`。整个 planning attempt 中该 snapshot immutable：
 
 ```text
 1. STOP classification
@@ -245,49 +164,37 @@ That snapshot is immutable for the entire planning attempt:
 7. typed ExecuteMission submission
 ```
 
-Agent must not refresh an old plan with a newer epoch after a slow LLM
-returns. A stale result is submitted with its original snapshot and rejected,
-or discarded locally.
+slow LLM 返回后，Agent 不得以较新 epoch refresh old plan。stale result 用原 snapshot 提交后被 reject，或在本地
+discard。
 
-Rules cover the closed move, rotate, save-map, Named Place, cancel, and common
-dialogue vocabulary. Clarification handles a missing distance, angle, logical
-Map ID, or Named Place. LLM output is only an Agent-internal JSON value. It
-must pass a closed JSON Schema and the same local semantic policy before
-construction of ROS `MissionStep` values. The ROS Mission Interface never
-becomes a dynamic JSON catalog.
+rule 覆盖 closed move、rotate、save-map、Named Place、cancel 与 common dialogue vocabulary。clarification 处理缺失
+distance、angle、logical Map ID 或 Named Place。LLM output 只是一项 Agent-internal JSON value，必须通过 closed JSON
+Schema 与同一 local semantic policy，才能构造 ROS `MissionStep`。ROS Mission Interface 永不变为 dynamic JSON catalog。
 
-Arbitrary LLM output cannot provide Twist, wheel speed, path, raw pose, file
-path, controller parameter, speed, acceleration, tolerance, or timeout.
-Deterministic rules and fixed STOP remain available when `llama-server` is
-down.
+任意 LLM output 都不能提供 Twist、wheel speed、path、raw pose、file path、controller parameter、speed、
+acceleration、tolerance 或 timeout。即使 `llama-server` 不可用，deterministic rule 与 fixed STOP 仍可用。
 
-## Queue and stale-result policy
+## Queue 与 stale-result 策略
 
-Agent has one pending LLM slot and uses **latest-turn-wins**:
+Agent 有一个 pending LLM slot，采用 **latest-turn-wins**：
 
-- a newer completed turn replaces the pending turn;
-- active inference receives cancellation where supported and always rotates
-  its local generation;
-- output with stale voice instance, sequence, turn ID, Runtime instance,
-  admission epoch, or generation is discarded;
-- STOP bypasses the LLM queue;
-- the queue remains bounded while inference is slow or unavailable.
+- 新完成 turn 替换 pending turn；
+- active inference 在支持时 receive cancellation，且始终 rotate local generation；
+- 具有 stale voice instance、sequence、turn ID、Runtime instance、admission epoch 或 generation 的 output 被 discard；
+- STOP 绕过 LLM queue；
+- inference slow 或 unavailable 时 queue 仍保持 bounded。
 
-Speak uses the same session/turn correlation. A newer PlaybackScope prevents
-unplayed or late PCM from an older generation from reaching the device.
+Speak 使用相同 session/turn correlation；新的 PlaybackScope 阻止 older generation 的未播放或 late PCM 到达 device。
 
-## Verification obligations
+## 验证义务
 
-- Callback inspection and stress tests cover allocation, blocking, logging,
-  ROS calls, inference, xrun, overflow, underflow, and silence fallback.
-- DSP fixtures verify exact 480-sample framing, render-reference ordering,
-  40–250 ms delay, drift, reset behavior, and continuous 16 kHz output.
-- Playback tests prove ordinary VAD cannot interrupt, while wake and fixed STOP
-  can.
-- Decision tests prove STOP and deterministic rules never call the LLM.
-- Agent tests prove planning-time epoch snapshot, capacity one, latest-wins,
-  schema rejection, semantic rejection, timeout, and late-result isolation.
-- Manifest tests verify every checksum and license before a dependency or
-  model loads.
-- Real analog audio and locked-model metrics remain v0.7/v1.0 release evidence
-  as specified by the testing strategy.
+- callback inspection 与 stress test 覆盖 allocation、blocking、logging、ROS call、inference、xrun、overflow、
+  underflow 与 silence fallback；
+- DSP fixture 验证精确 `480-sample` framing、render-reference ordering、`40–250 ms` delay、drift、reset behavior
+  与连续 16 kHz output；
+- playback test 证明普通 VAD 不能 interrupt，而 wake 与固定 STOP 可以；
+- decision test 证明 STOP 与 deterministic rule 从不调用 LLM；
+- Agent test 证明 planning-time epoch snapshot、capacity one、latest-wins、schema reject、semantic reject、timeout
+  与 late-result isolation；
+- manifest test 在 dependency 或 model load 前验证每个 checksum 与 license；
+- real analog audio 与 locked-model metric 仍是[测试策略](../process/testing-strategy.md)规定的 v0.7/v1.0 release evidence。

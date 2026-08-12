@@ -1,97 +1,82 @@
-# Release policy and roadmap
+# 发布策略与路线图
 
-VoiceNav Robot uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-Before 1.0, compatibility may change, but every change remains explicit and
-reviewable. Roadmap milestones use short names such as `v0.1`; immutable
-release tags use complete SemVer, such as `v0.1.0`.
+VoiceNav Robot 使用 [Semantic Versioning](https://semver.org/spec/v2.0.0.html)。1.0 前兼容性可以变化，
+但每项变化都必须明确且可审查。路线图 milestone 使用 `v0.1` 之类短名；不可变 release tag 使用完整
+SemVer，例如 `v0.1.0`。
 
-## Approved walking-skeleton roadmap
+## 已批准的 walking-skeleton 路线图
 
-The `v0.1` repository foundation already exists. The approved capability
-sequence is fixed as:
-`v0.2` → `v0.3` → `v0.4` → `v0.5` → `v0.6` → `v0.7` → `v1.0`.
-These are capability milestones in one vertically runnable walking skeleton,
-and each milestone extends the same runnable product path.
+`v0.1` 仓库基础已存在。已批准能力序列固定为：
+`v0.2` → `v0.3` → `v0.4` → `v0.5` → `v0.6` → `v0.7` → `v1.0`。
+它们是在一个纵向可运行 walking skeleton 中的 capability milestone；每个 milestone 都扩展同一可运行产品路径。
 
-| Milestone | Capability boundary |
+| 里程碑 | 能力边界 |
 | --- | --- |
-| `v0.2` | 运动基线：`gz_ros2_control`, TF ownership, LiDAR/world, independent MotionGate, and consumer deadman |
-| `v0.3` | 建图与导航：slam_toolbox mapping, atomic map package, AMCL, Named Places, and Nav2 safety navigation |
-| `v0.4` | 文本 Mission：Mission v1 Interface, validator/FSM, in-memory adapters, relative motion, navigation, and map adapters |
-| `v0.5` | 本地 Agent：deterministic Mandarin rules, local Qwen/llama.cpp fallback, clarification, and stale-result isolation |
-| `v0.6` | 实时语音：PortAudio, WebRTC APM, KWS/VAD/ASR, TTS, and offline audio fixtures |
-| `v0.7` | 全双工语音：AEC, barge-in, voice STOP, and end-to-end Mapping and Navigation flows |
-| `v1.0` | 端到端 Hardening：fault recovery, performance/soak, license and model inventory, and complete end-to-end release evidence |
+| `v0.2` | 运动基线：`gz_ros2_control`、TF ownership、LiDAR/world、独立 MotionGate 与 consumer deadman |
+| `v0.3` | 建图与导航：slam_toolbox mapping、atomic map package、AMCL、Named Place 与 Nav2 safety navigation |
+| `v0.4` | 文本 Mission：Mission v1 Interface、validator/FSM、in-memory adapter、relative motion、navigation 与 map adapter |
+| `v0.5` | 本地 Agent：deterministic Mandarin rule、本地 Qwen/llama.cpp fallback、clarification 和 stale-result isolation |
+| `v0.6` | 实时语音：PortAudio、WebRTC APM、KWS/VAD/ASR、TTS 与 offline audio fixture |
+| `v0.7` | 全双工语音：AEC、barge-in、voice STOP 与端到端 Mapping/Navigation flow |
+| `v1.0` | 端到端 Hardening：fault recovery、performance/soak、license/model inventory 与完整端到端 release evidence |
 
-Each milestone extends the preceding runnable slice. LLM availability is never
-a prerequisite for simulation, mapping, navigation, deterministic rules,
-Mission safety, or the fixed STOP path.
+每个 milestone 扩展前一个可运行切片。LLM availability 永远不是仿真、建图、导航、deterministic rule、
+Mission safety 或固定 STOP path 的前置条件。
 
-## Version meaning
+## 版本含义
 
-- `MAJOR`: an incompatible Stable Interface change after 1.0.
-- `MINOR`: a backward-compatible capability or an explicit pre-1.0 milestone.
-- `PATCH`: a backward-compatible correction that changes no intended Interface.
+- `MAJOR`：1.0 后不兼容的 Stable Interface change。
+- `MINOR`：向后兼容 capability 或明确的 pre-1.0 milestone。
+- `PATCH`：不改变预期 Interface 的向后兼容 correction。
 
-All project ROS packages use the same version at a release boundary. Package
-versions are not bumped for every commit.
+所有项目 ROS package 在 release boundary 使用同一版本；不会每个 commit 都 bump package version。
 
-Before 1.0, an incompatible IDL or behavioral change must:
+1.0 前，不兼容 IDL 或 behavior change 必须：
 
-- update every producer and consumer in one Issue;
-- update Interface and acceptance documentation;
-- add or change contract tests;
-- appear under `Unreleased` in `CHANGELOG.md`; and
-- state migration impact in the Issue and pull request.
+- 在一个 Issue 内更新全部 producer 与 consumer；
+- 更新 Interface 和 acceptance 文档；
+- 添加或修改 contract test；
+- 出现在 `CHANGELOG.md` 的 `Unreleased` 下；并且
+- 在 Issue 与 pull request 中说明 migration impact。
 
-After v1.0, a breaking Mission IDL change creates a V2 type and endpoint plus a
-bounded V1 migration Adapter. An `api_version` field does not make incompatible
-DDS types compatible.
+v1.0 后，破坏性 Mission IDL 变化创建 V2 type 与 endpoint，并提供有界 V1 migration Adapter。
+`api_version` field 不会使不兼容 DDS type 兼容。
 
-## Release gate
+## 发布门禁
 
-Every release is created only after all of the following are complete:
+仅在以下全部完成后创建 release：
 
-- the milestone Issue set satisfies every acceptance criterion;
-- PR CI passes from a clean checkout;
-- architecture, Interface, process, and operational documentation match
-  released behavior;
-- relevant `Unreleased` changelog entries move to the dated version;
-- package metadata, dependency declarations, and versions are consistent;
-- dependency, model, and license records needed by the milestone are present;
-- no unresolved critical motion, data-loss, privacy, or license issue remains;
-  and
-- milestone-specific automated and bounded manual acceptance evidence is
-  recorded.
+- milestone Issue 集合满足每条验收标准；
+- PR CI 从 clean checkout 通过；
+- architecture、Interface、process 与 operational 文档匹配发布 behavior；
+- 相关 `Unreleased` changelog entry 移至带日期版本；
+- package metadata、dependency declaration 和 version 一致；
+- milestone 所需 dependency、model 与 license record 存在；
+- 不存在未解决的 critical motion、data-loss、privacy 或 license issue；以及
+- milestone-specific automated 与有界 manual acceptance evidence 已记录。
 
-The release is created from reviewed `main` as an immutable annotated Git tag
-and a GitHub Release containing notes and links to its acceptance evidence.
-Release tags and artifacts are immutable; a discovered problem is fixed in a
-newer version rather than by rewriting a published release.
+release 从审查过的 `main` 创建为不可变 annotated Git tag 和 GitHub Release，包含 notes 与 acceptance evidence
+链接。release tag 与 artifact 不可变；发现问题时发布较新版本修复，而不是重写已发布 release。
 
-## v1.0 release evidence
+## v1.0 发布证据
 
-v1.0 additionally requires:
+v1.0 还需要：
 
-- the complete flow in the [product specification](../product/v1.0-product-spec.md);
-- all quantitative completion criteria in [Testing strategy](testing-strategy.md);
-- Mission invalid/busy/timeout/cancel/STOP race and late-result evidence;
-- Mission Runtime death, MotionGate death, consumer-timeout, and zero-velocity
-  evidence;
-- Mapping and Navigation TF ownership evidence plus an atomic saved-map handoff;
-- real local Mandarin KWS/ASR/TTS, playback-reference AEC, barge-in, and fixed
-  STOP evidence on the supported WSL analog-audio setup;
-- performance and soak evidence;
-- the license and locked-model inventory;
-- clean-checkout reproduction, release notes, and reproducible experiment
-  records; and
-- confirmation that no cloud request is required for the acceptance flow.
+- [产品规格](../product/v1.0-product-spec.md)中的完整 flow；
+- [测试策略](testing-strategy.md)中所有量化 completion criteria；
+- Mission invalid/busy/timeout/cancel/STOP race 与 late-result evidence；
+- Mission Runtime death、MotionGate death、consumer-timeout 和 zero-velocity evidence；
+- Mapping 与 Navigation TF ownership evidence 及 atomic saved-map handoff；
+- 在支持的 WSL analog-audio setup 上真实本地 Mandarin KWS/ASR/TTS、playback-reference AEC、barge-in 和固定
+  STOP evidence；
+- performance 与 soak evidence；
+- license 与 locked-model inventory；
+- clean-checkout reproduction、release note 和可复现实验记录；以及
+- 确认验收 flow 不需要 cloud request。
 
-## Distribution and recovery
+## 分发与恢复
 
-Before 1.0, distribution is source plus a tagged GitHub repository release.
-Bloom and ROS apt packaging are out of scope. Local model weights, large
-generated maps, and private runtime evidence are not attached to releases.
-The archive tag `archive/vn-0011a-pre-workflow-reset-20260804` at commit
-`075c0f4` and the external verified all-refs bundle are recovery evidence for
-retired repository material, not release inputs.
+1.0 前以 source 加 tagged GitHub repository release 分发。Bloom 与 ROS apt packaging 不在范围内。本地 model
+weight、大型生成 map 与私有 runtime evidence 不附加到 release。commit `075c0f4` 上的 archive tag
+`archive/vn-0011a-pre-workflow-reset-20260804` 与外部已验证 all-refs bundle 是已淘汰仓库材料的 recovery
+evidence，而非 release input。

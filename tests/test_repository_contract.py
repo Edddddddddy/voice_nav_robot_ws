@@ -10,6 +10,16 @@ import yaml
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 CHECKER = REPOSITORY_ROOT / "scripts" / "check_repository.py"
+HUMAN_DOCUMENTS = (
+    "AGENTS.md",
+    "CONTEXT.md",
+    "README.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    ".github/PULL_REQUEST_TEMPLATE.md",
+    "tools/schema/README.md",
+)
+MOJIBAKE_MARKERS = ("鈫?", "鐩", "锛?", "�")
 
 
 class RepositoryContractTest(unittest.TestCase):
@@ -162,11 +172,11 @@ class RepositoryContractTest(unittest.TestCase):
     def assert_review_delivery_semantics(self, document: str) -> None:
         normalized = " ".join(document.split())
         for marker in (
-            "only the final `VOICE_NAV_EVENT` uses the compact envelope",
-            "unresolved P0/P1",
-            "blocks merge",
-            "final `VOICE_NAV_EVENT: reviewed`",
-            "fill `decision_needed`",
+            "仅最终的 `VOICE_NAV_EVENT` 使用紧凑 envelope",
+            "未解决的 P0/P1",
+            "阻止合并",
+            "最终的 `VOICE_NAV_EVENT: reviewed`",
+            "填写 `decision_needed`",
         ):
             self.assertIn(marker, normalized)
 
@@ -193,14 +203,15 @@ class RepositoryContractTest(unittest.TestCase):
             "VOICE_NAV_HANDOFF: ready|blocked|reviewed",
             "VOICE_NAV_PERSISTED",
             "VOICE_NAV_EVENT: blocked|completed|reviewed",
-            "sole transport owner for GitHub writes",
-            "complete evidence to GitHub",
-            "directly returns",
-            "fabricate/reuse a URL",
-            "final event early",
+            "GitHub 写入的唯一传输负责人",
+            "完整证据持久化到 GitHub",
+            "直接返回",
+            "不得伪造或复用 URL",
+            "不得提前发送 最终事件",
             "thread/CI polling",
-            "exact `cwd`, `command`, `timeout`, and expected artifact",
-            "Simplified Chinese",
+            "精确保留 `cwd`",
+            "预期产物",
+            "简体中文",
         )
         for marker in protocol_markers:
             with self.subTest(document="AGENTS.md", marker=marker):
@@ -213,35 +224,35 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertLess(agents.index(persisted), agents.index(final_event))
         self.assert_review_delivery_semantics(agents)
 
-        compact_semantic = "only the final `VOICE_NAV_EVENT` uses the compact envelope"
+        compact_semantic = "仅最终的 `VOICE_NAV_EVENT` 使用紧凑 envelope"
         reformatted_agents = normalized_agents.replace(
             compact_semantic,
-            "only the final `VOICE_NAV_EVENT`\n"
-            "      uses the compact\n"
+            "仅最终的 `VOICE_NAV_EVENT`\n"
+            "      使用紧凑\n"
             "      envelope",
         )
         self.assert_review_delivery_semantics(reformatted_agents)
 
         negative_mutations = (
             (
-                "deleted compact boundary",
+                "删除紧凑交接边界",
                 normalized_agents.replace(compact_semantic, ""),
             ),
             (
-                "reversed compact boundary",
+                "颠倒紧凑交接边界",
                 normalized_agents.replace(
                     compact_semantic,
-                    "only the first `VOICE_NAV_EVENT` uses the compact envelope",
+                    "仅第一个 `VOICE_NAV_EVENT` 使用紧凑 envelope",
                 ),
             ),
             (
-                "removed P0/P1 blocker mapping",
-                normalized_agents.replace("unresolved P0/P1", "resolved P0/P1"),
+                "删除 P0/P1 合并阻断映射",
+                normalized_agents.replace("未解决的 P0/P1", "已解决的 P0/P1"),
             ),
             (
-                "removed decision_needed mapping",
+                "删除 decision_needed 映射",
                 normalized_agents.replace(
-                    "fill `decision_needed`", "omit `decision_needed`"
+                    "填写 `decision_needed`", "省略 `decision_needed`"
                 ),
             ),
         )
@@ -267,8 +278,8 @@ class RepositoryContractTest(unittest.TestCase):
         self.assertRegex(normalized_agents, r"Worker.*Luna.*max")
         self.assertRegex(normalized_agents, r"Reviewer.*Sol.*xhigh")
         self.assertIn("decision_needed", normalized_agents)
-        self.assertIn(
-            "use `none` only when no decision/action is needed", normalized_agents
+        self.assertRegex(
+            normalized_agents, r"仅当不需要任何\s+决策或行动时，才使用 `none`"
         )
 
         agent_docs = (
@@ -297,10 +308,18 @@ class RepositoryContractTest(unittest.TestCase):
         )
 
         context = (REPOSITORY_ROOT / "CONTEXT.md").read_text(encoding="utf-8")
-        for marker in ("VoiceNav", "Mission", "Place", "Stop", "docs/adr/"):
+        for marker in ("VoiceNav", "Mission", "Place", "Stop"):
             with self.subTest(document="docs/agents/README.md", marker=marker):
                 self.assertIn(marker, context)
-        for process_owner in ("Manager", "Worker", "Reviewer", "VOICE_NAV_"):
+        for process_owner in (
+            "Manager",
+            "Worker",
+            "Reviewer",
+            "VOICE_NAV_",
+            "voice_nav_mission",
+            "motion_gate_node",
+            "docs/adr/",
+        ):
             with self.subTest(document="CONTEXT.md", marker=process_owner):
                 self.assertNotIn(process_owner, context)
 
@@ -313,29 +332,61 @@ class RepositoryContractTest(unittest.TestCase):
             ).read_text(encoding="utf-8"),
         }
         for name, document in documents.items():
+            normalized = " ".join(document.split())
             with self.subTest(document=name):
-                self.assertIn("远端 required CI", document)
-                self.assertIn("真实失败后不得在无变更的同一 HEAD 重跑", document)
-                self.assertIn("不代表产品验证通过", document)
+                self.assertIn("required", normalized)
+                self.assertRegex(
+                    normalized,
+                    r"真实\s*失败后不得在无变更的同一 HEAD\s*重跑",
+                )
+                self.assertIn("不代表产品验证通过", normalized)
 
         for name in ("CONTRIBUTING.md", "change-lifecycle"):
             with self.subTest(document=name):
-                self.assertIn("main push 对 `before..sha`", documents[name])
-                self.assertIn("全零 `before` fail closed", documents[name])
+                normalized = " ".join(documents[name].split())
+                self.assertRegex(
+                    normalized,
+                    r"main push 对 `before\.\.sha`.*全零\s+`before` fail closed",
+                )
 
-        lifecycle = documents["change-lifecycle"]
-        self.assertIn(
-            "角色、权限、流程、交付和恢复的唯一权威",
-            lifecycle,
-        )
+        lifecycle = " ".join(documents["change-lifecycle"].split())
+        self.assertIn("角色、权限、流程、交付和恢复的唯一权威", lifecycle)
         self.assertIn("验证节奏和证据记录参考", lifecycle)
         self.assertNotIn("single repository contract", lifecycle)
         self.assertIn(
-            "每个 Task 只维护一份 Manager-owned canonical evidence COMMENT",
+            "每个 Task 只维护一份规范证据 COMMENT",
             lifecycle,
         )
         self.assertIn("PR 正文仅链接该 COMMENT，不复制摘要", lifecycle)
         self.assertNotIn("PR 只维护一份 canonical evidence summary", lifecycle)
+
+    def test_human_documents_are_utf8_chinese_and_keep_one_workflow_owner(self) -> None:
+        document_paths = [REPOSITORY_ROOT / path for path in HUMAN_DOCUMENTS]
+        document_paths.extend(sorted((REPOSITORY_ROOT / "docs").rglob("*.md")))
+        for path in document_paths:
+            with self.subTest(document=path.relative_to(REPOSITORY_ROOT)):
+                text = path.read_text(encoding="utf-8")
+                self.assertRegex(text, r"[\u4e00-\u9fff]")
+                for marker in MOJIBAKE_MARKERS:
+                    self.assertNotIn(marker, text)
+
+        agents = (REPOSITORY_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        context = (REPOSITORY_ROOT / "CONTEXT.md").read_text(encoding="utf-8")
+        agent_index = (
+            REPOSITORY_ROOT / "docs" / "agents" / "README.md"
+        ).read_text(encoding="utf-8")
+        lifecycle = (
+            REPOSITORY_ROOT / "docs" / "process" / "change-lifecycle.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("唯一权威", agents)
+        self.assertIn("角色", agents)
+        self.assertIn("领域词汇", context)
+        self.assertNotRegex(context, r"\b(Manager|Worker|Reviewer)\b")
+        self.assertIn("索引", agent_index)
+        self.assertNotIn("VOICE_NAV_HANDOFF", agent_index)
+        self.assertIn("AGENTS.md", lifecycle)
+        self.assertIn("链接", lifecycle)
 
     def test_missing_relative_markdown_link_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

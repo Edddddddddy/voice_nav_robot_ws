@@ -1,25 +1,24 @@
-# Safety and motion contract
+# 安全与运动契约
 
-**Status:** Target v1.0 contract
+**状态：**目标 v1.0 契约。
 
-VoiceNav Robot provides a deterministic, fail-closed **Operational Stop** for
-the supported simulation environment. It does not claim a hardware emergency
-stop or functional-safety certification.
+VoiceNav Robot 为支持的仿真环境提供确定性、fail-closed 的 **Operational Stop**。它不声称硬件 emergency stop
+或功能安全认证。
 
-## Trust and ownership
+## 信任与 ownership
 
-| Source or process | May propose motion | May publish final controller velocity |
+| 来源或进程 | 可提出运动 | 可发布最终控制器速度 |
 | --- | --- | --- |
-| KWS, ASR, local LLM | yes, untrusted intent | no |
-| deterministic Agent rules | yes, semantic steps | no |
-| `mission_runtime_node` | yes, after whole-plan admission | no |
-| Nav2 or relative-motion executor | yes, for the active generation | no |
-| `nav2_velocity_smoother` | conditions the active candidate | no |
-| `nav2_collision_monitor` | filters the conditioned candidate | no |
-| `motion_gate_node` | enforces the active lease and limits | **yes, sole publisher** |
-| `diff_drive_controller` | consumes the final command | no |
+| KWS、ASR、local LLM | 可以，不可信 intent | 不可以 |
+| deterministic Agent rule | 可以，semantic step | 不可以 |
+| `mission_runtime_node` | 可以，whole-plan admission 后 | 不可以 |
+| Nav2 或 relative-motion executor | 可以，仅 active generation | 不可以 |
+| `nav2_velocity_smoother` | condition active candidate | 不可以 |
+| `nav2_collision_monitor` | filter conditioned candidate | 不可以 |
+| `motion_gate_node` | enforce active lease 与 limit | **可以，唯一 publisher** |
+| `diff_drive_controller` | consume final command | 不可以 |
 
-The self-written runtime processes are exactly:
+自编写 runtime process 严格为：
 
 ```text
 voice_node
@@ -28,11 +27,10 @@ mission_runtime_node
 motion_gate_node
 ```
 
-`mission_runtime_node` and `motion_gate_node` are separate processes. The
-separate failure domains let the Gate expire its steady-clock lease if Runtime
-crashes, stalls, or loses executor progress.
+`mission_runtime_node` 与 `motion_gate_node` 是独立 process。独立 failure domain 使 Runtime crash、stall 或失去
+executor progress 时，Gate 仍可 expiry steady-clock lease。
 
-## Fixed target chain
+## 固定目标链
 
 ```text
 Nav2 or relative-motion candidate
@@ -44,504 +42,335 @@ Nav2 or relative-motion candidate
   -> gz_ros2_control / Gazebo wheel joints
 ```
 
-The complete chain uses `geometry_msgs/msg/TwistStamped`. The pinned Jazzy
-`diff_drive_controller` Interface intrinsically subscribes to that type; it
-has no `enable_stamped_cmd_vel` switch. Configuration and contract tests reject
-that fictitious parameter and the obsolete demo-only `use_stamped_vel` key.
+完整链使用 `geometry_msgs/msg/TwistStamped`。固定的 Jazzy `diff_drive_controller` Interface 天生订阅该 type，
+没有 `enable_stamped_cmd_vel` switch。configuration 与 contract test 拒绝该虚构 parameter 以及已废弃的 demo-only
+`use_stamped_vel` key。
 
-There is no `twist_mux`. The single Mission execution slot already determines
-the active source, so a second priority and ownership model would be
-ambiguous. The velocity smoother only conditions acceleration and velocity.
-Collision Monitor is a protective collision-avoidance layer, not a certified
-emergency-stop system. Neither replaces MotionGate.
+没有 `twist_mux`：single Mission execution slot 已决定 active source，第二套 priority/ownership model 会含糊。
+velocity smoother 只 condition acceleration 和 velocity；Collision Monitor 是 protective collision-avoidance layer，
+不是认证 emergency-stop system，二者均不能替代 MotionGate。
 
-`diff_drive_controller` enforces the final hard linear/angular velocity bounds,
-but its acceleration and deceleration limit parameters remain unset. Applying
-a second acceleration limiter there would make `cmd_vel_timeout` begin a ramp
-instead of selecting zero on the first controller update after expiry.
-`nav2_velocity_smoother` owns normal acceleration shaping upstream; command
-zero latency and physical stationarity remain separate measurements.
+`diff_drive_controller` enforce 最终 hard linear/angular velocity bound，但 acceleration/deceleration limit parameter 保持
+unset。若在这里再加 limiter，`cmd_vel_timeout` expiry 后将进入 ramp，而不是在第一个 controller update 选择 zero。
+`nav2_velocity_smoother` 在上游拥有 normal acceleration shaping；command-zero latency 与 physical stationarity 是独立
+measurement。`ros_gz_bridge` 在目标产品路径只 bridge `/clock` 与 `/scan`；velocity command、joint state、odometry 与
+TF 均留在 ROS 2 control。
 
-`ros_gz_bridge` bridges only `/clock` and `/scan` in the target product path.
-Velocity commands, joint state, odometry, and TF remain in ROS 2 control.
+## MotionGate 契约
 
-## MotionGate contract
+- MotionGate start 时 inhibited，restart 后不能恢复更早 lease。
+- 它是 controller final-command endpoint 的唯一 publisher。
+- Runtime 在 smoother 前按 Runtime instance、admission epoch、Mission generation 与 step generation filter child
+  callback；这些 identity 不在 `TwistStamped` 中，MotionGate 不会假装从 candidate message 恢复或验证它们。
+- MotionGate 在 `PREPARE` 时生成 opaque authority `lease_id` 与 per-lease candidate topic；caller 不得提供任意
+  ID 或 path。Runtime 通过 private control seam open/renew。authority lease 是 **Gate steady clock 上 `250 ms`**；
+  velocity candidate 永不 renew。
+- IDL 为 transport 将 `request_id`、`gate_instance_id`、`lease_id` bound 为 36 char。Core 要求 request 与 Gate
+  identity 严格为 32 个 lowercase hexadecimal char；PREPARE 的 lease field 必须 empty，OPEN/RENEW/INHIBIT 必须含
+  精确 32 lowercase-hex lease。uppercase、hyphenated UUID、short value 与 non-hex text 都 invalid。
+- 每个 control operation 使用一个 Gate-wide compare-and-swap `control_seq`。OPEN、RENEW、INHIBIT 还必须匹配
+  current Gate instance 与 lease。stale request 没有任何 state effect，包括与更晚 lease race 的 old-lease
+  `INHIBIT`。expired/revoked lease 不得 resurrect；再次取得 authority 必须重新执行完整 handover protocol。
+- candidate freshness 是独立 steady-clock deadline。non-zero output 同时要求 live Runtime authority 和从 current
+  bound data plane 收到 fresh candidate。freshness 在 **`150 ms` Gate steady time** 后 expiry。新 lease 的 first
+  candidate 到达前，successful activation RENEW 只重启此有界 first-sample window；任一 candidate accepted 后，
+  RENEW 永不延长 candidate freshness。candidate sample 永不延长 authority lease。
+- finite `linear.x`/`angular.z` 超 trusted YAML bound 时 clamp。NaN、Inf、non-zero unsupported axis、stale input，
+  或来自 unbound writer/topic generation 的 sample，均 retire lease 并选择 zero。
+- authority 或 candidate expiry inhibit motion，并每 **`20 ms` wall time** continuous publish zero，不等待 Runtime、
+  ROS time、Nav2 或 Gazebo time。
+- matching current `INHIBIT` 在 acknowledgement control request 前选择并 publish zero。
+- `diff_drive_controller.cmd_vel_timeout` 是 **`0.35 s`**，是 MotionGate 自身死亡后的 consumer-side second deadman。
+- Runtime crash、cancel、timeout、dependency loss、invalid generation 与 Gate fault 均 fail closed。
+- 无法建立 Gate health 或 zero-output state 时，生成 `SAFETY_FAULT`；Runtime faulted 时不准入新 Mission。
+- Runtime 仅在 active step、Gate、`/clock`、odometry 与必要 dependency 均按 steady-clock liveness fresh 时 renew
+  authority。任一 prerequisite loss 都停止 renewal 并终结旧 lease；dependency 恢复不会 reopen 它。
 
-- MotionGate starts inhibited and cannot restore an earlier lease after a
-  restart.
-- It is the only publisher to the controller's final command endpoint.
-- Runtime filters child callbacks by Runtime instance, admission epoch,
-  Mission generation, and step generation **before** the smoother. These
-  identities are not present in `TwistStamped`, so MotionGate does not pretend
-  to recover or validate them from candidate messages.
-- MotionGate generates the opaque authority `lease_id` and per-lease candidate
-  topic during `PREPARE`; callers cannot supply arbitrary IDs or paths.
-  Runtime opens and renews that lease through the private control seam. The
-  authority lease is **250 ms on MotionGate's steady clock**; velocity
-  candidates never renew it.
-- IDL bounds `request_id`, `gate_instance_id`, and `lease_id` at 36 characters
-  for transport. The Core requires request and Gate identities to be exactly
-  32 lowercase hexadecimal characters; PREPARE must carry an empty lease field,
-  while OPEN/RENEW/INHIBIT require an exact 32-lowercase-hex lease. Uppercase,
-  hyphenated UUID text, short values, and non-hexadecimal text are invalid.
-- Every control operation uses one Gate-wide compare-and-swap `control_seq`.
-  `OPEN`, `RENEW`, and `INHIBIT` also match the current Gate instance and
-  lease. A stale request has no state effect, including a late old-lease
-  `INHIBIT` racing a newer lease. An expired or revoked lease cannot be
-  resurrected; obtaining authority again requires the complete handover
-  protocol below.
-- Candidate freshness is a second, independent steady-clock deadline. A
-  non-zero output requires both live Runtime authority and a fresh candidate
-  from the currently bound data plane. Freshness expires at **150 ms** of
-  MotionGate steady time. Before the first candidate of a newly opened lease,
-  a successful activation RENEW restarts only this bounded first-sample
-  window; once any candidate is accepted, RENEW never extends candidate
-  freshness. Candidate samples never extend the independent authority lease.
-- Finite `linear.x` and `angular.z` values outside trusted YAML bounds are
-  clamped to those bounds. NaN, Inf, a non-zero unsupported axis, stale input,
-  or a sample from an unbound writer/topic generation retires the lease and
-  selects zero.
-- Authority or candidate expiry inhibits motion and continuously publishes
-  zero every **20 ms wall time** without waiting for Runtime, ROS time, Nav2,
-  or Gazebo time.
-- A matching current `INHIBIT` selects and publishes zero before it
-  acknowledges the control request.
-- `diff_drive_controller.cmd_vel_timeout` is **0.35 s**. It is the
-  consumer-side second deadman if MotionGate itself dies.
-- Runtime crash, cancel, timeout, dependency loss, invalid generation, and
-  Gate fault all fail closed.
-- A Gate health or zero-output state that cannot be established produces
-  `SAFETY_FAULT`; Runtime admits no new Mission while faulted.
-- Runtime renews authority only while the active step, Gate, `/clock`, odometry,
-  and required dependencies are fresh according to steady-clock liveness
-  checks. Losing any prerequisite stops renewal and terminates the old lease;
-  resuming a dependency never reopens it.
+WSL 不是 real-time environment。`250 ms` 与 `0.35 s` 是支持环境下的测试 budget，不是 hard real-time guarantee。
 
-WSL is not a real-time environment. The 250 ms and 0.35 s values are tested
-budgets for this supported environment, not hard real-time guarantees.
+### 包内 control/state seam
 
-### Package-private control and state seam
-
-The private ROS types live in `voice_nav_mission`, not
-`voice_nav_interfaces`:
+private ROS type 位于 `voice_nav_mission`，而非 `voice_nav_interfaces`：
 
 ```text
 voice_nav_mission/srv/InternalMotionGateControl
 voice_nav_mission/msg/InternalMotionGateState
 ```
 
-`motion_gate_core` is a package-internal static build target. Its header and
-library are neither installed nor exported; `motion_gate_node` is the only
-installed runtime target owned by this MotionGate submodule. The same package
-also installs the current Mission control-plane target `mission_runtime_node`,
-whose public endpoints and unavailable production motion boundary are defined
-in `mission-runtime-interface.md`. The Core Interface is the typed
-`prepare`/`open`/`renew`/`inhibit`/`accept_candidate`/`tick`/`snapshot`
-surface plus the read-only `selected_command`. Adapter-only `force_fault`
-latches graph, reader, clock, or publication failures into fail-closed state;
-it is not a fifth control operation.
-`PrepareAdmissionProvider` and `OpenBindingProvider` are internal seams that
-let the ROS Adapter supply bounded graph facts without moving ROS graph access
-into the Core.
+`motion_gate_core` 是 package-internal static build target，header 与 library 不 install/export；
+`motion_gate_node` 是该 MotionGate submodule 唯一 install 的 runtime target。同一 package 还 install 当前 Mission
+control-plane target `mission_runtime_node`；其 public endpoint 与 unavailable production-motion boundary 由
+[Mission Runtime 接口](mission-runtime-interface.md)定义。
 
-The node FQN is `/motion_gate_node`; the private absolute endpoints are
-`/motion_gate/internal/control` and `/motion_gate/internal/state`. PREPARE
-returns a bounded topic below
-`/voice_nav_internal/motion_gate/candidate/lease_`. These names and the final
-`/diff_drive_controller/cmd_vel` endpoint are code constants, not YAML
-parameters or product-launch remaps. Trusted parameter YAML uses the exact root
-`motion_gate_node`.
+Core Interface 是 typed `prepare`/`open`/`renew`/`inhibit`/`accept_candidate`/`tick`/`snapshot` surface 与 read-only
+`selected_command`。Adapter-only `force_fault` 将 graph、reader、clock 或 publication failure latch 入 fail-closed state，
+它不是第五项 control operation。`PrepareAdmissionProvider` 与 `OpenBindingProvider` 是 internal seam，允许 ROS
+Adapter 提供 bounded graph fact，而不将 ROS graph API 移入 Core contract。
 
-The only operations are `PREPARE`, `OPEN`, `RENEW`, and `INHIBIT`.
-`PREPARE` matches the current Gate instance and expected global
-`control_seq`; the other operations additionally match the current lease.
-Each accepted operation advances the single Gate-wide sequence. A stale
-instance, lease, or sequence returns a bounded typed mismatch without changing
-Gate state. Public `StopMission` remains unconditionally safety-effective at
-the Mission boundary because Runtime first linearizes STOP and then inhibits
-the **current** Gate tuple; an arbitrary private stale `INHIBIT` is not STOP.
-Request and Gate-instance identities, plus every non-PREPARE lease identity,
-have the exact 32-character lowercase hexadecimal semantic described above
-even though their IDL fields have a 36-character transport bound. PREPARE must
-not carry a lease ID.
+节点 FQN 为 `/motion_gate_node`；私有绝对 endpoint 是 `/motion_gate/internal/control` 与
+`/motion_gate/internal/state`。PREPARE 返回位于
+`/voice_nav_internal/motion_gate/candidate/lease_` 下的有界 topic。这些名称以及最终的
+`/diff_drive_controller/cmd_vel` endpoint 都是代码常量，不是 YAML parameter 或产品 launch remap。可信参数 YAML
+使用精确根 `motion_gate_node`。
 
-`InternalMotionGateControl` contains no writer GID. At `OPEN`, MotionGate uses
-its own graph context to require exactly one publisher endpoint and records
-that endpoint's complete 16-byte GID. Candidate callbacks compare it only with
-the `MessageInfo.publisher_gid` observed in the same Gate context. A
-locked-Fast-DDS self-test proves that those two Gate-local representations
-correlate; failure or mismatch keeps the Gate inhibited. This is a strict
-supported-runtime constraint: canonical product bringup sets
-`RMW_IMPLEMENTATION=rmw_fastrtps_cpp`, `motion_gate_node` rejects every other
-RMW at startup, and both runtime packages declare `rmw_fastrtps_cpp` as an
-execution dependency. A caller's `Publisher::get_gid()` is neither transported
-nor compared across processes.
+仅有 `PREPARE`、`OPEN`、`RENEW` 与 `INHIBIT` 四种 operation。`PREPARE` 匹配当前 Gate instance 与预期的全局
+`control_seq`；其余 operation 还匹配当前 lease。每个被接受的 operation 都推进唯一的 Gate-wide sequence。过期的
+instance、lease 或 sequence 返回有界的强类型 mismatch，而不改变 Gate state。公共 `StopMission` 在 Mission 边界仍
+无条件具有安全效果：Runtime 先线性化 STOP，再 inhibit **当前** Gate tuple；任意私有、过期的 `INHIBIT` 不是 STOP。
+request 与 Gate-instance identity，以及每个非 PREPARE lease identity，虽有 36 字符的 IDL transport bound，仍具有上文
+所定义的精确 32 字符小写十六进制语义。PREPARE 不得携带 lease ID。
 
-The same fail-closed rule applies to the command clock. Product startup
-requires `use_sim_time=true`; the Node rejects any runtime attempt to change
-that parameter. Immediately before every final publication, the serialized
-barrier independently requires both the parameter to remain true and
-`get_clock()->ros_time_is_active()`. Losing either invariant latches
-`ConfigurationInvalid`, replaces the selected command with zero, and emits a
-zero ROS stamp, so a system-time-stamped non-zero command cannot defeat the
-controller's simulation-time consumer timeout.
+`InternalMotionGateControl` 不包含 writer GID。`OPEN` 时，MotionGate 使用自身的 graph context 要求精确一个
+publisher endpoint，并记录该 endpoint 完整的 16-byte GID。candidate callback 只与同一 Gate context 中观测到的
+`MessageInfo.publisher_gid` 比较。锁定 Fast-DDS 的 self-test 证明两种 Gate-local 表示关联；失败或 mismatch 保持
+Gate inhibited。这是严格的受支持 runtime 限制：canonical 产品 bringup 设置
+`RMW_IMPLEMENTATION=rmw_fastrtps_cpp`，`motion_gate_node` 在 startup 拒绝其他 RMW，且两个 runtime package 均将
+`rmw_fastrtps_cpp` 声明为 execution dependency。调用方的 `Publisher::get_gid()` 不跨进程传输或比较。
 
-The state snapshot uses
-`RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1)` and reports the Gate instance,
-global sequence, `INHIBITED`/`PREPARED`/`ARMED`/`FAULTED` state, current lease
-and topic, validity flags, output sequence/zero state, bounded reason, and an
-optional fixed 16-byte bound GID for run-local diagnosis only. Package-private
-types and obscure topic names reduce the supported Interface surface; they
-are not DDS authentication or authorization.
+同一 fail-closed 规则适用于 command clock。产品 startup 要求 `use_sim_time=true`；Node 拒绝任何运行时修改该
+parameter 的尝试。每次最终发布前，串行 barrier 独立要求该 parameter 保持 true，且
+`get_clock()->ros_time_is_active()` 为真。任一 invariant 丢失都会 latch `ConfigurationInvalid`，将 selected command
+替换为 zero 并发出 zero ROS stamp，从而使 system-time-stamped 的 non-zero command 无法绕过 controller 的
+simulation-time consumer timeout。
 
-Candidate input uses `BEST_EFFORT + VOLATILE + KEEP_LAST(1)`. The final Gate
-publisher to `/diff_drive_controller/cmd_vel` uses
-`rclcpp::SystemDefaultsQoS()` to match the pinned controller's subscriber.
-Runtime graph checks prove actual endpoint compatibility and unique ownership;
-an introspected reliability, history, or depth reported as `UNKNOWN` is not
-hard-coded into a false assertion.
+state snapshot 使用 `RELIABLE + TRANSIENT_LOCAL + KEEP_LAST(1)`，报告 Gate instance、全局 sequence、
+`INHIBITED`/`PREPARED`/`ARMED`/`FAULTED` state、当前 lease 与 topic、validity flag、output sequence/zero state、
+有界 reason，以及仅用于本运行诊断的可选固定 16-byte bound GID。包内 type 与不显眼的 topic 名称缩小受支持的
+Interface surface；它们不是 DDS authentication 或 authorization。
 
-Control, candidate, expiry, state, and output decisions cross one publication
-serial barrier. Callbacks never publish directly. Once current-lease
-`INHIBIT`, expiry, or invalid-input retirement publishes zero through that
-barrier, an earlier queued non-zero decision cannot publish afterward.
-The Core owns the selected command and state decision, not publication
-acknowledgement. The Node Adapter owns actual final/state publication,
-`output_publish_seq`, `zero_publish_seq`, and the response's `zero_published`
-fact.
+candidate input 使用 `BEST_EFFORT + VOLATILE + KEEP_LAST(1)`。向 `/diff_drive_controller/cmd_vel` 的最终 Gate
+publisher 使用 `rclcpp::SystemDefaultsQoS()`，以匹配锁定 controller 的 subscriber。Runtime graph check 证明实际
+endpoint compatibility 与唯一 ownership；内省得到的 reliability、history 或 depth 如为 `UNKNOWN`，不得被硬编码成
+虚假的 assertion。
 
-### Authority and candidate handover barrier
+control、candidate、expiry、state 与 output decision 都跨越同一 publication serial barrier。callback 从不直接发布。
+一旦 current-lease `INHIBIT`、expiry 或 invalid-input retirement 经该 barrier 发布 zero，较早排队的 non-zero decision
+不得随后发布。Core 拥有 selected command 与 state decision，而非 publication acknowledgement。Node Adapter 拥有
+实际 final/state publication、`output_publish_seq`、`zero_publish_seq` 与 response 中的 `zero_published` 事实。
 
-`TwistStamped` deliberately remains the velocity type across the complete
-chain; adding Mission metadata to a controller command would couple the motion
-conditioners to Mission internals. That choice requires an explicit barrier so
-an old command buffered by the smoother, Collision Monitor, or DDS cannot be
-mistaken for a command from a newly admitted step.
+### Authority 与 candidate handover barrier
 
-Every initial arm, source change, step change, expired lease, cancel recovery,
-STOP recovery, or Runtime restart follows this internal protocol:
+`TwistStamped` 在完整链中有意保持 velocity type；向 controller command 添加 Mission metadata 会耦合 motion
+conditioner 与 Mission internal。该选择需要显式 barrier，防止 smoother、Collision Monitor 或 DDS 缓冲的 old command
+被误认为新 admitted step command。
+
+每次 initial arm、source change、step change、expired lease、cancel recovery、STOP recovery 或 Runtime restart 均执行：
 
 ```text
 revoke old authority, inhibit Gate, and select/publish zero
-  -> stop the old producer and cancel its child operation
-  -> fully unload/destroy the old smoother and Collision Monitor instances
+  -> stop old producer and cancel child operation
+  -> fully unload/destroy old smoother and Collision Monitor instances
   -> destroy Gate's old candidate subscription
-  -> confirm the old output writer GID has disappeared from the ROS graph
-  -> PREPARE admission confirms the retired writer is absent
-  -> Core PREPARE generates a new lease ID and per-lease candidate topic
+  -> confirm old output writer GID disappeared from ROS graph
+  -> PREPARE admission confirms retired writer absent
+  -> Core PREPARE generates new lease ID and per-lease candidate topic
   -> create discard-only reader A
   -> create/configure new Collision Monitor and smoother downstream-to-upstream
-  -> OPEN first performs pure Core request/state/CAS/lease/deadline validation;
-     a rejected request performs no graph query or reader mutation
-  -> graph snapshot #1 requires one writer and healthy final controller
-  -> destroy reader A and its queue; create discard-only reader B
-  -> graph snapshot #2 requires the same unique writer GID
+  -> OPEN pure Core validation (reject: no graph query/reader mutation)
+  -> graph snapshot #1: one writer and healthy final controller
+  -> destroy reader A/queue; create discard-only reader B
+  -> graph snapshot #2: same unique writer GID
   -> Core atomically enters ARMED with selected output still zero
-  -> destroy reader B and its queue; create accepting reader C
-  -> graph snapshot #3 requires the same writer GID and healthy controller;
-     mismatch faults the Gate and selects zero
-  -> only now complete OPEN with a 250 ms Runtime authority lease
-  -> RENEW while still selecting zero; activate Collision Monitor; RENEW;
-     activate the smoother; then RENEW once more under the admitted generation
-  -> start the new producer last
+  -> destroy reader B/queue; create accepting reader C
+  -> graph snapshot #3: same writer GID and healthy controller
+  -> only then complete OPEN with a 250 ms Runtime authority lease
+  -> RENEW while zero; activate Collision Monitor; RENEW;
+     activate Velocity Smoother; RENEW once more under admitted generation
+  -> start new producer last
 ```
 
-Readers A and B are always discard-only. Reader C is the first accepting
-reader and is created only after Core has atomically entered `ARMED` with zero
-selected. The two discard-reader destructions are queue barriers; the three
-graph snapshots prove that the unique writer did not change across them. A
-pre-OPEN sample can therefore never become a valid post-OPEN non-zero command.
-Gate callbacks accept only the writer bound during this handover on the new
-per-lease channel. An old sample retains its old channel or Gate-local writer
-identity and remains invalid even if DDS delivers it after the new lease opens.
+reader A/B 始终 discard-only。reader C 是第一个 accepting reader，仅在 Core atomically enter `ARMED` 且选择 zero 后
+创建。两次 discard-reader destruction 是 queue barrier；三次 graph snapshot 证明 unique writer 未改变。因此 pre-OPEN
+sample 永不能变成有效的 post-OPEN non-zero command。Gate callback 只接受 handover 中绑定的 writer 和新 per-lease
+channel；old sample 保留 old channel 或 Gate-local writer identity，即使 DDS 在新 lease open 后投递也 invalid。
 
-A lifecycle deactivate/cleanup/configure cycle is not sufficient: the pinned
-Nav2 1.3.12
+lifecycle deactivate/cleanup/configure cycle 不充分：固定的 Nav2 1.3.12
 [Velocity Smoother cleanup](https://github.com/ros-navigation/navigation2/blob/1.3.12/nav2_velocity_smoother/src/velocity_smoother.cpp#L199-L206)
-does not clear all cached command state. The supported implementation fully
-unloads and recreates both components and the Gate reader. A quiet window may
-be recorded for diagnostics, but it is not the isolation proof.
+不会清除所有 cached command state。支持实现完全 unload/recreate 两个 component 与 Gate reader。quiet window 可作为
+diagnostic 记录，但不是 isolation proof。failed unload、graph disappearance、new-writer binding、activation 或
+acknowledgement 都保持 Gate inhibited 并变为 `SAFETY_FAULT`。
 
-The Gate records the opaque lease ID for control-request idempotence, but the
-ID is not carried in `TwistStamped`. While inhibited or waiting for handover,
-every candidate is discarded. A failed unload, graph disappearance, new-writer
-binding, activation, or acknowledgement keeps the Gate inhibited and becomes
-`SAFETY_FAULT`.
+barrier 在连续 Mission step 间也必需，即使两 step 使用同一 producer。limit、timeout 与 queue bound 来自 trusted
+configuration，并以故意 delayed old command 验证。当前实现交付 normal-running Core、private seam、Gate-local binding、
+barrier、final ownership 与 deadline expiry 的 in-process authority/candidate harness；它不声称完整 Runtime/smoother/
+Collision Monitor integration。process-kill crash-stop、consumer-deadman proof 与 managed/unmanaged Gazebo pause
+behavior 是独立 target acceptance slice。
 
-The barrier is required between consecutive Mission steps too, even when both
-steps use the same producer. Limits, timeouts, and queue bounds come from
-trusted configuration and are verified with deliberately delayed old commands.
+### Gazebo managed safe-pause 与 resume
 
-The current implementation delivers the normal-running Core, private seam,
-Gate-local binding, barriers, final ownership, and deadline expiry with an
-in-process test authority/candidate harness. It does not claim the complete
-Runtime/smoother/Collision Monitor integration. Process-kill crash-stop,
-consumer-deadman proof, and managed/unmanaged Gazebo pause behavior remain
-separate target acceptance slices.
+controller timeout 本身不能证明 pause 后“无 replay”：Jazzy `diff_drive_controller`
+[从 controller time 与 Twist stamp 计算 command age](https://github.com/ros-controls/ros2_controllers/blob/jazzy/diff_drive_controller/src/diff_drive_controller.cpp#L94-L116)。simulation time 停止后，`0.35 s` timeout 不推进。
 
-### Gazebo managed safe-pause and resume
+支持的 product/test path 在 simulation update 仍推进时做两阶段 safe-pause transaction：
 
-The controller timeout alone cannot prove “no replay” across a pause:
-Jazzy `diff_drive_controller`
-[computes command age from controller time and the Twist stamp](https://github.com/ros-controls/ros2_controllers/blob/jazzy/diff_drive_controller/src/diff_drive_controller.cpp#L94-L116).
-When simulation time is stopped, its 0.35 s timeout does not advance.
+1. reject new Mission、停止 renew Runtime authority、inhibit MotionGate，并收到 zero-output acknowledgement；
+2. 观察 `diff_drive_controller` limited command output 和 wheel command/velocity state，在配置数量的完整 control
+   period 内为 zero；
+3. Gate 在 proof 前 failure 时，让 consumer timeout 或 controller deactivation 仍在 update loop 推进时完成，
+   但仍必须直接观测 configured control period 的 zero wheel command；inactive/released interface 不是 zero proof；
+4. 仅在 zero proof 后 pause Gazebo，并记录含 world iteration 与 Gate/controller instance state 的 opaque safe-pause
+   token。
 
-The supported product and test path therefore uses a two-phase safe-pause
-transaction while simulation updates are still advancing:
+这是 `voice_nav_bringup`/test-harness operational transaction，不是 public Mission pause endpoint，也不是第五个
+self-written resident process。若在 bounded pause deadline 前不能观测 zero，不 mint token；harness 从 known zero state
+terminate/restart simulation/control，而非冻结未证明 command。
 
-1. reject new Missions, stop renewing Runtime authority, inhibit MotionGate,
-   and receive its zero-output acknowledgement;
-2. observe `diff_drive_controller`'s limited command output and the wheel
-   command/velocity state at zero for a configured number of complete control
-   periods;
-3. if Gate fails before that proof, let the consumer timeout or deactivate the
-   controller while the update loop is still advancing, but still require
-   direct observation of zero wheel command for the configured control
-   periods; inactive or released interfaces alone are not zero proof;
-4. only after the zero proof pause Gazebo and record an opaque safe-pause token
-   containing the world iteration and Gate/controller instance state.
+managed resume 要求该 token，并验证记录的 controller state 未变。因此无论 controller remain active 还是曾
+deactivate，first resumed `PreUpdate` 前 wheel command 已证明 zero。deactivated controller 只能在 inhibited Gate 与
+zero path healthy 后再次 activate；first resumed wheel command 显式 test 为 zero。
 
-This is an operational `voice_nav_bringup`/test-harness transaction, not a
-public Mission pause endpoint and not a fifth self-written resident process.
-If zero cannot be observed by the bounded pause deadline, no token is minted
-and the harness terminates/restarts simulation and control from a known zero
-state instead of freezing an unproved command.
+在该 barrier 前的 direct GUI/Gazebo Transport pause 没有 safe-pause token。managed resume 拒绝原地 unpause；支持的
+recovery 是从 known inactive、zero-command state 完整 restart simulation/control。原因是 paused `gz_ros2_control`
+不能在第一次 resumed write 前处理 controller switch 或消费新 buffer zero。项目不将任意外部 pause/resume 视为
+functional-safety mechanism。
 
-Managed resume requires that token and verifies the recorded controller state
-has not changed. The wheel command is therefore already proven zero before the
-first resumed `PreUpdate`, whether the controller remains active or was also
-deactivated. A deactivated controller is activated later only after an
-inhibited Gate and zero path are healthy. The first resumed wheel command is
-explicitly tested as zero.
+## StopMission ownership 与顺序
 
-A direct GUI or Gazebo Transport pause taken before this barrier has no
-safe-pause token. Managed resume refuses to unpause it in place; the supported
-recovery is a full simulation/control restart from a known inactive,
-zero-command state. This is required because paused `gz_ros2_control` cannot
-process a controller switch or consume a newly buffered zero before the first
-resumed write. The project does not claim arbitrary external pause/resume as a
-functional-safety mechanism.
+`mission_runtime_node` 拥有 public `StopMission.srv` endpoint，因为 STOP、cancel、success、timeout 与 downstream
+completion 必须通过一个 serial linearization point。MotionGate 仅向 Runtime 暴露 internal control seam；它不是第二个
+public product-control API。
 
-## StopMission ownership and ordering
-
-`mission_runtime_node` owns the public `StopMission.srv` endpoint because
-STOP, cancel, success, timeout, and downstream completion must pass through
-one serial linearization point. MotionGate exposes only an internal control
-seam to Runtime; it is not a second public product-control API.
-
-A new Stop request always has safety effect, even when its source sequence is
-old. `request_id` makes retries idempotent; it does not grant permission to
-ignore a stop.
+新的 Stop request 永远有 safety effect，即使 source sequence 已旧。`request_id` 使 retry 幂等，不赋予忽略 stop
+的权限：
 
 ```text
 deduplicate request_id
   -> first terminal-intent linearization
   -> rotate admission_epoch for a new request
   -> inhibit MotionGate and select/publish zero
-  -> cancel the active downstream executor
-  -> commit the active Mission's STOPPED result when STOP won
+  -> cancel active downstream executor
+  -> commit active Mission's STOPPED result when STOP won
   -> return StopMission response
 ```
 
-The response is sent only after MotionGate reports inhibited and has published
-zero. `motion_inhibited=true` does **not** claim that simulated inertia has
-already brought the robot physically to rest.
+response 仅在 MotionGate 报告 inhibited 且已 published zero 后发送。`motion_inhibited=true` **不**表示 simulation
+inertia 已带来 physical rest。重复相同 `request_id` 返回 current response，不再 rotate epoch。后续 STOP 即使另一个
+terminal intent 已赢得 active Goal，仍 rotate global epoch 和 inhibit motion，但不改该 Goal 历史 Result。Operational
+Stop 不是 pause；只有携带最新 Runtime instance/admission epoch 的新计划、经 complete validation 后，才能取得新 lease。
 
-Repeating the same `request_id` returns the current response without rotating
-the epoch again. A later STOP still rotates the global epoch and inhibits
-motion even if another terminal intent already won for the active Goal; it
-does not rewrite that Goal's historical result.
+## Cancel、STOP 与 completion race
 
-Operational Stop is not pause. Only a newly planned and fully validated
-Mission carrying the latest Runtime instance and admission epoch can obtain a
-new lease.
+所有 terminal intent 采用 first-terminal-intent-wins：
 
-## Cancel, STOP, and completion races
+- **Cancel 赢**：Gate zero、downstream cancel，再 outer/inner `CANCELED`；后续 STOP 仍 rotate epoch 并保持 motion
+  inhibited。
+- **STOP 赢**：rotate epoch、Gate zero、downstream cancel，再 outer `ABORTED` 与 inner `STOPPED`；后续 cancel 不得
+  改写 Result。
+- **Success 赢**：publish final zero 并 commit `SUCCEEDED`；后续 STOP 只变 current global admission，不变 history。
+- **Timeout/failure 赢**：Gate zero、cancel child，commit 严格一个 structured failure Result。
 
-All terminal intents use first-terminal-intent-wins:
+late Nav2、relative-motion、map、timer callback 按 Runtime instance、admission epoch、Mission generation 与 step generation
+discard；late velocity sample 由上述 candidate handover barrier isolation。已进入 production `on_accepted` 且获得
+`GoalHandle`/`CallbackLease` 的 Goal 在 graceful shutdown 获得 exactly one terminal result。没有 handle 的 provisional goal
+在 bounded handoff window 内 revoke，不能 fabricated Result；context/process closing 后，transport 不声称 exactly-once。
 
-- **Cancel wins:** Gate zero, downstream cancel, then outer `CANCELED` and
-  inner `CANCELED`. A later STOP still rotates the epoch and keeps motion
-  inhibited.
-- **STOP wins:** rotate epoch, Gate zero, downstream cancel, then outer
-  `ABORTED` and inner `STOPPED`. A later cancel cannot rewrite the result.
-- **Success wins:** publish final zero and commit `SUCCEEDED`. A later STOP
-  changes current global admission only, not history.
-- **Timeout or failure wins:** Gate zero, cancel downstream, and commit its one
-  structured failure result.
+## 相对运动
 
-Late Nav2, relative-motion, map, and timer callbacks are discarded by Runtime
-instance, admission epoch, Mission generation, and step generation. Late
-velocity samples are isolated by the candidate handover barrier described
-above. Every Goal that has entered production `on_accepted` and acquired a
-`GoalHandle`/`CallbackLease` receives exactly one terminal result during
-graceful shutdown. A provisional goal without a handle is revoked within its
-bounded handoff window without fabricating a Result; after context or process
-closure the transport does not claim exactly-once delivery.
+- `RelativeMotionController` 是 production `RelativeMotionPort` 后的 deep ROS-free Module；其 ROS Adapter 观察
+  odometry/source-health，不拥有 final velocity writer。
+- MOVE 将 odometry displacement project 到 signed initial-heading axis；ROTATE 在比较 signed angular displacement 前
+  unwrap yaw。
+- 两者使用 trusted YAML speed、acceleration、tolerance、stall threshold 与 policy-computed deadline；临近 target
+  slowdown、completion 前 publish zero，并 commit 一个 first-terminal Result。
+- Relative-motion sample 受 Runtime/admission/Mission/step generation 与 active Gate lease fencing；late odometry、timer
+  或 downstream callback 不能 publish command 或改写 terminal Result。
+- step deadline、stall window、lease expiry 与 cancel grace 用 steady clock。ROS time 只 timestamp simulation-time data，
+  包括最终 `TwistStamped`、odometry、TF 和 sensor message；永不驱动 deadline。MotionGate 在 process lifetime 锁定
+  `use_sim_time=true`；若 invariant 或 active ROS clock loss，则 fault closed，只 emit zero command with zero stamp。
+- dependency steady liveness 为 `200 ms`。在 simulation 中，Collision Monitor raw ROS-time source-age limit 固定
+  `300 ms`；即使 callback 继续到达，old raw measurement 仍 fail closed。保留 original scan measurement stamp/frame，
+  Collision Monitor 直接消费 `/scan`，consumer 使用 `SENSOR_DATA + KEEP_LAST(1)`；没有 conditioned-scan relay
+  restamp 或 mask sensor backlog。headless raw-age/TF physical acceptance 由 Issue #72 追踪。
+- Runtime child callback 经由带 reserved control capacity 和 generation-tagged event 的 Node-owned typed queue serialise。
+  STOP/Cancel 先 fence generation、启动 async teardown；若 ROS service 不能 enqueue/await response，使用 serialized
+  state snapshot。
+- normal queue saturation 仅 reject normal event 并记录一个 QueueFault；reserved STOP/Cancel lane 保持可用。若 queue
+  admission 或 Runtime worker fail，Adapter 独立 emergency inhibit/zero path 仍执行且幂等。
+- stationarity 只从真实 steady-clock Gate `zero_proven_at` 后收到的 odometry 测量；deadline 绝对为
+  `zero_proven_at + 1200 ms`，不因 cleanup 延长。
 
-## Relative motion
+### RelativeMotion 生产 seam
 
-- `RelativeMotionController` is the deep ROS-free Module behind the production
-  `RelativeMotionPort`; its ROS Adapter observes odometry and source-health
-  signals without taking ownership of the final velocity writer.
-- MOVE projects odometry displacement onto the signed initial-heading axis.
-- ROTATE unwraps yaw before comparing signed angular displacement.
-- Both use trusted YAML for speed, acceleration, tolerance, stall thresholds,
-  and a policy-computed deadline.
-- Both slow down near the target, publish zero before completing, and commit
-  exactly one first-terminal result.
-- Relative-motion samples are fenced by Runtime / admission / Mission / step
-  generations and the active Gate lease; late odometry, timer, or downstream
-  callbacks cannot publish a command or rewrite a terminal result.
-- Step deadlines, stall windows, lease expiry, and cancel grace use a steady
-  clock. ROS time is used only to stamp simulation-time data, including the
-  final `TwistStamped`, odometry, TF, and sensor messages; it never drives a
-  deadline. MotionGate locks `use_sim_time=true` for the process lifetime. If
-  that invariant or the active ROS clock is lost, it faults closed and emits
-  only zero commands with a zero stamp.
-- Dependency steady liveness is 200 ms. In simulation, Collision Monitor's
-  raw ROS-time source-age limit is independently fixed at 300 ms; an old raw
-  measurement remains fail-closed even when callbacks continue arriving.
-  Original scan measurement stamps and frames are retained, Collision Monitor
-  consumes direct `/scan`, and the consumer uses `SENSOR_DATA` with
-  `KEEP_LAST(1)`; no conditioned-scan relay restamps or masks sensor backlog.
-  Headless raw-age and TF physical acceptance is tracked by Issue #72.
-- Runtime child callbacks are serialized through a Node-owned typed queue with
-  reserved control capacity and generation-tagged events. STOP/Cancel fences
-  the generation first, starts asynchronous teardown, and uses a serialized
-  state snapshot if the ROS service cannot enqueue or await its response.
-- Normal queue saturation rejects only the normal event and records one
-  QueueFault; the reserved STOP/Cancel lane remains usable. If queue admission
-  or the Runtime worker fails, the Adapter's independent emergency inhibit/
-  zero path still runs and remains idempotent.
-- Stationarity is measured only from odometry received at or after the actual
-  steady-clock Gate `zero_proven_at`; its deadline is absolute at
-  `zero_proven_at + 1200 ms`, with no cleanup-time extension.
+- Runtime event queue 有独立 normal/control capacity。normal lane full 记录 bounded queue fault；control lane full
+  触发独立 EmergencyFence，推进 admission epoch、inhibit/zero Gate，并阻止 late event reopen old generation。
+- cancellation 在每个 controller、writer、lifecycle、component boundary 后 fence，且在 `OPEN` 前再次 fence。因此
+  cancelled start 即使 downstream late return，也不能 publish producer command 或进入 `OPEN`。
+- start-drain timeout cleanup 由 object-held async continuation 拥有，不依赖 destruction；producer stop、component cleanup、
+  generation reclaim 与 terminal publication 每项至多一次。
+- health/teardown 保持 frozen typed failure-code taxonomy：source-only odom/scan/clock liveness loss 为
+  `DEPENDENCY_UNAVAILABLE`；RelativeMotion step deadline 为 `TIMEOUT`；stall/collision/其他 motion execution failure 为
+  `EXECUTION_FAILED`；Gate/controller/container/component/candidate-writer/zero-proof/handover/stationarity failure 为
+  `SAFETY_FAULT`。只有 teardown 不能 prove Gate inhibited+zero 时，original business failure 才升级为
+  `SAFETY_FAULT`；证明 zero 不改写 infrastructure safety fault；residual safety fault 对后续 admission latch。
+- Node shutdown 停止 ingress、drain 已接受的 internal completion event，等待 production `on_accepted` 保存的
+  GoalHandle/CallbackLease 取得一个 graceful-shutdown terminal，再关闭 queue 并销毁 Runtime state。provisional/no-handle
+  ticket 在 fixed bound revoke，永不 fabricated Result。ROS context/process closing 后不声称 distributed exactly-once。
+  terminal record bound 为最近八个 generation。
+- Action admission 由 Node-owned gate linearise，该 gate 共享 on-goal/on-accepted handoff、AdmitEvent dispatch、start
+  permit 与 quiesce。generation-bound permit 在 quiesce 后 invalid，因此已在 queue 的 event 也不能 start Core、
+  PREPARE、OPEN 或 producer。provisional revoked ticket 是 bounded shutdown state，不承诺保留 late transport handoff。
+  只有已进入 production `on_accepted` 且有 GoalHandle/CallbackLease 的 callback 参与 graceful second drain；
+  MotionGate inhibited+zero 仍是独立 safety guarantee。
+- production Node 使用 package-private RuntimeExecutionPlane，一起拥有 RuntimeCore 与 NodeCompletionMailbox。transaction、
+  start failure 与 emergency relay rejection 都经该 plane 收敛为一个 structured Goal terminal；mailbox shutdown 幂等，
+  并在同步 state 已构建后 join reaper。
+- reentrant RelativeMotion ROS callback 使用 shared lifetime ingress、weak Impl/producer capture 与 in-flight guard。
+  shutdown 在 reset subscription、raw timer、producer 前禁用新 ingress，再等待 queued/active callback 结束后释放 state。
+  production seam 在真实 MultiThreadedExecutor 上测试 odom、scan、clock、raw timer 和 command-supplier callback 的
+  barrier。
 
-### RelativeMotion production seams
+## 失败行为
 
-- The Runtime event queue has separate normal and control capacity. A full
-  normal lane records a bounded queue fault; a full control lane raises an
-  independent EmergencyFence that advances the admission epoch, inhibits and
-  zeros the Gate, and prevents a later event from reopening the old generation.
-- Cancellation is fenced after every controller, writer, lifecycle, and
-  component boundary and again immediately before `OPEN`. A cancelled start
-  therefore cannot publish a producer command or enter `OPEN`, even when the
-  downstream call returns late.
-- Start-drain timeout cleanup is owned by an object-held asynchronous
-  continuation. It is not dependent on destruction, and producer stop,
-  component cleanup, generation reclaim, and terminal publication are each
-  performed at most once.
-- Runtime health and teardown keep the frozen failure-code taxonomy typed:
-  source-only odom/scan/clock liveness loss is
-  `DEPENDENCY_UNAVAILABLE`; a RelativeMotion step deadline is `TIMEOUT`; and
-  stall, collision, or other motion execution failure is `EXECUTION_FAILED`.
-  Gate, controller, container, component, candidate-writer, zero-proof,
-  handover, and stationarity failures are `SAFETY_FAULT`. An original
-  business failure is upgraded to `SAFETY_FAULT` only when teardown cannot
-  prove Gate inhibited+zero; proving zero does not rewrite an infrastructure
-  safety fault. The residual safety fault remains latched against later
-  admission.
-- Node shutdown stops ingress, drains accepted internal completion events, and
-  waits for the saved GoalHandle/CallbackLease from production `on_accepted`
-  to receive its one graceful-shutdown terminal before closing the queue and
-  destroying Runtime state. A provisional/no-handle ticket is revoked at its
-  fixed bound and never receives a fabricated Result. Once the ROS context or
-  process is closing, transport delivery is not claimed to be distributed
-  exactly-once. Terminal records are bounded to eight recent generations.
-- Action admission is linearized by one Node-owned gate shared by the
-  on-goal/on-accepted handoff, AdmitEvent dispatch, start permits, and
-  quiesce. A generation-bound permit is invalid after quiesce, so an event
-  already in the queue cannot start Core, PREPARE, OPEN, or the producer.
-  Provisional revoked tickets are bounded shutdown state, not a promise to
-  retain a late transport handoff. Only an already-entered production
-  `on_accepted` callback with a GoalHandle/CallbackLease participates in the
-  graceful second drain; MotionGate inhibited+zero remains the independent
-  safety guarantee.
-- The production Node uses a package-private RuntimeExecutionPlane that owns
-  RuntimeCore and the NodeCompletionMailbox together. Transaction, start
-  failure, and emergency relay rejection all converge through this plane to a
-  single structured Goal terminal; mailbox shutdown is idempotent and joins
-  its reaper after all synchronization state has been constructed.
-- Reentrant RelativeMotion ROS callbacks use a shared lifetime ingress with a
-  weak Impl/producer capture and an in-flight guard. Shutdown disables new
-  ingress before resetting subscriptions, the raw timer, and producer, then
-  waits for queued and active callbacks before releasing the state. The
-  production seam tests this barrier on a real MultiThreadedExecutor for
-  odom, scan, clock, raw timer, and command-supplier callbacks.
-
-## Failure behavior
-
-| Failure | Required behavior |
+| 失败 | 必需行为 |
 | --- | --- |
-| Invalid, stale, or oversized Mission | reject before any execution side effect |
-| Second Mission while busy | return `BUSY`; no queue or implicit preemption |
-| Dependency unavailable during whole-plan validation | reject before an earlier step starts |
-| Candidate stale or authority lease expired | Gate inhibits, latches the old lease closed, and continuously publishes zero |
-| Runtime disappears | Gate lease expires independently |
-| MotionGate disappears while simulation advances | controller consumes no fresh command and times out within 0.35 s of advancing simulation |
-| MotionGate disappears after a managed safe-pause | the wheel command was directly proven zero before the token was issued; token-checked resume preserves it |
-| Gazebo safe-pause and managed resume | first resumed wheel command is zero; stale non-zero command is never replayed |
-| Direct external pause without a safe-pause token | in-place resume is refused; restart simulation/control from a known zero state |
-| Nav2 abort or step deadline | Gate zero, cancel child, fail step, skip remainder |
-| Map save partial failure | publish no completed logical map directory |
-| Late callback after cancel | discard callback by epoch/generation; discard velocity through the inhibited handover barrier |
-| Gate health or zero proof unavailable | report `SAFETY_FAULT` and remain fail-closed |
+| invalid、stale 或 oversized Mission | execution side effect 前 reject |
+| busy 时第二个 Mission | 返回 `BUSY`；无 queue/implicit preemption |
+| whole-plan validation 时 dependency unavailable | earlier step 启动前 reject |
+| candidate stale 或 authority lease expired | Gate inhibit、latch old lease closed、continuous publish zero |
+| Runtime 消失 | Gate lease independent expiry |
+| MotionGate 在 simulation 推进时消失 | controller 无 fresh command，在推进 simulation 的 `0.35 s` 内 timeout |
+| MotionGate 在 managed safe-pause 后消失 | token 发行前已直接证明 wheel command zero；token-checked resume 保持此状态 |
+| Gazebo safe-pause/managed resume | first resumed wheel command zero；不 replay stale non-zero |
+| 没有 safe-pause token 的 direct external pause | 拒绝 in-place resume；从 known zero state restart simulation/control |
+| Nav2 abort 或 step deadline | Gate zero、cancel child、fail step、skip remainder |
+| map save partial failure | 不 publish completed logical map directory |
+| cancel 后 late callback | 按 epoch/generation discard；经 inhibited handover barrier discard velocity |
+| Gate health 或 zero proof unavailable | 报告 `SAFETY_FAULT` 并保持 fail-closed |
 
-The corresponding terminal codes are deliberately not inferred from the
-presence of a later zero proof:
+终态代码刻意不由稍后 zero proof 推断：
 
-| Typed cause | Terminal code |
+| 类型化原因 | 终态代码 |
 | --- | --- |
-| Odom/scan/clock source liveness only | `DEPENDENCY_UNAVAILABLE` |
-| RelativeMotion step deadline only | `TIMEOUT` |
-| Stall, collision, or motion execution failure | `EXECUTION_FAILED` |
+| 仅 odom/scan/clock source liveness | `DEPENDENCY_UNAVAILABLE` |
+| 仅 RelativeMotion step deadline | `TIMEOUT` |
+| stall、collision 或 motion execution failure | `EXECUTION_FAILED` |
 | Gate/controller/container/component/writer/zero/handover/stationarity | `SAFETY_FAULT` |
 
-## Verification obligations
+## 验证义务
 
-- Current cumulative verification retains the pure-Core manual-clock GTest, the
-  deterministic conditioning/ROS-integration checks, a Fast-DDS-locked Node
-  launch test with neither Gazebo nor `/clock`, and the existing MotionGate /
-  perception headless product layer. Issue #64 does not claim a headless
-  physical RelativeMotion acceptance; raw-age and TF evidence belongs to
-  Issue #72. Repository-static contract checks are a prerequisite, not a
-  substitute for any layer.
-- Historical fixed-domain evidence is not current acceptance evidence. Current
-  launch layers use the official
-  `run_test_isolated.py` runner, clear inherited `ROS_DOMAIN_ID` and
-  `DISABLE_ROS_ISOLATION`, and allocate a process-isolated ROS domain with
-  localhost discovery. This current rule is not retroactive evidence for the
-  old tag.
-- The Node layer has a 60-second timeout and serial execution; the product
-  layer additionally has
-  a unique Gazebo partition, a 180-second timeout, and serial execution.
-- Manual-clock tests prove lease, cancel-grace, timeout, and callback-fencing
-  behavior without sleeping.
-- OPEN tests prove pure validation precedes graph access and that readers A/B/C
-  cross exactly three same-writer graph snapshots before success.
-- Runtime-death tests keep injecting valid-looking candidates and prove they
-  cannot renew the independent authority lease.
-- Stop tests assert `EPOCH -> INHIBIT/ZERO -> CANCEL -> RESPONSE`, plus
-  idempotent `request_id` behavior.
-- Runtime tests cover cancel/STOP/success races and exactly-one Result.
-- Process-death tests kill Runtime and MotionGate separately to prove both
-  deadman layers.
-- Managed safe-pause/resume tests prove that an old non-zero command cannot
-  resume motion within the documented boundary.
-- Handover tests inject old-writer candidates before, during, and after full
-  pipeline recreation and prove that channel/GID binding rejects all of them.
-- Pause tests request safe-pause while moving, prove the controller and wheel
-  command reach zero before `/clock` stops, kill MotionGate while paused, and
-  assert the first resumed wheel command is zero.
-- Pause tests also kill MotionGate before zero proof; interface release or
-  controller inactivity never mints a token without observed zero, and a
-  failed bounded proof selects full restart.
-- Unmanaged-pause tests prove that a missing or mismatched safe-pause token
-  refuses in-place resume and selects the full-restart recovery path.
-- Odometry tests distinguish command-zero latency from physical stationarity.
-- RelativeMotion tests cover signed projection, yaw unwrap across `+/-pi`,
-  bounded command limits, progress monotonicity, stall/deadline edges, and
-  zero-proof stationarity fencing with a manual steady clock.
-- No test exits while either Gate or controller can retain an authorized
-  non-zero command.
+- 当前累计验证保留 pure-Core manual-clock GTest、deterministic conditioning/ROS-integration check、没有 Gazebo 与
+  `/clock` 的 Fast-DDS-locked Node launch test，以及既有 MotionGate/perception headless product layer。Issue #64 不
+  声称 headless physical RelativeMotion acceptance；raw-age/TF evidence 属于 Issue #72。repository-static contract 是
+  prerequisite，不能替代任何 layer。
+- historical fixed-domain evidence 不是当前 acceptance evidence。当前 launch layer 使用官方
+  `run_test_isolated.py`，清除 inherited `ROS_DOMAIN_ID` 与 `DISABLE_ROS_ISOLATION`，并分配 process-isolated ROS
+  domain with localhost discovery；该规则不会 retroactively 为旧 tag 提供 evidence。
+- Node layer timeout `60 s` 且 serial execution；product layer 另有 unique Gazebo partition、`180 s` timeout 与
+  serial execution。
+- manual-clock test 无 sleep 地证明 lease、cancel-grace、timeout 与 callback-fencing behavior；OPEN test 证明 pure
+  validation 先于 graph access，reader A/B/C 成功前严格跨三次 same-writer graph snapshot。
+- Runtime-death test 持续 inject valid-looking candidate，证明不能 renew independent authority lease；Stop test assert
+  `EPOCH -> INHIBIT/ZERO -> CANCEL -> RESPONSE` 与 idempotent `request_id`；Runtime test 覆盖
+  cancel/STOP/success race 与 exactly-one Result。
+- process-death test 分别 kill Runtime 与 MotionGate，证明两层 deadman；managed safe-pause/resume test 证明 old
+  non-zero command 不能在契约边界内恢复运动。
+- handover test 在 full pipeline recreation 前、中、后注入 old-writer candidate，证明 channel/GID binding 全部 reject；
+  pause test 运动中请求 safe-pause，证明 controller/wheel command 在 `/clock` 停止前到达 zero，pause 中 kill MotionGate，
+  并 assert first resumed wheel command zero。
+- pause test 还在 zero proof 前 kill MotionGate；interface release/controller inactivity 永不在无 observed zero 时 mint
+  token，bounded proof failure 选择 full restart。unmanaged-pause test 证明 missing/mismatched safe-pause token 拒绝
+  in-place resume 并选择 full-restart recovery。
+- odometry test 区分 command-zero latency 和 physical stationarity；RelativeMotion test 覆盖 signed projection、跨
+  `+/-pi` yaw unwrap、有界 command limit、progress monotonicity、stall/deadline edge 和 manual steady clock 下的
+  zero-proof stationarity fencing。
+- 任一 Gate 或 controller 仍可能保留 authorized non-zero command 时，test 不得退出。

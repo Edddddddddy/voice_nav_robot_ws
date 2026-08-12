@@ -1,11 +1,10 @@
-# TF and operating modes
+# TF 与运行模式
 
-**Status:** Target v1.0 contract
+**状态：**目标 v1.0 契约。
 
-VoiceNav Robot uses separate Mapping and Navigation Mode launch compositions.
-The modes never overlap and do not switch online in v1.0.
+VoiceNav Robot 使用分别启动的 Mapping Mode 与 Navigation Mode。两个模式永不重叠，v1.0 不在线切换。
 
-## Frame tree and exact names
+## Frame tree 与精确名称
 
 ```text
 map
@@ -18,19 +17,15 @@ map
             └── laser_link
 ```
 
-The wheel frame names are exactly `left_wheel` and `right_wheel`. Joint names
-are separate configuration identifiers and must not be substituted for frame
-names.
+wheel frame 名称严格为 `left_wheel` 与 `right_wheel`。joint name 是独立 configuration identifier，不能替代
+frame name。
 
-The current model uses a cylindrical chassis with radius `0.20 m` and height
-`0.18 m`, wheel radius `0.035 m`, wheel width `0.025 m`, wheel centers at
-`y = ±0.20 m`, a caster radius of `0.045 m`, and a LiDAR cylinder of radius
-`0.04 m` and height `0.05 m`. `base_link` is `0.035 m` above the ground and
-the LiDAR pose relative to it is `[0.10, 0.00, 0.16]`, giving
-`base_footprint → laser_link = [0.100, 0.000, 0.195]`.
+当前 model 使用圆柱 chassis：radius `0.20 m`、height `0.18 m`；wheel radius `0.035 m`、wheel width
+`0.025 m`、wheel center `y = ±0.20 m`；caster radius `0.045 m`；LiDAR cylinder radius `0.04 m`、height
+`0.05 m`。`base_link` 距 ground `0.035 m`，LiDAR 相对 pose 为 `[0.10, 0.00, 0.16]`，因此
+`base_footprint → laser_link = [0.100, 0.000, 0.195]`。
 
-For wheel radius `r` and wheel-center distance `L = 0.40 m`, the controller
-semantics are:
+wheel radius 为 `r`、wheel-center distance 为 `L = 0.40 m` 时，controller semantic 为：
 
 ```text
 v_left  = v - ωL/2       v_right = v + ωL/2
@@ -38,118 +33,108 @@ v       = (v_right + v_left)/2
 ω       = (v_right - v_left)/L
 ```
 
-Odometry is continuous but can drift; it is not global map localization. Every
-physical link has visual, collision, and inertial semantics as appropriate,
-with positive mass and physically valid principal inertias. `base_footprint` is
-only a logical frame and does not receive a fabricated collision or inertia.
+odometry 连续但可能 drift，不是 global map localization。每个 physical link 按需具有 visual、collision 与
+inertial semantic，且拥有正 mass 和物理有效的 principal inertia。`base_footprint` 仅为 logical frame，
+不得伪造 collision 或 inertia。
 
-## Unique TF ownership
+## 唯一 TF ownership
 
-| Transform | Mapping Mode owner | Navigation Mode owner |
+| 变换 | 建图模式所有者 | 导航模式所有者 |
 | --- | --- | --- |
-| `map → odom` | slam_toolbox | AMCL |
-| `odom → base_footprint` | diff_drive_controller | diff_drive_controller |
-| `base_footprint → base_link` | robot_state_publisher | robot_state_publisher |
-| robot internal frames | robot_state_publisher | robot_state_publisher |
+| `map → odom` | `slam_toolbox` | AMCL |
+| `odom → base_footprint` | `diff_drive_controller` | `diff_drive_controller` |
+| `base_footprint → base_link` | `robot_state_publisher` | `robot_state_publisher` |
+| robot internal frame | `robot_state_publisher` | `robot_state_publisher` |
 
-No composition may contain two publishers for one dynamic transform. An owner
-change removes the prior publisher and updates TF contract tests in the same
-Issue.
+任一 composition 不能为同一 dynamic transform 包含两个 publisher。owner 改变时必须移除旧 publisher，并在同一
+Issue 更新 TF contract test。
 
-`LaserScan.header.frame_id` is exactly `laser_link`. Sensor placement is owned
-by Xacro and robot_state_publisher, not a duplicate static-transform process.
+`LaserScan.header.frame_id` 严格为 `laser_link`。sensor placement 归 Xacro 与 `robot_state_publisher`，不归
+duplicate static-transform process。
 
-## Common target control and sensor stack
+## 共同目标控制与传感器栈
 
-Both modes run:
+两种模式均运行：
 
-- Gazebo Harmonic with the hand-written differential-drive model;
-- `gz_ros2_control`;
-- `joint_state_broadcaster`;
-- `diff_drive_controller`, which owns odometry and
-  `odom → base_footprint`;
-- robot_state_publisher;
-- `ros_gz_bridge` for `/clock` and `/scan` only;
-- `mission_runtime_node` and independent `motion_gate_node`;
-- nav2_velocity_smoother and nav2_collision_monitor upstream of Motion Gate.
+- 使用手写 differential-drive model 的 Gazebo Harmonic；
+- `gz_ros2_control`；
+- `joint_state_broadcaster`；
+- 拥有 odometry 与 `odom → base_footprint` 的 `diff_drive_controller`；
+- `robot_state_publisher`；
+- 仅 bridge `/clock` 与 `/scan` 的 `ros_gz_bridge`；
+- `mission_runtime_node` 与独立 `motion_gate_node`；
+- 位于 Motion Gate 上游的 `nav2_velocity_smoother` 与 `nav2_collision_monitor`。
 
-Commands, joint state, odometry, and TF do not cross `ros_gz_bridge`.
+command、joint state、odometry 与 TF 不穿过 `ros_gz_bridge`。
 
-## Mode matrix
+## 模式矩阵
 
-| Runtime | Mapping Mode | Navigation Mode |
+| 运行时 | 建图模式 | 导航模式 |
 | --- | --- | --- |
 | common simulation/control/sensor stack | on | on |
-| slam_toolbox | on | off |
+| `slam_toolbox` | on | off |
 | map saver / pose-graph serializer | on | off |
 | map server | off | on |
 | AMCL | off | on |
 | Nav2 planner/controller/behavior/lifecycle | off | on |
-| Runtime configuration | `mode=mapping` | `mode=navigation` |
+| 运行时配置 | `mode=mapping` | `mode=navigation` |
 
-Mode is immutable for the process lifetime. A transition means:
+mode 在 process lifetime 内不可变。transition 意味着：
 
-1. request Operational Stop and observe locked zero;
-2. stop the current composition;
-3. verify its `map → odom` owner is gone;
-4. start the other composition with an explicit saved-map selection where
-   required;
-5. read the new `/mission/state` Runtime instance and admission epoch.
+1. 请求 Operational Stop 并观察 locked zero；
+2. 停止当前 composition；
+3. 验证其 `map → odom` owner 已消失；
+4. 在需要时使用明确 saved-map selection 启动另一 composition；
+5. 读取新的 `/mission/state` Runtime instance 与 admission epoch。
 
-## Mapping Mode
-
-```text
-Gazebo LiDAR ── /scan ──► slam_toolbox ──► map → odom
-diff_drive_controller ──► odom + odom → base_footprint
-semantic move/rotate Mission ──► fixed target motion chain
-SAVE_MAP ──► logical occupancy map + pose graph artifacts
-```
-
-Allowed Mission steps are move-distance, rotate-angle, and save-map. A logical
-map ID resolves below a configured map root. The caller cannot provide a path.
-A completed logical map is published transactionally from the caller's view.
-
-## Navigation Mode
+## Mapping 模式
 
 ```text
-saved map ──► map server
-/scan + initial pose ──► AMCL ──► map → odom
-Named Place ──► Mission Runtime ──► Nav2 NavigateToPose
-Nav2 velocity ──► nav2_velocity_smoother
-              ──► nav2_collision_monitor ──► Motion Gate
+Gazebo LiDAR ── /scan ──> slam_toolbox ──> map → odom
+diff_drive_controller ──> odom + odom → base_footprint
+semantic move/rotate Mission ──> fixed target motion chain
+SAVE_MAP ──> logical occupancy map + pose graph artifact
 ```
 
-Allowed Mission steps are move-distance, rotate-angle, and navigate-to-place.
-Mission Runtime resolves a Named Place to a `PoseStamped` in frame `map`. The
-Agent never receives or constructs raw map coordinates.
+允许的 Mission step 为 move-distance、rotate-angle 与 save-map。logical map ID 在 configured map root 下解析；
+caller 不能提供 path。已完成 logical map 从 caller 视角 transactionally publish。
 
-## Clock and data rules
+## Navigation 模式
 
-- Physics, TF, SLAM, AMCL, and Nav2 use `use_sim_time=true`.
-- Motion leases, controller liveness, cancellation bounds, audio liveness, and
-  process supervision use a steady monotonic clock.
-- Pausing simulation cannot preserve or renew a stale motion lease.
-- diff_drive_controller odometry and `odom → base_footprint` use one pose and
-  timestamp source.
-- robot_state_publisher is the sole owner of internal robot frames.
-- `/scan` must be transformable from `laser_link` at its message timestamp.
-- `/clock` and `/scan` bridge directions, types, names, and QoS are explicit
-  contract-test inputs.
+```text
+saved map ──> map server
+/scan + initial pose ──> AMCL ──> map → odom
+Named Place ──> Mission Runtime ──> Nav2 NavigateToPose
+Nav2 velocity ──> nav2_velocity_smoother
+              └──> nav2_collision_monitor ──> Motion Gate
+```
 
-## Acceptance checks
+允许的 Mission step 为 move-distance、rotate-angle 与 navigate-to-place。Mission Runtime 将 Named Place 解析为
+frame `map` 内的 `PoseStamped`；Agent 永不接收或构造 raw map coordinate。
 
-Each mode proves:
+## Clock 与数据规则
 
-- exactly one `map → odom` publisher when that transform exists;
-- exactly one `odom → base_footprint` publisher and that owner is
-  diff_drive_controller;
-- the connected chain
-  `map → odom → base_footprint → base_link → laser_link`;
-- exact `left_wheel` and `right_wheel` frames;
-- LaserScan transformability at message timestamps;
-- no mixed wall/simulation timestamps in navigation data;
-- valid TF through bounded motion and after Operational Stop;
-- no command, joint-state, odometry, or TF bridge beyond `/clock` and `/scan`.
+- Physics、TF、SLAM、AMCL 与 Nav2 使用 `use_sim_time=true`。
+- motion lease、controller liveness、cancellation bound、audio liveness 与 process supervision 使用 steady
+  monotonic clock。
+- pause simulation 不能保留或续约 stale motion lease。
+- `diff_drive_controller` odometry 与 `odom → base_footprint` 使用同一 pose 与 timestamp source。
+- `robot_state_publisher` 是 internal robot frame 的唯一 owner。
+- `/scan` 必须可在其 message timestamp 从 `laser_link` transform。
+- `/clock` 与 `/scan` bridge direction、type、name 和 QoS 是明确 contract-test input。
 
-Mapping acceptance saves and reloads a logical map. Navigation acceptance loads
-that artifact, accepts an initial pose, localizes, and reaches a Named Place.
+## 验收检查
+
+每种 mode 均证明：
+
+- transform 存在时，恰有一个 `map → odom` publisher；
+- 恰有一个 `odom → base_footprint` publisher，且 owner 为 `diff_drive_controller`；
+- 存在连接链 `map → odom → base_footprint → base_link → laser_link`；
+- 精确的 `left_wheel` 与 `right_wheel` frame；
+- LaserScan 在 message timestamp 可 transform；
+- navigation data 无 mixed wall/simulation timestamp；
+- 有界 motion 期间及 Operational Stop 后 TF 有效；
+- 除 `/clock` 与 `/scan` 外无 command、joint-state、odometry 或 TF bridge。
+
+Mapping acceptance 保存并重载 logical map。Navigation acceptance 加载该 artifact、接受 initial pose、完成
+localization 并到达 Named Place。

@@ -1,33 +1,28 @@
-# Crash-stop acceptance runbook
+# Crash-stop 验收手册
 
-This runbook describes the Issue #36 launch acceptance for an independent
-`mission_runtime_node` or `motion_gate_node` failure. It is a real headless
-Gazebo/Fast DDS/controller/odometry test; mocks may cover deterministic unit
-seams but may not replace the process being killed.
+本手册描述 Issue #36 对独立 `mission_runtime_node` 或 `motion_gate_node` failure 的 launch 验收。它是
+真实的 headless Gazebo/Fast DDS/controller/odometry test；mock 可覆盖确定性 unit seam，但不得替代被 kill
+的 process。
 
-## Scope and cadence
+## 范围与节奏
 
-The ordinary PR gate runs each scenario once, with a fresh launch, partition,
-and process-isolated ROS domain. The first real failure stops the run and is
-not retried. Five fresh runs per scenario are nightly/release hardening
-evidence, not an ordinary PR gate. Do not use CTest `--retest-until-pass`.
+常规 PR gate 对每个 scenario 运行一次，使用全新 launch、partition 与 process-isolated ROS domain。首次真实
+failure 即停止，不重试。每个 scenario 五次全新运行属于 nightly/release hardening evidence，不属于常规 PR
+gate。不得使用 CTest `--retest-until-pass`。
 
-The two exact scenarios are:
+两个精确 scenario 为：
 
-- `mission_runtime_crash_stop`: kill the launch-owned Runtime process while a
-  valid non-zero MOVE is active; prove Gate lease expiry, zero output,
-  stationarity, restart isolation, and a new Goal recovery.
-- `motion_gate_consumer_deadman`: kill the launch-owned Gate process while it
-  is the unique final-command publisher; prove the controller consumer
-  timeout, stationarity, restart isolation, and a new Goal recovery.
+- `mission_runtime_crash_stop`：有效非零 MOVE active 时 kill launch-owned Runtime process；证明 Gate lease
+  expiry、zero output、stationarity、restart isolation 和新 Goal recovery。
+- `motion_gate_consumer_deadman`：Gate 作为唯一 final-command publisher 时 kill launch-owned Gate process；
+  证明 controller consumer timeout、stationarity、restart isolation 和新 Goal recovery。
 
-The tests must not claim external Gazebo pause/resume safety, supervisor
-respawn, a journal, or a change to a public ROS IDL.
+测试不得声称外部 Gazebo pause/resume safety、supervisor respawn、journal 或 public ROS IDL 变化。
 
-## Directed local gate
+## 定向本地门禁
 
-Run from a sourced Jazzy environment. The directed build may prepare the
-workspace, but the acceptance command is exactly the two CTest names below:
+从已 source 的 Jazzy environment 运行。directed build 可准备 workspace，但验收命令严格为以下两个 CTest
+name：
 
 ```bash
 source /opt/ros/jazzy/setup.bash
@@ -39,72 +34,52 @@ colcon test --packages-select voice_nav_bringup --ctest-args \
 colcon test-result --verbose
 ```
 
-Do not substitute `scripts/verify.sh` for this task's directed gate and do
-not poll hosted CI. A test that fails before its SIGKILL injection is still a
-failure of the launch acceptance; record whether the failure is harness,
-environment, or product behavior and stop before the next scenario.
+不得用 `scripts/verify.sh` 代替本 Task 的定向门禁，也不得 poll hosted CI。若 test 在 SIGKILL injection 前失败，
+仍属于 launch acceptance failure；记录其归类为 harness、environment 或 product behavior，并在下一 scenario 前
+停止。
 
-## Exact process injection
+## 精确进程注入
 
-Each test retains the `ProcessStarted` action for its product node. Before
-signalling, the harness must prove all of the following for that same action:
+每项 test 为 product node 保留 `ProcessStarted` action。signalling 前，harness 必须针对同一个 action 证明：
 
-1. The captured PID is the process started by the action, and `os.pidfd_open`
-   succeeds immediately after the start event.
-2. `/proc/<pid>/stat` starttime, `/proc/<pid>/exe`, and cmdline still match the
-   launch executable and exact node marker.
-3. The expected ROS fully qualified node name has one graph owner and the
-   owner reports the expected executable/start arguments.
-4. The pidfd remains valid immediately before injection.
+1. 捕获的 PID 确为 action 启动的 process，且 start event 后立即 `os.pidfd_open` 成功。
+2. `/proc/<pid>/stat` starttime、`/proc/<pid>/exe` 与 cmdline 仍匹配 launch executable 和 exact node marker。
+3. 预期 ROS fully qualified node name 具有一个 graph owner，且该 owner 报告预期 executable/start argument。
+4. 注入前 pidfd 仍有效。
 
-The only permitted signal is
-`signal.pidfd_send_signal(pidfd, signal.SIGKILL)`. The harness must not use
-`pkill -f`, `killall`, process-name matching, PID files, `os.kill`, or a scan
-of user processes. The acknowledgement timestamp is captured from
-`time.monotonic_ns()` immediately after the pidfd syscall succeeds.
+唯一允许的 signal 是 `signal.pidfd_send_signal(pidfd, signal.SIGKILL)`。harness 不得使用 `pkill -f`、
+`killall`、process-name matching、PID file、`os.kill` 或扫描用户 process。acknowledgement timestamp 在 pidfd
+syscall 成功后立即由 `time.monotonic_ns()` 捕获。
 
-Cleanup closes the exact launch-owned actions and uses the existing structured
-Gazebo shutdown. It does not kill by name and does not touch resources from a
-user ROS/Gazebo session. Post-shutdown exit assertions accept SIGKILL only for
-the exact injected action; all other launch-managed processes must exit
-normally.
+cleanup 关闭精确 launch-owned action，并使用既有 structured Gazebo shutdown；不按名称 kill，也不触碰用户
+ROS/Gazebo session 的资源。post-shutdown exit assertion 仅允许被精确 injected action 因 SIGKILL 退出；所有
+其他 launch-managed process 必须正常退出。
 
-## Observable acceptance
+## 可观察验收
 
-Before Runtime injection, observe for at least 200 ms with advancing `/clock`:
-Gate `ARMED`, live authority, fresh candidate data, non-zero final command,
-and non-zero `cmd_vel_out`. From the pidfd acknowledgement, Gate must become
-inhibited and publish a newer proven zero within 350 ms steady/wall time.
+Runtime injection 前，在推进的 `/clock` 下至少观察 `200 ms`：Gate `ARMED`、live authority、fresh candidate
+data、非零 final command 和非零 `cmd_vel_out`。从 pidfd acknowledgement 开始，Gate 必须在 `350 ms` steady/wall
+time 内 inhibited 并发布更新的、已证明的 zero。
 
-Before Gate injection, prove that Gate is the unique final-command publisher
-and save the final non-zero command stamp. After injection, measure the first
-zero `cmd_vel_out` against the last non-zero final command in advancing
-simulation time; the accepted interval is `(0.35 s, 0.36 s]`. Publisher
-disappearance is not zero proof.
+Gate injection 前，证明 Gate 是唯一 final-command publisher，并保存最后一个非零 final command stamp。injection
+后，以推进的 simulation time，测量首个零 `cmd_vel_out` 相对最后非零 final command 的时差；可接受区间为
+`(0.35 s, 0.36 s]`。publisher 消失不是 zero proof。
 
-In both scenarios, physical stationarity is a separate proof: `/odom` must
-reach `abs(linear.x) <= 0.01 m/s` and `abs(angular.z) <= 0.02 rad/s`, and both
-wheel velocities must be zero, within 1.2 s simulation time and held for
-200 ms. Each simulation wait has a 5 s wall watchdog so a stopped clock fails
-closed.
+两个 scenario 中，physical stationarity 都是独立证明：`/odom` 必须在 `1.2 s` simulation time 内达到
+`abs(linear.x) <= 0.01 m/s` 和 `abs(angular.z) <= 0.02 rad/s`，两个 wheel velocity 必须为零，并保持 `200 ms`。
+每个 simulation wait 使用 `5 s` wall watchdog，因此 stopped clock fail closed。
 
-After the exact process restart, verify a new Runtime or Gate identity, reject
-old Runtime/epoch or Gate instance/lease/control-sequence/candidate-writer
-traffic without state mutation, and observe an advancing 1.0 s window with no
-Goal in which final command, controller output, wheel velocity, and odometry
-remain zero. A fresh `MOVE +0.25 m` must then complete and return to zero.
+精确 process restart 后，验证新的 Runtime 或 Gate identity，拒绝旧 Runtime/epoch 或 Gate instance/lease/
+control-sequence/candidate-writer traffic，且不发生 state mutation。接着观察一个推进的 `1.0 s`、没有 Goal 的窗口，
+其中 final command、controller output、wheel velocity 和 odometry 均保持零；随后新的 `MOVE +0.25 m` 必须完成并
+回到零。
 
-## Evidence and failure handling
+## 证据与失败处理
 
-Record the exact repository HEAD, package/RMW versions, scenario, launch
-partition/domain, process PID/starttime/executable/cmdline, instance IDs,
-kill acknowledgement, zero and stationarity timestamps, maximum measured
-latencies, cleanup exit codes, and the bounded failure diagnosis. Keep full
-logs outside Git and retain only compact evidence in the Issue or PR.
+记录 exact repository HEAD、package/RMW version、scenario、launch partition/domain、process PID/starttime/
+executable/cmdline、instance ID、kill acknowledgement、zero 与 stationarity timestamp、最大 measured latency、
+cleanup exit code 与有界 failure diagnosis。完整 log 保留在 Git 外，Issue 或 PR 仅存紧凑证据。
 
-If a real run exposes a Runtime/MotionGate product defect, persist the command,
-observations, smallest decision needed, options, and recommendation in Issue
-#36 immediately, mark the work blocked, and notify the Manager. Do not expand
-this harness task into a Runtime or MotionGate redesign. Do not run the second
-scenario after the first real failure and do not automatically retry the
-failed scenario.
+若真实运行暴露 Runtime/MotionGate product defect，立即在 Issue #36 持久化 command、observation、最小所需
+decision、option 与 recommendation，标记工作 blocked 并按 [AGENTS.md](../../AGENTS.md) 交接。不得将 harness Task 扩展为 Runtime 或
+MotionGate redesign。首次真实 failure 后不得运行第二个 scenario，也不得自动 retry 失败 scenario。

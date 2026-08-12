@@ -7,7 +7,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        一个 Goal 恰好绑定一个 decision-complete Issue 和一个 Draft PR；Task 合并或结束后 Goal 停止，下一 Task 必须由 Manager 新建 Goal。一个 Task 只属于一个父 PRD、一个新的隔离 Worker 上下文、一个分支和一个 Draft PR。验收边界应保持小且可验证。
+        Goal/Task 的绑定、角色和恢复规则以 AGENTS.md 为准。本表单只记录一项可独立回滚、边界清晰且可验证的 Task 与其父 PRD、Issue 和 Draft PR 关联。
   - type: textarea
     id: issue_linkage
     attributes:

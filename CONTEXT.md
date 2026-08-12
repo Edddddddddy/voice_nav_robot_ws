@@ -1,30 +1,19 @@
-# VoiceNav product context
+# VoiceNav 产品上下文
 
-This file is limited to product vocabulary and architecture. Delivery roles,
-permissions, recovery, and handoff state live in [AGENTS.md](AGENTS.md).
+本文件只定义实现无关的产品领域词汇。
 
-## Product vocabulary
+## 产品词汇
 
-- **VoiceNav** helps a person express and complete a bounded walking or
-  navigation intention with a robot.
-- **Mission** is a user-visible intention with a beginning, outcome, and
-  terminal result: completed, cancelled, or failed; it is not an unbounded
-  conversation.
-- **Place** is a named or otherwise recognizable destination in the operating
-  environment.
-- **Stop** explicitly ends active movement and leaves the system stationary.
+- **VoiceNav**：帮助人通过机器人表达并完成一个有边界的步行或导航意图。
+- **Mission**：具有开始、结果和终态（完成、取消或失败）的用户可见意图，不是无限对话。
+- **Place**：运行环境中具名或可识别的目的地。
+- **Stop**：显式结束当前运动，并使系统保持静止。
+- **Mapping Mode**：构建并保存环境地图的独立运行模式。
+- **Navigation Mode**：使用已有地图到达具名目的地的独立运行模式。
 
-## Product architecture
+## 领域不变量
 
-- One deep Mission Runtime owns Mission execution behind stable actions,
-  services, and observation; an independent Motion Gate retains final velocity
-  authority ([ADR-0003](docs/adr/0003-use-one-deep-mission-runtime.md)).
-- The product control path uses `gz_ros2_control` and
-  `diff_drive_controller`; the historical native-DiffDrive baseline is in
-  [ADR-0002](docs/adr/0002-migrate-to-gz-ros2-control.md) and
-  [ADR-0001](docs/adr/0001-use-native-gazebo-diff-drive.md).
-- Mapping and Navigation launch as separate modes so `map → odom` has one
-  owner at a time ([ADR-0004](docs/adr/0004-separate-mapping-and-navigation-modes.md)).
-
-For GitHub Issue/PR operations, see
-[docs/agents/README.md](docs/agents/README.md).
+- Mission 描述用户意图，不能直接携带车轮速度、最终速度或任意文件路径。
+- Stop 是高优先级的运行意图，要求系统停止当前运动；它不等同于经认证的硬件紧急停止。
+- Mapping Mode 与 Navigation Mode 分别运行，不能把建图与导航的状态混为同一会话。
+- Place 是用户可见的名称；其坐标、地图数据和解析方式属于实现细节，不在本词汇表定义。

@@ -1,60 +1,56 @@
-# VoiceNav repository protocol
+# VoiceNav 仓库协作协议
 
-`CONTEXT.md` is the product glossary. GitHub Issues own requirements,
-decisions, acceptance, dependencies, and status; applicable ADRs own product
-and interface decisions. This file is the single owner of roles, permissions, delivery state, and recovery order.
+`AGENTS.md` 是角色、权限、Goal/Task、交付状态和恢复顺序的**唯一权威**。
+`CONTEXT.md` 只维护产品领域词汇；GitHub Issue 维护需求、决策、验收、依赖和状态；
+ADR 维护产品与接口决策。其他流程文档只能链接本文件，不得复制或另立竞争性协议。
 
-## Ownership
+## 角色与责任
 
-- **Manager** owns the parent PRD and Task split, keeps at most two independent
-  sessions active, and is the Manager-only GitHub transport owner (the sole
-  transport owner for GitHub writes): Issue/PR
-  comments, labels, pushes, Draft PRs, reviews, merges, tags, and releases.
-- **目标与 Task**：一个 Goal 恰好绑定一个 decision-complete Issue 和一个 Draft PR，流程为 `PRD -> Issue -> isolated Task -> Draft PR`；Manager 在分配前把 Goal 和验收记录到 Issue。Task 合并或结束后，该 Goal 停止，不自动选择下一 Task；下一 Task 必须由 Manager 新建 Goal。
-- **Worker** owns exactly one decision-complete Issue in one fresh isolated
-  worktree based on current `origin/main`. Worker is Luna/Max (max reasoning);
-  implement with focused RED, minimal GREEN, refactor while green, and commit
-  locally.
-- **Reviewer** 是全新只读的 exact-HEAD PR 审查者，使用 Sol/xhigh；对照 Issue 契约和完整 diff 交接 P0–P3 简体中文证据，绝不修改 Worker 分支或直接写 PR comment。Manager 使用 `COMMENT` 持久化审查证据。
-- 所有新笔记、GitHub 评论、Issue/PR 正文、review、面向人的证据和交接使用简体中文；命令、标识符、协议字段及为精度必须保留的技术名保持原样。
-- Skill routing: use `voice-nav-requirements` for shaping,
-  `voice-nav-worker` for implementation, and `voice-nav-review` for review.
+- **Manager** 维护父 PRD 与 Task 划分，最多同时管理两个互不依赖的会话；也是 GitHub
+  写入的唯一传输负责人：负责
+  Issue/PR 评论、标签、push、Draft PR、review、merge、tag 和 release。
+- **Goal 与 Task**：一个 Goal 只绑定一个决策完整的 Issue 与一个 Draft PR，路径为
+  `PRD -> Issue -> isolated Task -> Draft PR`。Manager 在分配前将 Goal 与验收写入
+  Issue。Task 合并或终止后，该 Goal 停止；不得自动选择下一 Task，下一项必须由
+  Manager 新建 Goal。
+- **Worker** 只在一个基于当前 `origin/main` 的独立 worktree 中实现一个决策完整的
+  Issue。Worker 使用 Luna/Max（max reasoning），遵循聚焦 RED、最小 GREEN、保持
+  GREEN 后重构，并在本地提交。
+- **Reviewer** 是全新、只读、针对 exact HEAD 的 PR 审查者，使用 Sol/xhigh。其依据
+  Issue 契约和完整 diff 提交 P0–P3 简体中文证据；不得修改 Worker 分支或直接写 PR
+  评论。Manager 使用 `COMMENT` 持久化审查证据。
+- 所有新笔记、GitHub 评论、Issue/PR 正文、review、面向人的证据和交接均使用简体中文。
+  命令、路径、标识符、协议字段、标准名和为精度必须保留的技术名称保持原样。
+- 技能路由：需求澄清使用 `voice-nav-requirements`，实施使用 `voice-nav-worker`，审查
+  使用 `voice-nav-review`。
 
-## Authority and permissions
+## 权限与持续授权
 
-- Only the Manager calls GitHub write APIs or transports branches, comments,
-  reviews, merges, tags, and releases. Worker/Reviewer never log in, open an
-  auth browser, inspect or copy tokens, or ask the user for ordinary GitHub,
-  Git index, WSL/ROS/build/test, or focused-check permission.
-- 用户已提供一次持续授权：在已批准 Issue 范围内，普通 Git/GitHub/WSL/build/test 操作无需逐次询问；只有破坏性、跨范围或平台强制交互才请求用户。
-- On auth/403, shared-index, or command-boundary failure, preserve the exact
-  `cwd`, `command`, `timeout`, and expected artifact, local `HEAD`, result, and
-  evidence; the Manager executes the exact bounded command or an approved
-  equivalent. This is a transport limitation, not a product blocker.
-- User involvement is reserved for platform-forced interactive confirmation,
-  or a read-only audit that cannot exclude impact from a machine-wide or other
-  destructive operation.
+- 只有 Manager 调用 GitHub 写 API 或传输分支、评论、审查、合并、标签和发布。Worker/
+  Reviewer 不登录、不打开认证浏览器、不读取或复制 token，也不因普通 Git、GitHub、
+  WSL/ROS/build/test 或聚焦检查向用户逐次请求许可。
+- 用户已提供一次持续授权：在已批准的 Issue 范围内，可执行正常 Git/GitHub/WSL/build/
+  test 操作。只有破坏性、跨范围，或平台强制交互时才请求用户决定。
+- 发生 auth/403、shared-index 或命令边界失败时，精确保留 `cwd`、`command`、
+  `timeout`、预期产物、本地 `HEAD`、结果和证据；Manager 执行该精确有界命令
+  或已批准等价命令。这是传输限制，不是产品阻塞。
+- 用户介入仅用于平台强制的交互确认，或无法排除机器级/破坏性影响的只读审计。
 
-## Delivery state
+## 交付与证据
 
-The two-phase transport is owned here and never requires polling:
+交付采用两阶段传输，不进行 polling：
 
-1. After local commit/evidence, Worker or Reviewer sends the complete Chinese
-   `VOICE_NAV_HANDOFF: ready|blocked|reviewed` with exact `issue`, `pr`,
-   `thread`, `head`, `body`, `cwd`, commands/results, and `local_artifacts`.
-   A blocked handoff states the attempt, smallest missing decision, options,
-   and recommendation.
-2. The Manager writes the complete evidence to GitHub and directly returns
-   `VOICE_NAV_PERSISTED` with the canonical URL.
-3. Only after that response, send the compact
-   `VOICE_NAV_EVENT: blocked|completed|reviewed` with `issue`, `pr`, `thread`,
-   `head`, `evidence`, and `decision_needed`; never fabricate/reuse a URL or
-   send the final event early; only the final `VOICE_NAV_EVENT` uses the compact
-   envelope. An unresolved P0/P1 Review finding blocks merge; the final
-   `VOICE_NAV_EVENT: reviewed` must fill `decision_needed`; use `none` only when
-   no decision/action is needed.
-
-Required handoff fields are explicit; recovery never depends on hidden state:
+1. 完成本地提交和证据后，Worker 或 Reviewer 发送完整简体中文
+   `VOICE_NAV_HANDOFF: ready|blocked|reviewed`，包含 exact `issue`、`pr`、`thread`、
+   `head`、`body`、`cwd`、命令/结果与 `local_artifacts`。被阻塞的交接必须写明尝试、
+   最小缺失决策、选项和建议。
+2. Manager 将完整证据持久化到 GitHub，并直接返回
+   `VOICE_NAV_PERSISTED` 与规范 URL。
+3. 仅在收到该响应后，才发送紧凑的
+   `VOICE_NAV_EVENT: blocked|completed|reviewed`。不得伪造或复用 URL，也不得提前发送
+   最终事件；仅最终的 `VOICE_NAV_EVENT` 使用紧凑 envelope。未解决的 P0/P1 审查发现
+   阻止合并；最终的 `VOICE_NAV_EVENT: reviewed` 必须填写 `decision_needed`。仅当不需要任何
+   决策或行动时，才使用 `none`。
 
 ```text
 VOICE_NAV_HANDOFF: ready|blocked|reviewed
@@ -62,7 +58,7 @@ issue: #NN
 pr: #NN|none
 thread: <thread-id>
 head: <exact-sha|none>
-body: <complete Simplified Chinese evidence>
+body: <完整简体中文证据>
 cwd: <absolute path>
 command: <exact command>
 timeout: <milliseconds>
@@ -80,27 +76,26 @@ evidence: <canonical URL>
 decision_needed: <none or required decision>
 ```
 
-Workers hand off after local commit and verification; Manager pushes and
-creates/updates the PR. 开发中可小步本地提交；仅在可审查里程碑推送，推送前在本地 WSL 对 exact HEAD 执行一次适用的 build、定向测试或 `bash scripts/verify.sh` 并记录真实结果。真实失败后不得在无变更的同一 HEAD 重跑。远端 required CI 只验证治理，不代表产品验证通过。Review 修复可聚合后再推送；合并前 rebase 并保持单 Task 一提交的线性历史。Preserve rollback, interface impact, residual risks, and exact evidence in the handoff.
+Worker 在本地提交并验证后交接；Manager 负责 push 及创建/更新 PR。开发中可小步本地
+提交，只在完成本地验证的可审查里程碑 push。产品 Task 在 push 前须于本地 WSL 对 exact
+HEAD 运行一次适用的 build、定向测试或 `bash scripts/verify.sh`，并记录真实结果。真实
+失败后不得在无变更的同一 HEAD 重跑。远端 required CI 只验证治理，不代表产品验证通过。
+Review 修复可聚合后再 push；合并前 rebase，保持单 Task 一提交的线性历史。交接必须保留
+回滚、接口影响、残余风险和 exact evidence。
 
-## Recovery order
+## 恢复顺序
 
-1. Read `manager-state.yaml`/Task YAML, then the assigned Issue/PR, parent PRD,
-   dependencies, and persisted evidence.
-2. Read this file, `CONTEXT.md`, `docs/agents/README.md`, and applicable ADRs;
-   the latter two are references, not competing owners of this protocol.
-3. Confirm repository root, isolated worktree, branch, `HEAD`, and
-   `origin/main`; preserve unrelated changes.
-4. Rebuild the acceptance map from persisted records. If a requirement,
-   interface, threshold, dependency, or scope decision is missing, make no
-   implementation change: hand off `blocked` evidence to the Manager.
+1. 读取 `manager-state.yaml`/Task YAML，再读取已分配的 Issue/PR、父 PRD、依赖和已持久化
+   证据。
+2. 读取本文件、`CONTEXT.md`、`docs/agents/README.md` 和适用 ADR；后两者只是参考，不能
+   与本协议竞争。
+3. 确认仓库根目录、独立 worktree、分支、`HEAD` 与 `origin/main`，并保留无关变更。
+4. 从已持久化记录重建验收映射。若需求、接口、阈值、依赖或范围决策缺失，不得实施猜测性
+   变更；向 Manager 交接 `blocked` 证据。
 
-## Forbidden
+## 禁止事项
 
-- No subagents, thread/CI polling, recurring monitoring, shared checkouts, or
-  work on another Task's branch.
-- Worker/Reviewer do not merge, tag, release, force-push, or replace a missing
-  product decision with an implementation guess. Do not add AST/source-shape/
-  full-file-fingerprint checks without explicit Issue approval.
-- Do not change ROS interfaces or runtime behavior for a repository-workflow
-  Task unless its Issue explicitly authorizes that scope.
+- 禁止 subagents、thread/CI polling、循环监控、共享 checkout，或在另一 Task 分支工作。
+- Worker/Reviewer 不得 merge、tag、release、force-push，也不得用实现猜测替代缺失的产品
+  决策。未经 Issue 明确批准，不得添加 AST/source-shape/full-file-fingerprint 检查。
+- 仓库流程 Task 未获 Issue 明确授权时，不得修改 ROS 接口或 Runtime 行为。
