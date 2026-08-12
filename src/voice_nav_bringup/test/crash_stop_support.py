@@ -463,6 +463,7 @@ class CrashStopProbe:
             daemon=True,
         )
         self.lock = threading.Lock()
+        self.observation_changed = threading.Condition(self.lock)
         self.mission_states = deque(maxlen=4000)
         self.gate_states = deque(maxlen=4000)
         self.final_commands = deque(maxlen=8000)
@@ -565,8 +566,9 @@ class CrashStopProbe:
         self.spin_thread.start()
 
     def _append(self, collection: deque, message: Any) -> None:
-        with self.lock:
+        with self.observation_changed:
             collection.append((time.monotonic_ns(), message))
+            self.observation_changed.notify_all()
 
     def _snapshot(self, collection: deque):
         with self.lock:
@@ -807,72 +809,84 @@ class CrashStopProbe:
             'did not observe 200 ms of armed, moving Runtime/Gate pipeline'
         )
 
-    def capture_motion_at_signal_boundary(self):
-        """Freeze the moving proof immediately before pidfd SIGKILL."""
-        with self.lock:
-            state_sample = (
-                self.gate_states[-1] if self.gate_states else None
-            )
-            final_sample = (
-                self.final_commands[-1] if self.final_commands else None
-            )
-            limited_sample = (
-                self.limited_commands[-1]
-                if self.limited_commands else None
-            )
-            clock_sample = (
-                self.clock_samples[-1] if self.clock_samples else None
-            )
-            previous_clock_sample = (
-                self.clock_samples[-2]
-                if len(self.clock_samples) >= 2
-                else None
-            )
-            observed_ns = time.monotonic_ns()
-            samples = (
-                state_sample,
-                final_sample,
-                limited_sample,
-                clock_sample,
-                previous_clock_sample,
-            )
-            if any(sample is None for sample in samples):
-                raise AssertionError(
-                    'motion proof was incomplete at the pidfd signal boundary'
-                )
-            state = state_sample[1]
-            if not (
-                state.state == self._gate_state_type.ARMED
-                and state.authority_live
-                and state.candidate_fresh
-                and not state.motion_inhibited
-                and not state.zero_selected
-                and not is_zero(final_sample[1])
-                and not is_zero(limited_sample[1])
-                and clock_sample[1] > 0
-                and previous_clock_sample is not None
-                and clock_sample[1] > previous_clock_sample[1]
-            ):
-                raise AssertionError(
-                    'target was not armed and moving at the pidfd signal boundary'
-                )
-            if any(
-                observed_ns - sample[0] > DEPENDENCY_FRESHNESS_NS
-                for sample in samples
-            ):
-                raise AssertionError(
-                    'motion proof was stale at the pidfd signal boundary'
-                )
-            return {
-                'gate': deepcopy(state),
-                'final': (final_sample[0], deepcopy(final_sample[1])),
-                'limited': (
-                    limited_sample[0],
-                    deepcopy(limited_sample[1]),
-                ),
-                'clock': clock_sample,
-                'observed_ns': observed_ns,
-            }
+    def _current_motion_proof_locked(self, goal_handle: Any | None):
+        """Return one complete current motion proof while observations lock."""
+        state_sample = self.gate_states[-1] if self.gate_states else None
+        final_sample = (
+            self.final_commands[-1] if self.final_commands else None
+        )
+        limited_sample = (
+            self.limited_commands[-1] if self.limited_commands else None
+        )
+        clock_sample = (
+            self.clock_samples[-1] if self.clock_samples else None
+        )
+        previous_clock_sample = (
+            self.clock_samples[-2]
+            if len(self.clock_samples) >= 2
+            else None
+        )
+        observed_ns = time.monotonic_ns()
+        samples = (
+            state_sample,
+            final_sample,
+            limited_sample,
+            clock_sample,
+            previous_clock_sample,
+        )
+        if any(sample is None for sample in samples):
+            return None
+        state = state_sample[1]
+        if goal_handle is not None and goal_handle.status in (
+            GoalStatus.STATUS_SUCCEEDED,
+            GoalStatus.STATUS_CANCELED,
+            GoalStatus.STATUS_ABORTED,
+        ):
+            return None
+        if not (
+            state.state == self._gate_state_type.ARMED
+            and state.authority_live
+            and state.candidate_fresh
+            and not state.motion_inhibited
+            and not state.zero_selected
+            and not is_zero(final_sample[1])
+            and not is_zero(limited_sample[1])
+            and clock_sample[1] > 0
+            and clock_sample[1] > previous_clock_sample[1]
+        ):
+            return None
+        if any(
+            observed_ns - sample[0] > DEPENDENCY_FRESHNESS_NS
+            for sample in samples
+        ):
+            return None
+        return {
+            'gate': deepcopy(state),
+            'final': (final_sample[0], deepcopy(final_sample[1])),
+            'limited': (limited_sample[0], deepcopy(limited_sample[1])),
+            'clock': clock_sample,
+            'observed_ns': observed_ns,
+        }
+
+    def capture_motion_at_signal_boundary(
+        self,
+        goal_handle: Any | None = None,
+        timeout: float = WALL_WATCHDOG_SECONDS,
+    ):
+        """Wait for and freeze current motion proof before pidfd SIGKILL."""
+        deadline = time.monotonic() + timeout
+        with self.observation_changed:
+            while True:
+                proof = self._current_motion_proof_locked(goal_handle)
+                if proof is not None:
+                    return proof
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    raise AssertionError(
+                        'timed out waiting for current armed, moving proof '
+                        'at the pidfd signal boundary'
+                    )
+                self.observation_changed.wait(timeout=remaining)
 
     def wait_runtime_zero(
         self,
