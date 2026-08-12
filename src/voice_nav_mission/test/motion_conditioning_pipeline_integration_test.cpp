@@ -515,21 +515,39 @@ private:
   bool delivery_paused_{false};
 };
 
-class RclcppGuard final
+class RclcppProcessContext final
 {
 public:
-  RclcppGuard()
+  RclcppProcessContext()
   {
     int argc = 0;
     char ** argv = nullptr;
     rclcpp::init(argc, argv);
   }
 
-  ~RclcppGuard()
+  ~RclcppProcessContext()
   {
     if (rclcpp::ok()) {
       rclcpp::shutdown();
     }
+  }
+
+  RclcppProcessContext(const RclcppProcessContext &) = delete;
+  RclcppProcessContext & operator=(const RclcppProcessContext &) = delete;
+};
+
+RclcppProcessContext & rclcpp_process_context()
+{
+  static RclcppProcessContext context;
+  return context;
+}
+
+class RclcppGuard final
+{
+public:
+  RclcppGuard()
+  {
+    (void)rclcpp_process_context();
   }
 };
 
@@ -561,6 +579,21 @@ TEST(MotionConditioningPipelineIntegration, RuntimeAndAdapterStationarityBudgets
   EXPECT_EQ(
     runtime_config.stationarity_deadline,
     adapter_policy.stationarity_deadline);
+}
+
+TEST(MotionConditioningPipelineIntegration, RclcppContextSpansSequentialGuardScopes)
+{
+  {
+    RclcppGuard first_guard;
+    EXPECT_TRUE(rclcpp::ok());
+  }
+  EXPECT_TRUE(rclcpp::ok());
+
+  {
+    RclcppGuard second_guard;
+    EXPECT_TRUE(rclcpp::ok());
+  }
+  EXPECT_TRUE(rclcpp::ok());
 }
 
 template<typename PredicateT>
