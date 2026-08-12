@@ -54,6 +54,7 @@ jobs:
             tests.test_ci_contract \
             tests.test_conventional_commits \
             tests.test_repository_contract \
+            tests.test_skill_contract \
             --verbose
           python3 scripts/check_repository.py --root .
 

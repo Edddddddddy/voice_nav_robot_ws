@@ -21,8 +21,17 @@ ADR 维护产品与接口决策。其他流程文档只能链接本文件，不�
   评论。Manager 使用 `COMMENT` 持久化审查证据。
 - 所有新笔记、GitHub 评论、Issue/PR 正文、review、面向人的证据和交接均使用简体中文。
   命令、路径、标识符、协议字段、标准名和为精度必须保留的技术名称保持原样。
-- 技能路由：需求澄清使用 `voice-nav-requirements`，实施使用 `voice-nav-worker`，审查
-  使用 `voice-nav-review`。
+
+- 仓库级 Skill 的唯一版本化来源是根目录 `.agents/skills`；个人目录中的同名 Skill 不是项目
+  权威。需求澄清使用 `$voice-nav-requirements`，实施使用 `$voice-nav-worker`，审查使用
+  `$voice-nav-review`。Manager 分派角色 Task 时必须在正文显式写出对应 `$skill-name`，
+  不得依赖隐式触发。
+- 同一子任务最多选择一份 VoiceNav 角色 Skill；可按需组合 `tdd`、`diagnosing-bugs`、
+  `resolving-merge-conflicts`、`token-economy` 等通用 Skill，但通用 Skill 不得扩大 Issue 范围或角色权限，也不能替代角色 Skill。
+- 指令优先级为：系统/用户明确指令 > 仓库 `AGENTS.md` > 已批准 Issue/ADR > VoiceNav 角色 Skill > 通用 Skill 建议。任何 Skill 都不得绕过 Manager-only GitHub
+  写入、隔离 worktree、本地产品验证、fresh exact-HEAD Review 或 P0/P1 合并阻断。
+- 调用前确认 `SKILL.md` 可发现且可读；缺失时不得声称已使用，先记录并按本协议保守执行。
+  若影响角色或安全验收则交接 `blocked`；更新后仍未发现新版本时重启或新建 Task。
 
 ## 权限与持续授权
 

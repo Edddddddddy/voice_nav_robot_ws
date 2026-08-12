@@ -1,0 +1,6 @@
+interface:
+  display_name: "VoiceNav 需求"
+  short_description: "澄清并形成决策完整的 VoiceNav Issue"
+  default_prompt: "使用 $voice-nav-requirements 将这项请求整理为简洁的 PRD 与可独立执行 Issue。"
+policy:
+  allow_implicit_invocation: false

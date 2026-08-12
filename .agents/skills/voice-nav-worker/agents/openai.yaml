@@ -1,0 +1,6 @@
+interface:
+  display_name: "VoiceNav Worker"
+  short_description: "隔离实现一个决策完整的 VoiceNav Issue"
+  default_prompt: "使用 $voice-nav-worker 在独立 worktree 实现已分配 Issue，本地提交并把 GitHub 传输交给 Manager。"
+policy:
+  allow_implicit_invocation: false
