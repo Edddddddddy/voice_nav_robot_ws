@@ -2,34 +2,26 @@
 status: superseded by ADR-0002
 ---
 
-# Use Gazebo native DiffDrive behind a ROS adapter
+# 通过 ROS Adapter 使用 Gazebo 原生 DiffDrive
 
-VoiceNav Robot uses Gazebo Sim native DiffDrive for its simulation-only mobile
-base and will translate its model-scoped Gazebo Transport topics through a
-`ros_gz_bridge` adapter. This keeps the first implementation small and follows
-the Nav2 Gazebo odometry path while preventing Gazebo names from leaking into
-Mission, Agent, or audio Interfaces.
+VoiceNav Robot 的仿真移动底盘曾使用 Gazebo Sim 原生 DiffDrive，并经由 `ros_gz_bridge` Adapter
+转换 model-scoped Gazebo Transport topic。这个选择使首个实现较小，沿用 Nav2 的 Gazebo odometry
+路径，同时避免 Gazebo 名称泄漏到 Mission、Agent 或 audio Interface。
 
-This decision describes the completed early simulation baseline. It was
-superseded for the product target by
-[ADR-0002](0002-migrate-to-gz-ros2-control.md); the historical decision and its
-evidence remain valid.
+本决策描述已经完成的早期仿真基线。它已由
+[ADR-0002](0002-migrate-to-gz-ros2-control.md) 对产品目标 supersede；历史决策及其证据仍然有效。
 
-## Considered options
+## 考虑过的方案
 
-- Gazebo native DiffDrive plus `ros_gz_bridge`;
-- `gz_ros2_control` plus `diff_drive_controller`.
+- Gazebo 原生 DiffDrive 加 `ros_gz_bridge`；
+- `gz_ros2_control` 加 `diff_drive_controller`。
 
-## Consequences
+## 后果
 
-Native DiffDrive has velocity and acceleration limits but no command timeout,
-so every manual test must send zero velocity and the ROS motion output must gain
-a configured watchdog before Nav2 or voice control is connected. Migration to
-`gz_ros2_control` is reconsidered if the project adds real hardware, multiple
-controllers, controller lifecycle requirements, or requires the base
-controller itself to own the timeout.
+原生 DiffDrive 有速度和加速度限制，但没有命令超时。因此每项手工测试都必须发送零速度；在接入
+Nav2 或语音控制前，ROS 运动输出必须获得已配置的 watchdog。若项目加入真实硬件、多个 controller、
+controller lifecycle 需求，或要求 base controller 自己拥有 timeout，则重新考虑迁移到
+`gz_ros2_control`。
 
-**Superseded:** the last trigger became a product requirement even though the
-project remains simulation-only. [ADR-0002](0002-migrate-to-gz-ros2-control.md)
-records the later decision; this original consequence remains part of the
-historical decision record.
+**已 supersede：**尽管项目仍只用于仿真，上述最后一个触发条件后来成为产品需求。
+[ADR-0002](0002-migrate-to-gz-ros2-control.md) 记录后续决策；本文件保留原有后果作为历史决策记录。

@@ -1,48 +1,43 @@
-# GitHub operations
+# GitHub 工作索引
 
-The root [AGENTS.md](../../AGENTS.md) owns delivery roles, permissions,
-recovery, and the two-phase evidence protocol. The product glossary is
-[CONTEXT.md](../../CONTEXT.md). This file contains only GitHub Issue/PR
-operations and short examples.
+[AGENTS.md](../../AGENTS.md) 是角色、权限、恢复和交付协议的唯一权威；
+[CONTEXT.md](../../CONTEXT.md) 是产品词汇表。本页只索引 GitHub Issue/PR 记录和标签，
+不重复交接协议。
 
-## Issue and PR records
+## Issue 与 PR 索引
 
-- A GitHub Issue is the canonical record for requirements, decisions,
-  acceptance criteria, dependencies, and status.
-- One Task has one Issue, one managed worktree/branch, one Worker context, and
-  one Draft PR. A PR maps acceptance to files and evidence and includes
-  `Closes #NN`.
-- Comments preserve decisions, blocked reasons, verification summaries, and
-  evidence after transport. Local notes and Task YAML accelerate recovery but
-  never override the Issue, PR, or ADR.
+- GitHub Issue 记录需求、决策、验收标准、依赖和状态；PR 以 `Closes #NN` 链接其 Issue。
+- Issue 与 PR 评论保存决策、阻塞原因、验证摘要和已持久化证据。local notes 与 Task YAML 可以帮助恢复，
+  但不能覆盖 Issue、PR 或 ADR。
+- worktree、分支、Goal/Task 绑定、角色权限和交接时序不在本页定义，统一见
+  [AGENTS.md](../../AGENTS.md)。
 
-## Labels
+## 标签
 
-Keep the type label and at most one workflow-state label:
+保留一个类型标签和至多一个流程状态标签：
 
-| Label | Meaning |
+| 标签 | 含义 |
 | --- | --- |
-| `type:prd` | Parent product requirements document |
-| `type:task` | Independently reversible implementation Task |
-| `ready-for-agent` | Decision-complete and eligible for assignment |
-| `in-progress` | A Worker owns the Task |
-| `blocked` | A named decision or dependency is missing |
-| `review-needed` | Draft PR is ready for independent review |
-| `verified` | Acceptance evidence and required checks are complete |
+| `type:prd` | 父产品需求文档 |
+| `type:task` | 可独立回滚的实现 Task |
+| `ready-for-agent` | 决策完整，可分配 |
+| `in-progress` | 正在实施 |
+| `blocked` | 缺少具名决策或依赖 |
+| `review-needed` | Draft PR 已可独立审查 |
+| `verified` | 验收证据和适用检查完整 |
 
-State changes and the smallest blocker are recorded in an Issue comment.
+状态变化与最小阻塞原因写入 Issue 评论。
 
-## External contributions
+## 外部贡献
 
-An external PR is not a requirements or decision intake surface. A maintainer
-first identifies the canonical Issue, records scope and acceptance there, then
-links the contribution to that Issue.
+外部 PR 不是需求或决策输入面。维护者先确定 canonical Issue，在其中记录范围与验收，再将
+贡献链接到该 Issue。
 
-## Short examples
+## 简短示例
 
 ```text
 Issue 链接: #NN
-验收证据: command/result or immutable Git object
+验收证据: command/result 或 immutable Git object
 状态: ready-for-agent
 ```
 

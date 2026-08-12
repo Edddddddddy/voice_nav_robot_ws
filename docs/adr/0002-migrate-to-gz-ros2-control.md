@@ -2,27 +2,22 @@
 status: accepted
 ---
 
-# Migrate the product control path to gz_ros2_control
+# 将产品控制路径迁移至 gz_ros2_control
 
-The native Gazebo DiffDrive baseline made the initial physics slice small, but
-it holds the last command, lacks a consumer timeout, and would require
-commands, odometry, and TF to cross a Gazebo bridge. Starting from the VN-0007
-target baseline and shipping in v0.2, VoiceNav Robot uses `gz_ros2_control`,
-`diff_drive_controller`, a 0.35 s controller consumer timeout, and an
-independent Motion Gate with a 250 ms Runtime-renewed authority lease.
-Candidate velocity never renews that lease. `ros_gz_bridge` remains only for
-`/clock` and `/scan`.
+原生 Gazebo DiffDrive 基线使早期物理切片较小，但它保留最后一条命令、没有消费者超时，并会使命令、
+odometry 和 TF 穿过 Gazebo bridge。自 VN-0007 目标基线起并在 v0.2 交付中，VoiceNav Robot 使用
+`gz_ros2_control`、`diff_drive_controller`、`0.35 s` controller consumer timeout，以及一个由 Runtime
+续约 `250 ms` authority lease 的独立 Motion Gate。candidate velocity 永远不能续约该 lease；
+`ros_gz_bridge` 仅保留 `/clock` 与 `/scan`。
 
-## Considered options
+## 考虑过的方案
 
-- retain native DiffDrive and add only an upstream watchdog;
-- use native DiffDrive throughout v1 and bridge its control/odometry topics;
-- migrate to gz_ros2_control and standard ros2_control controllers.
+- 保留原生 DiffDrive，仅增加上游 watchdog；
+- 在整个 v1 中使用原生 DiffDrive 并 bridge 控制/odometry topic；
+- 迁移到 `gz_ros2_control` 和标准 ros2_control controller。
 
-## Consequences
+## 后果
 
-The native-DiffDrive path remains historical evidence but is not the product
-path. `diff_drive_controller` becomes the sole owner of odometry and
-`odom → base_footprint`; joint state and control no longer use
-`ros_gz_bridge`. The migration adds controller-manager configuration, but makes
-timeout ownership, Nav2 integration, controller lifecycle, and tests explicit.
+native-DiffDrive 路径保留为历史证据，但不再是产品路径。`diff_drive_controller` 成为 odometry 和
+`odom → base_footprint` 的唯一 owner；joint state 与 control 不再使用 `ros_gz_bridge`。迁移增加了
+controller-manager 配置，却使 timeout ownership、Nav2 集成、controller lifecycle 和测试明确可见。

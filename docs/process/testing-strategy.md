@@ -1,411 +1,310 @@
-# Testing strategy
+# 测试策略
 
-Tests follow the deepest stable Interface and observable behavior. A behavior
-test should retain its value when the Implementation behind that Interface is
-refactored. Tests should exercise the highest stable public seam rather than
-private implementation details.
+测试遵循最深稳定 Interface 与可观察行为。即使该 Interface 之后的 Implementation 被重构，behavior test 仍应
+保留价值。测试应覆盖最高稳定 public seam，而不是 private implementation detail。
 
-## Test layers
+## 测试层次
 
-| Layer | Purpose | Examples |
+| 层次 | 目的 | 示例 |
 | --- | --- | --- |
-| Static | Reject malformed source and metadata | XML, YAML, Python, CMake, license |
-| Unit | Exercise deterministic behavior and state | Mission Validator/FSM, Agent rules, audio buffers |
-| Contract | Protect externally visible semantics | ROS IDL, topic type, QoS, TF owner, units, limits |
-| Integration | Verify connected ROS Modules | launch, Action cancel, bridge directions, lifecycle |
-| Headless simulation | Verify physics and bounded flows | drive, stop, odom, scan, map, Named Place |
-| Model fixture | Verify locked local models and offline audio | KWS, ASR, TTS, LLM, AEC fixtures |
-| Manual release gate | Validate the supported WSL audio path | real single microphone, speaker, AEC, barge-in |
+| Static | 拒绝 malformed source 与 metadata | XML、YAML、Python、CMake、license |
+| Unit | 覆盖确定性 behavior 与 state | Mission Validator/FSM、Agent rule、audio buffer |
+| Contract | 保护外部可见 semantic | ROS IDL、topic type、QoS、TF owner、unit、limit |
+| Integration | 验证连接的 ROS Module | launch、Action cancel、bridge direction、lifecycle |
+| Headless simulation | 验证 physics 与有界 flow | drive、stop、odom、scan、map、Named Place |
+| Model fixture | 验证锁定本地 model 与 offline audio | KWS、ASR、TTS、LLM、AEC fixture |
+| Manual release gate | 验证支持的 WSL audio path | 真实单麦克风、speaker、AEC、barge-in |
 
-## Verification cadence
+## 验证节奏
 
-During implementation, run these focused repository checks as often as needed:
+实施中按需运行聚焦 repository check：
 
 ```bash
-python3 -m unittest tests.test_repository_contract
+python3 tests/test_repository_contract.py
 python3 scripts/check_repository.py --root .
 ```
 
-Before review, after the final change and on the final PR HEAD, run the
-complete repository gate exactly once:
+review 前、最终 change 后且在最终 PR HEAD 上，产品变更最多运行一次完整 repository gate：
 
 ```bash
 bash scripts/verify.sh
 ```
 
-Consume and record that invocation's actual exit status. A later diagnostic,
-snapshot, cleanup, or successful shell command must not replace a failed gate
-status. Full logs remain outside Git; the PR records the command, true exit
-status, concise test summary, and any bounded manual evidence.
+消费并记录该 invocation 的真实 exit status。后续 diagnostic、snapshot、cleanup 或成功 shell command 都不得
+替代失败 gate status。full log 保留在 Git 外；PR 记录 command、真实 exit status、简洁 test summary 与有界
+manual evidence。
 
-The full gate starts from declared dependencies, validates repository and
-robot-model contracts, builds all packages, runs all tests, and reports a
-zero-error `colcon test-result`. Repository contracts run through
-`scripts/run_repository_tests.py`; discovery uses the real non-package
-`tests/` layout and any skipped contract makes the gate fail.
+完整 gate 从声明 dependency 开始，验证 repository 和 robot-model contract、构建全部 package、运行全部 test，
+并报告零 error 的 `colcon test-result`。repository contract 经由 `scripts/run_repository_tests.py` 运行；
+discovery 使用真实 non-package `tests/` layout，任何 skipped contract 都使 gate 失败。
 
-Critical launch tests use Jazzy's official `run_test_isolated.py`. Their
-generated CTest contract clears inherited `ROS_DOMAIN_ID` and
-`DISABLE_ROS_ISOLATION`, retains `RUN_SERIAL`, and permits only the reviewed
-result-neutral properties. Source CMake is not final evidence: after configure,
-`scripts/check_generated_launch_tests.py` inspects
-`ctest --show-only=json-v1` for the exact runner, source target, environment,
-reviewed per-test timeout, resolved package build working directory, the single
-`launch_test` label, and result semantics. Required mutation tests replace
-`LABELS`, `TIMEOUT`, and `WORKING_DIRECTORY` independently and require every
-replacement to fail. The reporter then requires the matching critical xUnit
-testcase structure; a skip is accepted only for the exact package-local
-cppcheck artifact/class allowlist.
-Scaffolded Python lint skips are removed and made to pass rather than added to
-that allowlist.
+关键 launch test 使用 Jazzy 官方 `run_test_isolated.py`。其 generated CTest contract 清除继承的
+`ROS_DOMAIN_ID` 与 `DISABLE_ROS_ISOLATION`、保留 `RUN_SERIAL`，且只允许经过审查且 result-neutral 的 property。
+source CMake 不是最终证据：configure 后，`scripts/check_generated_launch_tests.py` 检查
+`ctest --show-only=json-v1`，确认 exact runner、source target、environment、reviewed per-test timeout、
+resolved package build working directory、单一 `launch_test` label 与 result semantic。required mutation test 分别
+替换 `LABELS`、`TIMEOUT` 与 `WORKING_DIRECTORY`，每种替换都必须失败。reporter 随后要求匹配的 critical xUnit
+testcase structure；skip 仅允许精确 package-local cppcheck artifact/class allowlist。不得以该 allowlist 新增
+scaffolded Python lint skip，而应删除 skip 并使其通过。
 
-The complete gate is the terminal verification command whose exit status is
-consumed. Process snapshots and other diagnostics run as separate commands
-afterward; a trailing successful `ps`, `grep`, or cleanup command must never
-replace a failed CTest status.
+完整 gate 是其 exit status 被消费的终端 verification command。process snapshot 和其他 diagnostic 在之后作为
+独立 command 运行；尾部成功的 `ps`、`grep` 或 cleanup 永远不能替代失败 CTest status。
 
-## Restricted structural checkers
+## 受限结构检查器
 
-Existing safety, concurrency, test-result ownership, and Gazebo lifecycle
-checkers remain active. A new AST, source-shape, or full-file-fingerprint
-checker is admitted only when all three conditions hold:
+既有 safety、concurrency、test-result ownership 与 Gazebo lifecycle checker 持续有效。新增 AST、source-shape 或
+full-file-fingerprint checker 仅在以下三项均成立时允许：
 
-1. A real recurring failure is recorded in the parent Issue or Task Issue.
-2. The checker protects the narrowest stable public repository seam that can
-   express the failure; a global text ban is not a substitute.
-3. The parent Issue or Task Issue explicitly approves the checker before it is
-   implemented.
+1. 父 Issue 或 Task Issue 已记录真实 recurring failure。
+2. checker 保护能表达该 failure 的最窄稳定 public repository seam；global text ban 不能替代它。
+3. 父 Issue 或 Task Issue 在实现前明确批准该 checker。
 
-The checker must test an observable repository contract and must not replace
-behavioral tests at a stable Interface. The change-volume and ten-commit stop
-rules are defined in the [change lifecycle](change-lifecycle.md#stop-and-re-scope).
+checker 必须检验可观察 repository contract，不能替代 stable Interface 的 behavioral test。change-volume 和
+ten-commit stop rule 见[变更生命周期](change-lifecycle.md#停止并重新划分范围)。
 
-### Shared test-result ownership
+### 共享 test-result ownership
 
-The workspace `build/**/test_results` tree has one writer at a time. A
-canonical `scripts/verify.sh` run owns an exclusive operational window from
-startup through its terminal status. During that window, reviewers and
-parallel agents may inspect source, Git metadata, and already copied evidence,
-but must not run `ctest`, `colcon test`, another verify process, or any helper
-that rewrites the shared result tree. Concurrent test work must use isolated
-build, install, and log bases or wait for the canonical gate to finish.
+workspace 的 `build/**/test_results` tree 同一时刻只能有一个 writer。canonical `scripts/verify.sh` 运行从启动到
+terminal status 独占 operational window。在此期间，reviewer 与 parallel agent 可以检查 source、Git metadata 和
+已复制 evidence，但不得运行 `ctest`、`colcon test`、另一 verify process 或任何改写共享 result tree 的 helper。
+并发测试必须使用独立 build/install/log base，或等待 canonical gate 结束。
 
-The result reporter deliberately snapshots inode, size, mtime, and ctime and
-fails closed if a writer overlaps evidence collection. On that diagnostic,
-identify the writer and establish quiescence before a full retry; do not clear
-the named file or relax the identity check. See
-[PIT-0022](known-pitfalls.md#pit-0022-test-result-evidence-requires-one-shared-tree-writer).
+result reporter 有意 snapshot inode、size、mtime 与 ctime；若 writer 与 evidence collection overlap 则 fail closed。
+出现该 diagnostic 时，识别 writer 并建立 quiescence 后才可做完整 retry；不得清除指定文件或放宽 identity check。
+参见 [PIT-0022](known-pitfalls.md#pit-0022test-result-evidence-需要共享树单-writer)。
 
-PR CI uses deterministic in-memory fakes as soon as their Module exists and
-adds bounded headless Gazebo tests with the v0.2 simulation milestones. At
-v0.1 the hosted gate covers repository metadata, static robot-model
-validation, package build, and package tests; it does not claim to launch
-Gazebo. Nightly validation uses the locked model set after the model fixtures
-are introduced. Real-audio metrics are manual hardware Release Gates for
-`v0.7` and `v1.0`; they are not weakened into CI simulations.
+本地 WSL 上的 exact HEAD 产品验证在 Module 存在后尽快采用确定性 in-memory fake，并在 v0.2 simulation
+milestone 后增加有界 headless Gazebo test。远端 PR CI 只运行 shellcheck、actionlint、治理契约和 Conventional
+Commit；它不安装 ROS，也不运行 ROS/package build、package test、headless Gazebo、Voice 或 LLM 产品检查。
+model fixture 引入后的 locked model set、real-audio metric 和 `v0.7`/`v1.0` manual hardware Release Gate 都是本地
+产品验证或人工 release evidence，不会被削弱成远端 CI simulation。
 
-## Adapter and time strategy
+## Adapter 与时间策略
 
-Internal seams have production and deterministic in-memory Adapters:
+内部 seam 具有 production 与确定性 in-memory Adapter：
 
-| Seam | Production Adapter | Deterministic test Adapter |
+| 接缝 | 生产适配器 | 确定性测试适配器 |
 | --- | --- | --- |
 | Navigation | Nav2 `NavigateToPose` | scripted goal/result/cancel fake |
-| Relative motion | odom feedback and candidate Twist | scripted motion fake |
-| Motion authority | independent MotionGate | event recorder with lease expiry |
+| Relative motion | odom feedback 与 candidate Twist | scripted motion fake |
+| Motion authority | 独立 MotionGate | 含 lease expiry 的 event recorder |
 | Map saving | slam_toolbox/map saver | in-memory map registry |
 | Clock | steady monotonic clock | manual clock |
-| ASR/TTS/LLM | locked local runtimes | scripted text/audio/result fakes |
+| ASR/TTS/LLM | locked local runtime | scripted text/audio/result fake |
 
-Mission behavior tests cross the Mission Module Interface and replace downstream Adapters. They do not assert private FSM states. Adapter contract tests prove that production Adapters map upstream ROS behavior to the same internal semantics.
+Mission behavior test 穿过 Mission Module Interface 并替换下游 Adapter，不断言 private FSM state。Adapter contract test
+证明 production Adapter 将 upstream ROS behavior 映射为相同 internal semantic。
 
-- Physics, TF, SLAM, AMCL, and Nav2 use simulation time where appropriate.
-- Mission timeouts, cancel grace, command leases, audio liveness, and cleanup deadlines use a steady monotonic clock.
-- Unit tests advance a manual clock instead of sleeping.
-- Fakes inject timeout, abort, partial map, delayed cancel, late success, and dependency loss.
-- Random seeds, worlds, initial poses, model versions, and resource limits are fixed in acceptance evidence.
+- Physics、TF、SLAM、AMCL 与 Nav2 在适用时使用 simulation time。
+- Mission timeout、cancel grace、command lease、audio liveness 与 cleanup deadline 使用 steady monotonic clock。
+- unit test 通过推进 manual clock，而不是 sleep。
+- fake 注入 timeout、abort、partial map、delayed cancel、late success 与 dependency loss。
+- random seed、world、initial pose、model version 与 resource limit 固定在 acceptance evidence 中。
 
-## Coverage gates
+## 覆盖率门禁
 
-- Mission Core and Agent: at least 90% line coverage and at least 80% branch coverage.
-- Audio code that does not require real hardware: at least 80% line coverage.
+- Mission Core 与 Agent：至少 `90%` line coverage、至少 `80%` branch coverage。
+- 不需要真实 hardware 的 audio code：至少 `80%` line coverage。
 
-Coverage is a release gate for the relevant milestone. It supplements behavior assertions and does not replace them.
+coverage 是相关 milestone 的 release gate。它补充 behavior assertion，不能替代它们。
 
-## Mission completion criteria
+## Mission 完成标准
 
-Mission unit and contract tests cover:
+Mission unit 与 contract test 覆盖：
 
-- invalid combinations of discriminant and payload fields;
-- NaN and Inf rejection;
-- Mapping/Navigation Mode policy;
-- atomic whole-plan validation for a three-step Mission before any motion side effect;
-- single execution-slot `BUSY` behavior;
-- source ordering, `runtime_instance_id`, and `admission_epoch`;
-- Runtime restart invalidating an old request;
-- Cancel, STOP, natural success, and timeout races through one terminal linearization point;
-- late Nav2, relative-motion, map, and Agent callbacks;
-- exactly one Result and non-decreasing best-estimate feedback;
-- steady-clock timeout behavior while ROS time is paused or changed.
+- discriminant 与 payload field 的无效组合；
+- NaN 与 Inf reject；
+- Mapping/Navigation Mode policy；
+- 任何 motion side effect 前，对三步 Mission 执行 atomic whole-plan validation；
+- single execution-slot `BUSY` behavior；
+- source ordering、`runtime_instance_id` 与 `admission_epoch`；
+- Runtime restart 使旧 request 失效；
+- Cancel、STOP、natural success 与 timeout race 经由同一 terminal linearization point；
+- late Nav2、relative-motion、map 与 Agent callback；
+- 严格一个 Result 与 non-decreasing best-estimate feedback；
+- ROS time paused 或变化时的 steady-clock timeout behavior。
 
-The test suite also proves that a rejected plan starts no downstream Adapter and that late results cannot reopen the MotionGate or advance the next step.
+suite 还证明 rejected plan 不启动下游 Adapter，且 late result 不能重新打开 MotionGate 或推进下一 step。
 
-## MotionGate and stopping completion criteria
+## MotionGate 与停止完成标准
 
-Every automated motion test uses configured limits, a steady-clock deadline, zero output in success and cleanup paths, odometry-based stationarity checks, and bounded process cleanup. `Ctrl+C`, publisher exit, Action Result, or a single zero publication is not proof of stopping.
+每个 automated motion test 都使用 configured limit、steady-clock deadline、success 与 cleanup path 的 zero output、
+odometry-based stationarity check 和有界 process cleanup。`Ctrl+C`、publisher exit、Action Result 或单次 zero
+publication 都不是 stopping proof。
 
-### Gazebo launch-test lifecycle
+### Gazebo launch-test 生命周期
 
-Tests that own a Gazebo server use a lifecycle oracle separate from their
-product assertions. At module import, each test process overwrites inherited
-state with a scope/PID/128-bit-random non-empty `GZ_PARTITION`; CMake does not
-provide a reusable fixed partition. Cleanup first selects zero or inhibits
-MotionGate, sends `stop: true` to `/server_control` with the same environment
-snapshot that was validated, requires a positive `gz.msgs.Boolean`
-acknowledgement, and then waits for the launch-managed `gazebo` process itself
-to exit. An ACK is request acceptance, not process completion. A post-shutdown
-test finally applies an unfiltered `assertExitCodes(proc_info)` to every
-launch-managed process.
+拥有 Gazebo server 的 test 使用独立于 product assertion 的 lifecycle oracle。module import 时，每个 test process
+用 scope/PID/128-bit-random non-empty `GZ_PARTITION` 覆盖 inherited state；CMake 不提供可复用的 fixed partition。
+cleanup 先选择 zero 或 inhibit MotionGate，在已验证的相同 environment snapshot 中向 `/server_control` 发送
+`stop: true`，要求正向 `gz.msgs.Boolean` acknowledgement，然后等待 launch-managed `gazebo` process 自身 exit。
+ACK 只是 request acceptance，不是 process completion。post-shutdown test 最后对每个 launch-managed process 使用
+无过滤的 `assertExitCodes(proc_info)`。
 
-The product launch still defaults to shutting down when Gazebo exits. Tests
-disable only that immediate event handler while their failure-safe cleanup
-performs the structured stop and process join. The cleanup ladder is must-run:
-zero/inhibit, structured stop, and ROS fixture destruction are independent
-LIFO `unittest` cleanups, so one exception cannot short-circuit the next.
-Cleanup phases that own multiple resources use an exhaustive aggregator and
-raise the collected errors only after every step was attempted. A typed
-`TimeoutExpired` from the isolated idempotent stop request is retried once in a
-fresh CLI process; all other CLI/ACK errors fail immediately, and two timeouts
-still fail. Static mutation tests reject fixed partitions, fixed sleeps,
-global process killing, shell execution, forced-exit allowlists, ACK-only
-cleanup, rebound or unreachable oracles, disabled critical test modules,
-wrong RPC environments, cleanup list mutation, and cleanup registration that
-can be skipped after an active assertion failure.
+product launch 默认在 Gazebo exit 时 shutdown。test 仅禁用该立即 event handler，以便其 failure-safe cleanup 执行
+structured stop 与 process join。cleanup ladder 必须运行：zero/inhibit、structured stop 与 ROS fixture destruction 是
+独立 LIFO `unittest` cleanup，因此一个 exception 不得短路后续项。拥有多个 resource 的 cleanup phase 使用
+exhaustive aggregator，并仅在每一步均已尝试后 raise collected error。isolated idempotent stop request 的 typed
+`TimeoutExpired` 在 fresh CLI process 中 retry 一次；其他 CLI/ACK error 立即失败，两个 timeout 仍失败。static
+mutation test 拒绝 fixed partition、fixed sleep、global process kill、shell execution、forced-exit allowlist、
+ACK-only cleanup、rebound/unreachable oracle、disabled critical test module、错误 RPC environment、cleanup list
+mutation 和可在 active assertion failure 后跳过的 cleanup registration。
 
-Gazebo ground-truth movement evidence is separate from ROS odometry. A pure
-test-support module queries the exact isolated world's pose topic with a
-10-second deadline and one read-only retry. It accepts at most four adjacent
-complete JSON documents because `gz topic --num 1` can race with a high-rate
-publisher and emit a small burst; every document must contain one valid model
-pose, and the newest is used. Wrong partition, malformed/extra output,
-duplicate/missing model, zero/non-finite quaternion, and non-finite pose all
-fail. After a finite valid-norm check, all four quaternion components are
-normalized before the unit-quaternion RPY formulas run; a scaled-quaternion
-regression must produce the same RPY as its equivalent unit quaternion. Query
-failure remains an active-test failure, not a teardown diagnosis.
+Gazebo ground-truth movement evidence 与 ROS odometry 分离。pure test-support module 以 `10 s` deadline 和一次
+read-only retry 查询精确 isolated world 的 pose topic。它最多接受四个相邻完整 JSON document，因为
+`gz topic --num 1` 可与高频 publisher race 并输出小 burst；每个 document 都必须含一个 valid model pose，
+使用最新者。wrong partition、malformed/extra output、duplicate/missing model、zero/non-finite quaternion 和
+non-finite pose 都失败。finite valid-norm check 后，四个 quaternion component 均在 unit-quaternion RPY formula
+运行前 normalize；scaled-quaternion regression 必须得到与等价 unit quaternion 相同 RPY。query failure 是 active-test
+failure，不是 teardown diagnosis。
 
-This fixture contract proves deterministic test teardown. It does not prove
-the internal cause of a slow signal-only Gazebo shutdown, ordinary user
-`Ctrl+C` behavior, MotionGate crash-stop, controller deadman, or managed
-pause/resume semantics. See
-[PIT-0012](known-pitfalls.md#pit-0012-no-residual-gazebo-process-is-not-a-clean-gazebo-exit).
+该 fixture contract 证明确定性 test teardown，不证明缓慢 signal-only Gazebo shutdown 的内部 cause、普通用户
+`Ctrl+C` behavior、MotionGate crash-stop、controller deadman 或 managed pause/resume semantic。参见
+[PIT-0012](known-pitfalls.md#pit-0012没有残留-gazebo-process-不等于-gazebo-clean-exit)。
 
-The source/AST guards are cooperative correctness controls for ordinary
-reviewed changes. They do not claim to sandbox a malicious same-UID process or
-deliberate Python dynamic metaprogramming that rewrites files or imported
-objects at runtime.
+source/AST guard 只是普通审查变更的 cooperative correctness control，不声称 sandbox 恶意 same-UID process 或
+故意使用 Python dynamic metaprogramming 改写 file/imported object 的行为。
 
-### Current normal-running Gate slice
+### 当前正常运行 Gate 切片
 
-The current Gate slice proves normal independent operation without claiming
-process death or pause recovery:
+当前 Gate 切片证明正常独立运行，但不声称 process death 或 pause recovery：
 
-- Manual-clock Core tables cover the exact 250 ms authority and 150 ms
-  candidate-freshness boundaries; a 20 ms wall output tick continuously
-  selects zero while inhibited. They also prove that activation RENEW may
-  restart the bounded first-candidate window only before the first accepted
-  sample, that later RENEW cannot hide a stale producer, and that candidate
-  samples never renew Runtime authority.
-- Every `PREPARE`/`OPEN`/`RENEW`/`INHIBIT` request uses the Gate instance and
-  one global compare-and-swap `control_seq`; operations after `PREPARE` also
-  match the Gate-generated current lease. A late old-lease `INHIBIT` cannot
-  stop a newer lease, while a matching current `INHIBIT` publishes zero before
-  acknowledgement.
-- Finite `linear.x`/`angular.z` values are clamped to trusted YAML limits.
-  NaN, Inf, or a non-zero unsupported axis retires the current lease and
-  selects zero.
-- `/motion_gate_node` serves `/motion_gate/internal/control` and
-  `/motion_gate/internal/state`. PREPARE returns a Gate-generated per-lease
-  topic below `/voice_nav_internal/motion_gate/candidate/lease_`. OPEN first
-  validates in Core without graph access, then requires the same unique
-  publisher GID across graph snapshot #1 with discard reader A, snapshot #2
-  after recreating discard reader B, and snapshot #3 after creating the first
-  accepting `VOLATILE + KEEP_LAST(1)` reader C. Any change faults closed.
-- Contract tests require trusted YAML root `motion_gate_node` and prove all
-  node/control/state/candidate-prefix/final-command names are code constants,
-  absent from YAML parameters and product remaps.
-- A locked `rmw_fastrtps_cpp` self-test correlates the Gate-local graph GID
-  with Gate-local `MessageInfo.publisher_gid`; the control request never
-  carries caller `Publisher::get_gid()`.
-- Candidate QoS is `BEST_EFFORT + VOLATILE + KEEP_LAST(1)`. The sole final
-  publisher uses `rclcpp::SystemDefaultsQoS()` and a runtime checker proves
-  actual compatibility with the controller subscriber; policies introspected
-  as `UNKNOWN` are not asserted as fixed reliability/history/depth.
-- A serial publication barrier proves that no earlier queued non-zero command
-  can publish after current-lease INHIBIT, expiry, or invalid-input zero.
-- A runtime parameter test rejects changing `use_sim_time` while moving.
-  Publication also requires both the parameter value and
-  `ros_time_is_active()`; loss of either invariant faults closed, publishes
-  zero, and never emits a system-time-stamped non-zero command.
-- Headless Gazebo evidence separately records Gate zero, controller output
-  zero, and odometry stationarity after bounded motion and after each normal
-  deadline expiry.
+- manual-clock Core table 覆盖精确 `250 ms` authority 和 `150 ms` candidate-freshness boundary；`20 ms` wall output
+  tick 在 inhibited 时持续选择 zero。它还证明 activation RENEW 仅在 first accepted sample 前可重启有界
+  first-candidate window，之后 RENEW 不能隐藏 stale producer，candidate sample 永远不能续约 Runtime authority。
+- 每个 `PREPARE`/`OPEN`/`RENEW`/`INHIBIT` request 使用 Gate instance 与一个 global compare-and-swap `control_seq`；
+  `PREPARE` 后的 operation 还匹配 Gate-generated current lease。late old-lease `INHIBIT` 不能停止新 lease；
+  matching current `INHIBIT` 在 acknowledgement 前发布 zero。
+- finite `linear.x`/`angular.z` 被 clamp 到 trusted YAML limit。NaN、Inf 或 non-zero unsupported axis 会 retire current
+  lease 并选择 zero。
+- `/motion_gate_node` 服务 `/motion_gate/internal/control` 与 `/motion_gate/internal/state`。PREPARE 返回
+  `/voice_nav_internal/motion_gate/candidate/lease_` 下 Gate-generated per-lease topic。OPEN 先在 Core 中无 graph
+  access 验证，再要求同一 unique publisher GID 依次出现在 discard reader A 的 graph snapshot #1、recreate
+  discard reader B 后的 snapshot #2，以及创建第一个 accepting `VOLATILE + KEEP_LAST(1)` reader C 后的
+  snapshot #3；任何变化都 fault closed。
+- contract test 要求 trusted YAML root `motion_gate_node`，并证明全部 node/control/state/candidate-prefix/
+  final-command name 为 code constant、不在 YAML parameter 或 product remap 中。
+- locked `rmw_fastrtps_cpp` self-test 将 Gate-local graph GID 与 Gate-local `MessageInfo.publisher_gid` 关联；
+  control request 永不携带 caller `Publisher::get_gid()`。
+- candidate QoS 是 `BEST_EFFORT + VOLATILE + KEEP_LAST(1)`。唯一 final publisher 使用
+  `rclcpp::SystemDefaultsQoS()`，runtime checker 证明与 controller subscriber 的实际 compatibility；被 introspect
+  为 `UNKNOWN` 的 policy 不得断言为固定 reliability/history/depth。
+- serial publication barrier 证明 current-lease INHIBIT、expiry 或 invalid-input zero 后，先前 queued non-zero
+  command 不会 publish。
+- runtime parameter test 拒绝移动中改变 `use_sim_time`。publication 同时要求 parameter value 与
+  `ros_time_is_active()`；任一 invariant 丢失即 fault closed、publish zero，并且永不发 system-time-stamped
+  non-zero command。
+- headless Gazebo evidence 分别记录有界 motion 后及每个 normal deadline expiry 后的 Gate zero、controller output
+  zero 与 odometry stationarity。
 
-Package-private IDL is an encapsulation boundary, not DDS security. The current
-tests use an authority/candidate harness. They do not count an authority,
-candidate, or MotionGate process kill, managed pause token, first-resume zero,
-or unmanaged-pause recovery as completed.
+package-private IDL 是 encapsulation boundary，不是 DDS security。当前 test 使用 authority/candidate harness；
+它们不将 authority、candidate 或 MotionGate process kill、managed pause token、first-resume zero 或 unmanaged-pause
+recovery 视为已完成。
 
-### Process-death and pause acceptance slice
+### Process-death 与 pause 验收切片
 
-The process-death and Gazebo-time acceptance slice supplies evidence that:
+process-death 与 Gazebo-time acceptance 需要证明：
 
-- killing the authority while valid-looking candidates continue still expires
-  the independent Gate lease;
-- killing the candidate producer still expires candidate freshness;
-- killing MotionGate causes `diff_drive_controller.cmd_vel_timeout` to select
-  zero on the first control update after 0.35 seconds of advancing simulation
-  time;
-- managed pause proves Gate, controller, and wheel zero before minting a token,
-  then proves the first resumed wheel command is zero;
-- unmanaged GUI/Transport pause has no token and requires a full
-  simulation/control restart rather than in-place resume.
+- authority 被 kill 而看似有效 candidate 持续时，独立 Gate lease 仍会 expiry；
+- candidate producer 被 kill 时，candidate freshness 仍会 expiry；
+- MotionGate 被 kill 时，`diff_drive_controller.cmd_vel_timeout` 在推进 simulation time 的 `0.35 s` 后第一次
+  control update 选择 zero；
+- managed pause 在 mint token 前证明 Gate、controller 与 wheel zero，并在 resume 后证明首个 wheel command 为 zero；
+- unmanaged GUI/Transport pause 没有 token，需完整 simulation/control restart，不做 in-place resume。
 
-The later Mission and voice milestones inherit these v1.0 quantitative
-acceptance criteria:
+后续 Mission 与 voice milestone 继承以下 v1.0 quantitative acceptance criterion：
 
-- From a `StopMission` request to the final zero-velocity output:
-  - P95 ≤ 100 ms;
-  - P99 ≤ 200 ms;
-  - maximum ≤ 300 ms.
-- From maximum configured speed, STOP causes odometry to enter the stationary tolerance within 1.2 seconds and remain there for 200 ms.
-- Killing MissionRuntime causes the independent MotionGate lease to expire and automatically select zero velocity.
-- Killing MotionGate causes `diff_drive_controller.cmd_vel_timeout` to select
-  zero on the first control update after 0.35 seconds of advancing simulation
-  time. The configured 100 Hz period gives the measurement one 10 ms
-  scheduling tolerance; physical stationarity is a separate assertion.
-- Candidate samples never renew Runtime authority; a test continues feeding
-  valid-looking smoother output after killing Runtime and still observes Gate
-  inhibition.
-- Every step handover recreates the candidate data plane. Tests inject samples
-  from the old topic generation and an unbound Gate-local writer after the new
-  lease opens and prove they are rejected.
-- Managed Gazebo safe-pause first proves Gate output, controller output, and
-  wheel command are zero while simulation still advances, then pauses and
-  records a token. After MotionGate dies during that pause, the first resumed
-  wheel command is still asserted to be zero.
-- A fault-injection case kills MotionGate before zero proof. Controller
-  inactivity or released command interfaces are insufficient: the harness
-  issues a token only after directly observing zero wheel command for the
-  configured periods; otherwise it selects full restart.
-- A direct GUI/Transport pause has no safe-pause token; in-place resume is
-  refused and the tested recovery is a full simulation/control restart from
-  an inactive zero-command state.
+- 从 `StopMission` request 到最终 zero-velocity output：P95 `<= 100 ms`、P99 `<= 200 ms`、maximum `<= 300 ms`；
+- 从最大 configured speed 开始，STOP 使 odometry 在 `1.2 s` 内进入 stationary tolerance，并保持 `200 ms`；
+- kill MissionRuntime 导致独立 MotionGate lease expiry，并自动选择 zero velocity；
+- kill MotionGate 导致 `diff_drive_controller.cmd_vel_timeout` 在推进 simulation time 的 `0.35 s` 后第一次 control
+  update 选择 zero；配置的 `100 Hz` period 给测量一项 `10 ms` scheduling tolerance，physical stationarity 为独立
+  assertion；
+- candidate sample 永不续约 Runtime authority；test 在 kill Runtime 后持续投送有效外观 smoother output，仍观测
+  Gate inhibition；
+- 每次 step handover 重新创建 candidate data plane。test 在新 lease open 后注入 old topic generation 和 unbound
+  Gate-local writer sample，并证明它们被 reject；
+- managed Gazebo safe-pause 先在 simulation 仍推进时证明 Gate output、controller output 与 wheel command 为 zero，
+  再 pause 并记录 token；pause 中 MotionGate death 后，首个 resumed wheel command 仍必须为 zero；
+- fault-injection 在 zero proof 前 kill MotionGate。controller inactivity 或 released command interface 不足：harness
+  仅在直接观测到配置时段的 zero wheel command 后发 token，否则选择完整 restart；
+- direct GUI/Transport pause 没有 safe-pause token；拒绝 in-place resume，测试 recovery 为从 inactive zero-command
+  state 开始的完整 simulation/control restart。
 
-These command-inhibition thresholds do not claim that the system is a functionally certified emergency stop.
+这些 command-inhibition threshold 不声称系统是功能安全认证的 emergency stop。
 
-### Issue #36 crash-stop acceptance
+### Issue #36 crash-stop 验收
 
-The crash-stop slice is a real headless Gazebo/Fast DDS/controller/odometry
-acceptance, not a mock replacement for the killed process. The two ordinary PR
-scenarios run once each with a fresh process-isolated launch; the first real
-failure stops the pair without retry. Five fresh repetitions belong to
-nightly/release hardening and are non-blocking for the ordinary PR.
+crash-stop 切片是实际 headless Gazebo/Fast DDS/controller/odometry acceptance，不是被 kill process 的 mock
+replacement。两个普通 PR scenario 各运行一次，均使用 fresh process-isolated launch；第一次真实 failure 停止该对
+scenario 且不 retry。五次 fresh repetition 属于 nightly/release hardening，对普通 PR 非阻塞。
 
-The harness owns exact `ProcessStarted` actions for Runtime and MotionGate. It
-opens a pidfd immediately, records `/proc/<pid>/stat` starttime, executable and
-cmdline, verifies the unique ROS graph owner, and injects only
-`signal.pidfd_send_signal(pidfd, SIGKILL)`. Process names, PID scans,
-`pkill -f`, and broad cleanup are forbidden. Runtime death is measured from
-the steady pidfd acknowledgement to Gate zero; Gate death is measured from
-the last non-zero final command to the first zero controller output in
-advancing simulation time. Publisher disappearance and controller `ACTIVE`
-are not zero or stationarity proofs.
+harness 为 Runtime 和 MotionGate 拥有 exact `ProcessStarted` action：立即打开 pidfd、记录 `/proc/<pid>/stat`
+starttime、executable 与 cmdline、验证唯一 ROS graph owner，并且仅注入
+`signal.pidfd_send_signal(pidfd, SIGKILL)`。禁止 process name、PID scan、`pkill -f` 和 broad cleanup。Runtime death
+从 steady pidfd acknowledgement 到 Gate zero 测量；Gate death 从最后非零 final command 到推进 simulation time 中
+首个 zero controller output 测量。publisher disappearance 和 controller `ACTIVE` 不是 zero 或 stationarity proof。
 
-Both scenarios separately prove odometry and wheel stationarity, fresh
-Runtime/Gate identity, stale tuple and writer isolation, a 1.0 s no-Goal zero
-window, and a new Goal recovery. The launch fixture uses a unique Gazebo
-partition, structured shutdown, bounded wall watchdogs, and unfiltered exit
-code assertions. A real product failure is persisted as a blocked Issue and
-does not authorize Runtime/MotionGate refactoring in the acceptance harness.
+两个 scenario 独立证明 odometry 与 wheel stationarity、fresh Runtime/Gate identity、stale tuple 与 writer isolation、
+`1.0 s` no-Goal zero window，以及新 Goal recovery。launch fixture 使用 unique Gazebo partition、structured shutdown、
+有界 wall watchdog 和 unfiltered exit-code assertion。真实 product failure 持久化为 blocked Issue，不授权在
+acceptance harness 中重构 Runtime/MotionGate。
 
-## Mapping completion criteria
+## Mapping 完成标准
 
-- A TF ownership check proves that each required transform has one semantic owner.
-- Saving produces a complete atomic map directory containing occupancy YAML, image, and posegraph.
-- The saved map package can be loaded again.
-- A partial failure exposes no half-written map package.
-- Map ID handling rejects path traversal.
+- TF ownership check 证明每条所需 transform 只有一个 semantic owner。
+- 保存生成包含 occupancy YAML、image 与 posegraph 的完整 atomic map directory。
+- saved map package 可再次加载。
+- partial failure 不暴露 half-written map package。
+- Map ID handling reject path traversal。
 
-## Navigation completion criteria
+## Navigation 完成标准
 
-- All three predefined Named Places succeed without collision.
-- Each final pose has position error ≤ 0.25 m and yaw error ≤ 0.25 rad.
-- Successful, failed, canceled, and timed-out navigation paths return to zero velocity.
-- A launch that tries to start SLAM and AMCL together fails instead of creating two `map → odom` owners.
+- 三个预定义 Named Place 均不碰撞地成功。
+- 每个 final pose position error `<= 0.25 m`，yaw error `<= 0.25 rad`。
+- success、failure、cancel 和 timeout navigation path 均返回 zero velocity。
+- 尝试同时启动 SLAM 和 AMCL 的 launch 必须失败，不能生成两个 `map → odom` owner。
 
-The mode checks also prove:
+模式检查还证明：Mapping 使用 `slam_toolbox` 拥有 `map → odom`；Navigation 使用 AMCL 拥有它；两种模式均由
+`diff_drive_controller` 拥有 `odom → base_footprint`；robot-internal frame 归 `robot_state_publisher`；
+`ros_gz_bridge` 只 bridge `/clock` 与 `/scan`。
 
-- Mapping uses slam_toolbox for `map → odom`;
-- Navigation uses AMCL for `map → odom`;
-- both modes use `diff_drive_controller` for `odom → base_footprint`;
-- robot-internal frames belong to `robot_state_publisher`;
-- `ros_gz_bridge` bridges only `/clock` and `/scan`.
+## Agent 完成标准
 
-## Agent completion criteria
+固定中文语料覆盖 deterministic rule、clarification、local LLM fallback、schema-valid 但 semantic-invalid output、
+LLM timeout，以及较新 turn 或 STOP 后 late LLM response。任意 LLM output 都不能 publish velocity、提供 path，
+或覆盖 trusted speed、acceleration、tolerance、timeout、map-path 或 admission policy。
 
-The fixed Mandarin corpus covers:
+## Offline voice 与 audio 完成标准
 
-- deterministic rules;
-- clarification;
-- local LLM fallback;
-- schema-valid but semantically invalid output;
-- LLM timeout;
-- a late LLM response after a newer turn or STOP.
+确定性 offline fixture 覆盖 far-end-only audio、near-end-only audio、double-talk、`40 ms` 至 `250 ms` acoustic delay、
+`±100 ppm` clock drift、PortAudio xrun、ring-buffer overflow、late TTS PCM 和 fixed STOP preemption。fixture 还验证
+48 kHz mono full-duplex callback boundary、`10 ms/480-sample` DSP framing、render-reference ordering、16 kHz KWS/ASR
+input 以及 stale playback/turn result isolation。real-time callback 不做 allocation、blocking、logging、ROS call 或
+model inference。
 
-For every case, arbitrary LLM output is unable to publish velocity, provide a path, or override trusted speed, acceleration, tolerance, timeout, map-path, or admission policy.
+## 真实单麦克风与 speaker 完成标准
 
-## Offline voice and audio completion criteria
+验收使用支持的 motherboard analog microphone input 与 speaker output，关闭 Windows audio enhancement 与 spatial audio：
 
-Deterministic offline fixtures cover:
+- 排除前 `2 s` convergence 后，far-end-only ERLE median `>= 6 dB`；
+- wake-word recall：quiet environment `>= 95%`，playback 期间 `>= 90%`；
+- double-talk command semantic success rate `>= 85%`；
+- 两小时 TTS-only run 产生零错误 Mission；
+- fixed STOP recall `>= 95%`；
+- 从 STOP phrase 结束到 MotionGate zero velocity，P95 `<= 500 ms`；
+- `30 min` soak 无未处理 overflow、无 uncontrolled playback，且无明显 memory growth。
 
-- far-end only audio;
-- near-end only audio;
-- double-talk;
-- acoustic delay from 40 ms through 250 ms;
-- clock drift of ±100 ppm;
-- PortAudio xrun;
-- ring-buffer overflow;
-- late TTS PCM;
-- fixed STOP preemption.
+## 证据与当前缺口
 
-The fixtures also verify the 48 kHz mono full-duplex callback boundary, 10 ms/480-sample DSP framing, render-reference ordering, 16 kHz KWS/ASR input, and stale playback/turn result isolation. The real-time callback performs no allocation, blocking, logging, ROS calls, or model inference.
+automated evidence 是 command、真实 exit status、简洁 test-result summary 和相关 coverage 或 latency report。
+manual evidence 可附 screenshot、pose sample、TF graph、sanitized audio clip 或 model manifest，但不能替代可自动化
+assertion。
 
-## Real single-microphone and speaker completion criteria
+Issue 维护需求、决策、验收、依赖和状态；PR 维护结果、final HEAD、验收映射、test summary、接口影响、回滚和
+残余风险。不得重复 Issue 正文、粘贴完整 log 或维护 per-commit evidence diary；generated log 与 private artifact
+不进入 Git。
 
-Acceptance uses the supported motherboard analog microphone input and speaker output, with Windows audio enhancements and spatial audio disabled.
-
-- Far-end-only ERLE median ≥ 6 dB, excluding the first 2 seconds of convergence.
-- Wake-word recall:
-  - quiet environment ≥ 95%;
-  - during playback ≥ 90%.
-- Double-talk command semantic success rate ≥ 85%.
-- A two-hour TTS-only run produces zero erroneous Missions.
-- Fixed STOP recall ≥ 95%.
-- From the end of the STOP phrase to MotionGate zero velocity, P95 ≤ 500 ms.
-- A 30-minute soak has no unhandled overflow, no uncontrolled playback, and no obvious memory growth.
-
-## Evidence and current gaps
-
-Automated evidence is a command, its true exit status, a concise test-result
-summary, and the relevant coverage or latency report. Manual evidence may add
-a screenshot, pose sample, TF graph, sanitized audio clip, or model manifest,
-but cannot replace an automatable assertion.
-
-The Issue owns requirements, decisions, acceptance, dependencies, and status.
-The PR owns results, final HEAD, acceptance mapping, test summaries, interface
-impact, rollback, and residual risks. Do not duplicate the Issue body, paste
-complete logs, or keep a per-commit evidence diary; generated logs and private
-artifacts do not enter Git.
-
-At the v0.1 foundation audit, the unified gate covered repository metadata, model expansion, URDF/SDF semantics, build, and package tests. It did not yet contain `gz_ros2_control`, LiDAR, MotionGate, Mission Runtime, SLAM, Nav2, Agent, or voice behavior tests. Each gap is closed by the capability milestones in the approved roadmap.
+v0.1 foundation audit 时，unified gate 覆盖 repository metadata、model expansion、URDF/SDF semantic、build 和
+package test，但尚未包含 `gz_ros2_control`、LiDAR、MotionGate、Mission Runtime、SLAM、Nav2、Agent 或 voice
+behavior test。每项缺口都由已批准路线图中的 capability milestone 收敛。

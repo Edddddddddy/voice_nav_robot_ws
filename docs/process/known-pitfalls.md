@@ -1,213 +1,172 @@
-# Known operational pitfalls
+# 已知运行陷阱
 
-This is the current grouped reference for recurring execution, interface,
-simulation, evidence, and validation failures. Each `PIT-NNNN` heading is a
-stable link target. The entries summarize the reusable rule; the owning Issue,
-PR, test, or primary source carries incident-specific evidence.
+这是执行、接口、仿真、证据和验证中可复发 failure 的当前归组参考。每个 `PIT-NNNN` heading 是稳定 link
+target。条目只概述可复用规则；incident-specific evidence 由 owning Issue、PR、test 或 primary source 保存。
 
-## WSL execution and ownership
+## WSL 执行与 ownership
 
-### PIT-0001: Windows-to-WSL quoting is a two-shell contract
+### PIT-0001：Windows 到 WSL 的 quoting 是两层 shell 契约
 
-PowerShell parses the outer command before Bash parses the inner command.
-Prefer a short, explicitly quoted WSL script and inspect the final command
-boundary before blaming Bash.
+PowerShell 先解析外层命令，Bash 再解析内层命令。优先使用短且显式 quoting 的 WSL script，在归因于 Bash
+前检查最终 command boundary。
 
-### PIT-0002: WSL transport warnings are not the command result
+### PIT-0002：WSL transport warning 不是命令结果
 
-WSL startup or localhost/NAT diagnostics may be noisy or slow. Use the child
-command exit status and decisive output as evidence, not the transport warning.
+WSL startup 或 localhost/NAT diagnostic 可能嘈杂或缓慢。以 child command 的 exit status 和决定性 output
+作为证据，而不是 transport warning。
 
-### PIT-0003: Repository ownership differs across Windows and WSL identities
+### PIT-0003：Windows 与 WSL identity 的 repository ownership 不同
 
-“Dubious ownership” usually means Git is running as an identity different from
-the repository owner. Run Git in the owning environment or use a narrowly
-approved repository-local trust setting; do not broaden global trust blindly.
+“Dubious ownership”通常表示 Git 运行 identity 与 repository owner 不同。在拥有环境中运行 Git，或使用狭窄、
+已批准的 repository-local trust setting；不要盲目扩大 global trust。
 
-### PIT-0023: WSL Git cannot consume a Windows managed-worktree pointer
+### PIT-0023：WSL Git 不能直接使用 Windows managed-worktree pointer
 
-A Codex managed worktree may contain a `.git` file whose `gitdir:` value is a
-Windows absolute path. WSL Git treats that value as a relative path and fails
-before it can inspect the worktree. `scripts/verify.sh` sources
-`scripts/prepare_git_context.sh` before its first Git subprocess; the helper
-resolves ordinary directories and relative pointers, converts Windows
-absolute pointers with `wslpath`, validates the target and `HEAD`, and exports
-`GIT_DIR` plus `GIT_WORK_TREE` to child processes. Do not pre-set those
-variables, edit `.git`, or guess another checkout. Missing, malformed,
-unconvertible, and nonexistent targets must fail closed with a safe diagnostic.
+Codex managed worktree 的 `.git` file 可能含 Windows absolute `gitdir:`。WSL Git 会将它视为 relative path，并在
+检查 worktree 前失败。`scripts/verify.sh` 在第一个 Git subprocess 前 source
+`scripts/prepare_git_context.sh`：helper 解析普通 directory 与 relative pointer，用 `wslpath` 转换 Windows
+absolute pointer，验证 target 与 `HEAD`，并向 child process export `GIT_DIR` 与 `GIT_WORK_TREE`。不得预设这些
+变量、编辑 `.git` 或猜测另一 checkout。missing、malformed、unconvertible 或 nonexistent target 必须 fail closed
+并给出安全 diagnostic。
 
-### PIT-0024: A WSL transport hang needs bounded diagnosis and manual recovery
+### PIT-0024：WSL transport hang 需要有界诊断和人工恢复
 
-The WSL transport can recur in a state where
-`wsl.exe -d Ubuntu-24.04 --exec /bin/true` hangs or Codex/Worker reports
-`Bash/Service/0x8007274c`, even while `WslService`, `vmcompute`, and `hns` are
-Running and `wsl --version` succeeds. Distinguish this from a ROS test by
-running the `/bin/true` command as a seconds-scale red/green loop and recording
-the exact `wsl.exe`/`wslhost.exe` PIDs and command lines.
+`wsl.exe -d Ubuntu-24.04 --exec /bin/true` 可能挂起，或任务运行器报告 `Bash/Service/0x8007274c`，即使
+`WslService`、`vmcompute`、`hns` 正在 Running 且 `wsl --version` 成功。用秒级 `/bin/true` red/green loop 记录
+精确 `wsl.exe`/`wslhost.exe` PID 和 command line，将它与 ROS test 区分。
 
-Before recovery, confirm that no simulation, build, or unsaved WSL process must
-be preserved. The permitted recovery is one official `wsl --shutdown`; it
-terminates running processes in all WSL distributions, so it must not be
-automated or run without that activity check. Do not unregister a distribution,
-delete or move a VHD, reinstall Ubuntu, or add an automatic restart/polling
-script. Verify recovery with repeated `/bin/true` executions and then
-`source /opt/ros/jazzy/setup.bash && ros2 pkg prefix rclcpp`. If it still fails,
-stop and escalate to Windows/WSL service diagnosis rather than hiding the
-failure with a global kill loop.
+恢复前确认没有必须保留的 simulation、build 或未保存 WSL process。允许的恢复是一次官方 `wsl --shutdown`；
+它会终止所有 WSL distribution 中的 process，因此不得自动执行，也不得未经 activity check 执行。不得 unregister
+distribution、删除/移动 VHD、重装 Ubuntu，或添加自动 restart/polling script。用重复 `/bin/true` 及
+`source /opt/ros/jazzy/setup.bash && ros2 pkg prefix rclcpp` 验证恢复；若仍失败，停止并升级到 Windows/WSL
+service diagnosis，而不是以 global kill loop 隐藏问题。
 
-## ROS interface and model semantics
+## ROS Interface 与模型语义
 
-### PIT-0004: A ROS interface package must declare its group
+### PIT-0004：ROS interface package 必须声明其 group
 
-An interface-generating package must declare `rosidl_interface_packages` in
-`package.xml` alongside its generator dependencies. Validate metadata and build
-from a sourced Jazzy environment.
+interface-generating package 必须在 `package.xml` 中与 generator dependency 一起声明
+`rosidl_interface_packages`；在 source 的 Jazzy environment 中验证 metadata 与 build。
 
-### PIT-0005: `base_footprint` is a logical frame, not a physical body
+### PIT-0005：`base_footprint` 是逻辑 frame，不是实体 body
 
-Do not add visual, collision, mass, or inertia to `base_footprint`. Physical
-properties belong to the robot body links; the planar frame is a navigation
-coordinate only.
+不得为 `base_footprint` 增加 visual、collision、mass 或 inertia。物理属性归属 robot body link；该平面 frame
+仅是 navigation coordinate。
 
-### PIT-0006: `xacro:material` is not an implicit built-in macro
+### PIT-0006：`xacro:material` 不是隐式 built-in macro
 
-Use standard URDF material syntax or define/include the project macro before
-invocation. A visually plausible model is not evidence that macro expansion is
-valid.
+使用标准 URDF material syntax，或调用前定义/包含项目 macro。视觉上合理的 model 不是 macro expansion 有效的
+证据。
 
-### PIT-0007: DDS matching and ROS graph identity are non-atomic
+### PIT-0007：DDS matching 与 ROS graph identity 不是原子操作
 
-A matched endpoint can have a temporarily unresolved node identity. Retry only
-the typed pending state inside the original absolute deadline; wrong type, kind,
-QoS, FQN, duplicate, zero, missing, or replaced GID remains fail-closed.
+matched endpoint 可能暂时没有 resolved node identity。仅在原 absolute deadline 内 retry typed pending state；
+wrong type、kind、QoS、FQN、duplicate、zero、missing 或 replaced GID 必须 fail closed。
 
-### PIT-0008: Acceptance evidence belongs to an exact commit
+### PIT-0008：验收证据属于 exact commit
 
-Evidence from an ancestor can become stale after code, tests, or documentation
-change. Record the exact final HEAD and rerun final checks there.
+代码、test 或文档变化后，祖先证据可能已过期。记录 exact final HEAD，并在该 HEAD 重跑最终检查。
 
-### PIT-0009: Documentation is part of the closed-set contract
+### PIT-0009：文档是 closed-set contract 的一部分
 
-When a supported value set or sentinel changes, update implementation, tests,
-checker, and documentation together. A green implementation with contradictory
-prose is an incomplete contract.
+supported value set 或 sentinel 改变时，同步更新 implementation、test、checker 与文档。implementation green 而
+prose 矛盾时，契约尚未完成。
 
-### PIT-0020: Unit-quaternion formulas require a unit quaternion
+### PIT-0020：unit-quaternion formula 需要 unit quaternion
 
-A finite non-zero quaternion must be norm-checked and normalized before RPY
-formulas. Reject zero, non-finite, or invalid norms rather than accepting a
-plausible-looking pose.
+finite non-zero quaternion 在使用 RPY formula 前必须 norm-check 并 normalize。拒绝 zero、non-finite 或 invalid
+norm，而不是接受看似合理的 pose。
 
-### PIT-0021: A size bound is not a schema-completeness guarantee
+### PIT-0021：size bound 不保证 schema complete
 
-Bound each variable field before composing a fixed diagnostic schema. Truncating
-the final string can hide a missing field or make a long wrong field appear
-valid.
+在组合 fixed diagnostic schema 前限制每个 variable field。截断最终 string 可能隐藏 missing field，或让一个很长的
+错误 field 看似有效。
 
-## DDS, deadlines, and isolation
+## DDS、deadline 与 isolation
 
-### PIT-0010: An absolute deadline surrounds the RPC
+### PIT-0010：absolute deadline 包围 RPC
 
-Passing a remaining duration to an RPC does not prove the response arrived in
-budget. Update the response timestamp and check the absolute deadline again
-immediately after every bounded call.
+向 RPC 传递剩余 duration 不代表 response 在 budget 内到达。每个 bounded call 后立即更新 response timestamp，
+并再次检查 absolute deadline。
 
-### PIT-0011: CTest needs the ROS environment, not only a build directory
+### PIT-0011：CTest 需要 ROS environment，不只是 build directory
 
-Source the base ROS installation and the current overlay in the shell that runs
-CTest. A configured build directory does not supply `ament` imports or runtime
-environment.
+在运行 CTest 的同一个 shell source base ROS installation 与 current overlay。configured build directory 不提供
+`ament` import 或 runtime environment。
 
-### PIT-0014: A fixed ROS domain is not concurrent test isolation
+### PIT-0014：固定 ROS domain 不是 concurrent test isolation
 
-A domain ID is a shared discovery namespace, not ownership. Use the official
-process-isolated runner with a runtime-unique lease and clear inherited domain
-overrides.
+domain ID 是 shared discovery namespace，不是 ownership。使用 official process-isolated runner 与 runtime-unique
+lease，并清除 inherited domain override。
 
-### PIT-0017: A Gazebo query timeout is not a teardown diagnosis
+### PIT-0017：Gazebo query timeout 不是 teardown diagnosis
 
-A bounded pose query can time out because the server or query stream is
-unhealthy. Diagnose the authoritative query separately from the shutdown
-oracle; do not turn a query retry into a teardown pass.
+bounded pose query 可因 server 或 query stream 不健康而 timeout。将 authoritative query 与 shutdown oracle 分别诊断；
+不要将 query retry 变成 teardown pass。
 
-### PIT-0025: Publisher disappearance is not a zero proof
+### PIT-0025：publisher 消失不是 zero proof
 
-When a MotionGate process dies, its final publisher disappearing only proves
-that the writer is gone. It does not prove what the controller selected or
-that the robot stopped. Observe the controller output, wheel velocities, and
-odometry under the bounded zero and stationarity contracts.
+MotionGate process 死亡时，final publisher 消失只证明 writer 已消失；不能证明 controller 选择了什么，也不能证明
+robot 已停止。必须在有界 zero 和 stationarity contract 下观测 controller output、wheel velocity 与 odometry。
 
-### PIT-0026: Controller `ACTIVE` is not a wheel-zero proof
+### PIT-0026：controller `ACTIVE` 不是 wheel-zero proof
 
-Lifecycle state and claimed command interfaces may remain healthy while a
-stale or non-zero command is still being consumed. Acceptance must observe
-the controller-selected command and both wheel velocities; do not replace
-that evidence with `ACTIVE` or interface ownership.
+lifecycle state 与 claimed command interface 即使健康，仍可能消费 stale 或非零 command。验收必须观测
+controller-selected command 和两个 wheel velocity；不得用 `ACTIVE` 或 interface ownership 代替。
 
-### PIT-0027: Wall time and simulation time answer different questions
+### PIT-0027：wall time 与 simulation time 回答不同问题
 
-Runtime lease expiry and test watchdogs use steady/wall time. Consumer
-deadman latency, odometry stationarity, and no-Goal recovery windows use an
-advancing simulation clock. If `/clock` stops or regresses, fail the measured
-scenario instead of substituting wall time for a simulation-time claim.
+Runtime lease expiry 和 test watchdog 使用 steady/wall time；consumer deadman latency、odometry stationarity 和
+no-Goal recovery window 使用推进的 simulation clock。若 `/clock` 停止或 regression，测量 scenario 必须失败，
+不能用 wall time 替代 simulation-time claim。
 
-### PIT-0028: Process names and PID scans are unsafe injection selectors
+### PIT-0028：process name 与 PID scan 是不安全的 injection selector
 
-A process name or a PID discovered by scanning can refer to a user's ROS or
-Gazebo resource, or to a reused PID. Bind injection to the launch-owned
-`ProcessStarted` action, pidfd, `/proc` starttime/executable/cmdline, and a
-unique ROS graph owner. Use only `pidfd_send_signal(SIGKILL)` and close the
-same exact handle during cleanup.
+按名称或扫描 PID 可能定位到用户的 ROS/Gazebo resource，或遇到 reused PID。将 injection 绑定到 launch-owned
+`ProcessStarted` action、pidfd、`/proc` starttime/executable/cmdline 和唯一 ROS graph owner。仅使用
+`pidfd_send_signal(SIGKILL)`，并在 cleanup 关闭同一精确 handle。
 
-## Evidence and test-result integrity
+## 证据与 test-result integrity
 
-### PIT-0016: Green status is not proof that the intended tests ran
+### PIT-0016：Green status 不证明预期 test 实际运行
 
-Close the evidence chain: source inventory, discovery, generated CTest metadata,
-critical xUnit names, skip policy, and executed count must describe the same
-tests. A summary alone is insufficient.
+闭合 evidence chain：source inventory、discovery、generated CTest metadata、critical xUnit name、skip policy 和
+executed count 必须描述同一组 test。summary 本身不充分。
 
-### PIT-0018: A trailing diagnostic can erase a failed gate status
+### PIT-0018：尾部 diagnostic 可抹去失败 gate status
 
-Make the gate the terminal command whose exit status is consumed. Run process
-snapshots, cleanup, and other diagnostics as separate commands so a later
-success cannot mask a failed test.
+让 gate 成为其 exit status 被消费的终端命令。process snapshot、cleanup 等 diagnostic 作为独立命令运行，避免
+后续 success 掩盖失败 test。
 
-### PIT-0019: A property-name allowlist does not validate property values
+### PIT-0019：property-name allowlist 不验证 property value
 
-Inspect generated CTest metadata and compare exact runner, label, timeout,
-working directory, environment, and result semantics. Checking only property
-names validates vocabulary, not behavior.
+检查 generated CTest metadata，比较 exact runner、label、timeout、working directory、environment 与 result
+semantic。仅检查 property name 只验证 vocabulary，而不验证 behavior。
 
-### PIT-0022: Test-result evidence requires one shared-tree writer
+### PIT-0022：test-result evidence 需要共享树单 writer
 
-Treat `build/**/test_results` as a single-writer resource from verification
-startup through its terminal status. Reviewers may inspect copied evidence but
-must not run another result-writing test or clear a changing file.
+从 verification startup 至 terminal status，将 `build/**/test_results` 视为 single-writer resource。只读审查可检查
+copy 的 evidence，但不得运行另一项 result-writing test，也不得清除变化中的文件。
 
-## Gazebo cleanup
+## Gazebo 清理
 
-### PIT-0012: No residual Gazebo process is not a clean Gazebo exit
+### PIT-0012：没有残留 Gazebo process 不等于 Gazebo clean exit
 
-An empty process list does not prove that every launch-managed process returned
-the required exit code. Structured stop requires the validated partition,
-positive acknowledgement, process exit, and unfiltered exit-code assertions.
+空 process list 不证明每个 launch-managed process 都按要求 exit code 返回。structured stop 需要 validated partition、
+positive acknowledgement、process exit 和 unfiltered exit-code assertion。
 
-### PIT-0013: Test discovery fixtures must match the repository layout
+### PIT-0013：test discovery fixture 必须匹配 repository layout
 
-A temporary importable package can make a focused runner test pass while the
-real non-package `tests/` tree fails. Exercise the same directory shape and
-discovery entry point used by the repository gate.
+临时 importable package 可能让 focused runner test 通过，而真实 non-package `tests/` tree 失败。应练习与 repository
+gate 使用的相同 directory shape 和 discovery entry point。
 
-### PIT-0015: One composite cleanup is one failure boundary
+### PIT-0015：一个 composite cleanup 是一个 failure boundary
 
-Register zero/inhibit, structured stop, and fixture destruction as independent
-must-run LIFO cleanups. Aggregate errors only after every cleanup phase has
-been attempted.
+将 zero/inhibit、structured stop 与 fixture destruction 注册为独立、必须运行的 LIFO cleanup。仅在每个 cleanup
+phase 均已尝试后 aggregate error。
 
-## Shell and schema guardrails
+## Shell 与 schema guardrail
 
-The repository checker validates text encoding, trailing whitespace, Markdown
-links and fences, supported documentation layout, package versions, Issue/PR
-forms, and the retired-path contract. It intentionally does not claim to
-sandbox malicious same-UID processes or replace runtime safety tests.
+repository checker 验证 text encoding、trailing whitespace、Markdown link/fence、支持的 documentation layout、
+package version、Issue/PR form 和 retired-path contract。它有意不声称 sandbox 恶意的 same-UID process，也不替代
+runtime safety test。

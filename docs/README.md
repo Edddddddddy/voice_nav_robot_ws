@@ -1,43 +1,45 @@
-# VoiceNav Robot documentation
+# VoiceNav Robot 文档索引
 
-This tree separates verified current behavior from the approved v1.0 target.
-Target documents are normative design contracts; they do not claim that the
-current source already implements the described behavior.
+此目录区分“已验证的当前行为”与“已批准的 v1.0 目标”。目标文档是规范性设计契约，
+不表示当前源码已经实现其全部描述。
 
-## Product
+## 产品
 
-- [v1.0 product specification](product/v1.0-product-spec.md)
-- [Product glossary](product/glossary.md)
-- [Engineering resources](product/resources.md)
+- [v1.0 产品规格](product/v1.0-product-spec.md)
+- [产品术语表](product/glossary.md)
+- [工程资源](product/resources.md)
 
-## Architecture
+## 架构
 
-- [Architecture overview](architecture/overview.md)
-- [Mission Runtime Interface](architecture/mission-runtime-interface.md)
-- [Safety and motion contract](architecture/safety-and-motion-contract.md)
-- [TF and operating modes](architecture/tf-and-operating-modes.md)
-- [Voice and Agent contract](architecture/voice-and-agent.md)
+- [架构概览](architecture/overview.md)
+- [Mission Runtime 接口](architecture/mission-runtime-interface.md)
+- [Voice Interface 契约](architecture/voice-interface.md)
+- [安全与运动契约](architecture/safety-and-motion-contract.md)
+- [TF 与运行模式](architecture/tf-and-operating-modes.md)
+- [语音与 Agent 契约](architecture/voice-and-agent.md)
 
-## Process
+## 过程
 
-- [Change lifecycle](process/change-lifecycle.md)
-- [Quality policy](process/quality-policy.md)
-- [Testing strategy](process/testing-strategy.md)
-- [Release policy and roadmap](process/release-policy.md)
-- [Problem recurrence control](process/problem-learning.md)
-- [Known pitfalls](process/known-pitfalls.md)
+- [变更生命周期](process/change-lifecycle.md)
+- [质量策略](process/quality-policy.md)
+- [测试策略](process/testing-strategy.md)
+- [发布策略与路线图](process/release-policy.md)
+- [问题复发控制](process/problem-learning.md)
+- [已知运行陷阱](process/known-pitfalls.md)
+- [Crash-stop 验收手册](process/crash-stop-runbook.md)
+- [第三方 LLM 通知](process/third-party-llm-notices.md)
 
-## Governance
+## 治理
 
-- [Architecture decisions](adr/)
-- [Agent control protocol](agents/README.md)
+- [仓库协作协议](../AGENTS.md)
+- [架构决策记录](adr/)
+- [GitHub 工作索引](agents/README.md)
 
-ADRs remain historical decision records. Do not rewrite a decision to make an
-earlier choice appear current; add a superseding ADR when the decision changes.
+ADR 是历史决策记录。不要为了让旧选择显得“当前”而重写它；若决策变化，应新增一份
+superseding ADR。
 
-## Status vocabulary
+## 状态词汇
 
-- **Current** means verified behavior present in the repository.
-- **Target v1.0** means approved behavior that may still require implementation.
-- **Evidence** means a command, result, or reviewed artifact tied to a GitHub
-  Issue, pull request, CI run, or immutable Git object.
+- **当前**：仓库中已有可验证的行为。
+- **目标 v1.0**：已批准但可能尚待实现的行为。
+- **证据**：与 GitHub Issue、PR、CI run 或不可变 Git 对象关联的命令、结果或审查产物。
