@@ -136,20 +136,21 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                 'graph_owner_gid': final_gid,
             }
             pre_kill_observation = self.probe.diagnostic()
-            self.probe.send_goal(
+            active_goal = self.probe.send_goal(
                 old_runtime,
                 source_instance_id='gate-crash-seed',
                 source_seq=1,
                 distance_m=1.0,
             )
-            moving = self.probe.wait_for_armed_motion()
-            old_gate = moving['gate']
+            old_gate = None
             signal_boundary_motion = None
 
             def capture_signal_boundary_motion():
                 nonlocal signal_boundary_motion
                 signal_boundary_motion = (
-                    self.probe.capture_motion_at_signal_boundary()
+                    self.probe.capture_motion_at_signal_boundary(
+                        goal_handle=active_goal
+                    )
                 )
 
             pidfd_kill = {
@@ -167,6 +168,7 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                 raise AssertionError(
                     'pidfd signal boundary did not capture moving proof'
                 )
+            old_gate = signal_boundary_motion['gate']
             pidfd_kill['signal_boundary_monotonic_ns'] = (
                 signal_boundary_motion['observed_ns']
             )

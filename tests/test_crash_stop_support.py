@@ -18,12 +18,17 @@ from __future__ import annotations
 
 from collections import deque
 import importlib.util
+import os
 from pathlib import Path
+import signal
+import subprocess
 import sys
 import threading
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+
+from launch.events.process import ProcessStarted
 
 
 def _load_support():
@@ -57,6 +62,23 @@ def command(stamp_ns: int, linear_x: float):
     return SimpleNamespace(
         header=SimpleNamespace(stamp=stamp),
         twist=SimpleNamespace(linear=vector, angular=vector),
+    )
+
+
+def gate_state(
+    *,
+    state: int = 2,
+    authority_live: bool = True,
+    candidate_fresh: bool = True,
+    motion_inhibited: bool = False,
+    zero_selected: bool = False,
+):
+    return SimpleNamespace(
+        state=state,
+        authority_live=authority_live,
+        candidate_fresh=candidate_fresh,
+        motion_inhibited=motion_inhibited,
+        zero_selected=zero_selected,
     )
 
 
@@ -269,6 +291,7 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
     def test_quiescence_fence_observes_final_added_after_first_snapshot(self):
         probe = support.CrashStopProbe.__new__(support.CrashStopProbe)
         probe.lock = threading.Lock()
+        probe.observation_changed = threading.Condition(probe.lock)
         probe.final_commands = deque(
             ((10, command(3_994_000_000, 0.01)),),
             maxlen=20,
@@ -328,6 +351,310 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
                 samples,
                 signal_boundary_sim_ns=3_994_000_000,
             )
+
+
+class SignalBoundaryMotionProofTest(unittest.TestCase):
+
+    def make_probe(self):
+        probe = support.CrashStopProbe.__new__(support.CrashStopProbe)
+        probe.lock = threading.Lock()
+        probe.observation_changed = threading.Condition(probe.lock)
+        probe._gate_state_type = SimpleNamespace(
+            ARMED=2,
+            INHIBITED=0,
+            FAULTED=3,
+        )
+        return probe
+
+    def fresh_motion_probe(self, **gate_fields):
+        """Build a current proof whose only invalid axis is Gate state."""
+        probe = self.make_probe()
+        probe.gate_states = deque(
+            ((1_000, gate_state(**gate_fields)),), maxlen=20
+        )
+        probe.final_commands = deque(
+            ((1_000, command(1_000, 0.1)),), maxlen=20
+        )
+        probe.limited_commands = deque(
+            ((1_000, command(1_000, 0.1)),), maxlen=20
+        )
+        probe.clock_samples = deque(
+            ((900, 900), (1_000, 1_000)), maxlen=20
+        )
+        return probe
+
+    def assert_fresh_invalid_gate_times_out(self, **gate_fields):
+        probe = self.fresh_motion_probe(**gate_fields)
+        active_goal = SimpleNamespace(status=support.GoalStatus.STATUS_EXECUTING)
+
+        class FakeTime:
+
+            def __init__(self):
+                self.now_ns = 1_000
+
+            def monotonic(self):
+                return self.now_ns / 1_000_000_000
+
+            def monotonic_ns(self):
+                return self.now_ns
+
+        fake_time = FakeTime()
+
+        class FakeCondition:
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def wait(self, timeout=None):
+                fake_time.now_ns += int(timeout * 1_000_000_000)
+
+        probe.observation_changed = FakeCondition()
+        with mock.patch.object(support, 'time', fake_time):
+            with self.assertRaisesRegex(
+                AssertionError,
+                'timed out waiting for current armed, moving proof',
+            ):
+                probe.capture_motion_at_signal_boundary(
+                    goal_handle=active_goal,
+                    timeout=0.1,
+                )
+
+    def test_current_fresh_nonzero_proof_rejects_each_invalid_gate_axis(self):
+        cases = (
+            (
+                'faulted',
+                {'state': self.make_probe()._gate_state_type.FAULTED},
+            ),
+            ('motion_inhibited', {'motion_inhibited': True}),
+            ('authority_dead', {'authority_live': False}),
+            ('candidate_stale', {'candidate_fresh': False}),
+            ('zero_selected', {'zero_selected': True}),
+        )
+
+        for name, gate_fields in cases:
+            with self.subTest(name=name):
+                self.assert_fresh_invalid_gate_times_out(**gate_fields)
+
+    @unittest.skipUnless(
+        hasattr(os, 'pidfd_open') and hasattr(signal, 'pidfd_send_signal'),
+        'pidfd is a Linux test requirement',
+    )
+    def test_faulted_gate_boundary_callback_does_not_pidfd_kill_child(self):
+        probe = self.fresh_motion_probe(
+            state=self.make_probe()._gate_state_type.FAULTED
+        )
+        active_goal = SimpleNamespace(status=support.GoalStatus.STATUS_EXECUTING)
+        command_line = [
+            sys.executable,
+            '-c',
+            'import time; time.sleep(60)',
+            '--ros-args',
+            '-r',
+            '__node:=signal_boundary_faulted_child',
+        ]
+        action = object()
+        child = subprocess.Popen(command_line)
+        event = ProcessStarted(
+            action=action,
+            name='signal_boundary_faulted_child',
+            cmd=command_line,
+            cwd=os.getcwd(),
+            env=dict(os.environ),
+            pid=child.pid,
+        )
+        process = None
+        try:
+            process = support.ExactPidfdProcess.from_process_started(
+                action=action,
+                event=event,
+                expected_executable=Path(sys.executable).name,
+                expected_node_name='signal_boundary_faulted_child',
+            )
+            with self.assertRaisesRegex(
+                AssertionError,
+                'timed out waiting for current armed, moving proof',
+            ):
+                process.kill(
+                    lambda: 1,
+                    before_signal=lambda: (
+                        probe.capture_motion_at_signal_boundary(
+                            goal_handle=active_goal,
+                            timeout=0.01,
+                        )
+                    ),
+                )
+            self.assertFalse(process.sigkill_sent)
+            self.assertIsNone(child.poll())
+        finally:
+            if process is not None:
+                process.close()
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=2)
+
+    def test_boundary_waits_for_fresh_motion_after_transient_zero(self):
+        probe = self.make_probe()
+        active_goal = SimpleNamespace(status=support.GoalStatus.STATUS_EXECUTING)
+        probe.gate_states = deque(((900, gate_state()),), maxlen=20)
+        probe.final_commands = deque(
+            ((900, command(1_000, 0.0)),), maxlen=20
+        )
+        probe.limited_commands = deque(
+            ((900, command(1_000, 0.0)),), maxlen=20
+        )
+        probe.clock_samples = deque(
+            ((900, 900), (901, 1_000)), maxlen=20
+        )
+
+        class FakeTime:
+
+            def __init__(self):
+                self.now_ns = 1_000
+                self.slept = False
+
+            def monotonic(self):
+                return self.now_ns / 1_000_000_000
+
+            def monotonic_ns(self):
+                return self.now_ns
+
+        fake_time = FakeTime()
+
+        class FakeCondition:
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def wait(self, timeout=None):
+                fake_time.now_ns += 10
+                if fake_time.slept:
+                    return
+                probe.gate_states.append(
+                    (fake_time.now_ns, gate_state())
+                )
+                probe.final_commands.append(
+                    (fake_time.now_ns, command(1_010, 0.1))
+                )
+                probe.limited_commands.append(
+                    (fake_time.now_ns, command(1_010, 0.1))
+                )
+                probe.clock_samples.append((fake_time.now_ns, 1_010))
+                fake_time.slept = True
+
+        probe.observation_changed = FakeCondition()
+        with mock.patch.object(support, 'time', fake_time):
+            proof = probe.capture_motion_at_signal_boundary(
+                goal_handle=active_goal,
+                timeout=0.1,
+            )
+
+        self.assertEqual(proof['observed_ns'], 1_010)
+        self.assertFalse(support.is_zero(proof['final'][1]))
+        self.assertFalse(support.is_zero(proof['limited'][1]))
+
+    def test_expired_motion_proof_fails_closed_before_signal(self):
+        probe = self.make_probe()
+        active_goal = SimpleNamespace(status=support.GoalStatus.STATUS_EXECUTING)
+        probe.gate_states = deque(((0, gate_state()),), maxlen=20)
+        probe.final_commands = deque(
+            ((0, command(1_000, 0.1)),), maxlen=20
+        )
+        probe.limited_commands = deque(
+            ((0, command(1_000, 0.1)),), maxlen=20
+        )
+        probe.clock_samples = deque(((0, 900), (0, 1_000)), maxlen=20)
+
+        class FakeTime:
+
+            def __init__(self):
+                self.now_ns = support.DEPENDENCY_FRESHNESS_NS + 1
+
+            def monotonic(self):
+                return self.now_ns / 1_000_000_000
+
+            def monotonic_ns(self):
+                return self.now_ns
+
+        fake_time = FakeTime()
+
+        class FakeCondition:
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def wait(self, timeout=None):
+                fake_time.now_ns += int(timeout * 1_000_000_000)
+
+        probe.observation_changed = FakeCondition()
+        with mock.patch.object(support, 'time', fake_time):
+            with self.assertRaisesRegex(
+                AssertionError,
+                'timed out waiting for current armed, moving proof',
+            ):
+                probe.capture_motion_at_signal_boundary(
+                    goal_handle=active_goal,
+                    timeout=0.1,
+                )
+
+    def test_ended_goal_cannot_reuse_current_motion_proof(self):
+        probe = self.make_probe()
+        probe.gate_states = deque(((1_000, gate_state()),), maxlen=20)
+        probe.final_commands = deque(
+            ((1_000, command(1_000, 0.1)),), maxlen=20
+        )
+        probe.limited_commands = deque(
+            ((1_000, command(1_000, 0.1)),), maxlen=20
+        )
+        probe.clock_samples = deque(
+            ((900, 900), (1_000, 1_000)), maxlen=20
+        )
+        active_goal = SimpleNamespace(
+            status=support.GoalStatus.STATUS_SUCCEEDED
+        )
+
+        class FakeTime:
+
+            def __init__(self):
+                self.now_ns = 1_000
+
+            def monotonic(self):
+                return self.now_ns / 1_000_000_000
+
+            def monotonic_ns(self):
+                return self.now_ns
+
+        fake_time = FakeTime()
+
+        class FakeCondition:
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def wait(self, timeout=None):
+                fake_time.now_ns += int(timeout * 1_000_000_000)
+
+        probe.observation_changed = FakeCondition()
+        with mock.patch.object(support, 'time', fake_time):
+            with self.assertRaisesRegex(
+                AssertionError,
+                'timed out waiting for current armed, moving proof',
+            ):
+                probe.capture_motion_at_signal_boundary(
+                    goal_handle=active_goal,
+                    timeout=0.1,
+                )
 
 
 if __name__ == '__main__':
