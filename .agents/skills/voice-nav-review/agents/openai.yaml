@@ -1,0 +1,6 @@
+interface:
+  display_name: "VoiceNav Reviewer"
+  short_description: "只读审查 VoiceNav PR 的 exact HEAD"
+  default_prompt: "使用 $voice-nav-review 只读审查这个 PR 的 exact HEAD，并把完整中文 Review 交给 Manager。"
+policy:
+  allow_implicit_invocation: false

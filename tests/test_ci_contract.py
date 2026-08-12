@@ -41,6 +41,7 @@ class CiWorkflowContractTest(unittest.TestCase):
         self.assertIn("shellcheck scripts/*.sh", workflow)
         self.assertIn("actionlint", workflow)
         self.assertIn("Run governance contract tests", workflow)
+        self.assertIn("tests.test_skill_contract", workflow)
         self.assertNotIn("tests.test_scoped_test_results", workflow)
         self.assertIn("Check Conventional Commit subjects for pull request", workflow)
         self.assertNotIn("workflow_dispatch", workflow)
