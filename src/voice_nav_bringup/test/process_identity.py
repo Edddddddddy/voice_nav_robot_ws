@@ -189,6 +189,7 @@ class ExactPidfdProcess:
                 'launch process executable does not match the expected node'
             )
         self._closed = False
+        self.sigkill_sent = False
 
     @classmethod
     def from_process_started(
@@ -252,9 +253,13 @@ class ExactPidfdProcess:
     def kill(
         self,
         graph_count: Callable[[], int],
+        *,
+        before_signal: Callable[[], None] | None = None,
     ) -> int:
-        """Validate graph-boundary proof and process identity, then SIGKILL."""
+        """Validate all signal preconditions, then SIGKILL through pidfd."""
         self.validate(graph_count)
+        if before_signal is not None:
+            before_signal()
         self._validate_process_identity()
         try:
             signal.pidfd_send_signal(self.pidfd, signal.SIGKILL)
@@ -262,6 +267,7 @@ class ExactPidfdProcess:
             raise ProcessIdentityError(
                 'pidfd SIGKILL injection failed'
             ) from error
+        self.sigkill_sent = True
         return time.monotonic_ns()
 
     def close(self) -> None:
