@@ -376,54 +376,298 @@ def is_zero(message: TwistStamped) -> bool:
     return all(value == 0.0 for value in values)
 
 
-def select_consumer_timeout_anchor(
-    final_samples: tuple[tuple[int, Any], ...],
+class ConsumerTraceAmbiguous(AssertionError):
+    """Fail closed when observer topics cannot prove controller consumption."""
+
+    def __init__(self, reason: str, **details: int | str) -> None:
+        self.evidence = {
+            'status': 'ambiguous',
+            'reason': reason,
+            **details,
+        }
+        super().__init__(
+            'controller consumer evidence ambiguous: '
+            + json.dumps(self.evidence, sort_keys=True)
+        )
+
+
+class ConsumerTimeoutOutOfBounds(AssertionError):
+    """Preserve a proved controller association when its timeout is unsafe."""
+
+    def __init__(
+        self,
+        trace: dict[str, int | str],
+        *,
+        delta_ns: int,
+    ) -> None:
+        self.evidence = {
+            'status': 'failed',
+            'reason': 'controller consumer timeout outside accepted window',
+            'authoritative_source_stamp_ns': trace['source_header_stamp_ns'],
+            'controller_nonzero_update_stamp_ns': (
+                trace['controller_update_stamp_ns']
+            ),
+            'controller_zero_update_stamp_ns': (
+                trace['controller_zero_update_stamp_ns']
+            ),
+            'delta_ns': delta_ns,
+            'accepted_window_ns': [
+                CONSUMER_ZERO_MIN_NS,
+                CONSUMER_ZERO_MAX_NS,
+            ],
+            'association_basis': trace['association_basis'],
+            'association': trace,
+        }
+        super().__init__(
+            'controller consumer timeout outside '
+            f'(0.35, 0.36] s: {delta_ns / 1_000_000_000:.6f} s; '
+            f'last_nonzero_sim_ns={trace["source_header_stamp_ns"]}; '
+            f'zero_sim_ns={trace["controller_zero_update_stamp_ns"]}'
+        )
+
+
+def _twist_signature(message: TwistStamped) -> tuple[float, ...]:
+    twist = message.twist
+    return (
+        twist.linear.x,
+        twist.linear.y,
+        twist.linear.z,
+        twist.angular.x,
+        twist.angular.y,
+        twist.angular.z,
+    )
+
+
+def _assert_strict_trace_order(
+    samples: tuple[tuple[int, Any], ...],
     *,
-    signal_boundary_sim_ns: int,
-):
-    """Select the latest killed-Gate final command by simulation stamp."""
-    eligible = []
-    for receipt_ns, message in final_samples:
+    topic: str,
+) -> None:
+    previous_receipt_ns = None
+    previous_stamp_ns = None
+    for receipt_ns, message in samples:
         stamp_ns = _stamp_ns(message)
         if (
-            stamp_ns >= signal_boundary_sim_ns
-            and not is_zero(message)
+            previous_receipt_ns is not None
+            and receipt_ns <= previous_receipt_ns
         ):
-            eligible.append((stamp_ns, receipt_ns, message))
-    if not eligible:
-        raise AssertionError(
-            'no eligible non-zero final command before consumer zero'
+            raise ConsumerTraceAmbiguous(
+                'out-of-order observer receipt',
+                topic=topic,
+                previous_receipt_ns=previous_receipt_ns,
+                receipt_ns=receipt_ns,
+            )
+        if previous_stamp_ns is not None and stamp_ns <= previous_stamp_ns:
+            raise ConsumerTraceAmbiguous(
+                'out-of-order topic header stamp',
+                topic=topic,
+                previous_stamp_ns=previous_stamp_ns,
+                stamp_ns=stamp_ns,
+            )
+        previous_receipt_ns = receipt_ns
+        previous_stamp_ns = stamp_ns
+
+
+def controller_consumed_command_trace(
+    final_samples: tuple[tuple[int, Any], ...],
+    limited_samples: tuple[tuple[int, Any], ...],
+    *,
+    source_anchor: tuple[int, Any],
+    zero_sim_ns: int,
+    zero_receipt_ns: int,
+) -> dict[str, int | str]:
+    """Prove the source command which the controller held before its first zero."""
+    _assert_strict_trace_order(final_samples, topic=FINAL_COMMAND_TOPIC)
+    _assert_strict_trace_order(limited_samples, topic=LIMITED_COMMAND_TOPIC)
+
+    source_receipt_ns, source_message = source_anchor
+    source_stamp_ns = _stamp_ns(source_message)
+    source_signature = _twist_signature(source_message)
+    if is_zero(source_message):
+        raise ConsumerTraceAmbiguous(
+            'frozen source anchor was zero',
+            source_header_stamp_ns=source_stamp_ns,
+            source_receipt_ns=source_receipt_ns,
         )
-    _, receipt_ns, message = max(eligible, key=lambda sample: sample[:2])
-    return receipt_ns, deepcopy(message)
+
+    source_indexes = [
+        index
+        for index, (receipt_ns, message) in enumerate(final_samples)
+        if (
+            receipt_ns == source_receipt_ns
+            and _stamp_ns(message) == source_stamp_ns
+            and _twist_signature(message) == source_signature
+        )
+    ]
+    if len(source_indexes) != 1:
+        raise ConsumerTraceAmbiguous(
+            'frozen source anchor was missing from final trace',
+            source_header_stamp_ns=source_stamp_ns,
+            source_receipt_ns=source_receipt_ns,
+        )
+    source_index = source_indexes[0]
+    if source_index != len(final_samples) - 1:
+        late_receipt_ns, late_message = final_samples[source_index + 1]
+        raise ConsumerTraceAmbiguous(
+            'late source delivery after frozen anchor',
+            source_header_stamp_ns=source_stamp_ns,
+            source_receipt_ns=source_receipt_ns,
+            late_source_header_stamp_ns=_stamp_ns(late_message),
+            late_source_receipt_ns=late_receipt_ns,
+        )
+
+    zero_indexes = [
+        index
+        for index, (receipt_ns, message) in enumerate(limited_samples)
+        if (
+            receipt_ns >= source_receipt_ns
+            and _stamp_ns(message) > source_stamp_ns
+            and is_zero(message)
+        )
+    ]
+    if not zero_indexes:
+        raise ConsumerTraceAmbiguous(
+            'missing controller first zero observation',
+            source_header_stamp_ns=source_stamp_ns,
+            source_receipt_ns=source_receipt_ns,
+        )
+    zero_index = zero_indexes[0]
+    observed_zero_receipt_ns, observed_zero = limited_samples[zero_index]
+    observed_zero_sim_ns = _stamp_ns(observed_zero)
+    if (
+        observed_zero_receipt_ns != zero_receipt_ns
+        or observed_zero_sim_ns != zero_sim_ns
+    ):
+        raise ConsumerTraceAmbiguous(
+            'provided controller zero was not the first zero observation',
+            expected_zero_sim_ns=observed_zero_sim_ns,
+            expected_zero_receipt_ns=observed_zero_receipt_ns,
+            zero_sim_ns=zero_sim_ns,
+            zero_receipt_ns=zero_receipt_ns,
+        )
+    if any(
+        not is_zero(message)
+        for _, message in limited_samples[zero_index + 1 :]
+    ):
+        raise ConsumerTraceAmbiguous(
+            'unassociated non-zero controller output after first zero',
+            zero_sim_ns=zero_sim_ns,
+            zero_receipt_ns=zero_receipt_ns,
+        )
+
+    pre_zero_nonzero = [
+        sample
+        for sample in limited_samples[:zero_index]
+        if (
+            not is_zero(sample[1])
+            and _stamp_ns(sample[1]) >= source_stamp_ns
+        )
+    ]
+    if not pre_zero_nonzero:
+        raise ConsumerTraceAmbiguous(
+            'missing non-zero controller observation before first zero',
+            source_header_stamp_ns=source_stamp_ns,
+            source_receipt_ns=source_receipt_ns,
+        )
+    for controller_receipt_ns, controller_message in pre_zero_nonzero:
+        controller_stamp_ns = _stamp_ns(controller_message)
+        if controller_receipt_ns <= source_receipt_ns:
+            raise ConsumerTraceAmbiguous(
+                'late source observer receipt',
+                source_header_stamp_ns=source_stamp_ns,
+                source_receipt_ns=source_receipt_ns,
+                controller_update_stamp_ns=controller_stamp_ns,
+                controller_receipt_ns=controller_receipt_ns,
+            )
+        if source_stamp_ns > controller_stamp_ns:
+            raise ConsumerTraceAmbiguous(
+                'source header stamp follows controller update',
+                source_header_stamp_ns=source_stamp_ns,
+                controller_update_stamp_ns=controller_stamp_ns,
+            )
+        if controller_stamp_ns >= zero_sim_ns:
+            raise ConsumerTraceAmbiguous(
+                'controller non-zero update does not precede first zero',
+                controller_update_stamp_ns=controller_stamp_ns,
+                controller_zero_update_stamp_ns=zero_sim_ns,
+            )
+        if _twist_signature(controller_message) != source_signature:
+            raise ConsumerTraceAmbiguous(
+                'unassociated non-zero controller output before first zero',
+                source_header_stamp_ns=source_stamp_ns,
+                controller_update_stamp_ns=controller_stamp_ns,
+            )
+
+        matching_sources = [
+            (receipt_ns, message)
+            for receipt_ns, message in final_samples
+            if (
+                receipt_ns <= controller_receipt_ns
+                and _stamp_ns(message) <= controller_stamp_ns
+                and not is_zero(message)
+                and _twist_signature(message) == source_signature
+            )
+        ]
+        if len(matching_sources) != 1:
+            raise ConsumerTraceAmbiguous(
+                'same-valued duplicate source commands',
+                source_header_stamp_ns=source_stamp_ns,
+                controller_update_stamp_ns=controller_stamp_ns,
+                matching_source_count=len(matching_sources),
+            )
+        if matching_sources[0][0] != source_receipt_ns:
+            raise ConsumerTraceAmbiguous(
+                'controller output was not uniquely associated with frozen source',
+                source_header_stamp_ns=source_stamp_ns,
+                controller_update_stamp_ns=controller_stamp_ns,
+            )
+
+    return {
+        'association_basis': 'unique ordered source/controller trace',
+        'source_header_stamp_ns': source_stamp_ns,
+        'source_observer_receipt_ns': source_receipt_ns,
+        'controller_update_stamp_ns': controller_stamp_ns,
+        'controller_observer_receipt_ns': controller_receipt_ns,
+        'controller_zero_update_stamp_ns': zero_sim_ns,
+        'controller_zero_observer_receipt_ns': zero_receipt_ns,
+    }
 
 
 def consumer_timeout_result(
     final_samples: tuple[tuple[int, Any], ...],
+    limited_samples: tuple[tuple[int, Any], ...],
     *,
-    signal_boundary_sim_ns: int,
+    source_anchor: tuple[int, Any],
     zero_sim_ns: int,
     zero_receipt_ns: int,
 ):
-    """Apply the frozen controller timeout to the drained final stream."""
-    last_nonzero_receipt_ns, last_nonzero = (
-        select_consumer_timeout_anchor(
-            final_samples,
-            signal_boundary_sim_ns=signal_boundary_sim_ns,
-        )
+    """Apply the frozen controller timeout to its uniquely proved source."""
+    trace = controller_consumed_command_trace(
+        final_samples,
+        limited_samples,
+        source_anchor=source_anchor,
+        zero_sim_ns=zero_sim_ns,
+        zero_receipt_ns=zero_receipt_ns,
     )
-    last_nonzero_sim_ns = _stamp_ns(last_nonzero)
+    last_nonzero_sim_ns = trace['source_header_stamp_ns']
     delta_ns = zero_sim_ns - last_nonzero_sim_ns
     if not (CONSUMER_ZERO_MIN_NS < delta_ns <= CONSUMER_ZERO_MAX_NS):
-        raise AssertionError(
-            'controller consumer timeout outside '
-            f'(0.35, 0.36] s: {delta_ns / 1_000_000_000:.6f} s; '
-            f'last_nonzero_sim_ns={last_nonzero_sim_ns}; '
-            f'zero_sim_ns={zero_sim_ns}'
+        raise ConsumerTimeoutOutOfBounds(
+            trace,
+            delta_ns=delta_ns,
         )
     return {
+        'authoritative_source_stamp_ns': last_nonzero_sim_ns,
+        'authoritative_source_receipt_ns': (
+            trace['source_observer_receipt_ns']
+        ),
+        'controller_last_nonzero_update_ns': (
+            trace['controller_update_stamp_ns']
+        ),
+        'controller_zero_update_ns': zero_sim_ns,
+        'association': trace,
         'last_nonzero_sim_ns': last_nonzero_sim_ns,
-        'last_nonzero_receipt_ns': last_nonzero_receipt_ns,
+        'last_nonzero_receipt_ns': trace['source_observer_receipt_ns'],
         'zero_sim_ns': zero_sim_ns,
         'delta_ns': delta_ns,
         'zero_receipt_ns': zero_receipt_ns,
@@ -1014,7 +1258,7 @@ class CrashStopProbe:
 
     def wait_confirm_consumer_timeout(
         self,
-        signal_boundary_sim_ns: int,
+        source_anchor: tuple[int, Any],
         consumer_zero: dict[str, int],
         *,
         timeout: float = WALL_WATCHDOG_SECONDS,
@@ -1027,12 +1271,17 @@ class CrashStopProbe:
             now_ns = time.monotonic_ns()
             with self.lock:
                 final_snapshot = tuple(self.final_commands)
+                limited_snapshot = tuple(self.limited_commands)
                 clock_sample = (
                     self.clock_samples[-1]
                     if self.clock_samples
                     else None
                 )
-            if not final_snapshot or clock_sample is None:
+            if (
+                not final_snapshot
+                or not limited_snapshot
+                or clock_sample is None
+            ):
                 stable_key = None
                 stable_since_ns = None
                 stable_clock_ns = None
@@ -1040,10 +1289,14 @@ class CrashStopProbe:
                 continue
 
             last_receipt_ns, last_message = final_snapshot[-1]
+            limited_receipt_ns, limited_message = limited_snapshot[-1]
             current_key = (
                 len(final_snapshot),
                 last_receipt_ns,
                 _stamp_ns(last_message),
+                len(limited_snapshot),
+                limited_receipt_ns,
+                _stamp_ns(limited_message),
             )
             if current_key != stable_key:
                 stable_key = current_key
@@ -1058,6 +1311,7 @@ class CrashStopProbe:
             ):
                 with self.lock:
                     confirmed_snapshot = tuple(self.final_commands)
+                    confirmed_limited = tuple(self.limited_commands)
                     confirmed_clock = (
                         self.clock_samples[-1]
                         if self.clock_samples
@@ -1068,11 +1322,22 @@ class CrashStopProbe:
                         if confirmed_snapshot
                         else None
                     )
+                    confirmed_limited_last = (
+                        confirmed_limited[-1]
+                        if confirmed_limited
+                        else None
+                    )
                     confirmed_key = (
                         len(confirmed_snapshot),
                         confirmed_last[0],
                         _stamp_ns(confirmed_last[1]),
-                    ) if confirmed_last is not None else None
+                        len(confirmed_limited),
+                        confirmed_limited_last[0],
+                        _stamp_ns(confirmed_limited_last[1]),
+                    ) if (
+                        confirmed_last is not None
+                        and confirmed_limited_last is not None
+                    ) else None
                     if (
                         confirmed_key == stable_key
                         and confirmed_clock is not None
@@ -1081,9 +1346,8 @@ class CrashStopProbe:
                     ):
                         return consumer_timeout_result(
                             confirmed_snapshot,
-                            signal_boundary_sim_ns=(
-                                signal_boundary_sim_ns
-                            ),
+                            confirmed_limited,
+                            source_anchor=source_anchor,
                             zero_sim_ns=consumer_zero['zero_sim_ns'],
                             zero_receipt_ns=(
                                 consumer_zero['zero_receipt_ns']
