@@ -36,6 +36,31 @@ enum class AuthorityOperationKind : std::uint8_t
   Inhibit = 3,
 };
 
+// Package-private trust boundary shared by Runtime Core and conditioning.
+// Authority revokes zero_proven when its overall deadline expires, so callers
+// must not reconstruct success from a retained snapshot alone.
+[[nodiscard]] inline bool inhibit_result_proves_zero(
+  const AuthorityOperation & operation,
+  const AuthorityResult & result) noexcept
+{
+  const bool complete_zero =
+    result.zero_proven && !result.transport_unavailable &&
+    !operation.gate_instance_id.empty() &&
+    result.snapshot.gate_instance_id == operation.gate_instance_id &&
+    result.snapshot.endpoint_available &&
+    result.snapshot.state == GateState::Inhibited &&
+    result.snapshot.motion_inhibited && result.snapshot.zero_selected &&
+    result.snapshot.zero_published;
+  if (!complete_zero) {
+    return false;
+  }
+  if (result.applied) {
+    return result.snapshot.control_seq >= operation.expected_control_seq;
+  }
+  return result.tuple_stale &&
+         result.snapshot.control_seq > operation.expected_control_seq;
+}
+
 // Package-private policy shared by the ROS Adapter and its deterministic
 // tests. The request ID remains unchanged across attempts; only a stale Gate
 // tuple is rebuilt from the latest response snapshot.
@@ -95,10 +120,31 @@ public:
       {
         return last;
       }
+      // A stale INHIBIT response can prove that a competing request already
+      // reached the same fail-closed zero state. Preserve that authority proof
+      // only while the overall deadline is still live; the deadline branch
+      // above revokes zero_proven before Core can consume it.
+      if (
+        kind == AuthorityOperationKind::Inhibit && !last.applied &&
+        inhibit_result_proves_zero(current, last))
+      {
+        return last;
+      }
       if (!last.retryable) {
         return last;
       }
       if (last.tuple_stale && last.snapshot.endpoint_available) {
+        if (
+          current.gate_instance_bound &&
+          last.snapshot.gate_instance_id != current.gate_instance_id)
+        {
+          last.applied = false;
+          last.zero_proven = false;
+          last.retryable = false;
+          last.detail =
+            "MotionGate identity changed during a generation-bound operation";
+          return last;
+        }
         current.gate_instance_id = last.snapshot.gate_instance_id;
         current.expected_control_seq = last.snapshot.control_seq;
         current.lease_id = kind == AuthorityOperationKind::Prepare ?

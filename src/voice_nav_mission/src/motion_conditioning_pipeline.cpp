@@ -54,6 +54,7 @@
 #include <rosgraph_msgs/msg/clock.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
 
+#include "voice_nav_mission/mission_authority_convergence.hpp"
 #include "voice_nav_mission/motion_authority_ros_adapter.hpp"
 #include "voice_nav_mission/motion_source_freshness.hpp"
 
@@ -661,6 +662,8 @@ private:
       gate_prepare_detail = gate_prepare.detail;
       if (gate_prepare_valid) {
         generation_ = ++generation_counter_;
+        generation_gate_instance_id_ = gate_prepare.snapshot.gate_instance_id;
+        generation_gate_control_seq_ = gate_prepare.snapshot.control_seq;
         prepare_open_deadline_ =
           std::chrono::steady_clock::now() + config_.prepare_open_deadline;
       }
@@ -839,13 +842,13 @@ private:
           generation_ == generation &&
           state_ == MotionConditioningState::Prepared &&
           lease_id_ == expected_lease && candidate_topic_ == expected_candidate &&
+          open_operation.gate_instance_id == generation_gate_instance_id_ &&
           std::chrono::steady_clock::now() < handover_deadline;
         if (activation_ready) {
           generation_request_id_ = open_operation.request_id;
           correlation_token_ = MotionConditioningCorrelationToken{
             generation, expected_lease, open_operation.request_id,
             open_operation.gate_instance_id};
-          generation_gate_instance_id_ = open_operation.gate_instance_id;
           activation_in_progress_.store(true);
           activation_failed_.store(false);
           std::lock_guard<std::mutex> activation_lock(activation_mutex_);
@@ -3236,10 +3239,7 @@ private:
       const auto operation = make_operation(snapshot, lease);
       std::lock_guard<std::mutex> authority_lock(authority_call_mutex_);
       const auto result = authority_->inhibit(operation);
-      const bool current_zero = result.applied && result.zero_proven &&
-        result.snapshot.gate_instance_id == operation.gate_instance_id &&
-        result.snapshot.control_seq >= operation.expected_control_seq &&
-        gate_snapshot_proves_zero(result.snapshot);
+      const bool current_zero = inhibit_result_proves_zero(operation, result);
       if (!current_zero) {
         return false;
       }
@@ -3746,9 +3746,13 @@ private:
   {
     try {
       std::string lease_id;
+      std::string generation_gate_instance_id;
+      std::uint64_t generation_gate_control_seq = 0U;
       {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
         lease_id = lease_id_;
+        generation_gate_instance_id = generation_gate_instance_id_;
+        generation_gate_control_seq = generation_gate_control_seq_;
       }
       if (lease_id.empty()) {
         const bool proven = gate_snapshot_proves_zero(authority_->snapshot());
@@ -3773,20 +3777,27 @@ private:
         // prove zero without waiting for the RPC to return.
         (void)authority_lock.try_lock();
       }
-      const auto operation = make_operation(lease_id);
+      const auto snapshot = authority_->snapshot();
+      const auto operation_lease =
+        !generation_gate_instance_id.empty() &&
+        snapshot.gate_instance_id == generation_gate_instance_id &&
+        snapshot.state == GateState::Inhibited ? std::string{} : lease_id;
+      auto operation = make_operation(snapshot, operation_lease);
+      if (!generation_gate_instance_id.empty()) {
+        operation.gate_instance_id = generation_gate_instance_id;
+        operation.expected_control_seq =
+          snapshot.gate_instance_id == generation_gate_instance_id ?
+          snapshot.control_seq : generation_gate_control_seq;
+        operation.gate_instance_bound = true;
+      }
       const auto result = authority_->inhibit(operation);
-      const bool proven = (!result.applied &&
-        result.snapshot.gate_instance_id == operation.gate_instance_id &&
-        gate_snapshot_proves_zero(result.snapshot)) ||
-        (result.applied && result.zero_proven &&
-        result.snapshot.gate_instance_id == operation.gate_instance_id &&
-        gate_snapshot_proves_zero(result.snapshot));
+      const bool proven = inhibit_result_proves_zero(operation, result);
       if (proven) {
         const auto proven_at = std::chrono::steady_clock::now();
         if (zero_proven_at != nullptr) {
           *zero_proven_at = proven_at;
         }
-        remember_zero_proof(proven_at, operation.lease_id);
+        remember_zero_proof(proven_at, lease_id);
       }
       return proven;
     } catch (...) {
@@ -3852,6 +3863,7 @@ private:
     candidate_topic_.clear();
     generation_request_id_.clear();
     generation_gate_instance_id_.clear();
+    generation_gate_control_seq_ = 0U;
     prepare_open_deadline_ = {};
     if (ready_for_new_generation) {
       producer_stop_proven_.store(false);
@@ -4406,6 +4418,7 @@ private:
   std::uint64_t generation_{0U};
   std::string generation_request_id_;
   std::string generation_gate_instance_id_;
+  std::uint64_t generation_gate_control_seq_{0U};
   MotionConditioningCorrelationToken correlation_token_;
   std::mutex startup_mutex_;
   bool startup_reconciled_{false};

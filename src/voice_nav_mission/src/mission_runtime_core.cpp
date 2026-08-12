@@ -14,6 +14,8 @@
 
 #include "voice_nav_mission/mission_runtime_core.hpp"
 
+#include "voice_nav_mission/mission_authority_convergence.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -1244,11 +1246,12 @@ void RuntimeCore::finish_active(const MissionResult & result)
 bool RuntimeCore::inhibit_and_prove_zero()
 {
   gate_snapshot_ = authority_->snapshot();
-  const auto result = authority_->inhibit(make_operation());
+  const auto operation = make_operation();
+  const auto result = authority_->inhibit(operation);
   gate_snapshot_ = result.snapshot;
   state_.gate_state = gate_snapshot_.endpoint_available ?
     gate_snapshot_.state : GateState::Faulted;
-  return result.applied && result.zero_proven && zero_is_proven(gate_snapshot_);
+  return inhibit_result_proves_zero(operation, result);
 }
 
 StopResponse RuntimeCore::make_stop_response(
@@ -1333,6 +1336,13 @@ AuthorityResult ScriptedMotionAuthorityPort::inhibit(
   ++inhibit_count_;
   if (inhibit_observer_) {
     inhibit_observer_();
+  }
+  if (next_inhibit_result_.has_value()) {
+    operations_.push_back(operation);
+    auto result = std::move(*next_inhibit_result_);
+    next_inhibit_result_.reset();
+    snapshot_ = result.snapshot;
+    return result;
   }
   if (!next_inhibit_failure_.empty()) {
     const auto detail = std::exchange(next_inhibit_failure_, {});
