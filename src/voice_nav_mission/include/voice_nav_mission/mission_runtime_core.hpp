@@ -170,6 +170,9 @@ struct AuthorityOperation
   std::string gate_instance_id;
   std::uint64_t expected_control_seq{0U};
   std::string lease_id;
+  // A generation teardown must converge only within the Gate instance that
+  // granted that generation.  Other operations may follow a fresh snapshot.
+  bool gate_instance_bound{false};
 };
 
 struct AuthorityResult
@@ -573,6 +576,10 @@ public:
   {
     next_inhibit_failure_ = std::move(detail);
   }
+  void set_inhibit_result(AuthorityResult result)
+  {
+    next_inhibit_result_ = std::move(result);
+  }
   void set_snapshot(GateSnapshot snapshot) {snapshot_ = std::move(snapshot);}
   void set_inhibit_observer(std::function<void()> observer)
   {
@@ -595,6 +602,7 @@ private:
   std::string next_failure_;
   std::string next_open_failure_;
   std::string next_inhibit_failure_;
+  std::optional<AuthorityResult> next_inhibit_result_;
   std::function<void()> inhibit_observer_;
   std::size_t inhibit_count_{0U};
 };

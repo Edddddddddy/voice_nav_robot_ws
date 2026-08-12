@@ -507,6 +507,36 @@ private:
   std::size_t count_{0U};
 };
 
+class ClockAdvanceBarrier final
+{
+public:
+  void on_health_callback(rclcpp::Clock & clock)
+  {
+    const auto stamp = clock.now().nanoseconds();
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (stamp <= 0 || stamp == last_stamp_) {
+      return;
+    }
+    if (last_stamp_ > 0) {
+      advanced_ = true;
+      condition_.notify_all();
+    }
+    last_stamp_ = stamp;
+  }
+
+  bool wait_for_advance(std::chrono::milliseconds timeout = 2s)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, timeout, [this]() {return advanced_;});
+  }
+
+private:
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  std::int64_t last_stamp_{0};
+  bool advanced_{false};
+};
+
 class FakeAuthority final : public MotionAuthorityPort
 {
 public:
@@ -600,14 +630,31 @@ public:
       true, false, false, snapshot_, snapshot_.lease_id, "renewed"};
   }
 
-  AuthorityResult inhibit(const AuthorityOperation &) override
+  AuthorityResult inhibit(const AuthorityOperation & operation) override
   {
     std::unique_lock<std::mutex> lock(mutex_);
     calls_.push_back(AuthorityOperationKind::Inhibit);
+    inhibit_lease_ids_.push_back(operation.lease_id);
+    inhibit_operations_.push_back(operation);
     if (block_inhibit_) {
       inhibit_entered_ = true;
       inhibit_cv_.notify_all();
       inhibit_cv_.wait(lock, [this]() {return release_inhibit_;});
+    }
+    if (next_inhibit_result_.has_value()) {
+      auto result = std::move(*next_inhibit_result_);
+      next_inhibit_result_.reset();
+      snapshot_ = result.snapshot;
+      return result;
+    }
+    if (
+      enforce_inhibit_lease_contract_ &&
+      snapshot_.state == GateState::Inhibited &&
+      !operation.lease_id.empty())
+    {
+      return AuthorityResult{
+        false, false, false, snapshot_, {},
+        "INHIBIT must not carry a lease after Gate retirement"};
     }
     snapshot_.control_seq++;
     snapshot_.state = GateState::Inhibited;
@@ -677,6 +724,43 @@ public:
   {
     std::lock_guard<std::mutex> lock(mutex_);
     inhibit_zero_proof_ = value;
+  }
+
+  void set_next_inhibit_result(AuthorityResult result)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    next_inhibit_result_ = std::move(result);
+  }
+
+  void retire_lease_with_current_zero_proof()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    enforce_inhibit_lease_contract_ = true;
+    snapshot_.control_seq++;
+    snapshot_.lease_id.clear();
+    snapshot_.candidate_topic.clear();
+    snapshot_.state = GateState::Inhibited;
+    snapshot_.motion_inhibited = true;
+    snapshot_.zero_selected = true;
+    snapshot_.zero_published = true;
+    snapshot_.authority_live = false;
+    snapshot_.writer_bound = false;
+  }
+
+  void set_current_inhibited_zero_for_gate(std::string identity)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    enforce_inhibit_lease_contract_ = true;
+    snapshot_.gate_instance_id = std::move(identity);
+    snapshot_.control_seq++;
+    snapshot_.lease_id.clear();
+    snapshot_.candidate_topic.clear();
+    snapshot_.state = GateState::Inhibited;
+    snapshot_.motion_inhibited = true;
+    snapshot_.zero_selected = true;
+    snapshot_.zero_published = true;
+    snapshot_.authority_live = false;
+    snapshot_.writer_bound = false;
   }
 
   void set_initial_zero_proof(bool value)
@@ -811,6 +895,18 @@ public:
     return renew_count_;
   }
 
+  std::vector<std::string> inhibit_lease_ids() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return inhibit_lease_ids_;
+  }
+
+  std::vector<AuthorityOperation> inhibit_operations() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return inhibit_operations_;
+  }
+
 private:
   mutable std::mutex mutex_;
   GateSnapshot snapshot_{
@@ -824,6 +920,8 @@ private:
   bool prepare_entered_{false};
   bool release_prepare_{false};
   bool inhibit_zero_proof_{true};
+  bool enforce_inhibit_lease_contract_{false};
+  std::optional<AuthorityResult> next_inhibit_result_;
   std::size_t renew_count_{0U};
   std::optional<std::size_t> renew_failure_after_;
   std::function<void()> renew_observer_;
@@ -846,6 +944,8 @@ private:
   std::condition_variable renew_cv_;
   std::condition_variable open_cv_;
   std::vector<AuthorityOperationKind> calls_;
+  std::vector<std::string> inhibit_lease_ids_;
+  std::vector<AuthorityOperation> inhibit_operations_;
 };
 
 bool startup_calls_only_reassert_inhibit(
@@ -1675,6 +1775,154 @@ TEST_F(
     }));
 }
 
+TEST_F(MotionConditioningPipelineTest, StartupAcceptsTrustedStaleInhibitZero)
+{
+  auto stale_zero = AuthorityResult{
+    false,
+    true,
+    true,
+    GateSnapshot{
+      "gate-test", 2U, "", GateState::Inhibited,
+      true, true, true, true},
+    "",
+    "expected_control_seq is stale",
+    true};
+  authority->set_next_inhibit_result(stale_zero);
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+
+  const auto result = pipeline.prepare();
+
+  EXPECT_TRUE(result.ok) << result.detail;
+  EXPECT_TRUE(result.zero_proven);
+}
+
+TEST_F(MotionConditioningPipelineTest, StartupRejectsRevokedOrUnavailableStaleZero)
+{
+  for (const auto transport_unavailable : {false, true}) {
+    SCOPED_TRACE(transport_unavailable ? "transport unavailable" : "deadline revoked");
+    auto stale_zero = AuthorityResult{
+      false,
+      transport_unavailable,
+      true,
+      GateSnapshot{
+        "gate-test", 2U, "", GateState::Inhibited,
+        true, true, true, true},
+      "",
+      "scripted stale zero",
+      true};
+    stale_zero.transport_unavailable = transport_unavailable;
+    authority->set_next_inhibit_result(stale_zero);
+    MotionConditioningPipeline pipeline(*client, authority, producer, config());
+
+    const auto result = pipeline.prepare();
+
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.failure, MotionConditioningFailure::SafetyFault);
+  }
+}
+
+TEST_F(MotionConditioningPipelineTest, TeardownRejectsOrdinaryUnappliedZero)
+{
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+  const auto prepared = pipeline.prepare();
+  ASSERT_TRUE(prepared.ok) << prepared.detail;
+  auto ordinary_reject = AuthorityResult{
+    false,
+    true,
+    false,
+    GateSnapshot{
+      "gate-test", authority->snapshot().control_seq + 1U, "",
+      GateState::Inhibited, true, true, true, true},
+    "",
+    "ordinary rejection",
+    false};
+  authority->set_next_inhibit_result(ordinary_reject);
+  authority->set_inhibit_zero_proof(false);
+
+  const auto stopped = pipeline.stop();
+
+  EXPECT_FALSE(stopped.ok);
+  EXPECT_EQ(stopped.failure, MotionConditioningFailure::SafetyFault);
+  EXPECT_FALSE(stopped.zero_proven);
+}
+
+TEST_F(
+  MotionConditioningPipelineTest,
+  TeardownUsesCurrentEmptyLeaseAfterGateRetiresGeneration)
+{
+  auto health_ready = std::make_shared<CallbackCounter>();
+  auto pipeline_config = config();
+  pipeline_config.after_health_callback = [health_ready]() {
+      (*health_ready)();
+    };
+  MotionConditioningPipeline pipeline(
+    *client, authority, producer, pipeline_config);
+  const auto prepared = pipeline.prepare();
+  ASSERT_TRUE(prepared.ok) << prepared.detail;
+  ASSERT_FALSE(prepared.lease_id.empty());
+  health_ready->expect(4U);
+  graph->publish_health_once();
+  ASSERT_TRUE(health_ready->wait_for_target());
+  const auto started = pipeline.start();
+  ASSERT_TRUE(started.ok) << started.detail;
+  authority->retire_lease_with_current_zero_proof();
+  const auto inhibit_count_before_stop = authority->inhibit_lease_ids().size();
+
+  const auto stopped = pipeline.stop();
+
+  EXPECT_TRUE(stopped.ok) << stopped.detail;
+  EXPECT_TRUE(stopped.zero_proven);
+  EXPECT_EQ(stopped.state, MotionConditioningState::Stopped);
+  const auto inhibit_lease_ids = authority->inhibit_lease_ids();
+  ASSERT_GT(inhibit_lease_ids.size(), inhibit_count_before_stop);
+  EXPECT_TRUE(inhibit_lease_ids[inhibit_count_before_stop].empty());
+  const auto inhibit_operations = authority->inhibit_operations();
+  ASSERT_GT(inhibit_operations.size(), inhibit_count_before_stop);
+  EXPECT_EQ(
+    inhibit_operations[inhibit_count_before_stop].gate_instance_id,
+    "gate-test");
+  EXPECT_TRUE(
+    inhibit_operations[inhibit_count_before_stop].gate_instance_bound);
+}
+
+TEST_F(
+  MotionConditioningPipelineTest,
+  TeardownDoesNotUseEmptyLeaseForDifferentGateIdentity)
+{
+  auto health_ready = std::make_shared<CallbackCounter>();
+  auto pipeline_config = config();
+  pipeline_config.after_health_callback = [health_ready]() {
+      (*health_ready)();
+    };
+  MotionConditioningPipeline pipeline(
+    *client, authority, producer, pipeline_config);
+  const auto prepared = pipeline.prepare();
+  ASSERT_TRUE(prepared.ok) << prepared.detail;
+  health_ready->expect(4U);
+  graph->publish_health_once();
+  ASSERT_TRUE(health_ready->wait_for_target());
+  const auto started = pipeline.start();
+  ASSERT_TRUE(started.ok) << started.detail;
+  authority->set_current_inhibited_zero_for_gate("replacement-gate");
+  const auto inhibit_count_before_stop = authority->inhibit_lease_ids().size();
+
+  const auto stopped = pipeline.stop();
+
+  EXPECT_FALSE(stopped.ok);
+  EXPECT_FALSE(stopped.zero_proven);
+  EXPECT_EQ(stopped.state, MotionConditioningState::Failed);
+  const auto inhibit_lease_ids = authority->inhibit_lease_ids();
+  ASSERT_GT(inhibit_lease_ids.size(), inhibit_count_before_stop);
+  EXPECT_EQ(inhibit_lease_ids[inhibit_count_before_stop], prepared.lease_id);
+  const auto inhibit_operations = authority->inhibit_operations();
+  ASSERT_GT(inhibit_operations.size(), inhibit_count_before_stop);
+  EXPECT_EQ(
+    inhibit_operations[inhibit_count_before_stop].gate_instance_id,
+    "gate-test");
+  EXPECT_TRUE(
+    inhibit_operations[inhibit_count_before_stop].gate_instance_bound);
+}
+
 TEST_F(MotionConditioningPipelineTest, StartupUnknownFqnFailsClosedBeforeGatePrepare)
 {
   graph->set_list_override({41U}, {"/unrelated_component"});
@@ -1923,17 +2171,16 @@ TEST_F(
   MotionConditioningPipelineTest,
   GateLossReplacementReassertsZeroWhenCachedProofIsUnavailable)
 {
-  auto health_ready = std::make_shared<CallbackCounter>();
+  auto clock_advanced = std::make_shared<ClockAdvanceBarrier>();
   auto pipeline_config = config();
-  pipeline_config.after_health_callback = [health_ready]() {
-      (*health_ready)();
+  pipeline_config.after_health_callback = [clock_advanced, client = client]() {
+      clock_advanced->on_health_callback(*client->get_clock());
     };
   MotionConditioningPipeline pipeline(*client, authority, producer, pipeline_config);
   const auto prepared = pipeline.prepare();
   ASSERT_TRUE(prepared.ok) << prepared.detail;
-  health_ready->expect(4U);
   graph->publish_health_once();
-  ASSERT_TRUE(health_ready->wait_for_target());
+  ASSERT_TRUE(clock_advanced->wait_for_advance());
   const auto started = pipeline.start();
   ASSERT_TRUE(started.ok) << started.detail;
   const auto token = pipeline.correlation_token();
@@ -3825,14 +4072,14 @@ TEST_F(MotionConditioningPipelineTest, DestructorDrainsActiveStartBeyondStopBarr
 TEST_F(MotionConditioningPipelineTest, StopTimeoutContinuationOwnsFinalCleanup)
 {
   producer->block_start = true;
-  auto health_ready = std::make_shared<CallbackCounter>();
+  auto clock_advanced = std::make_shared<ClockAdvanceBarrier>();
   auto pipeline_config = config();
   pipeline_config.writer_graph_timeout = 1s;
   pipeline_config.prepare_open_deadline = 5s;
   pipeline_config.dependency_liveness_timeout = 2s;
   pipeline_config.health_rpc_timeout = 500ms;
-  pipeline_config.after_health_callback = [health_ready]() {
-      (*health_ready)();
+  pipeline_config.after_health_callback = [clock_advanced, client = client]() {
+      clock_advanced->on_health_callback(*client->get_clock());
     };
   auto pipeline = std::make_unique<MotionConditioningPipeline>(
     *client, authority, producer, pipeline_config);
@@ -3840,9 +4087,8 @@ TEST_F(MotionConditioningPipelineTest, StopTimeoutContinuationOwnsFinalCleanup)
   ASSERT_TRUE(prepared.ok);
   ASSERT_TRUE(graph->wait_for_loaded_count(2U));
   ASSERT_TRUE(wait_for_candidate_writer(prepared.candidate_topic));
-  health_ready->expect(4U);
   graph->publish_health_once();
-  ASSERT_TRUE(health_ready->wait_for_target());
+  ASSERT_TRUE(clock_advanced->wait_for_advance());
 
   auto * raw_pipeline = pipeline.get();
   std::optional<MotionConditioningResult> start_result;

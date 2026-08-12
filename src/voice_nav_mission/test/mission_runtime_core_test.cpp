@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include "voice_nav_mission/mission_authority_convergence.hpp"
 #include "voice_nav_mission/mission_runtime_core.hpp"
 #include "voice_nav_mission/runtime_emergency_fence.hpp"
 
@@ -61,6 +62,41 @@ RuntimeConfig config()
       return id;
     };
   return value;
+}
+
+AuthorityResult converged_stale_inhibit(
+  std::chrono::milliseconds elapsed,
+  bool transport_unavailable = false)
+{
+  using TimePoint = MissionAuthorityAdapter::TimePoint;
+  TimePoint now{};
+  const auto snapshot = GateSnapshot{
+    kGateId, 16U, "", GateState::Inhibited,
+    true, true, true, true};
+  MissionAuthorityAdapter adapter(
+    std::chrono::milliseconds(250),
+    std::chrono::milliseconds(250),
+    [&now]() {return now;},
+    [&now, elapsed, snapshot, transport_unavailable](
+      const AuthorityOperation &,
+      AuthorityOperationKind,
+      TimePoint,
+      TimePoint)
+    {
+      now += elapsed;
+      auto result = AuthorityResult{
+        false,
+        true,
+        true,
+        snapshot,
+        "",
+        "expected_control_seq is stale",
+        true};
+      result.transport_unavailable = transport_unavailable;
+      return result;
+    });
+  return adapter.inhibit(AuthorityOperation{
+        "startup-inhibit", kGateId, 15U, ""});
 }
 
 struct Fixture
@@ -375,6 +411,133 @@ TEST(RuntimeCore, StartupConvergesLegacyPreparedGateToCurrentZeroProof)
   EXPECT_TRUE(authority->snapshot().zero_published);
   EXPECT_EQ(authority->inhibit_count(), 1U);
   EXPECT_EQ(core.state().availability, RuntimeAvailability::Available);
+}
+
+TEST(RuntimeCore, StartupAcceptsSameGateStaleInhibitWithCurrentZeroProof)
+{
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
+  authority->set_snapshot(GateSnapshot{
+        kGateId, 15U, "", GateState::Inhibited,
+        true, true, true, false});
+  authority->set_inhibit_result(converged_stale_inhibit(
+      std::chrono::milliseconds(249)));
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  RuntimeCore core(config(), clock, authority, relative);
+
+  core.observe_gate(authority->snapshot());
+
+  EXPECT_EQ(authority->inhibit_count(), 1U);
+  EXPECT_EQ(core.state().gate_state, GateState::Inhibited);
+  EXPECT_EQ(core.state().availability, RuntimeAvailability::Available);
+  EXPECT_TRUE(core.usable());
+}
+
+TEST(RuntimeCore, StartupRejectsStaleZeroRevokedAtAuthorityDeadline)
+{
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
+  authority->set_snapshot(GateSnapshot{
+        kGateId, 15U, "", GateState::Inhibited,
+        true, true, true, false});
+  const auto deadline_result = converged_stale_inhibit(
+    std::chrono::milliseconds(250));
+  ASSERT_FALSE(deadline_result.zero_proven);
+  authority->set_inhibit_result(deadline_result);
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  RuntimeCore core(config(), clock, authority, relative);
+
+  core.observe_gate(authority->snapshot());
+
+  EXPECT_EQ(core.state().availability, RuntimeAvailability::Faulted);
+  EXPECT_FALSE(core.usable());
+}
+
+TEST(RuntimeCore, StartupRejectsTransportUnavailableStaleZero)
+{
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
+  authority->set_snapshot(GateSnapshot{
+        kGateId, 15U, "", GateState::Inhibited,
+        true, true, true, false});
+  authority->set_inhibit_result(converged_stale_inhibit(
+      std::chrono::milliseconds(249), true));
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  RuntimeCore core(config(), clock, authority, relative);
+
+  core.observe_gate(authority->snapshot());
+
+  EXPECT_EQ(core.state().availability, RuntimeAvailability::Faulted);
+  EXPECT_FALSE(core.usable());
+}
+
+TEST(RuntimeCore, StartupRejectsStaleInhibitWithoutEveryCurrentZeroProof)
+{
+  struct InvalidResult
+  {
+    const char * name;
+    GateSnapshot snapshot;
+    bool tuple_stale{true};
+  };
+  const auto current_zero = GateSnapshot{
+    kGateId, 16U, "", GateState::Inhibited,
+    true, true, true, true};
+  std::vector<InvalidResult> invalid_results;
+  auto add_invalid = [&invalid_results, &current_zero](
+    const char * name, const auto & mutate, bool tuple_stale = true)
+    {
+      auto snapshot = current_zero;
+      mutate(snapshot);
+      invalid_results.push_back(InvalidResult{name, snapshot, tuple_stale});
+    };
+  add_invalid("different identity", [](auto & value) {
+      value.gate_instance_id = kOtherGateId;
+    });
+  add_invalid("endpoint unavailable", [](auto & value) {
+      value.endpoint_available = false;
+    });
+  add_invalid("not inhibited", [](auto & value) {
+      value.state = GateState::Prepared;
+    });
+  add_invalid("motion not inhibited", [](auto & value) {
+      value.motion_inhibited = false;
+    });
+  add_invalid("zero not selected", [](auto & value) {
+      value.zero_selected = false;
+    });
+  add_invalid("zero not published", [](auto & value) {
+      value.zero_published = false;
+    });
+  add_invalid("sequence did not advance", [](auto & value) {
+      value.control_seq = 15U;
+    });
+  add_invalid("ordinary reject", [](auto &) {}, false);
+
+  for (const auto & invalid : invalid_results) {
+    SCOPED_TRACE(invalid.name);
+    auto clock = std::make_shared<ScriptedSteadyClock>();
+    auto authority = std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
+    authority->set_snapshot(GateSnapshot{
+          kGateId, 15U, "", GateState::Inhibited,
+          true, true, true, false});
+    authority->set_inhibit_result(AuthorityResult{
+          false,
+          true,
+          true,
+          invalid.snapshot,
+          "",
+          "scripted rejection",
+          invalid.tuple_stale});
+    auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+    RuntimeCore core(config(), clock, authority, relative);
+
+    core.observe_gate(authority->snapshot());
+
+    EXPECT_EQ(authority->inhibit_count(), 1U);
+    EXPECT_EQ(core.state().availability, RuntimeAvailability::Faulted);
+    EXPECT_FALSE(core.usable());
+    EXPECT_FALSE(core.admit(goal(1U)).accepted);
+  }
 }
 
 TEST(RuntimeCore, StartupLegacyLeaseFailureRemainsFaultedAndUnbound)

@@ -66,11 +66,16 @@ TF 均留在 ROS 2 control。
   ID 或 path。Runtime 通过 private control seam open/renew。authority lease 是 **Gate steady clock 上 `250 ms`**；
   velocity candidate 永不 renew。
 - IDL 为 transport 将 `request_id`、`gate_instance_id`、`lease_id` bound 为 36 char。Core 要求 request 与 Gate
-  identity 严格为 32 个 lowercase hexadecimal char；PREPARE 的 lease field 必须 empty，OPEN/RENEW/INHIBIT 必须含
-  精确 32 lowercase-hex lease。uppercase、hyphenated UUID、short value 与 non-hex text 都 invalid。
-- 每个 control operation 使用一个 Gate-wide compare-and-swap `control_seq`。OPEN、RENEW、INHIBIT 还必须匹配
-  current Gate instance 与 lease。stale request 没有任何 state effect，包括与更晚 lease race 的 old-lease
-  `INHIBIT`。expired/revoked lease 不得 resurrect；再次取得 authority 必须重新执行完整 handover protocol。
+  identity 严格为 32 个 lowercase hexadecimal char；`PREPARE` 的 lease field 必须 empty，`OPEN`/`RENEW` 必须携带
+  精确 32 lowercase-hex current lease。`PREPARED`/`ARMED` 状态的 `INHIBIT` 同样必须携带 current lease；Gate 已经
+  `INHIBITED` 时，zero reassert 必须使用 empty lease。uppercase、hyphenated UUID、short value 与 non-hex text 都
+  invalid。
+- 每个 control operation 使用一个 Gate-wide compare-and-swap `control_seq`，并精确匹配 current Gate instance；
+  `OPEN`、`RENEW` 与带 lease 的 `INHIBIT` 还必须匹配 current lease。generation-bound teardown 只能在授予该
+  generation 的 Gate identity 内重建 stale `control_seq`/lease，不能跨 identity 取得 replacement Gate 的 lease，
+  也不能把 replacement Gate 的 zero 当作旧 generation 的完成证明。stale request 没有任何 state effect，包括与更晚
+  lease race 的 old-lease `INHIBIT`。expired/revoked lease 不得 resurrect；再次取得 authority 必须重新执行完整
+  handover protocol。
 - candidate freshness 是独立 steady-clock deadline。non-zero output 同时要求 live Runtime authority 和从 current
   bound data plane 收到 fresh candidate。freshness 在 **`150 ms` Gate steady time** 后 expiry。新 lease 的 first
   candidate 到达前，successful activation RENEW 只重启此有界 first-sample window；任一 candidate accepted 后，

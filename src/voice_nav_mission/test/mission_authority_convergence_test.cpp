@@ -515,6 +515,97 @@ TEST(MissionAuthorityAdapter, CoreWiringRebuildsStaleSequenceAndLease)
   }
 }
 
+TEST(MissionAuthorityAdapter, GenerationBoundInhibitNeverSuppressesReplacementGate)
+{
+  const std::array<Kind, 3> replacement_states{
+    Kind::Prepare, Kind::Open, Kind::Renew};
+  for (const auto replacement_state : replacement_states) {
+    SCOPED_TRACE(static_cast<int>(replacement_state));
+    MotionGateCore replacement_gate(MotionGateConfig{}, kCoreGateId);
+    const auto replacement_snapshot = setup_core(
+      replacement_gate, replacement_state, 7500U);
+    ASSERT_TRUE(
+      replacement_snapshot.state == GateState::Inhibited ||
+      replacement_snapshot.state == GateState::Prepared ||
+      replacement_snapshot.state == GateState::Armed);
+
+    AuthorityOperation generation_a_teardown{
+      core_identifier(7600U),
+      kOldCoreGateId,
+      17U,
+      core_identifier(7700U)};
+    generation_a_teardown.gate_instance_bound = true;
+    std::vector<AuthorityOperation> calls;
+    ScriptedClock clock;
+    MissionAuthorityAdapter adapter(
+      250ms,
+      100ms,
+      [&clock]() {return clock.now();},
+      [&replacement_gate, &calls](
+        const AuthorityOperation & operation,
+        Kind operation_kind,
+        TimePoint,
+        TimePoint) {
+        calls.push_back(operation);
+        return core_authority_result(
+          apply_core(
+            replacement_gate, operation, operation_kind,
+            MotionGateCore::SteadyTimePoint{}));
+      });
+
+    const auto result = adapter.inhibit(generation_a_teardown);
+    const auto final_snapshot = core_gate_snapshot(replacement_gate.snapshot());
+
+    EXPECT_FALSE(result.applied);
+    EXPECT_FALSE(result.zero_proven);
+    ASSERT_EQ(calls.size(), 1U);
+    EXPECT_EQ(calls.front().gate_instance_id, kOldCoreGateId);
+    EXPECT_NE(calls.front().lease_id, replacement_snapshot.lease_id);
+    EXPECT_EQ(final_snapshot.gate_instance_id, kCoreGateId);
+    EXPECT_EQ(final_snapshot.state, replacement_snapshot.state);
+    EXPECT_EQ(final_snapshot.lease_id, replacement_snapshot.lease_id);
+    EXPECT_EQ(
+      final_snapshot.motion_inhibited,
+      replacement_snapshot.motion_inhibited);
+  }
+}
+
+TEST(MissionAuthorityAdapter, GenerationBoundEmptyLeaseReassertsSameGateZero)
+{
+  MotionGateCore gate(MotionGateConfig{}, kCoreGateId);
+  const auto initial_snapshot = core_gate_snapshot(gate.snapshot());
+  AuthorityOperation teardown = operation_from_snapshot(
+    Kind::Inhibit, initial_snapshot, 7800U);
+  teardown.lease_id.clear();
+  teardown.gate_instance_bound = true;
+  std::vector<AuthorityOperation> calls;
+  ScriptedClock clock;
+  MissionAuthorityAdapter adapter(
+    250ms,
+    100ms,
+    [&clock]() {return clock.now();},
+    [&gate, &calls](
+      const AuthorityOperation & operation,
+      Kind operation_kind,
+      TimePoint,
+      TimePoint) {
+      calls.push_back(operation);
+      return core_authority_result(
+        apply_core(
+          gate, operation, operation_kind,
+          MotionGateCore::SteadyTimePoint{}));
+    });
+
+  const auto result = adapter.inhibit(teardown);
+
+  EXPECT_TRUE(result.applied);
+  EXPECT_TRUE(result.zero_proven);
+  ASSERT_EQ(calls.size(), 1U);
+  EXPECT_EQ(calls.front().gate_instance_id, kCoreGateId);
+  EXPECT_TRUE(calls.front().lease_id.empty());
+  EXPECT_EQ(gate.snapshot().state, State::Inhibited);
+}
+
 TEST(MissionAuthorityAdapter, CoreWiringStopsAfterThe250msOverallDeadline)
 {
   const std::array<Kind, 4> kinds{
