@@ -1,5 +1,5 @@
-name: Task
-description: Define one independently reversible implementation change.
+name: 任务
+description: 定义一项可独立回滚的实现变更。
 title: "[Task] "
 labels:
   - type:task
@@ -7,111 +7,59 @@ body:
   - type: markdown
     attributes:
       value: |
-        A Task belongs to one parent PRD, one fresh isolated worker context,
-        one branch, and one Draft PR. Keep the acceptance boundary small.
-
+        一个 Goal 恰好绑定一个 decision-complete Issue 和一个 Draft PR；Task 合并或结束后 Goal 停止，下一 Task 必须由 Manager 新建 Goal。一个 Task 只属于一个父 PRD、一个新的隔离 Worker 上下文、一个分支和一个 Draft PR。验收边界应保持小且可验证。
   - type: textarea
     id: issue_linkage
     attributes:
-      label: Issue linkage
-      description: Link the parent PRD, prerequisite Issues, and any related Tasks.
-      placeholder: |
-        Parent PRD: #
-        Blocked by: None
-        Related Issues:
-    validations:
-      required: true
-
+      label: Issue 关联
+      description: 链接父 PRD、前置 Issue 和相关 Task。
+      placeholder: "父 PRD: #\n前置阻塞: 无\n相关 Issue:"
+    validations: {required: true}
   - type: textarea
     id: outcome
     attributes:
-      label: Intended outcome
-      description: What observable behavior or repository capability should exist when this is done?
-      placeholder: A user or maintainer can...
-    validations:
-      required: true
-
+      label: 预期结果
+      description: 完成后应具备什么可观察行为或仓库能力？
+    validations: {required: true}
   - type: textarea
     id: context
-    attributes:
-      label: Context
-      description: Why is this change useful now, and what current behavior motivates it?
-    validations:
-      required: true
-
+    attributes: {label: 背景, description: 为什么现在有价值，当前什么行为促成此变更？}
+    validations: {required: true}
   - type: textarea
     id: scope
-    attributes:
-      label: In scope
-      description: List the concrete behavior, packages, interfaces, and documentation this Task may change.
-      placeholder: |
-        - ...
-    validations:
-      required: true
-
+    attributes: {label: 范围内, description: 列出本 Task 可修改的具体行为、包、接口和文档。}
+    validations: {required: true}
   - type: textarea
     id: non_goals
-    attributes:
-      label: Non-goals
-      description: State what deliberately remains out of scope.
-      placeholder: |
-        - ...
-    validations:
-      required: true
-
+    attributes: {label: 非目标, description: 明确列出刻意不处理的边界。}
+    validations: {required: true}
   - type: textarea
     id: acceptance
-    attributes:
-      label: Acceptance criteria
-      description: Use independently verifiable outcomes, including important failure behavior.
-      placeholder: |
-        - [ ] AC-001 ...
-    validations:
-      required: true
-
+    attributes: {label: 验收标准, description: 使用可独立验证的结果，包含重要失败行为。}
+    validations: {required: true}
   - type: textarea
     id: rollback
-    attributes:
-      label: Rollback
-      description: Explain how this Task can be reverted independently.
-    validations:
-      required: true
-
+    attributes: {label: 回滚, description: 说明如何独立回滚此 Task。}
+    validations: {required: true}
   - type: dropdown
     id: interface_impact
     attributes:
-      label: Stable Interface impact
-      description: Does this change user-visible, ROS, configuration, safety, timing, or error contracts?
-      options:
-        - No Stable Interface change
-        - Backward-compatible Stable Interface change
-        - Breaking Stable Interface change
-    validations:
-      required: true
-
+      label: Stable Interface 影响
+      description: 是否改变用户可见、ROS、配置、安全、时序或错误契约？
+      options: [无 Stable Interface 变更, 向后兼容的 Stable Interface 变更, 破坏性 Stable Interface 变更]
+    validations: {required: true}
   - type: textarea
     id: risks
-    attributes:
-      label: Risks and mitigations
-      description: Cover safety, compatibility, data, privacy, dependency, and operational risks.
-    validations:
-      required: true
-
+    attributes: {label: 风险与缓解, description: 覆盖安全、兼容性、数据、隐私、依赖和运维风险。}
+    validations: {required: true}
   - type: textarea
     id: dependencies
-    attributes:
-      label: Dependencies
-      description: Link prerequisite Issues, external constraints, approvals, or say None.
-    validations:
-      required: true
-
+    attributes: {label: 依赖, description: 链接前置 Issue、外部约束、审批，或写“无”。}
+    validations: {required: true}
   - type: textarea
     id: verification
     attributes:
-      label: Verification plan
-      description: Name exact focused commands, the final full gate, and bounded manual evidence.
-      placeholder: |
-        - Focused: `python3 ...`
-        - Final: `bash scripts/verify.sh`
-    validations:
-      required: true
+      label: 验证计划
+      description: 写明精确聚焦命令、最终完整门禁和有界人工证据。
+      placeholder: "聚焦: `python3 ...`\n最终: `bash scripts/verify.sh`"
+    validations: {required: true}

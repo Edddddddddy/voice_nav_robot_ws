@@ -1503,41 +1503,31 @@ class ScopedTestResultsTest(unittest.TestCase):
         )
         self.assertNotIn("colcon test-result --verbose", verify)
 
-    def test_ci_runs_repository_contract_tests_after_ros_install(self) -> None:
+    def test_ci_runs_only_remote_governance_checks(self) -> None:
         workflow = CI_WORKFLOW.read_text(encoding="utf-8")
 
-        ros_install = workflow.index(
-            "- name: Install ROS 2 Jazzy development environment"
-        )
-        contract_tests = workflow.index(
-            "- name: Run repository contract tests"
-        )
-        canonical_verify = workflow.index(
-            "- name: Run canonical workspace verification"
-        )
+        def step(name: str) -> str:
+            marker = f"      - name: {name}"
+            start = workflow.index(marker)
+            end = workflow.find("\n      - name: ", start + len(marker))
+            return workflow[start:] if end == -1 else workflow[start:end]
 
-        self.assertLess(ros_install, contract_tests)
-        self.assertLess(contract_tests, canonical_verify)
+        governance_step = step("Run governance contract tests")
+        self.assertNotIn("\n        if:", governance_step)
+        self.assertIn("tests.test_ci_contract", governance_step)
+        self.assertIn("tests.test_repository_contract", governance_step)
+        self.assertIn("python3 scripts/check_repository.py --root .", governance_step)
 
-        contract_step = workflow[contract_tests:canonical_verify]
-        self.assertIn("set +u", contract_step)
-        self.assertIn(
-            'source "/opt/ros/${ROS_DISTRO}/setup.bash"',
-            contract_step,
-        )
-        self.assertIn("set -u", contract_step)
-        self.assertLess(
-            contract_step.index("set +u"),
-            contract_step.index(
-                'source "/opt/ros/${ROS_DISTRO}/setup.bash"'
-            ),
-        )
-        self.assertLess(
-            contract_step.index(
-                'source "/opt/ros/${ROS_DISTRO}/setup.bash"'
-            ),
-            contract_step.index("set -u"),
-        )
+        for forbidden in (
+            "Install ROS 2 Jazzy development environment",
+            "Run complete repository contract tests",
+            "Run canonical workspace verification",
+            "rosdep",
+            "colcon",
+            "scripts/verify.sh",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, workflow)
 
     def test_verify_fails_closed_when_package_discovery_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

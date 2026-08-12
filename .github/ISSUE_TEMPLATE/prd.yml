@@ -1,133 +1,64 @@
-name: Product requirements document
-description: Record a decision-complete product requirement and its delivery boundaries.
+name: 产品需求文档
+description: 记录决策完整的产品需求与交付边界。
 title: "[PRD] "
 labels:
   - type:prd
 body:
   - type: markdown
     attributes:
-      value: |
-        Keep the PRD focused on user value, explicit decisions, and independently
-        verifiable outcomes. GitHub Issues are the canonical requirements record.
-
+      value: 保持 PRD 聚焦用户价值、明确决策和可独立验证的结果；GitHub Issue 是需求的唯一记录。
   - type: textarea
     id: issue_linkage
-    attributes:
-      label: Issue linkage
-      description: Link a parent PRD, related Issues, or child Tasks. State why each link matters.
-      placeholder: |
-        Parent: N/A
-        Related Issues:
-        Child Tasks:
-    validations:
-      required: true
-
+    attributes: {label: Issue 关联, description: 链接父 PRD、相关 Issue 或子 Task，并说明每个链接的意义。}
+    validations: {required: true}
   - type: textarea
     id: problem
-    attributes:
-      label: Problem statement
-      description: What user or product problem needs a decision now?
-    validations:
-      required: true
-
+    attributes: {label: 问题陈述, description: 什么用户或产品问题现在需要决策？}
+    validations: {required: true}
   - type: textarea
     id: goal
-    attributes:
-      label: Goal
-      description: State the measurable product outcome in one short paragraph.
-    validations:
-      required: true
-
+    attributes: {label: 目标, description: 用一段简短文字说明可衡量的产品结果。}
+    validations: {required: true}
   - type: textarea
     id: user_value
-    attributes:
-      label: User value
-      description: Who benefits, and what becomes possible or safer?
-    validations:
-      required: true
-
+    attributes: {label: 用户价值, description: 谁受益，什么将变得可能或更安全？}
+    validations: {required: true}
   - type: textarea
     id: requirements
-    attributes:
-      label: Requirements
-      description: List the product rules and observable behavior that must hold.
-      placeholder: |
-        - REQ-001 ...
-    validations:
-      required: true
-
+    attributes: {label: 需求, description: 列出必须保持的产品规则和可观察行为。}
+    validations: {required: true}
   - type: textarea
     id: decisions
-    attributes:
-      label: Decisions
-      description: Record selected approaches, important thresholds, and rejected alternatives.
-    validations:
-      required: true
-
+    attributes: {label: 决策, description: 记录选定方案、重要阈值和被拒绝的替代方案。}
+    validations: {required: true}
   - type: textarea
     id: out_of_scope
-    attributes:
-      label: Out of scope
-      description: State the boundaries that related Tasks must not cross.
-      placeholder: |
-        - ...
-    validations:
-      required: true
-
+    attributes: {label: 范围外, description: 声明相关 Task 不得跨越的边界。}
+    validations: {required: true}
   - type: textarea
     id: acceptance
-    attributes:
-      label: Acceptance criteria
-      description: Use independently verifiable, observable outcomes.
-      placeholder: |
-        - [ ] AC-001 ...
-    validations:
-      required: true
-
+    attributes: {label: 验收标准, description: 使用可独立验证、可观察的结果。}
+    validations: {required: true}
   - type: textarea
     id: rollback
-    attributes:
-      label: Rollback
-      description: Explain how the change can be reversed and what evidence must be preserved.
-    validations:
-      required: true
-
+    attributes: {label: 回滚, description: 说明如何回退变更及须保留的证据。}
+    validations: {required: true}
   - type: dropdown
     id: interface_impact
     attributes:
-      label: Stable Interface impact
-      description: Identify changes to user-visible, ROS, configuration, safety, timing, or error contracts.
-      options:
-        - No Stable Interface change
-        - Backward-compatible Stable Interface change
-        - Breaking Stable Interface change
-        - Not yet known
-    validations:
-      required: true
-
+      label: Stable Interface 影响
+      description: 识别用户可见、ROS、配置、安全、时序或错误契约变更。
+      options: [无 Stable Interface 变更, 向后兼容的 Stable Interface 变更, 破坏性 Stable Interface 变更, 尚未明确]
+    validations: {required: true}
   - type: textarea
     id: risks
-    attributes:
-      label: Risks and mitigations
-      description: Cover safety, compatibility, data, privacy, dependency, and operational risks.
-    validations:
-      required: true
-
+    attributes: {label: 风险与缓解, description: 覆盖安全、兼容性、数据、隐私、依赖和运维风险。}
+    validations: {required: true}
   - type: textarea
     id: dependencies
-    attributes:
-      label: Dependencies
-      description: Link prerequisite Issues, external constraints, approvals, or say None.
-    validations:
-      required: true
-
+    attributes: {label: 依赖, description: 链接前置 Issue、外部约束、审批，或写“无”。}
+    validations: {required: true}
   - type: textarea
     id: verification
-    attributes:
-      label: Verification plan
-      description: Name exact automated commands and bounded manual evidence.
-      placeholder: |
-        - `python3 ...`
-        - `bash scripts/verify.sh`
-    validations:
-      required: true
+    attributes: {label: 验证计划, description: 写明精确自动化命令和有界人工证据。}
+    validations: {required: true}

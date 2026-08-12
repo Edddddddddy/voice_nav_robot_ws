@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
-  - name: Security vulnerability
+  - name: 安全漏洞
     url: https://github.com/Edddddddddy/voice_nav_robot_ws/security/policy
-    about: Report credentials, unsafe bypasses, and vulnerabilities privately.
+    about: 请私下报告凭据泄露、不安全绕过和漏洞。
