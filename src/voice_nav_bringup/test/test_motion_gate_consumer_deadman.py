@@ -118,16 +118,7 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
         try:
             old_runtime = self.probe.wait_runtime_ready()
             self.probe.wait_gate_instance()
-            self.probe.send_goal(
-                old_runtime,
-                source_instance_id='gate-crash-seed',
-                source_seq=1,
-                distance_m=1.0,
-            )
-            moving = self.probe.wait_for_armed_motion()
-            old_gate = moving['gate']
             final_gid = self.probe.assert_unique_final_owner()
-
             pidfd_identity = {
                 'action': support.GATE_NODE,
                 'expected_node_name': self.gate_process.expected_node_name,
@@ -145,24 +136,29 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                 'graph_owner_gid': final_gid,
             }
             pre_kill_observation = self.probe.diagnostic()
+            self.probe.send_goal(
+                old_runtime,
+                source_instance_id='gate-crash-seed',
+                source_seq=1,
+                distance_m=1.0,
+            )
+            moving = self.probe.wait_for_armed_motion()
+            old_gate = moving['gate']
             signal_boundary_motion = None
 
-            def validate_graph_and_capture_signal_boundary():
+            def capture_signal_boundary_motion():
                 nonlocal signal_boundary_motion
-                graph_count = self.probe.count_fqn('/motion_gate_node')
-                if graph_count != 1:
-                    return graph_count
                 signal_boundary_motion = (
                     self.probe.capture_motion_at_signal_boundary()
                 )
-                return graph_count
 
             pidfd_kill = {
                 'call_before_monotonic_ns': time.monotonic_ns(),
             }
             try:
                 kill_ack_ns = self.gate_process.kill(
-                    validate_graph_and_capture_signal_boundary,
+                    lambda: self.probe.count_fqn('/motion_gate_node'),
+                    before_signal=capture_signal_boundary_motion,
                 )
             finally:
                 pidfd_kill['call_after_monotonic_ns'] = time.monotonic_ns()
@@ -333,8 +329,14 @@ class MotionGateConsumerDeadmanShutdownTest(unittest.TestCase):
         proc_info,
         runtime,
         gate,
+        gate_capture,
         restarts,
     ):
+        if not gate_capture.process.sigkill_sent:
+            raise AssertionError(
+                'MotionGate was never pidfd SIGKILLed; launch teardown exit '
+                'cannot satisfy the exact-target acceptance'
+            )
         assertExitCodes(proc_info, process=gate, allowable_exit_codes=[-9])
         assertExitCodes(proc_info, process=runtime, allowable_exit_codes=[0, -2])
         for record in restarts.records:

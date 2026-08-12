@@ -208,7 +208,7 @@ class ProcessIdentityTest(unittest.TestCase):
             if child.poll() is None:
                 child.wait(timeout=2)
 
-    def test_graph_boundary_precondition_runs_before_sigkill(self):
+    def test_signal_boundary_precondition_runs_between_graph_and_sigkill(self):
         child, action, event = self.make_child()
         guard = None
         calls = []
@@ -231,8 +231,12 @@ class ProcessIdentityTest(unittest.TestCase):
                 'pidfd_send_signal',
                 side_effect=traced_pidfd_send_signal,
             ):
-                guard.kill(lambda: calls.append('graph_precondition') or 1)
-            self.assertEqual(calls, ['graph_precondition', 'sigkill'])
+                guard.kill(
+                    lambda: calls.append('graph') or 1,
+                    before_signal=lambda: calls.append('motion'),
+                )
+            self.assertEqual(calls, ['graph', 'motion', 'sigkill'])
+            self.assertTrue(guard.sigkill_sent)
             self.assertNotEqual(child.wait(timeout=2), 0)
         finally:
             if guard is not None:
@@ -244,6 +248,7 @@ class ProcessIdentityTest(unittest.TestCase):
     def test_failed_signal_boundary_precondition_does_not_kill(self):
         child, action, event = self.make_child()
         guard = None
+        calls = []
         try:
             guard = support.ExactPidfdProcess.from_process_started(
                 action=action,
@@ -252,14 +257,24 @@ class ProcessIdentityTest(unittest.TestCase):
                 expected_node_name='pidfd_test_child',
             )
 
-            def reject_graph_boundary():
+            def count_unique_graph_owner():
+                calls.append('graph')
+                return 1
+
+            def reject_signal_boundary():
+                calls.append('motion')
                 raise AssertionError('target stopped moving before SIGKILL')
 
             with self.assertRaisesRegex(
-                support.ProcessIdentityError,
-                'ROS graph identity could not be checked',
+                AssertionError,
+                'target stopped moving before SIGKILL',
             ):
-                guard.kill(reject_graph_boundary)
+                guard.kill(
+                    count_unique_graph_owner,
+                    before_signal=reject_signal_boundary,
+                )
+            self.assertEqual(calls, ['graph', 'motion'])
+            self.assertFalse(guard.sigkill_sent)
             self.assertIsNone(child.poll())
         finally:
             if guard is not None:
@@ -268,9 +283,10 @@ class ProcessIdentityTest(unittest.TestCase):
                 child.terminate()
                 child.wait(timeout=2)
 
-    def test_identity_change_after_signal_boundary_does_not_kill(self):
+    def test_identity_change_after_motion_boundary_does_not_kill(self):
         child, action, event = self.make_child()
         guard = None
+        callbacks = []
         try:
             guard = support.ExactPidfdProcess.from_process_started(
                 action=action,
@@ -279,19 +295,37 @@ class ProcessIdentityTest(unittest.TestCase):
                 expected_node_name='pidfd_test_child',
             )
 
-            def invalidate_recorded_identity_after_graph_proof():
+            def count_unique_graph_owner():
+                callbacks.append('graph')
+                return 1
+
+            def invalidate_recorded_identity_after_motion_proof():
+                callbacks.append('motion')
                 guard.snapshot = replace(
                     guard.snapshot,
                     starttime_ticks=guard.snapshot.starttime_ticks + 1,
                 )
-                return 1
-
-            with self.assertRaises(support.ProcessIdentityError):
-                guard.kill(invalidate_recorded_identity_after_graph_proof)
+            try:
+                guard.kill(
+                    count_unique_graph_owner,
+                    before_signal=(
+                        invalidate_recorded_identity_after_motion_proof
+                    ),
+                )
+            except support.ProcessIdentityError:
+                pass
+            else:
+                self.fail(
+                    'recorded identity change after motion proof sent '
+                    f'SIGKILL; child exit={child.wait(timeout=2)}'
+                )
+            self.assertEqual(callbacks, ['graph', 'motion'])
             self.assertIsNone(child.poll())
+            self.assertFalse(guard.sigkill_sent)
         finally:
             if guard is not None:
-                guard.snapshot = support.read_process_snapshot(child.pid)
+                if child.poll() is None:
+                    guard.snapshot = support.read_process_snapshot(child.pid)
                 guard.close()
             if child.poll() is None:
                 child.terminate()
