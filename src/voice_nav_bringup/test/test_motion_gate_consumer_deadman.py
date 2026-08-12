@@ -177,6 +177,7 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
             signal_boundary_last_nonzero_sim_ns = support._stamp_ns(
                 signal_boundary_motion['final'][1]
             )
+            consumer_timeout_trace = None
             consumer_zero = self.probe.wait_consumer_zero(
                 kill_ack_ns,
                 signal_boundary_last_nonzero_sim_ns,
@@ -186,9 +187,10 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                 consumer_zero['zero_receipt_ns'],
             )
             consumer_zero = self.probe.wait_confirm_consumer_timeout(
-                signal_boundary_last_nonzero_sim_ns,
+                signal_boundary_motion['final'],
                 consumer_zero,
             )
+            consumer_timeout_trace = consumer_zero['association']
             last_nonzero_sim_ns = consumer_zero['last_nonzero_sim_ns']
             runtime_fault = self.probe.wait_runtime_fault(
                 after_monotonic_ns=kill_ack_ns,
@@ -278,6 +280,7 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                 last_nonzero_receipt_ns=(
                     consumer_zero['last_nonzero_receipt_ns']
                 ),
+                consumer_timeout_trace=consumer_timeout_trace,
                 final_owner_gid=final_gid,
                 consumer_timeout_s=consumer_zero['delta_ns'] / 1e9,
                 stationarity_settle_ms=stationarity['settle_ns'] / 1e6,
@@ -311,6 +314,7 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                     signal_boundary_last_nonzero_sim_ns
                 ),
                 last_nonzero_sim_ns=last_nonzero_sim_ns,
+                consumer_timeout_trace=getattr(error, 'evidence', None),
                 pidfd_identity=pidfd_identity,
                 pidfd_kill=pidfd_kill,
                 pre_kill_observation=pre_kill_observation,

@@ -170,11 +170,17 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
         ):
             isolated_support = _load_support()
 
-        _, message = isolated_support.select_consumer_timeout_anchor(
+        result = isolated_support.consumer_timeout_result(
             ((10, command(3_994_000_000, 0.01)),),
-            signal_boundary_sim_ns=3_994_000_000,
+            (
+                (20, command(4_000_000_000, 0.01)),
+                (30, command(4_345_000_000, 0.0)),
+            ),
+            source_anchor=(10, command(3_994_000_000, 0.01)),
+            zero_sim_ns=4_345_000_000,
+            zero_receipt_ns=30,
         )
-        self.assertEqual(isolated_support._stamp_ns(message), 3_994_000_000)
+        self.assertEqual(result['delta_ns'], 351_000_000)
 
         with mock.patch(
             'builtins.__import__', side_effect=reject_workspace_interfaces
@@ -224,53 +230,289 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
 
         loader.assert_called_once_with()
 
-    def test_selects_latest_nonzero_final_even_when_observer_delivers_it_late(self):
-        samples = (
-            (10, command(3_994_000_000, 0.01)),
-            (20, command(4_098_000_000, 0.02)),
-            (31, command(4_120_000_000, 0.03)),
-        )
+    def test_unique_trace_returns_authoritative_source_and_controller_stamps(self):
+        source_anchor = (20, command(4_000_000_000, 0.02))
 
-        receipt_ns, message = support.select_consumer_timeout_anchor(
-            samples,
-            signal_boundary_sim_ns=3_994_000_000,
-        )
-
-        self.assertEqual(receipt_ns, 31)
-        self.assertEqual(support._stamp_ns(message), 4_120_000_000)
-
-    def test_recomputes_frozen_timeout_from_actual_last_final(self):
         result = support.consumer_timeout_result(
             (
-                (10, command(3_994_000_000, 0.01)),
-                (20, command(4_098_000_000, 0.02)),
+                (10, command(3_990_000_000, 0.01)),
+                source_anchor,
             ),
-            signal_boundary_sim_ns=3_994_000_000,
-            zero_sim_ns=4_449_000_000,
+            (
+                (15, command(3_995_000_000, 0.01)),
+                (25, command(4_010_000_000, 0.02)),
+                (30, command(4_351_000_000, 0.0)),
+            ),
+            source_anchor=source_anchor,
+            zero_sim_ns=4_351_000_000,
             zero_receipt_ns=30,
         )
 
-        self.assertEqual(result['last_nonzero_sim_ns'], 4_098_000_000)
-        self.assertEqual(result['last_nonzero_receipt_ns'], 20)
+        self.assertEqual(
+            result['authoritative_source_stamp_ns'], 4_000_000_000
+        )
+        self.assertEqual(
+            result['controller_last_nonzero_update_ns'], 4_010_000_000
+        )
+        self.assertEqual(result['controller_zero_update_ns'], 4_351_000_000)
         self.assertEqual(result['delta_ns'], 351_000_000)
 
-    def test_late_final_that_breaks_timeout_is_not_ignored(self):
-        with self.assertRaisesRegex(AssertionError, '0.329000 s'):
+    def test_timeout_window_remains_strict_at_both_boundaries(self):
+        source_anchor = (20, command(4_000_000_000, 0.02))
+        final_samples = ((10, command(3_990_000_000, 0.01)), source_anchor)
+
+        for zero_sim_ns, should_pass in (
+            (4_350_000_000, False),
+            (4_351_000_000, True),
+            (4_360_000_000, True),
+            (4_361_000_000, False),
+        ):
+            with self.subTest(zero_sim_ns=zero_sim_ns):
+                limited_samples = (
+                    (15, command(3_995_000_000, 0.01)),
+                    (25, command(4_010_000_000, 0.02)),
+                    (30, command(zero_sim_ns, 0.0)),
+                )
+                if should_pass:
+                    result = support.consumer_timeout_result(
+                        final_samples,
+                        limited_samples,
+                        source_anchor=source_anchor,
+                        zero_sim_ns=zero_sim_ns,
+                        zero_receipt_ns=30,
+                    )
+                    self.assertEqual(
+                        result['delta_ns'], zero_sim_ns - 4_000_000_000
+                    )
+                else:
+                    with self.assertRaisesRegex(
+                        AssertionError, 'controller consumer timeout outside'
+                    ):
+                        support.consumer_timeout_result(
+                            final_samples,
+                            limited_samples,
+                            source_anchor=source_anchor,
+                            zero_sim_ns=zero_sim_ns,
+                            zero_receipt_ns=30,
+                        )
+
+    def test_out_of_window_unique_trace_retains_launch_failure_evidence(self):
+        source_anchor = (20, command(4_000_000_000, 0.02))
+
+        for zero_sim_ns in (4_361_000_000, 4_374_000_000):
+            with self.subTest(zero_sim_ns=zero_sim_ns):
+                with self.assertRaises(AssertionError) as context:
+                    support.consumer_timeout_result(
+                        (source_anchor,),
+                        (
+                            (25, command(4_010_000_000, 0.02)),
+                            (30, command(zero_sim_ns, 0.0)),
+                        ),
+                        source_anchor=source_anchor,
+                        zero_sim_ns=zero_sim_ns,
+                        zero_receipt_ns=30,
+                    )
+
+                evidence = getattr(context.exception, 'evidence', None)
+                self.assertIsNotNone(evidence)
+                self.assertEqual(
+                    evidence['authoritative_source_stamp_ns'], 4_000_000_000
+                )
+                self.assertEqual(
+                    evidence['controller_nonzero_update_stamp_ns'], 4_010_000_000
+                )
+                self.assertEqual(
+                    evidence['controller_zero_update_stamp_ns'], zero_sim_ns)
+                self.assertEqual(
+                    evidence['delta_ns'], zero_sim_ns - 4_000_000_000
+                )
+                self.assertEqual(
+                    evidence['accepted_window_ns'], [350_000_000, 360_000_000]
+                )
+                self.assertEqual(
+                    evidence['association_basis'],
+                    'unique ordered source/controller trace',
+                )
+                self.assertEqual(
+                    evidence['reason'],
+                    'controller consumer timeout outside accepted window',
+                )
+
+    def test_rejects_late_source_delivery_after_frozen_anchor(self):
+        source_anchor = (20, command(4_000_000_000, 0.02))
+
+        with self.assertRaisesRegex(
+            support.ConsumerTraceAmbiguous,
+            'late source delivery after frozen anchor',
+        ) as context:
             support.consumer_timeout_result(
                 (
-                    (10, command(3_994_000_000, 0.01)),
-                    (31, command(4_120_000_000, 0.03)),
+                    source_anchor,
+                    (40, command(4_020_000_000, 0.03)),
                 ),
-                signal_boundary_sim_ns=3_994_000_000,
-                zero_sim_ns=4_449_000_000,
+                (
+                    (25, command(4_010_000_000, 0.02)),
+                    (30, command(4_351_000_000, 0.0)),
+                ),
+                source_anchor=source_anchor,
+                zero_sim_ns=4_351_000_000,
+                zero_receipt_ns=30,
+            )
+
+        self.assertEqual(
+            context.exception.evidence['late_source_header_stamp_ns'],
+            4_020_000_000,
+        )
+
+    def test_rejects_source_observer_receipt_late_for_controller_update(self):
+        source_anchor = (50, command(4_000_000_000, 0.02))
+
+        with self.assertRaisesRegex(
+            support.ConsumerTraceAmbiguous,
+            'late source observer receipt',
+        ):
+            support.consumer_timeout_result(
+                (source_anchor,),
+                (
+                    (25, command(4_010_000_000, 0.02)),
+                    (60, command(4_351_000_000, 0.0)),
+                ),
+                source_anchor=source_anchor,
+                zero_sim_ns=4_351_000_000,
+                zero_receipt_ns=60,
+            )
+
+    def test_rejects_missing_controller_nonzero_before_first_zero(self):
+        source_anchor = (20, command(4_000_000_000, 0.02))
+
+        with self.assertRaisesRegex(
+            support.ConsumerTraceAmbiguous,
+            'missing non-zero controller observation before first zero',
+        ):
+            support.consumer_timeout_result(
+                (source_anchor,),
+                ((30, command(4_351_000_000, 0.0)),),
+                source_anchor=source_anchor,
+                zero_sim_ns=4_351_000_000,
+                zero_receipt_ns=30,
+            )
+
+    def test_rejects_same_valued_duplicate_source_commands(self):
+        source_anchor = (20, command(4_000_000_000, 0.02))
+
+        with self.assertRaisesRegex(
+            support.ConsumerTraceAmbiguous,
+            'same-valued duplicate source commands',
+        ) as context:
+            support.consumer_timeout_result(
+                (
+                    (10, command(3_990_000_000, 0.02)),
+                    source_anchor,
+                ),
+                (
+                    (25, command(4_010_000_000, 0.02)),
+                    (30, command(4_351_000_000, 0.0)),
+                ),
+                source_anchor=source_anchor,
+                zero_sim_ns=4_351_000_000,
+                zero_receipt_ns=30,
+            )
+
+        self.assertEqual(context.exception.evidence['matching_source_count'], 2)
+
+    def test_rejects_out_of_order_source_trace(self):
+        source_anchor = (20, command(3_999_000_000, 0.02))
+
+        with self.assertRaisesRegex(
+            support.ConsumerTraceAmbiguous,
+            'out-of-order topic header stamp',
+        ):
+            support.consumer_timeout_result(
+                (
+                    (10, command(4_000_000_000, 0.01)),
+                    source_anchor,
+                ),
+                (
+                    (25, command(4_010_000_000, 0.02)),
+                    (30, command(4_350_000_000, 0.0)),
+                ),
+                source_anchor=source_anchor,
+                zero_sim_ns=4_350_000_000,
+                zero_receipt_ns=30,
+            )
+
+    def test_rejects_unassociated_controller_nonzero_before_first_zero(self):
+        source_anchor = (20, command(4_000_000_000, 0.02))
+
+        with self.assertRaisesRegex(
+            support.ConsumerTraceAmbiguous,
+            'unassociated non-zero controller output before first zero',
+        ):
+            support.consumer_timeout_result(
+                (source_anchor,),
+                (
+                    (25, command(4_010_000_000, 0.02)),
+                    (26, command(4_020_000_000, 0.03)),
+                    (30, command(4_351_000_000, 0.0)),
+                ),
+                source_anchor=source_anchor,
+                zero_sim_ns=4_351_000_000,
+                zero_receipt_ns=30,
+            )
+
+    def test_rejects_unassociated_controller_nonzero_before_matching_sample(self):
+        source_anchor = (20, command(4_000_000_000, 0.02))
+
+        with self.assertRaisesRegex(
+            support.ConsumerTraceAmbiguous,
+            'unassociated non-zero controller output before first zero',
+        ) as context:
+            support.consumer_timeout_result(
+                (source_anchor,),
+                (
+                    (25, command(4_005_000_000, 0.03)),
+                    (26, command(4_010_000_000, 0.02)),
+                    (30, command(4_351_000_000, 0.0)),
+                ),
+                source_anchor=source_anchor,
+                zero_sim_ns=4_351_000_000,
+                zero_receipt_ns=30,
+            )
+
+        self.assertEqual(
+            context.exception.evidence['controller_update_stamp_ns'],
+            4_005_000_000,
+        )
+
+    def test_rejects_unassociated_controller_nonzero_after_first_zero(self):
+        source_anchor = (20, command(4_000_000_000, 0.02))
+
+        with self.assertRaisesRegex(
+            support.ConsumerTraceAmbiguous,
+            'unassociated non-zero controller output after first zero',
+        ):
+            support.consumer_timeout_result(
+                (source_anchor,),
+                (
+                    (25, command(4_010_000_000, 0.02)),
+                    (30, command(4_351_000_000, 0.0)),
+                    (40, command(4_360_000_000, 0.03)),
+                ),
+                source_anchor=source_anchor,
+                zero_sim_ns=4_351_000_000,
                 zero_receipt_ns=30,
             )
 
     def test_quiescence_fence_observes_final_added_after_first_snapshot(self):
         probe = support.CrashStopProbe.__new__(support.CrashStopProbe)
         probe.lock = threading.Lock()
-        probe.final_commands = deque(
-            ((10, command(3_994_000_000, 0.01)),),
+        source_anchor = (10, command(3_994_000_000, 0.01))
+        probe.final_commands = deque((source_anchor,), maxlen=20)
+        probe.limited_commands = deque(
+            (
+                (20, command(4_000_000_000, 0.01)),
+                (30, command(4_449_000_000, 0.0)),
+            ),
             maxlen=20,
         )
         probe.clock_samples = deque(((0, 4_500_000_000),), maxlen=20)
@@ -303,9 +545,12 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
                 self.sleep_count += 1
 
         with mock.patch.object(support, 'time', FakeTime()):
-            with self.assertRaisesRegex(AssertionError, '0.329000 s'):
+            with self.assertRaisesRegex(
+                support.ConsumerTraceAmbiguous,
+                'late source delivery after frozen anchor',
+            ):
                 probe.wait_confirm_consumer_timeout(
-                    3_994_000_000,
+                    source_anchor,
                     {
                         'zero_sim_ns': 4_449_000_000,
                         'zero_receipt_ns': 30,
@@ -314,21 +559,57 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
                 )
         probe.publisher_count.assert_not_called()
 
-    def test_rejects_missing_eligible_nonzero_final(self):
-        samples = (
-            (10, command(3_994_000_000, 0.0)),
-            (31, command(3_900_000_000, 0.02)),
+    def test_quiescence_fence_waits_for_delayed_limited_sample(self):
+        probe = support.CrashStopProbe.__new__(support.CrashStopProbe)
+        probe.lock = threading.Lock()
+        source_anchor = (10, command(3_994_000_000, 0.01))
+        probe.final_commands = deque((source_anchor,), maxlen=20)
+        probe.limited_commands = deque(
+            (
+                (20, command(4_000_000_000, 0.01)),
+                (30, command(4_345_000_000, 0.0)),
+            ),
+            maxlen=20,
         )
+        probe.clock_samples = deque(((0, 4_500_000_000),), maxlen=20)
 
-        with self.assertRaisesRegex(
-            AssertionError,
-            'no eligible non-zero final command',
-        ):
-            support.select_consumer_timeout_anchor(
-                samples,
-                signal_boundary_sim_ns=3_994_000_000,
+        class FakeTime:
+
+            def __init__(self):
+                self.now_ns = 0
+                self.sleep_count = 0
+
+            def monotonic(self):
+                return self.now_ns / 1_000_000_000
+
+            def monotonic_ns(self):
+                return self.now_ns
+
+            def sleep(self, seconds):
+                self.now_ns += 100_000_000
+                with probe.lock:
+                    if self.sleep_count == 1:
+                        probe.limited_commands.append(
+                            (40, command(4_346_000_000, 0.0))
+                        )
+                    probe.clock_samples.append(
+                        (self.now_ns, 4_500_000_000 + self.now_ns)
+                    )
+                self.sleep_count += 1
+
+        fake_time = FakeTime()
+        with mock.patch.object(support, 'time', fake_time):
+            result = probe.wait_confirm_consumer_timeout(
+                source_anchor,
+                {
+                    'zero_sim_ns': 4_345_000_000,
+                    'zero_receipt_ns': 30,
+                },
+                timeout=1.0,
             )
 
+        self.assertEqual(result['delta_ns'], 351_000_000)
+        self.assertGreaterEqual(fake_time.now_ns, 400_000_000)
 
 if __name__ == '__main__':
     unittest.main()
