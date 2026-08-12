@@ -1,38 +1,35 @@
-## Issue 链接
+## 关联 Issue
 
 Closes #
 
 ## 结果
 
-描述本 PR 交付的可观察行为或仓库能力，以及最终结果。
+说明本 PR 交付的可观察行为或仓库能力及最终结果。
 
 ## 验收映射
 
-将 Issue 的每个验收标准映射到修改文件和证据。
+将 owning Issue 的每个验收标准映射到改动文件和证据。
 
 - [ ] AC-001：
 
-## 最终测试摘要
+## Manager 维护的 canonical evidence COMMENT
 
-列出聚焦检查和最终完整门禁的精确命令、真实退出状态及简洁结果。完整
-`bash scripts/verify.sh` 仅在最终 PR HEAD 运行一次。
+仅填写 Manager 维护的 canonical evidence COMMENT URL 或标识：
 
-```text
-python3 -m unittest tests.test_repository_contract
-python3 scripts/check_repository.py --root .
-bash scripts/verify.sh
-```
+- [ ] COMMENT URL 或标识：
+
+唯一的摘要正文只在此 COMMENT 更新；PR 正文不得复制 canonical evidence summary、逐提交开发日志、完整原始日志或重复 Issue 正文。Worker/Reviewer 只交接 exact-HEAD 简体中文证据；Manager 使用 `COMMENT` 将其持久化到 GitHub。
 
 ## 接口影响
 
-- [ ] 无 Stable Interface 或 ROS/runtime 接口变化。
-- [ ] Stable Interface 影响已在 Issue 和相关文档中说明，并有对应测试。
+- [ ] 无 Stable Interface 或 ROS/runtime 接口变更。
+- [ ] 已在 Issue 和相关文档说明 Stable Interface 影响，并有对应测试。
 - [ ] 需要时已链接 ADR。
 
 ## 回滚
 
-说明最小安全 revert，以及需要保留的证据。
+说明最小安全 `revert` 以及须保留的证据。
 
-## 剩余风险
+## 残余风险
 
-列出剩余的安全、兼容性、数据、隐私、依赖和运维风险。
+列出安全、兼容性、数据、隐私、依赖和运维残余风险。

@@ -125,30 +125,36 @@ class RepositoryContractTest(unittest.TestCase):
                 self.assertEqual(
                     interface_options,
                     [
-                        "No Stable Interface change",
-                        "Backward-compatible Stable Interface change",
-                        "Breaking Stable Interface change",
+                        "无 Stable Interface 变更",
+                        "向后兼容的 Stable Interface 变更",
+                        "破坏性 Stable Interface 变更",
                     ],
                 )
-                self.assertNotIn("Not yet known", interface_options)
+                self.assertNotIn("尚未明确", interface_options)
             else:
-                self.assertIn("Not yet known", interface_options)
+                self.assertIn("尚未明确", interface_options)
 
         pull_request_template = (
             REPOSITORY_ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md"
         ).read_text(encoding="utf-8")
         for heading in (
-            "## Issue 链接",
+            "## 关联 Issue",
             "## 结果",
             "## 验收映射",
-            "## 最终测试摘要",
+            "## Manager 维护的 canonical evidence COMMENT",
             "## 接口影响",
             "## 回滚",
-            "## 剩余风险",
+            "## 残余风险",
         ):
             with self.subTest(heading=heading):
                 self.assertIn(heading, pull_request_template)
         self.assertIn("Closes #", pull_request_template)
+        self.assertIn("COMMENT URL 或标识", pull_request_template)
+        self.assertIn("唯一的摘要正文只在此 COMMENT 更新", pull_request_template)
+        self.assertIn(
+            "PR 正文不得复制 canonical evidence summary",
+            pull_request_template,
+        )
         self.assertNotRegex(
             pull_request_template.lower(), r"lesson|learning[- ]record|work[- ]item"
         )
@@ -297,6 +303,39 @@ class RepositoryContractTest(unittest.TestCase):
         for process_owner in ("Manager", "Worker", "Reviewer", "VOICE_NAV_"):
             with self.subTest(document="CONTEXT.md", marker=process_owner):
                 self.assertNotIn(process_owner, context)
+
+    def test_governance_docs_match_local_product_evidence_and_main_push_policy(self) -> None:
+        documents = {
+            "AGENTS.md": (REPOSITORY_ROOT / "AGENTS.md").read_text(encoding="utf-8"),
+            "CONTRIBUTING.md": (REPOSITORY_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8"),
+            "change-lifecycle": (
+                REPOSITORY_ROOT / "docs" / "process" / "change-lifecycle.md"
+            ).read_text(encoding="utf-8"),
+        }
+        for name, document in documents.items():
+            with self.subTest(document=name):
+                self.assertIn("远端 required CI", document)
+                self.assertIn("真实失败后不得在无变更的同一 HEAD 重跑", document)
+                self.assertIn("不代表产品验证通过", document)
+
+        for name in ("CONTRIBUTING.md", "change-lifecycle"):
+            with self.subTest(document=name):
+                self.assertIn("main push 对 `before..sha`", documents[name])
+                self.assertIn("全零 `before` fail closed", documents[name])
+
+        lifecycle = documents["change-lifecycle"]
+        self.assertIn(
+            "角色、权限、流程、交付和恢复的唯一权威",
+            lifecycle,
+        )
+        self.assertIn("验证节奏和证据记录参考", lifecycle)
+        self.assertNotIn("single repository contract", lifecycle)
+        self.assertIn(
+            "每个 Task 只维护一份 Manager-owned canonical evidence COMMENT",
+            lifecycle,
+        )
+        self.assertIn("PR 正文仅链接该 COMMENT，不复制摘要", lifecycle)
+        self.assertNotIn("PR 只维护一份 canonical evidence summary", lifecycle)
 
     def test_missing_relative_markdown_link_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

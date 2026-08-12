@@ -10,16 +10,13 @@ and interface decisions. This file is the single owner of roles, permissions, de
   sessions active, and is the Manager-only GitHub transport owner (the sole
   transport owner for GitHub writes): Issue/PR
   comments, labels, pushes, Draft PRs, reviews, merges, tags, and releases.
+- **目标与 Task**：一个 Goal 恰好绑定一个 decision-complete Issue 和一个 Draft PR，流程为 `PRD -> Issue -> isolated Task -> Draft PR`；Manager 在分配前把 Goal 和验收记录到 Issue。Task 合并或结束后，该 Goal 停止，不自动选择下一 Task；下一 Task 必须由 Manager 新建 Goal。
 - **Worker** owns exactly one decision-complete Issue in one fresh isolated
   worktree based on current `origin/main`. Worker is Luna/Max (max reasoning);
   implement with focused RED, minimal GREEN, refactor while green, and commit
   locally.
-- **Reviewer** is a fresh read-only exact-HEAD PR review. Reviewer is Sol/xhigh;
-  compare the Issue contract and full diff, report P0–P3 findings, and never
-  modify the Worker branch.
-- All GitHub comments, Issue/PR bodies, reviews, and human-facing evidence use
-  Simplified Chinese; preserve commands, identifiers, protocol fields, and
-  established technical names when translation would reduce precision.
+- **Reviewer** 是全新只读的 exact-HEAD PR 审查者，使用 Sol/xhigh；对照 Issue 契约和完整 diff 交接 P0–P3 简体中文证据，绝不修改 Worker 分支或直接写 PR comment。Manager 使用 `COMMENT` 持久化审查证据。
+- 所有新笔记、GitHub 评论、Issue/PR 正文、review、面向人的证据和交接使用简体中文；命令、标识符、协议字段及为精度必须保留的技术名保持原样。
 - Skill routing: use `voice-nav-requirements` for shaping,
   `voice-nav-worker` for implementation, and `voice-nav-review` for review.
 
@@ -29,6 +26,7 @@ and interface decisions. This file is the single owner of roles, permissions, de
   reviews, merges, tags, and releases. Worker/Reviewer never log in, open an
   auth browser, inspect or copy tokens, or ask the user for ordinary GitHub,
   Git index, WSL/ROS/build/test, or focused-check permission.
+- 用户已提供一次持续授权：在已批准 Issue 范围内，普通 Git/GitHub/WSL/build/test 操作无需逐次询问；只有破坏性、跨范围或平台强制交互才请求用户。
 - On auth/403, shared-index, or command-boundary failure, preserve the exact
   `cwd`, `command`, `timeout`, and expected artifact, local `HEAD`, result, and
   evidence; the Manager executes the exact bounded command or an approved
@@ -83,9 +81,7 @@ decision_needed: <none or required decision>
 ```
 
 Workers hand off after local commit and verification; Manager pushes and
-creates/updates the PR. Run focused checks during development and the complete
-repository gate once on final HEAD. Preserve rollback, interface impact,
-residual risks, and exact evidence in the handoff.
+creates/updates the PR. 开发中可小步本地提交；仅在可审查里程碑推送，推送前在本地 WSL 对 exact HEAD 执行一次适用的 build、定向测试或 `bash scripts/verify.sh` 并记录真实结果。真实失败后不得在无变更的同一 HEAD 重跑。远端 required CI 只验证治理，不代表产品验证通过。Review 修复可聚合后再推送；合并前 rebase 并保持单 Task 一提交的线性历史。Preserve rollback, interface impact, residual risks, and exact evidence in the handoff.
 
 ## Recovery order
 

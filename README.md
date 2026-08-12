@@ -82,8 +82,9 @@ python3 -m unittest tests.test_repository_contract
 python3 scripts/check_repository.py --root .
 ```
 
-After the final change, run the complete quality gate exactly once on the
-final PR HEAD in the same managed worktree:
+After the final change, run the applicable product checks on the exact PR HEAD
+in the local WSL 2 Jazzy worktree. Product changes normally finish with the
+complete local quality gate:
 
 ```bash
 bash scripts/verify.sh
@@ -99,6 +100,12 @@ later successful command must not overwrite a failed result. The complete
 cadence and evidence ownership are defined in the
 [change lifecycle](docs/process/change-lifecycle.md).
 
+GitHub's required check is intentionally a fast governance gate: it checks the
+workflow, repository contracts, and commit subjects, but does not install ROS,
+build the workspace, or run Gazebo. Its success is not product evidence. The
+Manager records the local exact-HEAD commands, results, and artifact paths in
+the Task's single canonical evidence comment before merge.
+
 Generated `build/`, `install/`, and `log/` trees, model weights, maps,
 recordings, and runtime evidence must not be committed. The supported
 MotionGate implementation is locked to `rmw_fastrtps_cpp`; the canonical
@@ -113,8 +120,13 @@ and status record. The delivery path is:
 ```text
 GitHub Issue -> isolated branch -> tests-first implementation
   -> documentation / ADR / changelog as needed -> local verification
-  -> Draft PR -> review -> CI -> rebase merge
+  -> reviewable-milestone push -> Draft PR -> review -> governance CI
+  -> rebase merge
 ```
+
+Local commits may stay small and reversible. Push only a reviewable milestone
+after local verification so routine development does not trigger redundant CI
+runs for every intermediate commit.
 
 Read [Contributing](CONTRIBUTING.md), the [change lifecycle](docs/process/change-lifecycle.md),
 and the relevant product and architecture contracts before editing.

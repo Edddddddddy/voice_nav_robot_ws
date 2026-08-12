@@ -1,33 +1,26 @@
-# Contributing to VoiceNav Robot
+# 为 VoiceNav Robot 贡献
 
-GitHub Issues are the canonical requirements, decisions, acceptance criteria,
-dependencies, and status record. Each implementation change has one owning
-Issue, one isolated branch, and one Draft PR.
+GitHub Issue 是需求、决策、验收标准、依赖和状态的唯一记录。每项实现变更只对应一个 owning Issue、一个隔离分支和一个 Draft PR。
 
-## Change workflow
+一个 Goal 恰好绑定一个 decision-complete Issue 和一个 Draft PR；Task 合并或结束后 Goal 停止，绝不自动选择下一 Task，下一项工作只能由 Manager 新建 Goal。用户已持续授权已批准 Issue 范围内的普通 Git/GitHub/WSL/build/test 操作；仅破坏性、跨范围或平台强制交互需要再次请求用户。
 
-1. Shape or update the GitHub Issue with goal, non-goals, acceptance, risk,
-   interface impact, dependencies, rollback, and verification requirements.
-2. Start from the current `main` in an isolated worktree and create a
-   short-lived branch.
-3. Implement the smallest observable behavior. For behavior changes, record a
-   focused RED test, make it GREEN, then refactor while it remains green.
-4. Update user documentation, the changelog, and an ADR only when applicable.
-5. Run the focused repository checks during development. After the final
-   change, run the complete repository gate exactly once on the final PR HEAD
-   and retain its true exit status.
-6. Open a Draft PR with `Closes #NN`, record the result, acceptance mapping,
-   final test summary, interface impact, rollback, and residual risks, then
-   review the complete diff.
-7. Rebase-merge only after independent review, required CI, and every
-   Definition of Done item are satisfied.
+## 变更流程
 
-Do not develop directly on `main`. Do not use a shared checkout for an
-implementation task, and do not treat a PR as a replacement for its Issue.
+1. 在 GitHub Issue 写明目标、非目标、验收、风险、接口影响、依赖、回滚和验证要求。
+2. 基于当前 `main` 创建隔离 worktree 和短生命周期分支。
+3. 每次实现一个可观察行为：先记录聚焦 RED，再最小 GREEN，最后只在保持 GREEN 时重构。
+4. 仅在适用时更新用户文档、`CHANGELOG.md` 和 ADR。
+5. 开发中运行聚焦仓库检查并可小步本地提交；仅在可审查里程碑推送。推送前在本地 WSL 对 exact HEAD 执行一次适用的产品验证；远端 required CI 只验证治理，不代表产品验证通过。
+6. Manager 创建 Draft PR，使用 `Closes #NN`，且只维护一份 canonical evidence summary：验收映射、最终 HEAD、检查摘要、接口影响、回滚和残余风险。原始日志留在 Git 外，以 artifact 路径引用，不逐提交粘贴日志或重复 Issue 正文。
+7. 仅在独立审查、远端治理 CI 与本地产品证据齐备后执行 rebase merge；Review 修复可聚合后再推送，合并前 rebase 并保持单 Task 一提交的线性历史。
 
-## Branch names
+不得直接在 `main` 开发；不得使用共享 checkout；PR 不能替代其 owning Issue。
 
-Use a short-lived branch whose name identifies the Issue and intent, for example:
+Worker/Reviewer 不直接写 PR comment；Reviewer 只交接 exact-HEAD P0–P3 简体中文证据，Manager 使用 `COMMENT` 写入 GitHub。
+
+## 分支与提交
+
+使用能表明 Issue 和目的的短生命周期分支，例如：
 
 ```text
 feat/25-mission-admission
@@ -36,46 +29,32 @@ test/37-tf-ownership
 docs/25-retire-legacy-workflow
 ```
 
-## Commit messages
+提交必须符合 [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/) 的 `type(scope): 中文摘要`，其中 `scope` 可省略。允许的 primary type 为 `feat`、`fix`、`test`、`docs`、`refactor`、`perf`、`build`、`ci`、`chore` 和 `revert`。每个提交只表达一个可审查的变更理由，避免把大范围格式化和行为改动混在一起。
 
-Use [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/):
+PR 的完整门禁检查 `base..head` 中全部提交；main push 对 `before..sha` 检查本次提交范围，全零 `before` fail closed，因此不依赖 branch protection 提供该项覆盖。
 
-```text
-feat(sim): bridge Gazebo odometry into ROS
-fix(mission): reject non-finite motion distance
-test(sim): verify odom frame ownership
-docs(adr): record the simulation drive adapter
-chore(repo): stop tracking generated outputs
-```
+## 远端治理 CI 与本地产品验证
 
-Allowed primary types are `feat`, `fix`, `test`, `docs`, `refactor`, `perf`,
-`build`, `ci`, and `chore`. Each commit should represent one coherent reason
-for change. Avoid broad formatting mixed with behavior changes.
+`required / ubuntu-24.04 / ros-jazzy` 是稳定的 branch-protection required check，只运行 shellcheck、actionlint、治理合同和 Conventional Commit。它不运行 ROS、rosdep、colcon、Gazebo 或 `scripts/verify.sh`，通过不代表产品验证通过。
 
-## Focused repository checks
+产品 PR 在推送可审查里程碑前必须在本地 WSL 对 exact HEAD 完成适用的 build、定向测试或一次完整验证。Manager 把命令、退出状态、结果和 artifact 路径写入唯一的 canonical evidence COMMENT；治理或纯文档 Task 可按范围只运行治理检查。
 
-Run these checks during development:
+## 聚焦检查与完整门禁
+
+开发中运行：
 
 ```bash
 python3 -m unittest tests.test_repository_contract
 python3 scripts/check_repository.py --root .
 ```
 
-The complete change-request gate is run exactly once after the final change,
-on the final PR HEAD. Run it from that managed worktree; the verification
-entry point automatically resolves the `.git` pointer and exports the Git
-context to its child processes:
+每个推送候选 exact HEAD 的本地产品完整门禁（最多一次）：
 
 ```bash
 bash scripts/verify.sh
 ```
 
-Record its actual exit status before running any separate diagnostics. A later
-successful command must not overwrite a failed gate result. See the
-[change lifecycle](docs/process/change-lifecycle.md) for the canonical
-cadence, evidence ownership, and stop rules.
-
-Review what will be committed with:
+先记录该调用的真实退出状态；真实失败后不得在无变更的同一 HEAD 重跑，必须先有因果修复形成新 exact HEAD；后续诊断命令成功不得覆盖失败门禁的结论。远端治理 CI 不代表产品验证通过。完整规则见[变更生命周期](docs/process/change-lifecycle.md)。提交前检查将要提交的内容：
 
 ```bash
 git status --short
@@ -83,54 +62,19 @@ git diff
 git diff --cached
 ```
 
-Generated workspaces, model weights, recordings, bags, credentials, and
-runtime evidence must never be committed. Prefer explicit pathspecs over an
-unreviewed `git add .`.
+生成的 workspace、模型权重、录音、bag、凭据和运行时证据不得提交。混合 Windows/WSL 环境中优先使用显式 pathspec，避免未经审阅的 `git add .`。
 
-## Definition of Done
+## 完成定义
 
-A change is done only when:
+变更完成的前提是：关联 Issue 的验收已满足；相关包能从声明依赖构建；自动化测试覆盖新成功路径和重要失败路径；每个候选 exact HEAD 最多一次 `bash scripts/verify.sh` 并记录真实状态；Stable Interface 影响在 Issue 和文档中说明；必要时有 ADR；无生成数据、密钥、私有音频或模型权重；PR 的 canonical evidence summary 完整且作者审阅了完整 staged diff。
 
-- its linked Issue acceptance criteria are satisfied;
-- the relevant package builds from declared dependencies;
-- automated tests cover the new success path and important failure paths;
-- `bash scripts/verify.sh` was run exactly once on the final PR HEAD and its
-  true exit status is recorded;
-- ROS names, types, QoS, parameters, units, TF ownership, error behavior, and
-  ordering constraints are documented when they form a Stable Interface;
-- motion tests request zero velocity during normal and failure cleanup;
-- user-visible behavior is recorded under `Unreleased` in `CHANGELOG.md`;
-- architecture documentation distinguishes current implementation from the
-  approved target architecture;
-- a qualifying architectural trade-off has an ADR;
-- the diff contains no generated data, secrets, private audio, or model weights;
-- the PR records exact verification evidence without a per-commit development
-  diary or duplicated Issue body; and
-- the author has reviewed the complete staged diff.
+## 接口、架构和发布
 
-## Architecture decision threshold
+- `voice_nav_interfaces` 不依赖项目业务包。
+- `voice_nav_agent` 不发布车轮或最终速度命令；LLM 输出不可信，必须经过强类型 Mission gate。
+- `voice_nav_audio` 不依赖 Nav2、SLAM 或 Gazebo；`voice_nav_mission` 不依赖 Gazebo；`voice_nav_sim` 只包含仿真适配器；`voice_nav_bringup` 只组合模块和配置。
+- 每条动态 TF 边和最终运动输出只有一个 owner。
+- ADR 只记录代价高、缺少上下文会令人意外、且存在真实权衡的决定。
+- 发布代表连贯的能力里程碑，不代表单个分支或提交；遵循[发布策略](docs/process/release-policy.md)。
 
-Write an ADR only when the choice is costly to reverse, surprising without its
-context, and the result of a real trade-off. Ordinary implementation details
-belong in code, tests, configuration, or the relevant Interface document.
-
-## Interface and dependency rules
-
-- `voice_nav_interfaces` depends on no project business package.
-- `voice_nav_agent` never publishes wheel or final velocity commands.
-- `voice_nav_audio` does not depend on Nav2, SLAM, or Gazebo.
-- `voice_nav_mission` does not depend on Gazebo.
-- `voice_nav_sim` contains simulation adapters, not domain behavior.
-- `voice_nav_bringup` composes Modules and configuration but owns no business
-  rules.
-- Every dynamic TF edge and final motion output has exactly one owner.
-- LLM output is untrusted and must pass a strongly typed Mission gate.
-
-## Releases
-
-Releases represent coherent capability milestones, not individual branches or
-commits. They follow [the release policy](docs/process/release-policy.md).
-The current archive tag is recovery evidence and is not a supported release.
-
-The repository currently has one maintainer. CI and resolved conversations are
-required; approval by the PR author never substitutes for independent review.
+仓库当前只有一名维护者。CI 和已解决的对话仍是必须条件；PR 作者的批准不能替代独立审查。
