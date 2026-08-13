@@ -352,6 +352,17 @@ if(BUILD_TESTING)
   )
 
   ament_add_gtest(
+    relative_motion_policy_selector_test
+    test/relative_motion_policy_selector_test.cpp
+  )
+  target_compile_features(
+    relative_motion_policy_selector_test PUBLIC cxx_std_17)
+  target_include_directories(
+    relative_motion_policy_selector_test
+    PRIVATE include src
+  )
+
+  ament_add_gtest(
     motion_source_freshness_test
     test/motion_source_freshness_test.cpp
   )

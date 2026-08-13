@@ -728,6 +728,20 @@ public:
       if (active) {
         return true;
       }
+      if (completion_record_in_progress_) {
+        // A terminal record with an established zero/stationarity proof is
+        // safe while Runtime has not yet consumed the record.  Reporting an
+        // unhealthy dependency in this handoff interval would fault the
+        // active Mission before its legitimate terminal result is delivered.
+        return teardown_safe_;
+      }
+      if (
+        transaction_kind_ != TransactionKind::Idle ||
+        transaction_in_progress_ || pending_teardown_.has_value() ||
+        !teardown_complete_)
+      {
+        return false;
+      }
       if (!dependencies_fresh_locked(now)) {
         return false;
       }
@@ -744,6 +758,14 @@ public:
       }
     }
     return conditioning_state != MotionConditioningState::Failed;
+  }
+
+  [[nodiscard]] bool transaction_is_idle_for_test() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return transaction_kind_ == TransactionKind::Idle &&
+           !transaction_in_progress_ && !pending_teardown_.has_value() &&
+           !completion_record_in_progress_;
   }
 
   [[nodiscard]] bool safety_faulted() const noexcept
@@ -1195,6 +1217,7 @@ private:
     for (;; ) {
       TransactionKind kind = TransactionKind::Idle;
       std::optional<TeardownRequest> teardown;
+      RelativeMotionCompletionRecordPtr deferred_completion;
       {
         std::unique_lock<std::mutex> lock(mutex_);
         transaction_condition_.wait(lock, [this]() {
@@ -1216,11 +1239,11 @@ private:
 
       try {
         if (kind == TransactionKind::Start) {
-          run_start_transaction();
+          run_start_transaction(deferred_completion);
         } else if (kind == TransactionKind::StartupReconcile) {
           run_startup_reconciliation_transaction();
         } else if (kind == TransactionKind::Teardown && teardown.has_value()) {
-          (void)run_teardown(*teardown);
+          (void)run_teardown(*teardown, &deferred_completion);
         }
       } catch (const std::exception & error) {
         fail_transaction(
@@ -1251,7 +1274,15 @@ private:
           transaction_kind_ = TransactionKind::Idle;
         }
         transaction_in_progress_ = false;
+        if (deferred_completion) {
+          // A terminal result may admit the next Mission step.  Make it
+          // visible only after this generation's serial transaction drains.
+          completion_record_in_progress_ = true;
+        }
         condition_variable_.notify_all();
+      }
+      if (deferred_completion) {
+        publish_completion(std::move(deferred_completion));
       }
     }
   }
@@ -1370,7 +1401,8 @@ private:
            !cancel_requested_.load() && !shutting_down_;
   }
 
-  void run_start_transaction()
+  void run_start_transaction(
+    RelativeMotionCompletionRecordPtr & deferred_completion)
   {
     MotionToken token;
     MissionStep step;
@@ -1399,7 +1431,7 @@ private:
       }
     }
     if (!prepared.ok || prepared.state != MotionConditioningState::Prepared) {
-      finish_start_failure(token, prepared);
+      finish_start_failure(token, prepared, deferred_completion);
       return;
     }
 
@@ -1419,7 +1451,7 @@ private:
       }
     }
     if (!started.ok || started.state != MotionConditioningState::Running) {
-      finish_start_failure(token, started);
+      finish_start_failure(token, started, deferred_completion);
       return;
     }
 
@@ -1642,6 +1674,9 @@ private:
       }
       condition_variable_.notify_all();
     }
+    if (conditioning_config_.after_adapter_completion_publish) {
+      conditioning_config_.after_adapter_completion_publish();
+    }
     if (!accepted) {
       RCLCPP_ERROR(
         node_.get_logger(),
@@ -1651,7 +1686,8 @@ private:
 
   void finish_start_failure(
     const MotionToken & token,
-    const MotionConditioningResult & conditioning_result)
+    const MotionConditioningResult & conditioning_result,
+    RelativeMotionCompletionRecordPtr & deferred_completion)
   {
     const bool zero_proven = conditioning_result.zero_proven &&
       conditioning_result.zero_proven_at != TimePoint{};
@@ -1696,7 +1732,7 @@ private:
       static_cast<unsigned int>(conditioning_result.failure),
       zero_proven ? 1 : 0,
       conditioning_result.detail.c_str());
-    publish_completion(std::move(completion));
+    deferred_completion = std::move(completion);
   }
 
   [[nodiscard]] bool wait_for_stationarity(
@@ -1765,7 +1801,8 @@ private:
   }
 
   [[nodiscard]] bool run_teardown(
-    const TeardownRequest & request)
+    const TeardownRequest & request,
+    RelativeMotionCompletionRecordPtr * deferred_completion = nullptr)
   {
     MotionConditioningResult conditioning_result;
     try {
@@ -1901,7 +1938,11 @@ private:
       if (conditioning_config_.before_adapter_completion_publish) {
         conditioning_config_.before_adapter_completion_publish();
       }
-      publish_completion(std::move(completion));
+      if (deferred_completion != nullptr) {
+        *deferred_completion = std::move(completion);
+      } else {
+        publish_completion(std::move(completion));
+      }
     }
     const bool safe = zero && (!mission_active || stationary) &&
       !conditioning_failure_is_safety_terminal(conditioning_result.failure);
@@ -2119,6 +2160,12 @@ bool detail::RelativeMotionRosAdapterTestAccess::start_raw_producer(
   const std::string & raw_topic)
 {
   return adapter.impl_ && adapter.impl_->start_raw_producer_for_test(raw_topic);
+}
+
+bool detail::RelativeMotionRosAdapterTestAccess::transaction_is_idle(
+  const RelativeMotionRosAdapter & adapter)
+{
+  return adapter.impl_ && adapter.impl_->transaction_is_idle_for_test();
 }
 
 void detail::begin_relative_motion_shutdown(

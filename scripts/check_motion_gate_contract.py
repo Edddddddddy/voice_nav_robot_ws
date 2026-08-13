@@ -2305,13 +2305,15 @@ def validate_bringup_cmake(path: Path) -> None:
             "test/test_mission_runtime_crash_stop.py",
             "test/test_motion_gate_consumer_deadman.py",
             "test/test_relative_motion_product.py",
+            "test/test_mapping_mode.py",
         ),
-        (180, 300, 300, 300),
+        (180, 300, 300, 300, 330),
         (
             None,
             "mission_runtime_crash_stop",
             "motion_gate_consumer_deadman",
             None,
+            "mapping_mode",
         ),
     )
     install_match = re.search(

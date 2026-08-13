@@ -45,6 +45,7 @@
 #include "voice_nav_mission/mission_action_result_router.hpp"
 #include "voice_nav_mission/motion_authority_ros_adapter.hpp"
 #include "voice_nav_mission/relative_motion_ros_adapter.hpp"
+#include "relative_motion_policy_selector.hpp"
 #include "voice_nav_mission/runtime_admission_gate.hpp"
 #include "voice_nav_mission/runtime_emergency_fence.hpp"
 #include "voice_nav_mission/runtime_execution_plane.hpp"
@@ -302,7 +303,7 @@ public:
         (void)enqueue_internal_event(RuntimeEvent{0U, GateSnapshotEvent{snapshot}});
       });
     const auto initial_gate_snapshot = authority_->snapshot();
-    RelativeMotionPolicy motion_policy;
+    auto motion_policy = detail::relative_motion_policy_for(config_.operating_mode);
     motion_policy.stationarity_deadline = config_.stationarity_deadline;
     MotionConditioningConfig conditioning_config;
     conditioning_config.stop_barrier = config_.stop_barrier;

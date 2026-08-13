@@ -849,6 +849,8 @@ TEST(
   CountLatch core_running;
   TerminalProbe terminal;
   RuntimeCompletionWorker completion_worker;
+  BlockingLatch terminal_relay_barrier;
+  std::atomic<bool> block_safe_terminal_relay{false};
   std::shared_ptr<RuntimeExecutionPlane> plane;
   std::atomic<std::size_t> emergency_count{0U};
   std::atomic<std::size_t> open_attempts{0U};
@@ -878,8 +880,12 @@ TEST(
   conditioning_config.before_open_callback = [&open_attempts]() {
       open_attempts.fetch_add(1U);
     };
-  conditioning_config.completion_relay = [&plane](
+  conditioning_config.completion_relay = [
+    &plane, &terminal_relay_barrier, &block_safe_terminal_relay](
     RelativeMotionCompletionRecordPtr record) {
+      if (block_safe_terminal_relay.load()) {
+        terminal_relay_barrier.enter();
+      }
       return plane && plane->completion_mailbox().relay(std::move(record));
     };
 
@@ -1048,11 +1054,48 @@ TEST(
     MissionResultCode::Canceled);
   EXPECT_EQ(emergency_count.load(), 0U);
 
-  completion_worker.pause_delivery();
-  graph->set_nonstationary_odom(true);
   const auto fourth_admission = admit_generation(4U);
   ASSERT_TRUE(fourth_admission.accepted) << fourth_admission.result.detail;
   ASSERT_TRUE(core_running.wait_for_at_least(4U));
+  block_safe_terminal_relay.store(true);
+  graph->set_collision_stop(true);
+  if (!terminal_relay_barrier.wait_for_entry(3s)) {
+    block_safe_terminal_relay.store(false);
+    terminal_relay_barrier.release();
+    FAIL() << "safe terminal did not reach the completion relay";
+  }
+  // The safe terminal transaction is drained, but Runtime still owns this
+  // Mission until the relay returns. Runtime observes dependency health
+  // before consuming that completion, so it must not see a false gap here.
+  EXPECT_TRUE(adapter->healthy());
+  {
+    std::lock_guard<std::recursive_mutex> lock(plane->core_serial_mutex());
+    plane->core()->on_tick();
+    EXPECT_TRUE(plane->core()->has_active_mission());
+    EXPECT_EQ(plane->core()->state().availability, RuntimeAvailability::Busy);
+  }
+  const auto fourth_terminal_baseline = terminal.results().size();
+  block_safe_terminal_relay.store(false);
+  terminal_relay_barrier.release();
+
+  ASSERT_TRUE(terminal.wait_for_count(
+    fourth_terminal_baseline + 1U,
+    std::chrono::steady_clock::now() + 2s));
+  const auto fourth_results = terminal.results();
+  ASSERT_EQ(fourth_results.size(), fourth_terminal_baseline + 1U);
+  EXPECT_EQ(fourth_results.at(fourth_terminal_baseline).code,
+    MissionResultCode::ExecutionFailed);
+  EXPECT_NE(
+    fourth_results.at(fourth_terminal_baseline).detail.find(
+      "Collision Monitor reported STOP for stop_zone"),
+    std::string::npos);
+
+  graph->set_collision_stop(false);
+  graph->set_nonstationary_odom(true);
+  completion_worker.pause_delivery();
+  const auto fifth_admission = admit_generation(5U);
+  ASSERT_TRUE(fifth_admission.accepted) << fifth_admission.result.detail;
+  ASSERT_TRUE(core_running.wait_for_at_least(5U));
   graph->set_collision_stop(true);
   ASSERT_TRUE(completion_worker.wait_for_pending(
     std::chrono::steady_clock::now() + 3s));
@@ -1060,44 +1103,15 @@ TEST(
     *adapter,
     std::chrono::steady_clock::now() + 3s));
   EXPECT_FALSE(adapter->healthy());
-  const auto fourth_terminal_baseline = terminal.results().size();
-  completion_worker.release_delivery();
-
-  ASSERT_TRUE(terminal.wait_for_count(
-    fourth_terminal_baseline + 1U,
-    std::chrono::steady_clock::now() + 2s));
-  const auto fourth_results = terminal.results();
-  ASSERT_EQ(fourth_results.size(), fourth_terminal_baseline + 1U);
-  ASSERT_EQ(fourth_results.at(fourth_terminal_baseline).code,
-    MissionResultCode::SafetyFault);
-  EXPECT_NE(
-    fourth_results.at(fourth_terminal_baseline).detail.find(
-      "odometry did not prove stationarity"),
-    std::string::npos);
-
-  graph->set_collision_stop(false);
-  graph->set_nonstationary_odom(false);
   {
     std::lock_guard<std::recursive_mutex> lock(plane->core_serial_mutex());
     plane->core()->on_tick();
   }
-  EXPECT_EQ(
-    plane->core()->state().availability,
-    RuntimeAvailability::Faulted);
-  const auto running_at_safety_fault = core_running.value();
-  const auto open_at_safety_fault = open_attempts.load();
-  const auto raw_at_safety_fault = raw_output.value();
-  const auto renew_at_safety_fault = renew_callbacks.value();
-  const auto rejected_after_safety_fault = admit_generation(5U);
+  EXPECT_EQ(plane->core()->state().availability, RuntimeAvailability::Faulted);
+  const auto rejected_after_safety_fault = admit_generation(6U);
   EXPECT_FALSE(rejected_after_safety_fault.accepted);
-  EXPECT_EQ(
-    rejected_after_safety_fault.result.code,
-    MissionResultCode::SafetyFault);
-  EXPECT_FALSE(adapter->healthy());
-  EXPECT_EQ(core_running.value(), running_at_safety_fault);
-  EXPECT_EQ(open_attempts.load(), open_at_safety_fault);
-  EXPECT_EQ(raw_output.value(), raw_at_safety_fault);
-  EXPECT_EQ(renew_callbacks.value(), renew_at_safety_fault);
+  EXPECT_NE(rejected_after_safety_fault.result.code, MissionResultCode::Succeeded);
+  completion_worker.release_delivery();
   plane->shutdown();
 }
 

@@ -1,6 +1,7 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="voice_nav_robot">
   <xacro:arg name="controllers_file" default="" />
+  <xacro:arg name="laser_update_rate" default="10" />
 
   <!-- 车体参数：X 前方，Y 左方，Z 上方 -->
   <xacro:property name="base_radius" value="0.20" />
@@ -182,7 +183,7 @@
       <topic>/scan</topic>
       <gz_frame_id>laser_link</gz_frame_id>
       <always_on>true</always_on>
-      <update_rate>10</update_rate>
+      <update_rate>$(arg laser_update_rate)</update_rate>
       <lidar>
         <scan>
           <horizontal>

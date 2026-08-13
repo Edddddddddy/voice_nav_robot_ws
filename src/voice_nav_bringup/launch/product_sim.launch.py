@@ -26,6 +26,8 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     headless = LaunchConfiguration('headless')
+    world_name = LaunchConfiguration('world_name')
+    laser_update_rate = LaunchConfiguration('laser_update_rate')
     shutdown_on_gazebo_exit = LaunchConfiguration(
         'shutdown_on_gazebo_exit'
     )
@@ -41,6 +43,8 @@ def generate_launch_description():
         ),
         launch_arguments={
             'headless': headless,
+            'world_name': world_name,
+            'laser_update_rate': laser_update_rate,
             'shutdown_on_gazebo_exit': shutdown_on_gazebo_exit,
         }.items(),
     )
@@ -99,6 +103,18 @@ def generate_launch_description():
                     'disable this while joining Gazebo explicitly.'
                 ),
                 choices=['true', 'false'],
+            ),
+            DeclareLaunchArgument(
+                'world_name',
+                default_value='voice_nav_test_world',
+                description='Select one trusted VoiceNav simulation world.',
+                choices=['voice_nav_test_world', 'voice_nav_house_world'],
+            ),
+            DeclareLaunchArgument(
+                'laser_update_rate',
+                default_value='10',
+                description='Select one trusted LiDAR sampling profile.',
+                choices=['10', '20'],
             ),
             simulation,
             motion_conditioning_container,
