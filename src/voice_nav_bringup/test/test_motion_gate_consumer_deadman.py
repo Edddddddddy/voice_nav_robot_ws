@@ -113,8 +113,10 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
         pidfd_kill = None
         pre_kill_observation = None
         post_kill_observation = None
+        final_endpoint_disappearance = None
         signal_boundary_last_nonzero_sim_ns = None
         last_nonzero_sim_ns = None
+        replacement_final_observation = None
         try:
             old_runtime = self.probe.wait_runtime_ready()
             self.probe.wait_gate_instance()
@@ -171,8 +173,11 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                 signal_boundary_motion['observed_ns']
             )
             proc_info.assertWaitForShutdown(gate, timeout=10.0)
-            # Exact process death supersedes a stale DDS discovery endpoint;
-            # the bounded final-stream fence below requires fresh quiescence.
+            final_endpoint_disappearance = (
+                self.probe.wait_final_endpoint_disappearance(
+                    signal_boundary_motion['final_endpoint_fence']
+                )
+            )
             post_kill_observation = self.probe.diagnostic()
             signal_boundary_last_nonzero_sim_ns = support._stamp_ns(
                 signal_boundary_motion['final'][1]
@@ -190,11 +195,17 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
             consumer_zero = self.probe.wait_confirm_consumer_timeout(
                 signal_boundary_motion['final'],
                 consumer_zero,
+                final_endpoint_fence=(
+                    signal_boundary_motion['final_endpoint_fence']
+                ),
             )
             consumer_timeout_trace = consumer_zero['association']
             last_nonzero_sim_ns = consumer_zero['last_nonzero_sim_ns']
             runtime_fault = self.probe.wait_runtime_fault(
                 after_monotonic_ns=kill_ack_ns,
+            )
+            replacement_final_observation = (
+                self.probe.begin_replacement_final_observation_epoch()
             )
 
             replacement = support.restart_product_node(
@@ -277,6 +288,31 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                 signal_boundary_last_nonzero_sim_ns=(
                     signal_boundary_last_nonzero_sim_ns
                 ),
+                motion_proof_anchor=(
+                    consumer_zero['source_finalization']['motion_proof_anchor']
+                ),
+                consumer_source_anchor=(
+                    consumer_zero['source_finalization'][
+                        'consumer_source_anchor'
+                    ]
+                ),
+                post_pidfd_final_endpoint_disappearance=(
+                    final_endpoint_disappearance
+                ),
+                finalized_trace_final_endpoint_disappearance=(
+                    consumer_zero['final_endpoint_disappearance']
+                ),
+                final_quiescence=consumer_zero['final_quiescence'],
+                limited_zero_watermark=consumer_zero[
+                    'limited_zero_watermark'
+                ],
+                endpoint_continuity=consumer_zero['endpoint_continuity'],
+                finalized_trace_checkpoint=(
+                    consumer_zero['finalized_trace_checkpoint']
+                ),
+                replacement_final_observation=(
+                    replacement_final_observation
+                ),
                 last_nonzero_sim_ns=last_nonzero_sim_ns,
                 last_nonzero_receipt_ns=(
                     consumer_zero['last_nonzero_receipt_ns']
@@ -320,6 +356,10 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                 pidfd_kill=pidfd_kill,
                 pre_kill_observation=pre_kill_observation,
                 post_kill_observation=post_kill_observation,
+                final_endpoint_disappearance=final_endpoint_disappearance,
+                replacement_final_observation=(
+                    replacement_final_observation
+                ),
                 startup_order=getattr(self, 'startup_order', []),
                 diagnostics=self.probe.diagnostic(),
             )
