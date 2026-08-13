@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "assets": [
+    {
+      "id": "portaudio",
+      "version": "v19.7.0",
+      "revision": "147dd722548358763a8b649b3e4b41dfffbcfbb6",
+      "url": "https://codeload.github.com/PortAudio/portaudio/tar.gz/147dd722548358763a8b649b3e4b41dfffbcfbb6",
+      "size": 1463329,
+      "sha256": "95457b809ce60d4d4790f84bb692e271f644e59d8adf96feb988c89ab52a506a",
+      "license": "MIT",
+      "license_url": "https://github.com/PortAudio/portaudio/blob/147dd722548358763a8b649b3e4b41dfffbcfbb6/LICENSE.txt",
+      "destination": "portaudio/portaudio-147dd722548358763a8b649b3e4b41dfffbcfbb6.tar.gz",
+      "build_options": {"system": "CMake", "PA_BUILD_SHARED": "OFF", "PA_BUILD_TESTS": "OFF"}
+    },
+    {
+      "id": "webrtc-audio-processing",
+      "version": "2.1",
+      "revision": "2.1",
+      "url": "https://gstreamer.freedesktop.org/src/mirror/webrtc-audio-processing/webrtc-audio-processing-2.1.tar.xz",
+      "size": 604192,
+      "sha256": "ae9302824b2038d394f10213cab05312c564a038434269f11dbf68f511f9f9fe",
+      "license": "BSD-3-Clause",
+      "license_url": "https://cgit.freedesktop.org/pulseaudio/webrtc-audio-processing/tree/COPYING?h=2.1",
+      "destination": "webrtc-audio-processing/webrtc-audio-processing-2.1.tar.xz",
+      "build_options": {"system": "Meson", "default_library": "static", "tests": "disabled"}
+    },
+    {
+      "id": "abseil-cpp",
+      "version": "20240722.0",
+      "revision": "20240722.0",
+      "url": "https://github.com/abseil/abseil-cpp/releases/download/20240722.0/abseil-cpp-20240722.0.tar.gz",
+      "size": 2242861,
+      "sha256": "f50e5ac311a81382da7fa75b97310e4b9006474f9560ac46f54a9967f07d4ae3",
+      "license": "Apache-2.0",
+      "license_url": "https://github.com/abseil/abseil-cpp/blob/20240722.0/LICENSE",
+      "destination": "abseil-cpp/abseil-cpp-20240722.0.tar.gz",
+      "build_options": {"system": "CMake", "BUILD_SHARED_LIBS": "OFF", "ABSL_BUILD_TESTING": "OFF"}
+    },
+    {
+      "id": "abseil-cpp-meson-patch",
+      "version": "20240722.0-3",
+      "revision": "20240722.0-3",
+      "url": "https://wrapdb.mesonbuild.com/v2/abseil-cpp_20240722.0-3/get_patch",
+      "size": 5929,
+      "sha256": "12dd8df1488a314c53e3751abd2750cf233b830651d168b6a9f15e7d0cf71f7b",
+      "license": "Apache-2.0",
+      "license_url": "https://wrapdb.mesonbuild.com/v2/abseil-cpp_20240722.0-3/get_patch",
+      "destination": "abseil-cpp/abseil-cpp_20240722.0-3_patch.zip",
+      "build_options": {"system": "Meson", "wrap": "20240722.0-3"}
+    },
+    {
+      "id": "sherpa-onnx",
+      "version": "v1.13.4",
+      "revision": "142807252687d81b40d6315f23470a1512a00de3",
+      "url": "https://codeload.github.com/k2-fsa/sherpa-onnx/tar.gz/142807252687d81b40d6315f23470a1512a00de3",
+      "size": 9840362,
+      "sha256": "f0dc7c9b41b8691313daee671e826eb23946fa1320559a8d37e84f8774af76b2",
+      "license": "Apache-2.0",
+      "license_url": "https://github.com/k2-fsa/sherpa-onnx/blob/142807252687d81b40d6315f23470a1512a00de3/LICENSE",
+      "destination": "sherpa-onnx/sherpa-onnx-142807252687d81b40d6315f23470a1512a00de3.tar.gz",
+      "build_options": {"system": "CMake", "BUILD_SHARED_LIBS": "OFF", "SHERPA_ONNX_ENABLE_TESTS": "OFF"}
+    }
+  ]
+}

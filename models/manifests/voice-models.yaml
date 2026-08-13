@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "assets": [
+    {
+      "id": "kws-zh-en-3m-2025-12-20",
+      "version": "sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20",
+      "revision": "2025-12-20",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20.tar.bz2",
+      "size": 32885699,
+      "sha256": "68447f4fbc67e70eee3a93961f36e81e98f47aef73ce7e7ca00885c6cd3616a6",
+      "destination": "kws/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20.tar.bz2",
+      "build_options": {"runtime": "sherpa-onnx", "provider": "cpu"},
+      "sample_rate": 16000,
+      "runtime_license": "Apache-2.0",
+      "runtime_license_url": "https://github.com/k2-fsa/sherpa-onnx/blob/142807252687d81b40d6315f23470a1512a00de3/LICENSE",
+      "model_provenance": {
+        "status": "unresolved",
+        "weights_license": null,
+        "weights_license_url": null,
+        "training_data_provenance": "未找到可核验的 KWS 权重或训练数据权威许可；sherpa-onnx Apache-2.0 仅覆盖运行时框架。",
+        "training_data_url": null,
+        "model_card_url": "https://k2-fsa.github.io/sherpa/onnx/kws/pretrained_models/index.html"
+      },
+      "release_asset_id": null
+    },
+    {
+      "id": "vad-silero-int8",
+      "version": "silero_vad.int8.onnx",
+      "revision": "silero-vad-int8",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.int8.onnx",
+      "size": 212860,
+      "sha256": "c36d490aff5ab924ca6c7aeec4d8f6bd3d22db6fa17611b9c5b17eae58ac3a20",
+      "destination": "vad/silero_vad.int8.onnx",
+      "build_options": {"runtime": "sherpa-onnx", "provider": "cpu"},
+      "sample_rate": 16000,
+      "runtime_license": "Apache-2.0",
+      "runtime_license_url": "https://github.com/k2-fsa/sherpa-onnx/blob/142807252687d81b40d6315f23470a1512a00de3/LICENSE",
+      "model_provenance": {
+        "status": "resolved",
+        "weights_license": "MIT",
+        "weights_license_url": "https://github.com/snakers4/silero-vad/blob/v5.1.2/LICENSE",
+        "training_data_provenance": "Silero VAD 上游 MIT 模型仓库与模型卡是权重及训练来源的可追溯出处；sherpa-onnx Apache-2.0 不替代该模型许可证。",
+        "training_data_url": "https://github.com/snakers4/silero-vad/tree/v5.1.2",
+        "model_card_url": "https://k2-fsa.github.io/sherpa/onnx/vad/silero-vad.html"
+      },
+      "release_asset_id": null
+    },
+    {
+      "id": "asr-zh-int8-2025-06-30",
+      "version": "sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30",
+      "revision": "2025-06-30",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30.tar.bz2",
+      "size": 132634597,
+      "sha256": "5a2832047ea1f97dd0dc595b816c230c4bafad65cfc0341fa57517cadc50afd0",
+      "destination": "asr/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30.tar.bz2",
+      "build_options": {"runtime": "sherpa-onnx", "provider": "cpu", "streaming": "ON"},
+      "sample_rate": 16000,
+      "runtime_license": "Apache-2.0",
+      "runtime_license_url": "https://github.com/k2-fsa/sherpa-onnx/blob/142807252687d81b40d6315f23470a1512a00de3/LICENSE",
+      "model_provenance": {
+        "status": "unresolved",
+        "weights_license": null,
+        "weights_license_url": null,
+        "training_data_provenance": "未找到可核验的 ASR 权重及训练数据权威许可；sherpa-onnx Apache-2.0 仅覆盖运行时框架。",
+        "training_data_url": null,
+        "model_card_url": "https://k2-fsa.github.io/sherpa/onnx/pretrained_models/online-transducer/zipformer-transducer-models.html"
+      },
+      "release_asset_id": null
+    },
+    {
+      "id": "tts-chaowen-medium-int8",
+      "version": "vits-piper-zh_CN-chaowen-medium-int8.tar.bz2",
+      "revision": "406468505",
+      "url": "https://api.github.com/repos/k2-fsa/sherpa-onnx/releases/assets/406468505",
+      "size": 14011298,
+      "sha256": "f5f7c8628427fbb259ea4b7ec1a9a822a0c04e3f267071f0abfa0610371d9e0c",
+      "destination": "tts/vits-piper-zh_CN-chaowen-medium-int8.tar.bz2",
+      "build_options": {"runtime": "sherpa-onnx", "provider": "cpu", "quantization": "int8"},
+      "sample_rate": 22050,
+      "runtime_license": "Apache-2.0",
+      "runtime_license_url": "https://github.com/k2-fsa/sherpa-onnx/blob/142807252687d81b40d6315f23470a1512a00de3/LICENSE",
+      "model_provenance": {
+        "status": "restricted",
+        "weights_license": "Xiao Ya/BZNSYP upstream data restricted to non-commercial use",
+        "weights_license_url": "https://k2-fsa.github.io/sherpa/onnx/tts/all/Chinese/vits-piper-zh_CN-chaowen-medium.html",
+        "training_data_provenance": "Chaowen 模型卡记录 Xiao Ya 基座与 BZNSYP 训练数据链；上游限制为非商业使用。",
+        "training_data_url": "https://k2-fsa.github.io/sherpa/onnx/tts/all/Chinese/vits-piper-zh_CN-chaowen-medium.html",
+        "model_card_url": "https://k2-fsa.github.io/sherpa/onnx/tts/all/Chinese/vits-piper-zh_CN-chaowen-medium.html"
+      },
+      "release_asset_id": 406468505
+    }
+  ]
+}
