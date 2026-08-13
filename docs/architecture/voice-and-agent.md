@@ -140,15 +140,37 @@ AudioProcessing 2.1 upstream build metadata 选择并验证；v0.1 architecture 
 runtime version 与固定 Mandarin acceptance corpus。weight 是本地 artifact，永不 commit。默认 policy：
 
 - KWS：`sherpa-onnx-kws-zipformer-zh-en-3M`；
-- ASR：先用 `14M Chinese Streaming Zipformer`；若未通过 fixed-corpus gate，自动选 locked
-  `2025-06-30 int8` model；
-- TTS：`vits-piper-zh_CN-chaowen-medium`；
+- ASR：唯一冻结 `2025-06-30 int8` model；其模型许可证当前为 `unresolved`，不得进入 Runtime；
+- TTS：`vits-piper-zh_CN-chaowen-medium-int8.tar.bz2`（GitHub release asset `406468505`）；
 - LLM：官方 `Qwen3-0.6B-GGUF` `Q8_0`。
 
 model selection 是可复现 policy，不是 online “latest” lookup。runtime 不会静默 download 或 upgrade model。
 `llama-server` 是由固定 llama.cpp commit 构建的独立 dependency process：只 bind loopback，加载 locked GGUF，并使用
 bounded context、output、concurrency 与 request deadline。v1.0 acceptance 没有 cloud fallback。
 
+语音资产使用独立的两个 JSON-compatible YAML lock：
+[`third_party/locks/audio-dependencies.yaml`](../../third_party/locks/audio-dependencies.yaml) 与
+[`models/manifests/voice-models.yaml`](../../models/manifests/voice-models.yaml)。lock schema 对每个资产闭合记录 identity
+（version、immutable revision/asset ID、URL、size、SHA-256、normalized destination）、build options 与许可证状态；
+version/revision 不能是 `main`、`master`、`latest` 或 `HEAD`，ID 和 destination 跨两个 manifest 全局唯一。
+
+模型 lock 将 sherpa-onnx 等运行时/框架许可证与模型权重、训练数据 provenance 分开。KWS 及 ASR 当前为
+`unresolved`：没有权威模型/训练数据许可时，默认 provision 与 verify 会在创建 artifact directory 或发起下载前 fail-closed。
+它们不能进入 KWS/ASR Runtime，直至维护者取得并锁定权威许可。VAD 记录 Silero 上游 MIT 模型 provenance，不能以
+sherpa-onnx Apache-2.0 混充；Chaowen 记录模型卡及 Xiao Ya/BZNSYP 非商业继承链，状态为 `restricted`。
+
+Chaowen TTS 使用不可变 GitHub release asset `406468505`：
+`vits-piper-zh_CN-chaowen-medium-int8.tar.bz2`、`14011298` bytes、
+`f5f7c8628427fbb259ea4b7ec1a9a822a0c04e3f267071f0abfa0610371d9e0c`。它通过
+`https://api.github.com/repos/k2-fsa/sherpa-onnx/releases/assets/406468505` 下载，并带
+`Accept: application/octet-stream`；下载后仍需 size/SHA-256 核验，临时、截断、损坏或错误哈希文件永不发布。
+
+维护者在有网络的环境显式运行 `bash scripts/provision_voice_assets.sh`；真实资产存在时使用
+`bash scripts/provision_voice_assets.sh --verify` 重验。正式 CLI 只接受仓库内且 `.gitignore` 覆盖的
+`.deps/voice-assets/` 与 `models/weights/voice-assets/`；自定义 root 仅是 Python test seam。运行时不得下载、发现
+latest、访问云，或将临时、缺失、损坏、许可证 unresolved 或未经验证的资产当成完成输入。真实完整资产下载与 verify 是
+维护/Release evidence，不属于普通 PR 的小 fixture 测试。完整第三方声明见
+[THIRD_PARTY_NOTICES.md](../../THIRD_PARTY_NOTICES.md)。
 ## Agent 决策顺序
 
 每个 `COMMAND` turn，Agent 先分配 source sequence，并从 `/mission/state` snapshot `runtime_instance_id` 与
