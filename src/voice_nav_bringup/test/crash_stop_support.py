@@ -90,6 +90,21 @@ class WorkspaceInterfaceTypes:
     gate_control: Any
 
 
+@dataclass(frozen=True)
+class CommandObservation:
+    """One observed command with optional Jazzy publication metadata."""
+
+    receipt_ns: int
+    message: Any
+    publication_sequence_number: int | None = None
+
+    def __iter__(self):
+        return iter((self.receipt_ns, self.message))
+
+    def __getitem__(self, index: int):
+        return (self.receipt_ns, self.message)[index]
+
+
 def _load_workspace_interface_types() -> WorkspaceInterfaceTypes:
     from voice_nav_interfaces.action import ExecuteMission
     from voice_nav_interfaces.msg import MissionState, MissionStep
@@ -387,6 +402,21 @@ class ConsumerTraceAmbiguous(AssertionError):
         }
         super().__init__(
             'controller consumer evidence ambiguous: '
+            + json.dumps(self.evidence, sort_keys=True)
+        )
+
+
+class ConsumerTraceWatermarkTimeout(AssertionError):
+    """Fail closed when the controller zero stream cannot reach its watermark."""
+
+    def __init__(self, **details: Any) -> None:
+        self.evidence = {
+            'status': 'timeout',
+            'reason': 'limited zero watermark did not advance',
+            **details,
+        }
+        super().__init__(
+            'controller consumer evidence incomplete: '
             + json.dumps(self.evidence, sort_keys=True)
         )
 
@@ -759,9 +789,7 @@ class CrashStopProbe:
             self.node.create_subscription(
                 TwistStamped,
                 LIMITED_COMMAND_TOPIC,
-                lambda message: self._append(
-                    self.limited_commands, message
-                ),
+                self._append_limited,
                 100,
                 callback_group=self.safety_observation_group,
             ),
@@ -811,6 +839,35 @@ class CrashStopProbe:
     def _append(self, collection: deque, message: Any) -> None:
         with self.lock:
             collection.append((time.monotonic_ns(), message))
+
+    def _append_limited(self, message: Any, message_info: Any) -> None:
+        if isinstance(message_info, dict):
+            sequence = message_info.get('publication_sequence_number')
+        else:
+            sequence = getattr(message_info, 'publication_sequence_number', None)
+        if not isinstance(sequence, int) or isinstance(sequence, bool):
+            sequence = None
+        with self.lock:
+            self.limited_commands.append(
+                CommandObservation(
+                    receipt_ns=time.monotonic_ns(),
+                    message=message,
+                    publication_sequence_number=sequence,
+                )
+            )
+
+    def _limited_endpoint_snapshot(self) -> tuple[str, ...]:
+        provider = getattr(self, '_limited_endpoint_snapshot_provider', None)
+        if provider is not None:
+            return tuple(provider())
+        return tuple(
+            sorted(
+                bytes(endpoint.endpoint_gid).hex()
+                for endpoint in self.node.get_publishers_info_by_topic(
+                    LIMITED_COMMAND_TOPIC
+                )
+            )
+        )
 
     def _snapshot(self, collection: deque):
         with self.lock:
@@ -1107,6 +1164,10 @@ class CrashStopProbe:
                 raise AssertionError(
                     'motion proof was stale at the pidfd signal boundary'
                 )
+            endpoint_gid = self._require_limited_endpoint_continuity(
+                expected_gid=None,
+                checkpoint='signal-boundary',
+            )
             return {
                 'gate': deepcopy(state),
                 'final': (final_sample[0], deepcopy(final_sample[1])),
@@ -1116,6 +1177,10 @@ class CrashStopProbe:
                 ),
                 'clock': clock_sample,
                 'observed_ns': observed_ns,
+                'limited_endpoint_fence': {
+                    'endpoint_gid': endpoint_gid,
+                    'limited_receipt_fence_ns': limited_sample[0],
+                },
             }
 
     def wait_runtime_zero(
@@ -1219,12 +1284,50 @@ class CrashStopProbe:
         raise AssertionError('no bounded final/controller zero proof observed')
 
     def wait_consumer_zero(
-        self, kill_ack_ns: int, signal_boundary_sim_ns: int
+        self,
+        kill_ack_ns: int,
+        signal_boundary_sim_ns: int,
+        limited_endpoint_fence: dict[str, Any],
     ):
         deadline = time.monotonic() + WALL_WATCHDOG_SECONDS
+        endpoint_gid, limited_receipt_fence_ns = (
+            self._limited_endpoint_fence(limited_endpoint_fence)
+        )
         previous_clock = self.latest(self.clock_samples)
         while time.monotonic() < deadline:
-            current_clock = self.latest(self.clock_samples)
+            with self.lock:
+                current_clock = (
+                    self.clock_samples[-1] if self.clock_samples else None
+                )
+                limited_snapshot = tuple(self.limited_commands)
+                self._require_limited_endpoint_continuity(
+                    expected_gid=endpoint_gid,
+                    checkpoint='first-zero',
+                )
+                candidate = next(
+                    (
+                        (receipt_ns, deepcopy(message))
+                        for receipt_ns, message in limited_snapshot
+                        if (
+                            receipt_ns >= kill_ack_ns
+                            and _stamp_ns(message) > signal_boundary_sim_ns
+                            and is_zero(message)
+                        )
+                    ),
+                    None,
+                )
+                if (
+                    candidate is not None
+                    and candidate[0] <= limited_receipt_fence_ns
+                ):
+                    raise ConsumerTraceAmbiguous(
+                        'controller first zero predates signal-boundary '
+                        'receipt fence',
+                        endpoint_gid=endpoint_gid,
+                        limited_receipt_fence_ns=limited_receipt_fence_ns,
+                        zero_receipt_ns=candidate[0],
+                        zero_sim_ns=_stamp_ns(candidate[1]),
+                    )
             if (
                 previous_clock is not None
                 and current_clock is not None
@@ -1236,20 +1339,12 @@ class CrashStopProbe:
                 )
             if current_clock is not None:
                 previous_clock = current_clock
-            candidate = None
-            for receipt_ns, message in self._snapshot(self.limited_commands):
-                stamp_ns = _stamp_ns(message)
-                if (
-                    receipt_ns >= kill_ack_ns
-                    and stamp_ns > signal_boundary_sim_ns
-                    and is_zero(message)
-                ):
-                    candidate = (receipt_ns, deepcopy(message))
-                    break
             if candidate is not None:
                 return {
                     'zero_sim_ns': _stamp_ns(candidate[1]),
                     'zero_receipt_ns': candidate[0],
+                    'endpoint_gid': endpoint_gid,
+                    'limited_receipt_fence_ns': limited_receipt_fence_ns,
                 }
             time.sleep(0.01)
         raise AssertionError(
@@ -1264,9 +1359,12 @@ class CrashStopProbe:
         timeout: float = WALL_WATCHDOG_SECONDS,
     ):
         deadline = time.monotonic() + timeout
-        stable_key = None
-        stable_since_ns = None
-        stable_clock_ns = None
+        endpoint_gid, limited_receipt_fence_ns = (
+            self._consumer_zero_endpoint_fence(consumer_zero)
+        )
+        final_stable_key = None
+        final_stable_since_ns = None
+        final_stable_clock_ns = None
         while time.monotonic() < deadline:
             now_ns = time.monotonic_ns()
             with self.lock:
@@ -1277,36 +1375,36 @@ class CrashStopProbe:
                     if self.clock_samples
                     else None
                 )
+                self._require_limited_endpoint_continuity(
+                    expected_gid=endpoint_gid,
+                    checkpoint='observation',
+                )
             if (
                 not final_snapshot
                 or not limited_snapshot
                 or clock_sample is None
             ):
-                stable_key = None
-                stable_since_ns = None
-                stable_clock_ns = None
+                final_stable_key = None
+                final_stable_since_ns = None
+                final_stable_clock_ns = None
                 time.sleep(0.01)
                 continue
 
             last_receipt_ns, last_message = final_snapshot[-1]
-            limited_receipt_ns, limited_message = limited_snapshot[-1]
-            current_key = (
+            current_final_key = (
                 len(final_snapshot),
                 last_receipt_ns,
                 _stamp_ns(last_message),
-                len(limited_snapshot),
-                limited_receipt_ns,
-                _stamp_ns(limited_message),
             )
-            if current_key != stable_key:
-                stable_key = current_key
-                stable_since_ns = now_ns
-                stable_clock_ns = clock_sample[1]
+            if current_final_key != final_stable_key:
+                final_stable_key = current_final_key
+                final_stable_since_ns = now_ns
+                final_stable_clock_ns = clock_sample[1]
             elif (
-                stable_since_ns is not None
-                and stable_clock_ns is not None
-                and now_ns - stable_since_ns >= FINAL_STREAM_QUIESCENCE_NS
-                and clock_sample[1] - stable_clock_ns
+                final_stable_since_ns is not None
+                and final_stable_clock_ns is not None
+                and now_ns - final_stable_since_ns >= FINAL_STREAM_QUIESCENCE_NS
+                and clock_sample[1] - final_stable_clock_ns
                 >= FINAL_STREAM_QUIESCENCE_NS
             ):
                 with self.lock:
@@ -1322,29 +1420,24 @@ class CrashStopProbe:
                         if confirmed_snapshot
                         else None
                     )
-                    confirmed_limited_last = (
-                        confirmed_limited[-1]
-                        if confirmed_limited
-                        else None
-                    )
-                    confirmed_key = (
+                    confirmed_final_key = (
                         len(confirmed_snapshot),
                         confirmed_last[0],
                         _stamp_ns(confirmed_last[1]),
-                        len(confirmed_limited),
-                        confirmed_limited_last[0],
-                        _stamp_ns(confirmed_limited_last[1]),
-                    ) if (
-                        confirmed_last is not None
-                        and confirmed_limited_last is not None
-                    ) else None
+                    ) if confirmed_last is not None else None
+                    confirmed_endpoint_gid = (
+                        self._require_limited_endpoint_continuity(
+                            expected_gid=endpoint_gid,
+                            checkpoint='final',
+                        )
+                    )
                     if (
-                        confirmed_key == stable_key
+                        confirmed_final_key == final_stable_key
                         and confirmed_clock is not None
-                        and confirmed_clock[1] - stable_clock_ns
+                        and confirmed_clock[1] - final_stable_clock_ns
                         >= FINAL_STREAM_QUIESCENCE_NS
                     ):
-                        return consumer_timeout_result(
+                        controller_consumed_command_trace(
                             confirmed_snapshot,
                             confirmed_limited,
                             source_anchor=source_anchor,
@@ -1353,13 +1446,327 @@ class CrashStopProbe:
                                 consumer_zero['zero_receipt_ns']
                             ),
                         )
-                stable_key = None
-                stable_since_ns = None
-                stable_clock_ns = None
+                        watermark = self._limited_zero_watermark(
+                            confirmed_limited,
+                            consumer_zero,
+                        )
+                        if watermark is not None:
+                            result = consumer_timeout_result(
+                                confirmed_snapshot,
+                                confirmed_limited,
+                                source_anchor=source_anchor,
+                                zero_sim_ns=consumer_zero['zero_sim_ns'],
+                                zero_receipt_ns=(
+                                    consumer_zero['zero_receipt_ns']
+                                ),
+                            )
+                            result['final_quiescence'] = {
+                                'stable_key': list(final_stable_key),
+                                'wall_elapsed_ns': (
+                                    now_ns - final_stable_since_ns
+                                ),
+                                'sim_elapsed_ns': (
+                                    confirmed_clock[1]
+                                    - final_stable_clock_ns
+                                ),
+                            }
+                            result['limited_zero_watermark'] = watermark
+                            result['endpoint_continuity'] = {
+                                'endpoint_gid': confirmed_endpoint_gid,
+                                'signal_boundary_checkpoint': 'singleton',
+                                'first_zero_checkpoint': 'singleton',
+                                'observation_checkpoint': 'singleton',
+                                'final_checkpoint': 'singleton',
+                                'limited_receipt_fence_ns': (
+                                    limited_receipt_fence_ns
+                                ),
+                            }
+                            return result
             time.sleep(0.01)
+        with self.lock:
+            deadline_now_ns = time.monotonic_ns()
+            final_snapshot = tuple(self.final_commands)
+            limited_snapshot = tuple(self.limited_commands)
+            clock_sample = (
+                self.clock_samples[-1] if self.clock_samples else None
+            )
+            self._require_limited_endpoint_continuity(
+                expected_gid=endpoint_gid,
+                checkpoint='deadline',
+            )
+            if (
+                final_snapshot
+                and limited_snapshot
+                and clock_sample is not None
+            ):
+                deadline_last = final_snapshot[-1]
+                deadline_final_key = (
+                    len(final_snapshot),
+                    deadline_last[0],
+                    _stamp_ns(deadline_last[1]),
+                )
+                deadline_watermark = self._limited_zero_watermark(
+                    limited_snapshot,
+                    consumer_zero,
+                )
+                if (
+                    deadline_final_key == final_stable_key
+                    and final_stable_since_ns is not None
+                    and final_stable_clock_ns is not None
+                    and deadline_now_ns - final_stable_since_ns
+                    >= FINAL_STREAM_QUIESCENCE_NS
+                    and clock_sample[1] - final_stable_clock_ns
+                    >= FINAL_STREAM_QUIESCENCE_NS
+                    and deadline_watermark is None
+                ):
+                    raise ConsumerTraceWatermarkTimeout(
+                        endpoint_gid=endpoint_gid,
+                        final_quiescence={
+                            'stable_key': list(final_stable_key),
+                            'wall_elapsed_ns': (
+                                deadline_now_ns - final_stable_since_ns
+                            ),
+                            'sim_elapsed_ns': (
+                                clock_sample[1] - final_stable_clock_ns
+                            ),
+                        },
+                        **self._limited_zero_watermark_evidence(
+                            limited_snapshot,
+                            consumer_zero,
+                        ),
+                    )
         raise AssertionError(
             'final command observer did not quiesce with advancing clock'
         )
+
+    @staticmethod
+    def _consumer_zero_endpoint_fence(
+        consumer_zero: dict[str, Any],
+    ) -> tuple[str, int]:
+        return CrashStopProbe._limited_endpoint_fence(consumer_zero)
+
+    @staticmethod
+    def _limited_endpoint_fence(
+        limited_endpoint_fence: dict[str, Any],
+    ) -> tuple[str, int]:
+        endpoint_gid = limited_endpoint_fence.get('endpoint_gid')
+        if (
+            not isinstance(endpoint_gid, str)
+            or not endpoint_gid
+            or all(character == '0' for character in endpoint_gid)
+        ):
+            raise ConsumerTraceAmbiguous(
+                'limited endpoint identity unavailable',
+                checkpoint='consumer-zero',
+                endpoint_gid=(
+                    endpoint_gid if isinstance(endpoint_gid, str) else ''
+                ),
+            )
+        limited_receipt_fence_ns = limited_endpoint_fence.get(
+            'limited_receipt_fence_ns'
+        )
+        if (
+            not isinstance(limited_receipt_fence_ns, int)
+            or isinstance(limited_receipt_fence_ns, bool)
+        ):
+            raise ConsumerTraceAmbiguous(
+                'limited endpoint fence boundary unavailable',
+                checkpoint='signal-boundary',
+            )
+        return endpoint_gid, limited_receipt_fence_ns
+
+    def _require_limited_endpoint_continuity(
+        self,
+        *,
+        expected_gid: str | None,
+        checkpoint: str,
+    ) -> str:
+        endpoint_gids = self._limited_endpoint_snapshot()
+        if len(endpoint_gids) != 1:
+            raise ConsumerTraceAmbiguous(
+                'limited endpoint set was not singleton',
+                checkpoint=checkpoint,
+                endpoint_count=len(endpoint_gids),
+            )
+        endpoint_gid = endpoint_gids[0]
+        if (
+            not isinstance(endpoint_gid, str)
+            or not endpoint_gid
+            or all(character == '0' for character in endpoint_gid)
+        ):
+            raise ConsumerTraceAmbiguous(
+                'limited endpoint identity unavailable',
+                checkpoint=checkpoint,
+                endpoint_gid=(
+                    endpoint_gid if isinstance(endpoint_gid, str) else ''
+                ),
+            )
+        if expected_gid is not None and endpoint_gid != expected_gid:
+            raise ConsumerTraceAmbiguous(
+                'limited endpoint changed during continuity fence',
+                checkpoint=checkpoint,
+                expected_endpoint_gid=expected_gid,
+                observed_endpoint_gid=endpoint_gid,
+            )
+        return endpoint_gid
+
+    def _limited_zero_watermark(
+        self,
+        limited_snapshot: tuple[Any, ...],
+        consumer_zero: dict[str, int],
+    ) -> dict[str, Any] | None:
+        _assert_strict_trace_order(limited_snapshot, topic=LIMITED_COMMAND_TOPIC)
+        self._assert_limited_publication_sequence_continuity(
+            limited_snapshot
+        )
+        zero_indexes = [
+            index
+            for index, sample in enumerate(limited_snapshot)
+            if (
+                sample[0] == consumer_zero['zero_receipt_ns']
+                and _stamp_ns(sample[1]) == consumer_zero['zero_sim_ns']
+                and is_zero(sample[1])
+            )
+        ]
+        if len(zero_indexes) != 1:
+            raise ConsumerTraceAmbiguous(
+                'provided controller zero was not uniquely observed',
+                matching_zero_count=len(zero_indexes),
+                zero_receipt_ns=consumer_zero['zero_receipt_ns'],
+                zero_sim_ns=consumer_zero['zero_sim_ns'],
+            )
+        first_zero_index = zero_indexes[0]
+        limited_receipt_fence_ns = consumer_zero.get(
+            'limited_receipt_fence_ns'
+        )
+        if (
+            limited_receipt_fence_ns is not None
+            and consumer_zero['zero_receipt_ns']
+            <= limited_receipt_fence_ns
+        ):
+            raise ConsumerTraceAmbiguous(
+                'provided controller zero predates signal-boundary receipt '
+                'fence',
+                limited_receipt_fence_ns=limited_receipt_fence_ns,
+                zero_receipt_ns=consumer_zero['zero_receipt_ns'],
+            )
+        zero_prefix = limited_snapshot[first_zero_index:]
+        first_zero = zero_prefix[0]
+        first_zero_stamp_ns = _stamp_ns(first_zero[1])
+        first_zero_sequence = self._limited_publication_sequence(
+            first_zero,
+            checkpoint='first-zero',
+        )
+        for observation in zero_prefix:
+            if not is_zero(observation[1]):
+                raise ConsumerTraceAmbiguous(
+                    'non-zero controller output after first zero',
+                    first_zero_receipt_ns=first_zero[0],
+                    first_zero_stamp_ns=first_zero_stamp_ns,
+                    observed_receipt_ns=observation[0],
+                    observed_stamp_ns=_stamp_ns(observation[1]),
+                )
+        watermark = zero_prefix[-1]
+        watermark_stamp_ns = _stamp_ns(watermark[1])
+        if (
+            watermark_stamp_ns - first_zero_stamp_ns
+            < FINAL_STREAM_QUIESCENCE_NS
+        ):
+            return None
+        return {
+            'first_zero_stamp_ns': first_zero_stamp_ns,
+            'first_zero_receipt_ns': first_zero[0],
+            'first_zero_publication_sequence_number': first_zero_sequence,
+            'watermark_stamp_ns': watermark_stamp_ns,
+            'watermark_receipt_ns': watermark[0],
+            'watermark_publication_sequence_number': (
+                self._limited_publication_sequence(
+                    watermark,
+                    checkpoint='watermark',
+                )
+            ),
+        }
+
+    def _assert_limited_publication_sequence_continuity(
+        self,
+        limited_snapshot: tuple[Any, ...],
+    ) -> None:
+        previous_sequence = None
+        for observation in limited_snapshot:
+            sequence = self._limited_publication_sequence(
+                observation,
+                checkpoint='observation',
+            )
+            if previous_sequence is not None:
+                if sequence == previous_sequence:
+                    raise ConsumerTraceAmbiguous(
+                        'duplicate limited publication sequence',
+                        previous_sequence=previous_sequence,
+                        publication_sequence_number=sequence,
+                    )
+                if sequence < previous_sequence:
+                    raise ConsumerTraceAmbiguous(
+                        'limited publication sequence regressed',
+                        previous_sequence=previous_sequence,
+                        publication_sequence_number=sequence,
+                    )
+                if sequence > previous_sequence + 1:
+                    raise ConsumerTraceAmbiguous(
+                        'limited publication sequence gap',
+                        expected_sequence=previous_sequence + 1,
+                        publication_sequence_number=sequence,
+                        missing_sequence_count=(
+                            sequence - previous_sequence - 1
+                        ),
+                    )
+            previous_sequence = sequence
+
+    @staticmethod
+    def _limited_publication_sequence(
+        observation: Any,
+        *,
+        checkpoint: str,
+    ) -> int:
+        sequence = getattr(observation, 'publication_sequence_number', None)
+        if not isinstance(sequence, int) or isinstance(sequence, bool):
+            raise ConsumerTraceAmbiguous(
+                'limited publication sequence unavailable',
+                checkpoint=checkpoint,
+                receipt_ns=observation[0],
+                stamp_ns=_stamp_ns(observation[1]),
+            )
+        return sequence
+
+    @staticmethod
+    def _limited_zero_watermark_evidence(
+        limited_snapshot: tuple[Any, ...],
+        consumer_zero: dict[str, int],
+    ) -> dict[str, int]:
+        first_zero = next(
+            (
+                sample
+                for sample in limited_snapshot
+                if (
+                    sample[0] == consumer_zero['zero_receipt_ns']
+                    and _stamp_ns(sample[1]) == consumer_zero['zero_sim_ns']
+                    and is_zero(sample[1])
+                )
+            ),
+            None,
+        )
+        if first_zero is None:
+            return {
+                'zero_receipt_ns': consumer_zero['zero_receipt_ns'],
+                'zero_sim_ns': consumer_zero['zero_sim_ns'],
+            }
+        last_sample = limited_snapshot[-1]
+        return {
+            'first_zero_receipt_ns': first_zero[0],
+            'first_zero_stamp_ns': _stamp_ns(first_zero[1]),
+            'last_limited_receipt_ns': last_sample[0],
+            'last_limited_stamp_ns': _stamp_ns(last_sample[1]),
+            'required_progress_ns': FINAL_STREAM_QUIESCENCE_NS,
+        }
 
     @staticmethod
     def _wheels_stationary(message: JointState) -> bool:

@@ -208,7 +208,7 @@ class ProcessIdentityTest(unittest.TestCase):
             if child.poll() is None:
                 child.wait(timeout=2)
 
-    def test_signal_boundary_precondition_runs_between_graph_and_sigkill(self):
+    def test_signal_boundary_proof_and_receipt_fence_run_before_sigkill(self):
         child, action, event = self.make_child()
         guard = None
         calls = []
@@ -231,11 +231,23 @@ class ProcessIdentityTest(unittest.TestCase):
                 'pidfd_send_signal',
                 side_effect=traced_pidfd_send_signal,
             ):
+                def capture_signal_boundary_evidence():
+                    calls.append('motion-proof')
+                    calls.append('endpoint-receipt-fence')
+
                 guard.kill(
                     lambda: calls.append('graph') or 1,
-                    before_signal=lambda: calls.append('motion'),
+                    before_signal=capture_signal_boundary_evidence,
                 )
-            self.assertEqual(calls, ['graph', 'motion', 'sigkill'])
+            self.assertEqual(
+                calls,
+                [
+                    'graph',
+                    'motion-proof',
+                    'endpoint-receipt-fence',
+                    'sigkill',
+                ],
+            )
             self.assertTrue(guard.sigkill_sent)
             self.assertNotEqual(child.wait(timeout=2), 0)
         finally:

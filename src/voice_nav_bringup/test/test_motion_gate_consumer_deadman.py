@@ -172,7 +172,7 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
             )
             proc_info.assertWaitForShutdown(gate, timeout=10.0)
             # Exact process death supersedes a stale DDS discovery endpoint;
-            # the bounded final-stream fence below drains observer callbacks.
+            # the bounded final-stream fence below requires fresh quiescence.
             post_kill_observation = self.probe.diagnostic()
             signal_boundary_last_nonzero_sim_ns = support._stamp_ns(
                 signal_boundary_motion['final'][1]
@@ -181,6 +181,7 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
             consumer_zero = self.probe.wait_consumer_zero(
                 kill_ack_ns,
                 signal_boundary_last_nonzero_sim_ns,
+                signal_boundary_motion['limited_endpoint_fence'],
             )
             stationarity = self.probe.wait_stationary(
                 consumer_zero['zero_sim_ns'],
