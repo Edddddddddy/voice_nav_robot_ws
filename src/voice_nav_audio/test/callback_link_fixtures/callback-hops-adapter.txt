@@ -1,0 +1,2 @@
+0000000000000000 T voice_nav_audio::native_portaudio_callback(void const*, void*, unsigned long, PaStreamCallbackTimeInfo const*, unsigned long, void*)
+00000000000000b8 T voice_nav_audio::PortAudioAdapter::callback(void*, short const*, short*, unsigned long, voice_nav_audio::CallbackStatus)
