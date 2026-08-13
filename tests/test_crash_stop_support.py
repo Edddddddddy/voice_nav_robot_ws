@@ -300,6 +300,288 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
         self.assertEqual(result['controller_zero_update_ns'], 4_351_000_000)
         self.assertEqual(result['delta_ns'], 351_000_000)
 
+    def test_excludes_pre_anchor_same_signature_source_before_unique_anchor(self):
+        source_anchor = (30, command(4_000_000_000, 0.02))
+
+        result = support.consumer_timeout_result(
+            (
+                (1, command(0, 0.0)),
+                (2, command(0, 0.0)),
+                (3, command(3_990_000_000, 0.02)),
+                source_anchor,
+            ),
+            (
+                (4, command(0, 0.0)),
+                (5, command(0, 0.0)),
+                (15, command(3_995_000_000, 0.01)),
+                (35, command(4_010_000_000, 0.02)),
+                (40, command(4_351_000_000, 0.0)),
+            ),
+            source_anchor=source_anchor,
+            zero_sim_ns=4_351_000_000,
+            zero_receipt_ns=40,
+        )
+
+        association = result['association']
+        self.assertEqual(association['source_header_stamp_ns'], 4_000_000_000)
+        self.assertEqual(association['controller_zero_update_stamp_ns'], 4_351_000_000)
+        self.assertEqual(result['delta_ns'], 351_000_000)
+        self.assertEqual(
+            association['phase_isolation']['final']['excluded_prefix_count'],
+            3,
+        )
+        self.assertEqual(
+            association['phase_isolation']['limited']['excluded_prefix_count'],
+            3,
+        )
+
+    def test_rejects_duplicate_anchor_identity_after_phase_isolation(self):
+        source_anchor = (30, command(4_000_000_000, 0.02))
+
+        with self.assertRaisesRegex(
+            support.ConsumerTraceAmbiguous,
+            'frozen source anchor was not unique in final trace',
+        ) as context:
+            support.consumer_timeout_result(
+                (
+                    (1, command(0, 0.0)),
+                    source_anchor,
+                    source_anchor,
+                ),
+                (
+                    (35, command(4_010_000_000, 0.02)),
+                    (40, command(4_351_000_000, 0.0)),
+                ),
+                source_anchor=source_anchor,
+                zero_sim_ns=4_351_000_000,
+                zero_receipt_ns=40,
+            )
+
+        self.assertEqual(
+            context.exception.evidence['matching_source_count'], 2
+        )
+
+    def test_rejects_missing_anchor_identity_after_startup_prefix(self):
+        source_anchor = (30, command(4_000_000_000, 0.02))
+
+        with self.assertRaisesRegex(
+            support.ConsumerTraceAmbiguous,
+            'frozen source anchor was missing from final trace',
+        ):
+            support.consumer_timeout_result(
+                (
+                    (1, command(0, 0.0)),
+                    (2, command(0, 0.0)),
+                    (3, command(3_990_000_000, 0.01)),
+                ),
+                (
+                    (35, command(4_010_000_000, 0.02)),
+                    (40, command(4_351_000_000, 0.0)),
+                ),
+                source_anchor=source_anchor,
+                zero_sim_ns=4_351_000_000,
+                zero_receipt_ns=40,
+            )
+
+    def test_rejects_zero_stamp_delivered_after_anchor_receipt(self):
+        source_anchor = (30, command(4_000_000_000, 0.02))
+
+        with self.assertRaisesRegex(
+            support.ConsumerTraceAmbiguous,
+            'late source delivery after frozen anchor',
+        ):
+            support.consumer_timeout_result(
+                (
+                    (1, command(0, 0.0)),
+                    source_anchor,
+                    (40, command(0, 0.0)),
+                ),
+                (
+                    (35, command(4_010_000_000, 0.02)),
+                    (45, command(4_351_000_000, 0.0)),
+                ),
+                source_anchor=source_anchor,
+                zero_sim_ns=4_351_000_000,
+                zero_receipt_ns=45,
+            )
+
+    def test_rejects_controller_receipt_stamp_phase_conflict(self):
+        source_anchor = (30, command(4_000_000_000, 0.02))
+
+        with self.assertRaisesRegex(
+            support.ConsumerTraceAmbiguous,
+            'controller header stamp precedes source anchor phase',
+        ) as context:
+            support.consumer_timeout_result(
+                (
+                    (1, command(0, 0.0)),
+                    source_anchor,
+                ),
+                (
+                    (4, command(0, 0.0)),
+                    (35, command(3_995_000_000, 0.01)),
+                    (40, command(4_010_000_000, 0.02)),
+                    (45, command(4_351_000_000, 0.0)),
+                ),
+                source_anchor=source_anchor,
+                zero_sim_ns=4_351_000_000,
+                zero_receipt_ns=45,
+            )
+
+        self.assertEqual(
+            context.exception.evidence['controller_receipt_ns'], 35
+        )
+
+    def test_rejects_zero_stamp_controller_sample_after_anchor_receipt(self):
+        source_anchor = (30, command(4_000_000_000, 0.02))
+
+        with self.assertRaisesRegex(
+            support.ConsumerTraceAmbiguous,
+            'non-positive topic header stamp in relevant trace phase',
+        ) as context:
+            support.consumer_timeout_result(
+                (
+                    (1, command(0, 0.0)),
+                    source_anchor,
+                ),
+                (
+                    (4, command(0, 0.0)),
+                    (35, command(0, 0.0)),
+                    (40, command(4_010_000_000, 0.02)),
+                    (45, command(4_351_000_000, 0.0)),
+                ),
+                source_anchor=source_anchor,
+                zero_sim_ns=4_351_000_000,
+                zero_receipt_ns=45,
+            )
+
+        self.assertEqual(context.exception.evidence['observed_receipt_ns'], 35)
+        self.assertEqual(
+            context.exception.evidence['phase_isolation'][
+                'excluded_prefix_count'
+            ],
+            1,
+        )
+
+    def test_rejects_first_relevant_zero_with_early_receipt(self):
+        source_anchor = (30, command(4_000_000_000, 0.02))
+
+        with self.assertRaisesRegex(
+            support.ConsumerTraceAmbiguous,
+            'first relevant controller zero conflicts with source anchor',
+        ) as context:
+            support.consumer_timeout_result(
+                (source_anchor,),
+                (
+                    (25, command(4_005_000_000, 0.0)),
+                    (35, command(4_010_000_000, 0.02)),
+                    (40, command(4_351_000_000, 0.0)),
+                ),
+                source_anchor=source_anchor,
+                zero_sim_ns=4_351_000_000,
+                zero_receipt_ns=40,
+            )
+
+        self.assertEqual(
+            context.exception.evidence['first_relevant_zero_receipt_ns'], 25
+        )
+        self.assertEqual(
+            context.exception.evidence['first_relevant_zero_stamp_ns'],
+            4_005_000_000,
+        )
+        self.assertTrue(context.exception.evidence['receipt_conflict'])
+        self.assertFalse(context.exception.evidence['stamp_conflict'])
+
+    def test_watermark_rejects_first_relevant_zero_with_anchor_stamp(self):
+        probe = support.CrashStopProbe.__new__(support.CrashStopProbe)
+        source_anchor = (30, command(4_000_000_000, 0.02))
+
+        with self.assertRaisesRegex(
+            support.ConsumerTraceAmbiguous,
+            'first relevant controller zero conflicts with source anchor',
+        ) as context:
+            probe._limited_zero_watermark(
+                (
+                    LimitedObservation(31, command(4_000_000_000, 0.0), 4),
+                    LimitedObservation(35, command(4_010_000_000, 0.02), 5),
+                    LimitedObservation(40, command(4_351_000_000, 0.0), 6),
+                    LimitedObservation(50, command(4_551_000_000, 0.0), 7),
+                ),
+                {
+                    'zero_sim_ns': 4_351_000_000,
+                    'zero_receipt_ns': 40,
+                },
+                source_anchor=source_anchor,
+            )
+
+        self.assertEqual(
+            context.exception.evidence['first_relevant_zero_receipt_ns'], 31
+        )
+        self.assertEqual(
+            context.exception.evidence['first_relevant_zero_stamp_ns'],
+            4_000_000_000,
+        )
+        self.assertFalse(context.exception.evidence['receipt_conflict'])
+        self.assertTrue(context.exception.evidence['stamp_conflict'])
+
+    def test_rejects_relevant_controller_duplicate_stamp_after_prefix(self):
+        source_anchor = (30, command(4_000_000_000, 0.02))
+
+        with self.assertRaisesRegex(
+            support.ConsumerTraceAmbiguous,
+            'out-of-order topic header stamp',
+        ) as context:
+            support.consumer_timeout_result(
+                (
+                    (1, command(0, 0.0)),
+                    source_anchor,
+                ),
+                (
+                    (4, command(0, 0.0)),
+                    (5, command(0, 0.0)),
+                    (15, command(3_995_000_000, 0.01)),
+                    (35, command(4_010_000_000, 0.02)),
+                    (40, command(4_351_000_000, 0.0)),
+                    (45, command(4_351_000_000, 0.0)),
+                ),
+                source_anchor=source_anchor,
+                zero_sim_ns=4_351_000_000,
+                zero_receipt_ns=40,
+            )
+
+        self.assertEqual(
+            context.exception.evidence['phase_isolation'][
+                'excluded_prefix_count'
+            ],
+            3,
+        )
+
+    def test_phase_does_not_skip_first_unproven_final_sample(self):
+        source_anchor = (30, command(4_000_000_000, 0.02))
+
+        with self.assertRaisesRegex(
+            support.ConsumerTraceAmbiguous,
+            'out-of-order observer receipt',
+        ) as context:
+            support.consumer_timeout_result(
+                (
+                    (1, command(0, 0.0)),
+                    (35, command(3_995_000_000, 0.01)),
+                    source_anchor,
+                ),
+                (
+                    (40, command(4_010_000_000, 0.02)),
+                    (45, command(4_351_000_000, 0.0)),
+                ),
+                source_anchor=source_anchor,
+                zero_sim_ns=4_351_000_000,
+                zero_receipt_ns=45,
+            )
+
+        phase = context.exception.evidence['phase_isolation']
+        self.assertEqual(phase['excluded_prefix_count'], 1)
+        self.assertEqual(phase['relevant_trace_start']['receipt_ns'], 35)
+
     def test_timeout_window_remains_strict_at_both_boundaries(self):
         source_anchor = (20, command(4_000_000_000, 0.02))
         final_samples = ((10, command(3_990_000_000, 0.01)), source_anchor)
@@ -440,17 +722,17 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
                 zero_receipt_ns=30,
             )
 
-    def test_rejects_same_valued_duplicate_source_commands(self):
+    def test_rejects_same_signature_source_after_anchor_receipt(self):
         source_anchor = (20, command(4_000_000_000, 0.02))
 
         with self.assertRaisesRegex(
             support.ConsumerTraceAmbiguous,
-            'same-valued duplicate source commands',
-        ) as context:
+            'late source delivery after frozen anchor',
+        ):
             support.consumer_timeout_result(
                 (
-                    (10, command(3_990_000_000, 0.02)),
                     source_anchor,
+                    (40, command(4_020_000_000, 0.02)),
                 ),
                 (
                     (25, command(4_010_000_000, 0.02)),
@@ -460,8 +742,6 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
                 zero_sim_ns=4_351_000_000,
                 zero_receipt_ns=30,
             )
-
-        self.assertEqual(context.exception.evidence['matching_source_count'], 2)
 
     def test_rejects_out_of_order_source_trace(self):
         source_anchor = (20, command(3_999_000_000, 0.02))
@@ -717,16 +997,97 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
             result['endpoint_continuity']['endpoint_gid'], 'gid-controller'
         )
 
+    def test_quiescence_fence_isolates_startup_prefix_for_zero_watermark(self):
+        probe = support.CrashStopProbe.__new__(support.CrashStopProbe)
+        probe.lock = threading.Lock()
+        probe._limited_endpoint_snapshot_provider = lambda: ('gid-controller',)
+        source_anchor = (30, command(4_000_000_000, 0.02))
+        probe.final_commands = deque(
+            (
+                (1, command(0, 0.0)),
+                (2, command(0, 0.0)),
+                (3, command(3_990_000_000, 0.01)),
+                source_anchor,
+            ),
+            maxlen=20,
+        )
+        probe.limited_commands = deque(
+            (
+                LimitedObservation(4, command(0, 0.0), 1),
+                LimitedObservation(5, command(0, 0.0), 2),
+                LimitedObservation(15, command(3_995_000_000, 0.01), 3),
+                LimitedObservation(35, command(4_010_000_000, 0.02), 4),
+                LimitedObservation(40, command(4_351_000_000, 0.0), 5),
+            ),
+            maxlen=20,
+        )
+        probe.clock_samples = deque(((0, 4_500_000_000),), maxlen=20)
+
+        class FakeTime:
+
+            def __init__(self):
+                self.now_ns = 0
+
+            def monotonic(self):
+                return self.now_ns / 1_000_000_000
+
+            def monotonic_ns(self):
+                return self.now_ns
+
+            def sleep(self, seconds):
+                self.now_ns += 100_000_000
+                with probe.lock:
+                    probe.limited_commands.append(
+                        LimitedObservation(
+                            40 + self.now_ns,
+                            command(4_351_000_000 + self.now_ns, 0.0),
+                            5 + self.now_ns // 100_000_000,
+                        )
+                    )
+                    probe.clock_samples.append(
+                        (self.now_ns, 4_500_000_000 + self.now_ns)
+                    )
+
+        with mock.patch.object(support, 'time', FakeTime()):
+            result = probe.wait_confirm_consumer_timeout(
+                source_anchor,
+                fenced_consumer_zero(4_351_000_000, 40),
+                timeout=1.0,
+            )
+
+        self.assertEqual(result['delta_ns'], 351_000_000)
+        self.assertEqual(
+            result['association']['phase_isolation']['limited'][
+                'excluded_prefix_count'
+            ],
+            3,
+        )
+        self.assertEqual(
+            result['limited_zero_watermark']['watermark_stamp_ns'],
+            4_551_000_000,
+        )
+
     def test_quiescence_fence_reports_limited_watermark_timeout(self):
         probe = support.CrashStopProbe.__new__(support.CrashStopProbe)
         probe.lock = threading.Lock()
         probe._limited_endpoint_snapshot_provider = lambda: ('gid-controller',)
-        source_anchor = (10, command(3_994_000_000, 0.01))
-        probe.final_commands = deque((source_anchor,), maxlen=20)
+        source_anchor = (30, command(4_000_000_000, 0.02))
+        probe.final_commands = deque(
+            (
+                (1, command(0, 0.0)),
+                (2, command(0, 0.0)),
+                (3, command(3_990_000_000, 0.01)),
+                source_anchor,
+            ),
+            maxlen=20,
+        )
         probe.limited_commands = deque(
             (
-                LimitedObservation(20, command(4_000_000_000, 0.01), 8),
-                LimitedObservation(30, command(4_345_000_000, 0.0), 9),
+                LimitedObservation(4, command(0, 0.0), 1),
+                LimitedObservation(5, command(0, 0.0), 2),
+                LimitedObservation(15, command(3_995_000_000, 0.01), 3),
+                LimitedObservation(35, command(4_010_000_000, 0.02), 4),
+                LimitedObservation(40, command(4_351_000_000, 0.0), 5),
             ),
             maxlen=20,
         )
@@ -757,13 +1118,19 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
             ) as context:
                 probe.wait_confirm_consumer_timeout(
                     source_anchor,
-                    fenced_consumer_zero(4_345_000_000, 30),
+                    fenced_consumer_zero(4_351_000_000, 40),
                     timeout=0.5,
                 )
 
         self.assertEqual(context.exception.evidence['endpoint_gid'], 'gid-controller')
         self.assertEqual(
-            context.exception.evidence['first_zero_stamp_ns'], 4_345_000_000
+            context.exception.evidence['first_zero_stamp_ns'], 4_351_000_000
+        )
+        self.assertEqual(
+            context.exception.evidence['limited_phase_isolation'][
+                'excluded_prefix_count'
+            ],
+            3,
         )
         self.assertGreaterEqual(
             context.exception.evidence['final_quiescence']['wall_elapsed_ns'],
@@ -1299,33 +1666,45 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
 
     def test_limited_watermark_rejects_invalid_publication_sequences(self):
         probe = support.CrashStopProbe.__new__(support.CrashStopProbe)
+        source_anchor = (30, command(4_000_000_000, 0.02))
         consumer_zero = {
-            'zero_sim_ns': 4_345_000_000,
-            'zero_receipt_ns': 30,
+            'zero_sim_ns': 4_351_000_000,
+            'zero_receipt_ns': 40,
         }
         for sequence, reason in (
             (None, 'limited publication sequence unavailable'),
-            (9, 'duplicate limited publication sequence'),
-            (8, 'limited publication sequence regressed'),
+            (5, 'duplicate limited publication sequence'),
+            (4, 'limited publication sequence regressed'),
         ):
             with self.subTest(sequence=sequence):
                 limited = (
-                    LimitedObservation(20, command(4_000_000_000, 0.01), 8),
-                    LimitedObservation(30, command(4_345_000_000, 0.0), 9),
-                    LimitedObservation(40, command(4_545_000_000, 0.0), sequence),
+                    LimitedObservation(4, command(0, 0.0), 1),
+                    LimitedObservation(5, command(0, 0.0), 2),
+                    LimitedObservation(15, command(3_995_000_000, 0.01), 3),
+                    LimitedObservation(35, command(4_010_000_000, 0.02), 4),
+                    LimitedObservation(40, command(4_351_000_000, 0.0), 5),
+                    LimitedObservation(50, command(4_551_000_000, 0.0), sequence),
                 )
                 with self.assertRaisesRegex(
                     support.ConsumerTraceAmbiguous,
                     reason,
                 ):
-                    probe._limited_zero_watermark(limited, consumer_zero)
+                    probe._limited_zero_watermark(
+                        limited,
+                        consumer_zero,
+                        source_anchor=source_anchor,
+                    )
 
     def test_limited_watermark_rejects_late_nonzero_after_first_zero(self):
         probe = support.CrashStopProbe.__new__(support.CrashStopProbe)
+        source_anchor = (30, command(4_000_000_000, 0.02))
         limited = (
-            LimitedObservation(20, command(4_000_000_000, 0.01), 8),
-            LimitedObservation(30, command(4_345_000_000, 0.0), 9),
-            LimitedObservation(40, command(4_545_000_000, 0.01), 10),
+            LimitedObservation(4, command(0, 0.0), 1),
+            LimitedObservation(5, command(0, 0.0), 2),
+            LimitedObservation(15, command(3_995_000_000, 0.01), 3),
+            LimitedObservation(35, command(4_010_000_000, 0.02), 4),
+            LimitedObservation(40, command(4_351_000_000, 0.0), 5),
+            LimitedObservation(50, command(4_551_000_000, 0.01), 6),
         )
 
         with self.assertRaisesRegex(
@@ -1335,17 +1714,22 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
             probe._limited_zero_watermark(
                 limited,
                 {
-                    'zero_sim_ns': 4_345_000_000,
-                    'zero_receipt_ns': 30,
+                    'zero_sim_ns': 4_351_000_000,
+                    'zero_receipt_ns': 40,
                 },
+                source_anchor=source_anchor,
             )
 
     def test_limited_watermark_rejects_out_of_order_controller_stamp(self):
         probe = support.CrashStopProbe.__new__(support.CrashStopProbe)
+        source_anchor = (30, command(4_000_000_000, 0.02))
         limited = (
-            LimitedObservation(20, command(4_000_000_000, 0.01), 8),
-            LimitedObservation(30, command(4_345_000_000, 0.0), 9),
-            LimitedObservation(40, command(4_344_000_000, 0.0), 10),
+            LimitedObservation(4, command(0, 0.0), 1),
+            LimitedObservation(5, command(0, 0.0), 2),
+            LimitedObservation(15, command(3_995_000_000, 0.01), 3),
+            LimitedObservation(35, command(4_010_000_000, 0.02), 4),
+            LimitedObservation(40, command(4_351_000_000, 0.0), 5),
+            LimitedObservation(50, command(4_350_000_000, 0.0), 6),
         )
 
         with self.assertRaisesRegex(
@@ -1355,30 +1739,36 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
             probe._limited_zero_watermark(
                 limited,
                 {
-                    'zero_sim_ns': 4_345_000_000,
-                    'zero_receipt_ns': 30,
+                    'zero_sim_ns': 4_351_000_000,
+                    'zero_receipt_ns': 40,
                 },
+                source_anchor=source_anchor,
             )
 
     def test_limited_watermark_rejects_publication_sequence_gap(self):
         probe = support.CrashStopProbe.__new__(support.CrashStopProbe)
+        source_anchor = (30, command(4_000_000_000, 0.02))
         with self.assertRaisesRegex(
             support.ConsumerTraceAmbiguous,
             'limited publication sequence gap',
         ) as context:
             probe._limited_zero_watermark(
                 (
-                    LimitedObservation(20, command(4_000_000_000, 0.01), 8),
-                    LimitedObservation(30, command(4_345_000_000, 0.0), 9),
-                    LimitedObservation(40, command(4_545_000_000, 0.0), 12),
+                    LimitedObservation(4, command(0, 0.0), 1),
+                    LimitedObservation(5, command(0, 0.0), 2),
+                    LimitedObservation(15, command(3_995_000_000, 0.01), 3),
+                    LimitedObservation(35, command(4_010_000_000, 0.02), 4),
+                    LimitedObservation(40, command(4_351_000_000, 0.0), 5),
+                    LimitedObservation(50, command(4_551_000_000, 0.0), 8),
                 ),
                 {
-                    'zero_sim_ns': 4_345_000_000,
-                    'zero_receipt_ns': 30,
+                    'zero_sim_ns': 4_351_000_000,
+                    'zero_receipt_ns': 40,
                 },
+                source_anchor=source_anchor,
             )
 
-        self.assertEqual(context.exception.evidence['expected_sequence'], 10)
+        self.assertEqual(context.exception.evidence['expected_sequence'], 6)
         self.assertEqual(
             context.exception.evidence['missing_sequence_count'], 2
         )

@@ -394,7 +394,7 @@ def is_zero(message: TwistStamped) -> bool:
 class ConsumerTraceAmbiguous(AssertionError):
     """Fail closed when observer topics cannot prove controller consumption."""
 
-    def __init__(self, reason: str, **details: int | str) -> None:
+    def __init__(self, reason: str, **details: Any) -> None:
         self.evidence = {
             'status': 'ambiguous',
             'reason': reason,
@@ -426,7 +426,7 @@ class ConsumerTimeoutOutOfBounds(AssertionError):
 
     def __init__(
         self,
-        trace: dict[str, int | str],
+        trace: dict[str, Any],
         *,
         delta_ns: int,
     ) -> None:
@@ -498,6 +498,113 @@ def _assert_strict_trace_order(
         previous_stamp_ns = stamp_ns
 
 
+def _relevant_trace_phase(
+    samples: tuple[tuple[int, Any], ...],
+    *,
+    source_anchor: tuple[int, Any],
+    topic: str,
+) -> tuple[tuple[tuple[int, Any], ...], dict[str, Any]]:
+    """Keep only the trace phase that cannot predate the source anchor."""
+    source_receipt_ns, source_message = source_anchor
+    source_stamp_ns = _stamp_ns(source_message)
+    excluded_prefix_count = 0
+    for receipt_ns, message in samples:
+        if (
+            receipt_ns < source_receipt_ns
+            and _stamp_ns(message) < source_stamp_ns
+        ):
+            excluded_prefix_count += 1
+            continue
+        break
+
+    excluded_prefix = samples[:excluded_prefix_count]
+    relevant_samples = samples[excluded_prefix_count:]
+    phase_evidence = {
+        'topic': topic,
+        'excluded_prefix_count': excluded_prefix_count,
+        'excluded_prefix_boundary': (
+            {
+                'receipt_ns': excluded_prefix[-1][0],
+                'header_stamp_ns': _stamp_ns(excluded_prefix[-1][1]),
+            }
+            if excluded_prefix
+            else None
+        ),
+        'relevant_trace_start': (
+            {
+                'receipt_ns': relevant_samples[0][0],
+                'header_stamp_ns': _stamp_ns(relevant_samples[0][1]),
+            }
+            if relevant_samples
+            else None
+        ),
+    }
+    for receipt_ns, message in relevant_samples:
+        stamp_ns = _stamp_ns(message)
+        if stamp_ns <= 0:
+            raise ConsumerTraceAmbiguous(
+                'non-positive topic header stamp in relevant trace phase',
+                topic=topic,
+                source_header_stamp_ns=source_stamp_ns,
+                source_receipt_ns=source_receipt_ns,
+                observed_header_stamp_ns=stamp_ns,
+                observed_receipt_ns=receipt_ns,
+                phase_isolation=phase_evidence,
+            )
+    try:
+        _assert_strict_trace_order(relevant_samples, topic=topic)
+    except ConsumerTraceAmbiguous as error:
+        error.evidence['phase_isolation'] = phase_evidence
+        raise
+    return relevant_samples, phase_evidence
+
+
+def _first_relevant_controller_zero(
+    relevant_samples: tuple[tuple[int, Any], ...],
+    *,
+    source_anchor: tuple[int, Any],
+    zero_sim_ns: int,
+    zero_receipt_ns: int,
+    phase_isolation: dict[str, Any],
+) -> tuple[int, tuple[int, Any]]:
+    """Return the first relevant controller zero or fail closed."""
+    source_receipt_ns, source_message = source_anchor
+    source_stamp_ns = _stamp_ns(source_message)
+    for index, (receipt_ns, message) in enumerate(relevant_samples):
+        if not is_zero(message):
+            continue
+        stamp_ns = _stamp_ns(message)
+        receipt_conflict = receipt_ns < source_receipt_ns
+        stamp_conflict = stamp_ns <= source_stamp_ns
+        if receipt_conflict or stamp_conflict:
+            raise ConsumerTraceAmbiguous(
+                'first relevant controller zero conflicts with source anchor',
+                source_header_stamp_ns=source_stamp_ns,
+                source_receipt_ns=source_receipt_ns,
+                first_relevant_zero_receipt_ns=receipt_ns,
+                first_relevant_zero_stamp_ns=stamp_ns,
+                receipt_conflict=receipt_conflict,
+                stamp_conflict=stamp_conflict,
+                phase_isolation=phase_isolation,
+            )
+        if receipt_ns != zero_receipt_ns or stamp_ns != zero_sim_ns:
+            raise ConsumerTraceAmbiguous(
+                'provided controller zero was not the first relevant zero observation',
+                first_relevant_zero_receipt_ns=receipt_ns,
+                first_relevant_zero_stamp_ns=stamp_ns,
+                zero_receipt_ns=zero_receipt_ns,
+                zero_sim_ns=zero_sim_ns,
+                phase_isolation=phase_isolation,
+            )
+        return index, (receipt_ns, message)
+    raise ConsumerTraceAmbiguous(
+        'missing controller first zero observation',
+        source_header_stamp_ns=source_stamp_ns,
+        source_receipt_ns=source_receipt_ns,
+        phase_isolation=phase_isolation,
+    )
+
+
 def controller_consumed_command_trace(
     final_samples: tuple[tuple[int, Any], ...],
     limited_samples: tuple[tuple[int, Any], ...],
@@ -505,11 +612,8 @@ def controller_consumed_command_trace(
     source_anchor: tuple[int, Any],
     zero_sim_ns: int,
     zero_receipt_ns: int,
-) -> dict[str, int | str]:
+) -> dict[str, Any]:
     """Prove the source command which the controller held before its first zero."""
-    _assert_strict_trace_order(final_samples, topic=FINAL_COMMAND_TOPIC)
-    _assert_strict_trace_order(limited_samples, topic=LIMITED_COMMAND_TOPIC)
-
     source_receipt_ns, source_message = source_anchor
     source_stamp_ns = _stamp_ns(source_message)
     source_signature = _twist_signature(source_message)
@@ -529,11 +633,18 @@ def controller_consumed_command_trace(
             and _twist_signature(message) == source_signature
         )
     ]
-    if len(source_indexes) != 1:
+    if not source_indexes:
         raise ConsumerTraceAmbiguous(
             'frozen source anchor was missing from final trace',
             source_header_stamp_ns=source_stamp_ns,
             source_receipt_ns=source_receipt_ns,
+        )
+    if len(source_indexes) != 1:
+        raise ConsumerTraceAmbiguous(
+            'frozen source anchor was not unique in final trace',
+            source_header_stamp_ns=source_stamp_ns,
+            source_receipt_ns=source_receipt_ns,
+            matching_source_count=len(source_indexes),
         )
     source_index = source_indexes[0]
     if source_index != len(final_samples) - 1:
@@ -546,38 +657,50 @@ def controller_consumed_command_trace(
             late_source_receipt_ns=late_receipt_ns,
         )
 
-    zero_indexes = [
-        index
-        for index, (receipt_ns, message) in enumerate(limited_samples)
-        if (
-            receipt_ns >= source_receipt_ns
-            and _stamp_ns(message) > source_stamp_ns
-            and is_zero(message)
-        )
-    ]
-    if not zero_indexes:
-        raise ConsumerTraceAmbiguous(
-            'missing controller first zero observation',
-            source_header_stamp_ns=source_stamp_ns,
-            source_receipt_ns=source_receipt_ns,
-        )
-    zero_index = zero_indexes[0]
-    observed_zero_receipt_ns, observed_zero = limited_samples[zero_index]
-    observed_zero_sim_ns = _stamp_ns(observed_zero)
-    if (
-        observed_zero_receipt_ns != zero_receipt_ns
-        or observed_zero_sim_ns != zero_sim_ns
-    ):
-        raise ConsumerTraceAmbiguous(
-            'provided controller zero was not the first zero observation',
-            expected_zero_sim_ns=observed_zero_sim_ns,
-            expected_zero_receipt_ns=observed_zero_receipt_ns,
+    relevant_final_samples, final_phase = _relevant_trace_phase(
+        final_samples,
+        source_anchor=source_anchor,
+        topic=FINAL_COMMAND_TOPIC,
+    )
+    relevant_limited_samples, limited_phase = _relevant_trace_phase(
+        limited_samples,
+        source_anchor=source_anchor,
+        topic=LIMITED_COMMAND_TOPIC,
+    )
+    phase_isolation = {
+        'source_anchor': {
+            'receipt_ns': source_receipt_ns,
+            'header_stamp_ns': source_stamp_ns,
+            'twist_signature': list(source_signature),
+        },
+        'final': final_phase,
+        'limited': limited_phase,
+    }
+    for controller_receipt_ns, controller_message in relevant_limited_samples:
+        controller_stamp_ns = _stamp_ns(controller_message)
+        if controller_stamp_ns < source_stamp_ns:
+            raise ConsumerTraceAmbiguous(
+                'controller header stamp precedes source anchor phase',
+                source_header_stamp_ns=source_stamp_ns,
+                source_receipt_ns=source_receipt_ns,
+                controller_update_stamp_ns=controller_stamp_ns,
+                controller_receipt_ns=controller_receipt_ns,
+                phase_isolation=phase_isolation,
+            )
+
+    zero_index, (observed_zero_receipt_ns, observed_zero) = (
+        _first_relevant_controller_zero(
+            relevant_limited_samples,
+            source_anchor=source_anchor,
             zero_sim_ns=zero_sim_ns,
             zero_receipt_ns=zero_receipt_ns,
+            phase_isolation=phase_isolation,
         )
+    )
+    observed_zero_sim_ns = _stamp_ns(observed_zero)
     if any(
         not is_zero(message)
-        for _, message in limited_samples[zero_index + 1 :]
+        for _, message in relevant_limited_samples[zero_index + 1 :]
     ):
         raise ConsumerTraceAmbiguous(
             'unassociated non-zero controller output after first zero',
@@ -587,7 +710,7 @@ def controller_consumed_command_trace(
 
     pre_zero_nonzero = [
         sample
-        for sample in limited_samples[:zero_index]
+        for sample in relevant_limited_samples[:zero_index]
         if (
             not is_zero(sample[1])
             and _stamp_ns(sample[1]) >= source_stamp_ns
@@ -630,7 +753,7 @@ def controller_consumed_command_trace(
 
         matching_sources = [
             (receipt_ns, message)
-            for receipt_ns, message in final_samples
+            for receipt_ns, message in relevant_final_samples
             if (
                 receipt_ns <= controller_receipt_ns
                 and _stamp_ns(message) <= controller_stamp_ns
@@ -660,6 +783,7 @@ def controller_consumed_command_trace(
         'controller_observer_receipt_ns': controller_receipt_ns,
         'controller_zero_update_stamp_ns': zero_sim_ns,
         'controller_zero_observer_receipt_ns': zero_receipt_ns,
+        'phase_isolation': phase_isolation,
     }
 
 
@@ -1449,6 +1573,7 @@ class CrashStopProbe:
                         watermark = self._limited_zero_watermark(
                             confirmed_limited,
                             consumer_zero,
+                            source_anchor=source_anchor,
                         )
                         if watermark is not None:
                             result = consumer_timeout_result(
@@ -1508,6 +1633,7 @@ class CrashStopProbe:
                 deadline_watermark = self._limited_zero_watermark(
                     limited_snapshot,
                     consumer_zero,
+                    source_anchor=source_anchor,
                 )
                 if (
                     deadline_final_key == final_stable_key
@@ -1533,6 +1659,7 @@ class CrashStopProbe:
                         **self._limited_zero_watermark_evidence(
                             limited_snapshot,
                             consumer_zero,
+                            source_anchor=source_anchor,
                         ),
                     )
         raise AssertionError(
@@ -1614,14 +1741,27 @@ class CrashStopProbe:
         self,
         limited_snapshot: tuple[Any, ...],
         consumer_zero: dict[str, int],
+        *,
+        source_anchor: tuple[int, Any],
     ) -> dict[str, Any] | None:
-        _assert_strict_trace_order(limited_snapshot, topic=LIMITED_COMMAND_TOPIC)
+        relevant_limited, limited_phase = _relevant_trace_phase(
+            limited_snapshot,
+            source_anchor=source_anchor,
+            topic=LIMITED_COMMAND_TOPIC,
+        )
         self._assert_limited_publication_sequence_continuity(
-            limited_snapshot
+            relevant_limited
+        )
+        first_zero_index, _ = _first_relevant_controller_zero(
+            relevant_limited,
+            source_anchor=source_anchor,
+            zero_sim_ns=consumer_zero['zero_sim_ns'],
+            zero_receipt_ns=consumer_zero['zero_receipt_ns'],
+            phase_isolation=limited_phase,
         )
         zero_indexes = [
             index
-            for index, sample in enumerate(limited_snapshot)
+            for index, sample in enumerate(relevant_limited)
             if (
                 sample[0] == consumer_zero['zero_receipt_ns']
                 and _stamp_ns(sample[1]) == consumer_zero['zero_sim_ns']
@@ -1635,7 +1775,13 @@ class CrashStopProbe:
                 zero_receipt_ns=consumer_zero['zero_receipt_ns'],
                 zero_sim_ns=consumer_zero['zero_sim_ns'],
             )
-        first_zero_index = zero_indexes[0]
+        if zero_indexes[0] != first_zero_index:
+            raise ConsumerTraceAmbiguous(
+                'provided controller zero disagrees with first relevant zero',
+                first_relevant_zero_index=first_zero_index,
+                provided_zero_index=zero_indexes[0],
+                phase_isolation=limited_phase,
+            )
         limited_receipt_fence_ns = consumer_zero.get(
             'limited_receipt_fence_ns'
         )
@@ -1650,7 +1796,7 @@ class CrashStopProbe:
                 limited_receipt_fence_ns=limited_receipt_fence_ns,
                 zero_receipt_ns=consumer_zero['zero_receipt_ns'],
             )
-        zero_prefix = limited_snapshot[first_zero_index:]
+        zero_prefix = relevant_limited[first_zero_index:]
         first_zero = zero_prefix[0]
         first_zero_stamp_ns = _stamp_ns(first_zero[1])
         first_zero_sequence = self._limited_publication_sequence(
@@ -1741,31 +1887,29 @@ class CrashStopProbe:
     def _limited_zero_watermark_evidence(
         limited_snapshot: tuple[Any, ...],
         consumer_zero: dict[str, int],
-    ) -> dict[str, int]:
-        first_zero = next(
-            (
-                sample
-                for sample in limited_snapshot
-                if (
-                    sample[0] == consumer_zero['zero_receipt_ns']
-                    and _stamp_ns(sample[1]) == consumer_zero['zero_sim_ns']
-                    and is_zero(sample[1])
-                )
-            ),
-            None,
+        *,
+        source_anchor: tuple[int, Any],
+    ) -> dict[str, Any]:
+        relevant_limited, phase_isolation = _relevant_trace_phase(
+            limited_snapshot,
+            source_anchor=source_anchor,
+            topic=LIMITED_COMMAND_TOPIC,
         )
-        if first_zero is None:
-            return {
-                'zero_receipt_ns': consumer_zero['zero_receipt_ns'],
-                'zero_sim_ns': consumer_zero['zero_sim_ns'],
-            }
-        last_sample = limited_snapshot[-1]
+        _, first_zero = _first_relevant_controller_zero(
+            relevant_limited,
+            source_anchor=source_anchor,
+            zero_sim_ns=consumer_zero['zero_sim_ns'],
+            zero_receipt_ns=consumer_zero['zero_receipt_ns'],
+            phase_isolation=phase_isolation,
+        )
+        last_sample = relevant_limited[-1]
         return {
             'first_zero_receipt_ns': first_zero[0],
             'first_zero_stamp_ns': _stamp_ns(first_zero[1]),
             'last_limited_receipt_ns': last_sample[0],
             'last_limited_stamp_ns': _stamp_ns(last_sample[1]),
             'required_progress_ns': FINAL_STREAM_QUIESCENCE_NS,
+            'limited_phase_isolation': phase_isolation,
         }
 
     @staticmethod
