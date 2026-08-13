@@ -97,6 +97,13 @@ class CommandObservation:
     receipt_ns: int
     message: Any
     publication_sequence_number: int | None = None
+    source_timestamp_ns: int | None = None
+    received_timestamp_ns: int | None = None
+    reception_sequence_number: int | None = None
+    final_subscription_identity: str | None = None
+    observation_epoch: int | None = None
+    header_stamp_ns: int | None = None
+    twist_signature: tuple[float, ...] | None = None
 
     def __iter__(self):
         return iter((self.receipt_ns, self.message))
@@ -468,6 +475,310 @@ def _twist_signature(message: TwistStamped) -> tuple[float, ...]:
     )
 
 
+def _final_observation_metadata(
+    observation: Any,
+    *,
+    checkpoint: str,
+) -> dict[str, int | str | None]:
+    """Return the Jazzy-observable identity and sequence for one final sample."""
+    subscription_identity = getattr(
+        observation, 'final_subscription_identity', None
+    )
+    if not isinstance(subscription_identity, str) or not subscription_identity:
+        raise ConsumerTraceAmbiguous(
+            'final subscription identity unavailable',
+            checkpoint=checkpoint,
+            receipt_ns=observation[0],
+            header_stamp_ns=_stamp_ns(observation[1]),
+        )
+    publication_sequence_number = getattr(
+        observation, 'publication_sequence_number', None
+    )
+    if (
+        not isinstance(publication_sequence_number, int)
+        or isinstance(publication_sequence_number, bool)
+        or publication_sequence_number < 0
+    ):
+        raise ConsumerTraceAmbiguous(
+            'final publication sequence unavailable',
+            checkpoint=checkpoint,
+            receipt_ns=observation[0],
+            header_stamp_ns=_stamp_ns(observation[1]),
+        )
+
+    def optional_jazzy_timestamp(name: str) -> int | None:
+        value = getattr(observation, name, None)
+        if value is None:
+            return None
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ConsumerTraceAmbiguous(
+                'final Jazzy metadata was malformed',
+                checkpoint=checkpoint,
+                field=name,
+                receipt_ns=observation[0],
+                header_stamp_ns=_stamp_ns(observation[1]),
+            )
+        return value
+
+    return {
+        'final_subscription_identity': subscription_identity,
+        'publication_sequence_number': publication_sequence_number,
+        'source_timestamp_ns': optional_jazzy_timestamp('source_timestamp_ns'),
+        'received_timestamp_ns': optional_jazzy_timestamp(
+            'received_timestamp_ns'
+        ),
+        'reception_sequence_number': optional_jazzy_timestamp(
+            'reception_sequence_number'
+        ),
+    }
+
+
+def _final_endpoint_continuity_fence(
+    final_endpoint_fence: dict[str, Any],
+) -> dict[str, int | str | None]:
+    """Validate the graph and subscription boundary frozen before SIGKILL."""
+    endpoint_gid = final_endpoint_fence.get('endpoint_gid')
+    if (
+        not isinstance(endpoint_gid, str)
+        or not endpoint_gid
+        or all(character == '0' for character in endpoint_gid)
+    ):
+        raise ConsumerTraceAmbiguous(
+            'final endpoint identity unavailable',
+            checkpoint='signal-boundary',
+            endpoint_gid=(endpoint_gid if isinstance(endpoint_gid, str) else ''),
+        )
+    subscription_identity = final_endpoint_fence.get(
+        'final_subscription_identity'
+    )
+    if not isinstance(subscription_identity, str) or not subscription_identity:
+        raise ConsumerTraceAmbiguous(
+            'final subscription identity unavailable',
+            checkpoint='signal-boundary',
+        )
+    fields = {
+        'final_receipt_fence_ns': final_endpoint_fence.get(
+            'final_receipt_fence_ns'
+        ),
+        'final_header_stamp_ns': final_endpoint_fence.get(
+            'final_header_stamp_ns'
+        ),
+        'final_publication_sequence_number': final_endpoint_fence.get(
+            'final_publication_sequence_number'
+        ),
+    }
+    for name, value in fields.items():
+        if not isinstance(value, int) or isinstance(value, bool):
+            raise ConsumerTraceAmbiguous(
+                'final endpoint continuity fence was incomplete',
+                checkpoint='signal-boundary',
+                field=name,
+            )
+    optional_fields = {
+        'final_source_timestamp_ns': final_endpoint_fence.get(
+            'final_source_timestamp_ns'
+        ),
+        'final_received_timestamp_ns': final_endpoint_fence.get(
+            'final_received_timestamp_ns'
+        ),
+        'final_reception_sequence_number': final_endpoint_fence.get(
+            'final_reception_sequence_number'
+        ),
+    }
+    for name, value in optional_fields.items():
+        if value is not None and (
+            not isinstance(value, int) or isinstance(value, bool)
+        ):
+            raise ConsumerTraceAmbiguous(
+                'final endpoint continuity fence metadata was malformed',
+                checkpoint='signal-boundary',
+                field=name,
+            )
+    return {
+        'endpoint_gid': endpoint_gid,
+        'final_subscription_identity': subscription_identity,
+        **fields,
+        **optional_fields,
+    }
+
+
+def finalize_consumer_source_anchor(
+    final_samples: tuple[tuple[int, Any], ...],
+    *,
+    motion_proof_anchor: tuple[int, Any],
+    final_endpoint_fence: dict[str, Any],
+) -> tuple[tuple[int, Any], dict[str, Any]]:
+    """Freeze a drained final source without claiming per-message publisher GID.
+
+    Jazzy rclpy exposes timestamps and sequence numbers, but not an RMW
+    publisher GID in the subscription callback.  The graph endpoint is frozen
+    before SIGKILL and proved absent afterwards; this helper proves that the
+    finalized trace is one ordered delivery stream from the same local final
+    subscription.  It deliberately does not infer a per-message GID.
+    """
+    fence = _final_endpoint_continuity_fence(final_endpoint_fence)
+
+    motion_receipt_ns, motion_message = motion_proof_anchor
+    motion_stamp_ns = _stamp_ns(motion_message)
+    motion_metadata = _final_observation_metadata(
+        motion_proof_anchor,
+        checkpoint='motion-proof',
+    )
+    if (
+        motion_metadata['final_subscription_identity']
+        != fence['final_subscription_identity']
+        or motion_metadata['publication_sequence_number']
+        != fence['final_publication_sequence_number']
+        or motion_receipt_ns != fence['final_receipt_fence_ns']
+        or motion_stamp_ns != fence['final_header_stamp_ns']
+        or motion_metadata['source_timestamp_ns']
+        != fence['final_source_timestamp_ns']
+        or motion_metadata['received_timestamp_ns']
+        != fence['final_received_timestamp_ns']
+        or motion_metadata['reception_sequence_number']
+        != fence['final_reception_sequence_number']
+    ):
+        raise ConsumerTraceAmbiguous(
+            'motion proof final observation did not match endpoint continuity fence',
+            motion_proof_receipt_ns=motion_receipt_ns,
+            motion_proof_stamp_ns=motion_stamp_ns,
+            motion_proof_metadata=motion_metadata,
+            final_endpoint_fence=fence,
+        )
+
+    relevant_final, final_phase = _relevant_trace_phase(
+        final_samples,
+        source_anchor=motion_proof_anchor,
+        topic=FINAL_COMMAND_TOPIC,
+    )
+    if not relevant_final:
+        raise ConsumerTraceAmbiguous(
+            'motion proof anchor was missing from final trace',
+            motion_proof_receipt_ns=motion_receipt_ns,
+            motion_proof_stamp_ns=motion_stamp_ns,
+        )
+
+    motion_indexes = [
+        index
+        for index, observation in enumerate(relevant_final)
+        if (
+            observation[0] == motion_receipt_ns
+            and _stamp_ns(observation[1]) == motion_stamp_ns
+            and _twist_signature(observation[1])
+            == _twist_signature(motion_message)
+            and _final_observation_metadata(
+                observation,
+                checkpoint='motion-proof-trace',
+            )
+            == motion_metadata
+        )
+    ]
+    if len(motion_indexes) != 1:
+        raise ConsumerTraceAmbiguous(
+            'motion proof anchor was not uniquely observed in final trace',
+            motion_proof_receipt_ns=motion_receipt_ns,
+            motion_proof_stamp_ns=motion_stamp_ns,
+            matching_motion_proof_count=len(motion_indexes),
+            final_phase_isolation=final_phase,
+        )
+
+    previous_sequence = None
+    for observation in relevant_final:
+        receipt_ns, message = observation
+        metadata = _final_observation_metadata(
+            observation,
+            checkpoint='finalized-trace',
+        )
+        if (
+            metadata['final_subscription_identity']
+            != fence['final_subscription_identity']
+        ):
+            raise ConsumerTraceAmbiguous(
+                'final subscription identity changed during endpoint continuity',
+                expected_final_subscription_identity=(
+                    fence['final_subscription_identity']
+                ),
+                observed_final_subscription_identity=(
+                    metadata['final_subscription_identity']
+                ),
+                observed_receipt_ns=receipt_ns,
+                observed_stamp_ns=_stamp_ns(message),
+                final_phase_isolation=final_phase,
+            )
+        sequence = metadata['publication_sequence_number']
+        if previous_sequence is not None:
+            if sequence == previous_sequence:
+                raise ConsumerTraceAmbiguous(
+                    'duplicate final publication sequence',
+                    previous_sequence=previous_sequence,
+                    publication_sequence_number=sequence,
+                    final_phase_isolation=final_phase,
+                )
+            if sequence < previous_sequence:
+                raise ConsumerTraceAmbiguous(
+                    'final publication sequence regressed',
+                    previous_sequence=previous_sequence,
+                    publication_sequence_number=sequence,
+                    final_phase_isolation=final_phase,
+                )
+            if sequence > previous_sequence + 1:
+                raise ConsumerTraceAmbiguous(
+                    'final publication sequence gap',
+                    expected_sequence=previous_sequence + 1,
+                    publication_sequence_number=sequence,
+                    final_phase_isolation=final_phase,
+                )
+        previous_sequence = sequence
+
+    source_anchor = relevant_final[-1]
+    source_receipt_ns, source_message = source_anchor
+    source_stamp_ns = _stamp_ns(source_message)
+    if is_zero(source_message):
+        raise ConsumerTraceAmbiguous(
+            'finalized consumer source anchor was zero',
+            final_endpoint_gid=fence['endpoint_gid'],
+            source_receipt_ns=source_receipt_ns,
+            source_header_stamp_ns=source_stamp_ns,
+            final_phase_isolation=final_phase,
+        )
+    source_metadata = _final_observation_metadata(
+        source_anchor,
+        checkpoint='consumer-source',
+    )
+    return source_anchor, {
+        'motion_proof_anchor': {
+            'receipt_ns': motion_receipt_ns,
+            'header_stamp_ns': motion_stamp_ns,
+            **motion_metadata,
+        },
+        'consumer_source_anchor': {
+            'receipt_ns': source_receipt_ns,
+            'header_stamp_ns': source_stamp_ns,
+            'twist_signature': list(_twist_signature(source_message)),
+            **source_metadata,
+        },
+        'endpoint_continuity': {
+            'graph_endpoint_gid': fence['endpoint_gid'],
+            'final_subscription_identity': fence[
+                'final_subscription_identity'
+            ],
+            'signal_boundary_final_receipt_ns': fence[
+                'final_receipt_fence_ns'
+            ],
+            'signal_boundary_final_header_stamp_ns': fence[
+                'final_header_stamp_ns'
+            ],
+            'signal_boundary_final_publication_sequence_number': fence[
+                'final_publication_sequence_number'
+            ],
+            'finalized_publication_sequence_number': source_metadata[
+                'publication_sequence_number'
+            ],
+        },
+        'final_phase_isolation': final_phase,
+    }
+
+
 def _assert_strict_trace_order(
     samples: tuple[tuple[int, Any], ...],
     *,
@@ -656,7 +967,6 @@ def controller_consumed_command_trace(
             late_source_header_stamp_ns=_stamp_ns(late_message),
             late_source_receipt_ns=late_receipt_ns,
         )
-
     relevant_final_samples, final_phase = _relevant_trace_phase(
         final_samples,
         source_anchor=source_anchor,
@@ -713,7 +1023,7 @@ def controller_consumed_command_trace(
         for sample in relevant_limited_samples[:zero_index]
         if (
             not is_zero(sample[1])
-            and _stamp_ns(sample[1]) >= source_stamp_ns
+            and _stamp_ns(sample[1]) > source_stamp_ns
         )
     ]
     if not pre_zero_nonzero:
@@ -732,9 +1042,9 @@ def controller_consumed_command_trace(
                 controller_update_stamp_ns=controller_stamp_ns,
                 controller_receipt_ns=controller_receipt_ns,
             )
-        if source_stamp_ns > controller_stamp_ns:
+        if source_stamp_ns >= controller_stamp_ns:
             raise ConsumerTraceAmbiguous(
-                'source header stamp follows controller update',
+                'source header stamp does not precede controller update',
                 source_header_stamp_ns=source_stamp_ns,
                 controller_update_stamp_ns=controller_stamp_ns,
             )
@@ -794,8 +1104,10 @@ def consumer_timeout_result(
     source_anchor: tuple[int, Any],
     zero_sim_ns: int,
     zero_receipt_ns: int,
+    source_finalization: dict[str, Any] | None = None,
 ):
-    """Apply the frozen controller timeout to its uniquely proved source."""
+    """Apply the controller timeout to the finalized exact-Gate source."""
+    finalized_source_evidence = source_finalization
     trace = controller_consumed_command_trace(
         final_samples,
         limited_samples,
@@ -810,7 +1122,7 @@ def consumer_timeout_result(
             trace,
             delta_ns=delta_ns,
         )
-    return {
+    result = {
         'authoritative_source_stamp_ns': last_nonzero_sim_ns,
         'authoritative_source_receipt_ns': (
             trace['source_observer_receipt_ns']
@@ -826,6 +1138,9 @@ def consumer_timeout_result(
         'delta_ns': delta_ns,
         'zero_receipt_ns': zero_receipt_ns,
     }
+    if finalized_source_evidence is not None:
+        result['source_finalization'] = finalized_source_evidence
+    return result
 
 
 def gate_zero_proven(message: Any) -> bool:
@@ -861,6 +1176,20 @@ class CrashStopProbe:
             daemon=True,
         )
         self.lock = threading.Lock()
+        self._final_callback_condition = threading.Condition()
+        self._final_callbacks_in_flight = 0
+        self._final_trace_frozen = False
+        self._final_post_freeze_ingress_count = 0
+        self._final_stale_epoch_ingress_count = 0
+        self._final_observation_epoch = 0
+        self._final_trace_epoch_state = 'observing'
+        self._final_subscription_identity = (
+            'voice-nav-final-subscription-' + secrets.token_hex(16)
+        )
+        self._finalized_final_trace: tuple[CommandObservation, ...] | None = (
+            None
+        )
+        self._finalized_trace_fence: dict[str, Any] | None = None
         self.mission_states = deque(maxlen=4000)
         self.gate_states = deque(maxlen=4000)
         self.final_commands = deque(maxlen=8000)
@@ -901,14 +1230,11 @@ class CrashStopProbe:
                 state_qos,
                 callback_group=self.safety_observation_group,
             ),
-            self.node.create_subscription(
-                TwistStamped,
-                FINAL_COMMAND_TOPIC,
-                lambda message: self._append(
-                    self.final_commands, message
+            self._create_final_subscription(
+                observation_epoch=self._final_observation_epoch,
+                final_subscription_identity=(
+                    self._final_subscription_identity
                 ),
-                100,
-                callback_group=self.safety_observation_group,
             ),
             self.node.create_subscription(
                 TwistStamped,
@@ -950,6 +1276,7 @@ class CrashStopProbe:
                 callback_group=self.sensor_observation_group,
             ),
         ]
+        self.final_subscription = self.subscriptions[2]
         self.action_client = ActionClient(
             self.node, self._execute_mission_type, ACTION_NAME
         )
@@ -979,6 +1306,382 @@ class CrashStopProbe:
                     publication_sequence_number=sequence,
                 )
             )
+
+    def _ensure_final_callback_state(self) -> None:
+        """Initialize the package-private final callback barrier for unit probes."""
+        if not hasattr(self, '_final_callback_condition'):
+            self._final_callback_condition = threading.Condition()
+        if not hasattr(self, '_final_callbacks_in_flight'):
+            self._final_callbacks_in_flight = 0
+        if not hasattr(self, '_final_trace_frozen'):
+            self._final_trace_frozen = False
+        if not hasattr(self, '_final_post_freeze_ingress_count'):
+            self._final_post_freeze_ingress_count = 0
+        if not hasattr(self, '_final_stale_epoch_ingress_count'):
+            self._final_stale_epoch_ingress_count = 0
+        if not hasattr(self, '_final_observation_epoch'):
+            self._final_observation_epoch = 0
+        if not hasattr(self, '_final_trace_epoch_state'):
+            self._final_trace_epoch_state = 'observing'
+        if not hasattr(self, '_final_subscription_identity'):
+            self._final_subscription_identity = (
+                'voice-nav-final-subscription-' + secrets.token_hex(16)
+            )
+        if not hasattr(self, '_finalized_final_trace'):
+            self._finalized_final_trace = None
+        if not hasattr(self, '_finalized_trace_fence'):
+            self._finalized_trace_fence = None
+
+    @staticmethod
+    def _jazzy_message_info_int(message_info: Any, field: str) -> int | None:
+        if isinstance(message_info, dict):
+            value = message_info.get(field)
+        else:
+            value = getattr(message_info, field, None)
+        if not isinstance(value, int) or isinstance(value, bool):
+            return None
+        return value
+
+    def _create_final_subscription(
+        self,
+        *,
+        observation_epoch: int,
+        final_subscription_identity: str,
+    ):
+        """Create one epoch-bound final-command observer subscription."""
+        return self.node.create_subscription(
+            TwistStamped,
+            FINAL_COMMAND_TOPIC,
+            lambda message, message_info: self._append_final(
+                message,
+                message_info,
+                observation_epoch=observation_epoch,
+                final_subscription_identity=final_subscription_identity,
+            ),
+            100,
+            callback_group=self.safety_observation_group,
+        )
+
+    def _append_final(
+        self,
+        message: Any,
+        message_info: Any,
+        *,
+        observation_epoch: int | None = None,
+        final_subscription_identity: str | None = None,
+    ) -> None:
+        """Record Jazzy metadata and mark callback ingress before waiting on lock."""
+        self._ensure_final_callback_state()
+        with self._final_callback_condition:
+            if observation_epoch is None:
+                observation_epoch = self._final_observation_epoch
+            if final_subscription_identity is None:
+                final_subscription_identity = self._final_subscription_identity
+            if (
+                observation_epoch != self._final_observation_epoch
+                or final_subscription_identity
+                != self._final_subscription_identity
+            ):
+                self._final_stale_epoch_ingress_count += 1
+                self._final_callback_condition.notify_all()
+                return
+            if self._final_trace_frozen:
+                self._final_post_freeze_ingress_count += 1
+                self._final_callback_condition.notify_all()
+                return
+            self._final_callbacks_in_flight += 1
+        try:
+            with self.lock:
+                self.final_commands.append(
+                    CommandObservation(
+                        receipt_ns=time.monotonic_ns(),
+                        message=message,
+                        publication_sequence_number=(
+                            self._jazzy_message_info_int(
+                                message_info,
+                                'publication_sequence_number',
+                            )
+                        ),
+                        source_timestamp_ns=self._jazzy_message_info_int(
+                            message_info,
+                            'source_timestamp',
+                        ),
+                        received_timestamp_ns=self._jazzy_message_info_int(
+                            message_info,
+                            'received_timestamp',
+                        ),
+                        reception_sequence_number=(
+                            self._jazzy_message_info_int(
+                                message_info,
+                                'reception_sequence_number',
+                            )
+                        ),
+                        final_subscription_identity=(
+                            final_subscription_identity
+                        ),
+                        observation_epoch=observation_epoch,
+                        header_stamp_ns=_stamp_ns(message),
+                        twist_signature=_twist_signature(message),
+                    )
+                )
+        finally:
+            with self._final_callback_condition:
+                self._final_callbacks_in_flight -= 1
+                self._final_callback_condition.notify_all()
+
+    def begin_replacement_final_observation_epoch(self) -> dict[str, Any]:
+        """Fence an immutable final trace before observing a replacement Gate."""
+        self._ensure_final_callback_state()
+        with self._final_callback_condition:
+            if (
+                not self._final_trace_frozen
+                or self._final_trace_epoch_state != 'finalized'
+            ):
+                raise ConsumerTraceAmbiguous(
+                    'replacement final observation requires a frozen trace'
+                )
+            if (
+                self._final_callbacks_in_flight
+                or self._final_post_freeze_ingress_count
+            ):
+                self._final_trace_epoch_state = 'failed'
+                raise ConsumerTraceAmbiguous(
+                    'old callback entered after finalized trace freeze',
+                    in_flight_callbacks=self._final_callbacks_in_flight,
+                    post_freeze_ingress_count=(
+                        self._final_post_freeze_ingress_count
+                    ),
+                )
+            if self._finalized_final_trace is None:
+                raise ConsumerTraceAmbiguous(
+                    'replacement final observation requires finalized trace'
+                )
+            if self._finalized_trace_fence is None:
+                raise ConsumerTraceAmbiguous(
+                    'replacement final observation requires finalized trace fence'
+                )
+            previous_epoch = self._final_observation_epoch
+            previous_identity = self._final_subscription_identity
+            previous_trace = self._finalized_final_trace
+            previous_post_freeze_ingress_count = (
+                self._final_post_freeze_ingress_count
+            )
+            replacement_epoch = previous_epoch + 1
+            replacement_identity = (
+                'voice-nav-final-subscription-' + secrets.token_hex(16)
+            )
+            self._final_trace_epoch_state = 'transitioning'
+            self._final_callback_condition.notify_all()
+
+        old_subscription = getattr(self, 'final_subscription', None)
+        subscriptions = getattr(self, 'subscriptions', None)
+        subscription_index = None
+        if old_subscription is not None and subscriptions is not None:
+            try:
+                subscription_index = subscriptions.index(old_subscription)
+            except ValueError as error:
+                self._fail_replacement_final_observation_transition(
+                    'replacement final subscription was not registered',
+                    error=error,
+                )
+
+        replacement_subscription = None
+        try:
+            if old_subscription is not None:
+                if self.node.destroy_subscription(old_subscription) is not True:
+                    raise RuntimeError(
+                        'replacement final subscription was not destroyed'
+                    )
+                replacement_subscription = self._create_final_subscription(
+                    observation_epoch=replacement_epoch,
+                    final_subscription_identity=replacement_identity,
+                )
+                if replacement_subscription is None:
+                    raise RuntimeError(
+                        'replacement final subscription was not created'
+                    )
+        except Exception as error:
+            self._fail_replacement_final_observation_transition(
+                'replacement final observer transition failed',
+                error=error,
+            )
+
+        with self._final_callback_condition:
+            if (
+                self._final_trace_epoch_state != 'transitioning'
+                or not self._final_trace_frozen
+                or self._final_callbacks_in_flight
+                or self._final_post_freeze_ingress_count
+            ):
+                self._final_trace_epoch_state = 'failed'
+                self._final_callback_condition.notify_all()
+                failure = ConsumerTraceAmbiguous(
+                    'old callback entered during replacement final transition',
+                    in_flight_callbacks=self._final_callbacks_in_flight,
+                    post_freeze_ingress_count=(
+                        self._final_post_freeze_ingress_count
+                    ),
+                )
+            else:
+                if subscription_index is not None:
+                    subscriptions[subscription_index] = replacement_subscription
+                if old_subscription is not None:
+                    self.final_subscription = replacement_subscription
+                self._final_observation_epoch = replacement_epoch
+                self._final_subscription_identity = replacement_identity
+                self._final_trace_frozen = False
+                self._final_post_freeze_ingress_count = 0
+                self._final_trace_epoch_state = 'replacement'
+                replacement = {
+                    'finalized_trace_fence': deepcopy(
+                        self._finalized_trace_fence
+                    ),
+                    'previous_observation_epoch': previous_epoch,
+                    'previous_final_subscription_identity': previous_identity,
+                    'previous_final_trace_length': len(previous_trace),
+                    'previous_post_freeze_ingress_count': (
+                        previous_post_freeze_ingress_count
+                    ),
+                    'observation_epoch': self._final_observation_epoch,
+                    'final_subscription_identity': (
+                        self._final_subscription_identity
+                    ),
+                }
+                self._final_callback_condition.notify_all()
+                return replacement
+
+        if replacement_subscription is not None:
+            try:
+                self.node.destroy_subscription(replacement_subscription)
+            except Exception:
+                pass
+        raise failure
+
+    def _fail_replacement_final_observation_transition(
+        self,
+        reason: str,
+        *,
+        error: Exception,
+    ) -> None:
+        """Keep an incomplete subscription swap frozen and fail closed."""
+        with self._final_callback_condition:
+            self._final_trace_frozen = True
+            self._final_trace_epoch_state = 'failed'
+            self._final_callback_condition.notify_all()
+        raise ConsumerTraceAmbiguous(
+            reason,
+            error_type=type(error).__name__,
+            error_detail=str(error),
+        ) from error
+
+    def _freeze_final_callback_ingress(
+        self,
+        *,
+        deadline: float,
+    ) -> dict[str, int]:
+        """Block a finalization until every callback already in ingress drains."""
+        self._ensure_final_callback_state()
+        with self._final_callback_condition:
+            self._final_trace_frozen = True
+            while self._final_callbacks_in_flight:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._final_trace_frozen = False
+                    self._final_callback_condition.notify_all()
+                    raise ConsumerTraceAmbiguous(
+                        'final callback ingress did not drain before freeze',
+                        in_flight_callbacks=self._final_callbacks_in_flight,
+                        post_freeze_ingress_count=(
+                            self._final_post_freeze_ingress_count
+                        ),
+                    )
+                self._final_callback_condition.wait(timeout=min(remaining, 0.05))
+            if self._final_post_freeze_ingress_count:
+                self._final_trace_frozen = False
+                self._final_callback_condition.notify_all()
+                raise ConsumerTraceAmbiguous(
+                    'final callback entered after trace freeze',
+                    post_freeze_ingress_count=(
+                        self._final_post_freeze_ingress_count
+                    ),
+                )
+            self._final_trace_epoch_state = 'frozen'
+            return {
+                'in_flight_callbacks': self._final_callbacks_in_flight,
+                'post_freeze_ingress_count': (
+                    self._final_post_freeze_ingress_count
+                ),
+            }
+
+    def _unfreeze_final_callback_ingress(self) -> None:
+        """Permit diagnostic collection again after a failed finalization."""
+        self._ensure_final_callback_state()
+        with self._final_callback_condition:
+            self._final_trace_frozen = False
+            self._final_post_freeze_ingress_count = 0
+            self._final_trace_epoch_state = 'observing'
+            self._final_callback_condition.notify_all()
+
+    def _assert_final_callback_freeze_clean(self) -> None:
+        """Reject a callback that entered after the finalized trace freeze."""
+        self._ensure_final_callback_state()
+        with self._final_callback_condition:
+            if self._final_post_freeze_ingress_count:
+                raise ConsumerTraceAmbiguous(
+                    'final callback entered after trace freeze',
+                    post_freeze_ingress_count=(
+                        self._final_post_freeze_ingress_count
+                    ),
+                )
+
+    def _commit_finalized_trace_checkpoint(
+        self,
+        rechecked_snapshot: tuple[CommandObservation, ...],
+    ) -> dict[str, Any]:
+        """Atomically freeze the immutable old epoch and its switch fence."""
+        self._ensure_final_callback_state()
+        with self._final_callback_condition:
+            if (
+                not self._final_trace_frozen
+                or self._final_trace_epoch_state != 'frozen'
+            ):
+                raise ConsumerTraceAmbiguous(
+                    'finalized trace checkpoint was not frozen'
+                )
+            if (
+                self._final_callbacks_in_flight
+                or self._final_post_freeze_ingress_count
+            ):
+                raise ConsumerTraceAmbiguous(
+                    'final callback entered after trace freeze',
+                    in_flight_callbacks=self._final_callbacks_in_flight,
+                    post_freeze_ingress_count=(
+                        self._final_post_freeze_ingress_count
+                    ),
+                )
+            self._finalized_final_trace = tuple(deepcopy(rechecked_snapshot))
+            self._finalized_trace_fence = {
+                'observation_epoch': self._final_observation_epoch,
+                'final_subscription_identity': (
+                    self._final_subscription_identity
+                ),
+                'trace_length': len(self._finalized_final_trace),
+            }
+            self._final_trace_epoch_state = 'finalized'
+            return deepcopy(self._finalized_trace_fence)
+
+    def _final_endpoint_snapshot(self) -> tuple[str, ...]:
+        provider = getattr(self, '_final_endpoint_snapshot_provider', None)
+        if provider is not None:
+            return tuple(provider())
+        return tuple(
+            sorted(
+                bytes(endpoint.endpoint_gid).hex()
+                for endpoint in self.node.get_publishers_info_by_topic(
+                    FINAL_COMMAND_TOPIC
+                )
+            )
+        )
 
     def _limited_endpoint_snapshot(self) -> tuple[str, ...]:
         provider = getattr(self, '_limited_endpoint_snapshot_provider', None)
@@ -1288,13 +1991,18 @@ class CrashStopProbe:
                 raise AssertionError(
                     'motion proof was stale at the pidfd signal boundary'
                 )
+            final_endpoint_gid = self.assert_unique_final_owner()
+            final_metadata = _final_observation_metadata(
+                final_sample,
+                checkpoint='signal-boundary',
+            )
             endpoint_gid = self._require_limited_endpoint_continuity(
                 expected_gid=None,
                 checkpoint='signal-boundary',
             )
             return {
                 'gate': deepcopy(state),
-                'final': (final_sample[0], deepcopy(final_sample[1])),
+                'final': deepcopy(final_sample),
                 'limited': (
                     limited_sample[0],
                     deepcopy(limited_sample[1]),
@@ -1304,6 +2012,26 @@ class CrashStopProbe:
                 'limited_endpoint_fence': {
                     'endpoint_gid': endpoint_gid,
                     'limited_receipt_fence_ns': limited_sample[0],
+                },
+                'final_endpoint_fence': {
+                    'endpoint_gid': final_endpoint_gid,
+                    'final_subscription_identity': final_metadata[
+                        'final_subscription_identity'
+                    ],
+                    'final_receipt_fence_ns': final_sample[0],
+                    'final_header_stamp_ns': _stamp_ns(final_sample[1]),
+                    'final_publication_sequence_number': final_metadata[
+                        'publication_sequence_number'
+                    ],
+                    'final_source_timestamp_ns': final_metadata[
+                        'source_timestamp_ns'
+                    ],
+                    'final_received_timestamp_ns': final_metadata[
+                        'received_timestamp_ns'
+                    ],
+                    'final_reception_sequence_number': final_metadata[
+                        'reception_sequence_number'
+                    ],
                 },
             }
 
@@ -1458,8 +2186,11 @@ class CrashStopProbe:
                 and current_clock[1] <= previous_clock[1]
                 and time.monotonic_ns() - kill_ack_ns > 1_000_000_000
             ):
-                raise AssertionError(
-                    'simulation clock stopped during consumer-timeout measurement'
+                raise ConsumerTraceAmbiguous(
+                    'simulation clock stopped during consumer-timeout measurement',
+                    previous_clock_ns=previous_clock[1],
+                    observed_clock_ns=current_clock[1],
+                    kill_ack_ns=kill_ack_ns,
                 )
             if current_clock is not None:
                 previous_clock = current_clock
@@ -1475,11 +2206,97 @@ class CrashStopProbe:
             'controller cmd_vel_out did not select zero before the watchdog'
         )
 
+    @staticmethod
+    def _final_endpoint_fence(
+        final_endpoint_fence: dict[str, Any],
+    ) -> tuple[str, int]:
+        endpoint_gid = final_endpoint_fence.get('endpoint_gid')
+        if (
+            not isinstance(endpoint_gid, str)
+            or not endpoint_gid
+            or all(character == '0' for character in endpoint_gid)
+        ):
+            raise ConsumerTraceAmbiguous(
+                'final endpoint identity unavailable',
+                checkpoint='signal-boundary',
+                endpoint_gid=(endpoint_gid if isinstance(endpoint_gid, str) else ''),
+            )
+        receipt_fence_ns = final_endpoint_fence.get('final_receipt_fence_ns')
+        if (
+            not isinstance(receipt_fence_ns, int)
+            or isinstance(receipt_fence_ns, bool)
+        ):
+            raise ConsumerTraceAmbiguous(
+                'final endpoint receipt fence unavailable',
+                checkpoint='signal-boundary',
+            )
+        return endpoint_gid, receipt_fence_ns
+
+    def _require_final_endpoint_disappearance(
+        self,
+        final_endpoint_fence: dict[str, Any],
+        *,
+        checkpoint: str,
+    ) -> dict[str, Any] | None:
+        endpoint_gid, receipt_fence_ns = self._final_endpoint_fence(
+            final_endpoint_fence
+        )
+        endpoint_gids = self._final_endpoint_snapshot()
+        if not endpoint_gids:
+            return {
+                'endpoint_gid': endpoint_gid,
+                'final_receipt_fence_ns': receipt_fence_ns,
+                'checkpoint': checkpoint,
+                'remaining_endpoint_gids': [],
+            }
+        if endpoint_gid not in endpoint_gids:
+            raise ConsumerTraceAmbiguous(
+                'foreign final endpoint appeared after exact Gate SIGKILL',
+                checkpoint=checkpoint,
+                expected_endpoint_gid=endpoint_gid,
+                observed_endpoint_gids=list(endpoint_gids),
+            )
+        if len(endpoint_gids) != 1:
+            raise ConsumerTraceAmbiguous(
+                'duplicate final endpoints remained after exact Gate SIGKILL',
+                checkpoint=checkpoint,
+                expected_endpoint_gid=endpoint_gid,
+                observed_endpoint_gids=list(endpoint_gids),
+            )
+        return None
+
+    def wait_final_endpoint_disappearance(
+        self,
+        final_endpoint_fence: dict[str, Any],
+        *,
+        timeout: float = WALL_WATCHDOG_SECONDS,
+    ) -> dict[str, Any]:
+        """Wait for the signal-boundary Gate endpoint to leave the graph."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            disappeared = self._require_final_endpoint_disappearance(
+                final_endpoint_fence,
+                checkpoint='post-pidfd',
+            )
+            if disappeared is not None:
+                disappeared['observed_ns'] = time.monotonic_ns()
+                return disappeared
+            time.sleep(0.01)
+        endpoint_gid, receipt_fence_ns = self._final_endpoint_fence(
+            final_endpoint_fence
+        )
+        raise ConsumerTraceAmbiguous(
+            'exact Gate final endpoint did not disappear after pidfd acknowledgement',
+            endpoint_gid=endpoint_gid,
+            final_receipt_fence_ns=receipt_fence_ns,
+        )
+
     def wait_confirm_consumer_timeout(
         self,
-        source_anchor: tuple[int, Any],
+        motion_proof_anchor: tuple[int, Any],
         consumer_zero: dict[str, int],
         *,
+        final_endpoint_fence: dict[str, Any] | None = None,
         timeout: float = WALL_WATCHDOG_SECONDS,
     ):
         deadline = time.monotonic() + timeout
@@ -1555,58 +2372,165 @@ class CrashStopProbe:
                             checkpoint='final',
                         )
                     )
-                    if (
-                        confirmed_final_key == final_stable_key
-                        and confirmed_clock is not None
-                        and confirmed_clock[1] - final_stable_clock_ns
-                        >= FINAL_STREAM_QUIESCENCE_NS
-                    ):
-                        controller_consumed_command_trace(
-                            confirmed_snapshot,
-                            confirmed_limited,
-                            source_anchor=source_anchor,
-                            zero_sim_ns=consumer_zero['zero_sim_ns'],
-                            zero_receipt_ns=(
-                                consumer_zero['zero_receipt_ns']
+                    if confirmed_final_key != final_stable_key:
+                        raise ConsumerTraceAmbiguous(
+                            'final source appeared after quiescence freeze',
+                            stable_final_key=list(final_stable_key),
+                            observed_final_key=(
+                                list(confirmed_final_key)
+                                if confirmed_final_key is not None
+                                else None
                             ),
                         )
-                        watermark = self._limited_zero_watermark(
-                            confirmed_limited,
-                            consumer_zero,
-                            source_anchor=source_anchor,
+                if (
+                    confirmed_clock is None
+                    or confirmed_clock[1] - final_stable_clock_ns
+                    < FINAL_STREAM_QUIESCENCE_NS
+                ):
+                    time.sleep(0.01)
+                    continue
+
+                final_callback_ingress = None
+                try:
+                    if final_endpoint_fence is not None:
+                        # This is separate from self.lock: a callback can have
+                        # entered rclpy ingress already and still be waiting for
+                        # self.lock.  Drain it before the final graph/trace
+                        # checkpoint so a queued source cannot appear after a
+                        # successful return.
+                        final_callback_ingress = (
+                            self._freeze_final_callback_ingress(deadline=deadline)
                         )
-                        if watermark is not None:
-                            result = consumer_timeout_result(
-                                confirmed_snapshot,
-                                confirmed_limited,
-                                source_anchor=source_anchor,
-                                zero_sim_ns=consumer_zero['zero_sim_ns'],
-                                zero_receipt_ns=(
-                                    consumer_zero['zero_receipt_ns']
-                                ),
+                    with self.lock:
+                        rechecked_snapshot = tuple(self.final_commands)
+                        rechecked_limited = tuple(self.limited_commands)
+                        rechecked_clock = (
+                            self.clock_samples[-1]
+                            if self.clock_samples
+                            else None
+                        )
+                        rechecked_last = (
+                            rechecked_snapshot[-1]
+                            if rechecked_snapshot
+                            else None
+                        )
+                        rechecked_final_key = (
+                            len(rechecked_snapshot),
+                            rechecked_last[0],
+                            _stamp_ns(rechecked_last[1]),
+                        ) if rechecked_last is not None else None
+                        rechecked_endpoint_gid = (
+                            self._require_limited_endpoint_continuity(
+                                expected_gid=endpoint_gid,
+                                checkpoint='finalized-trace',
                             )
-                            result['final_quiescence'] = {
-                                'stable_key': list(final_stable_key),
-                                'wall_elapsed_ns': (
-                                    now_ns - final_stable_since_ns
-                                ),
-                                'sim_elapsed_ns': (
-                                    confirmed_clock[1]
-                                    - final_stable_clock_ns
-                                ),
-                            }
-                            result['limited_zero_watermark'] = watermark
-                            result['endpoint_continuity'] = {
-                                'endpoint_gid': confirmed_endpoint_gid,
-                                'signal_boundary_checkpoint': 'singleton',
-                                'first_zero_checkpoint': 'singleton',
-                                'observation_checkpoint': 'singleton',
-                                'final_checkpoint': 'singleton',
-                                'limited_receipt_fence_ns': (
-                                    limited_receipt_fence_ns
-                                ),
-                            }
-                            return result
+                        )
+                    if rechecked_final_key != confirmed_final_key:
+                        raise ConsumerTraceAmbiguous(
+                            'final source appeared after quiescence freeze',
+                            stable_final_key=list(final_stable_key),
+                            confirmed_final_key=(
+                                list(confirmed_final_key)
+                                if confirmed_final_key is not None
+                                else None
+                            ),
+                            rechecked_final_key=(
+                                list(rechecked_final_key)
+                                if rechecked_final_key is not None
+                                else None
+                            ),
+                        )
+                    if (
+                        rechecked_clock is None
+                        or rechecked_clock[1] - final_stable_clock_ns
+                        < FINAL_STREAM_QUIESCENCE_NS
+                    ):
+                        if final_endpoint_fence is not None:
+                            self._unfreeze_final_callback_ingress()
+                        continue
+
+                    consumer_source_anchor = motion_proof_anchor
+                    source_finalization = None
+                    final_endpoint_disappearance = None
+                    if final_endpoint_fence is not None:
+                        final_endpoint_disappearance = (
+                            self._require_final_endpoint_disappearance(
+                                final_endpoint_fence,
+                                checkpoint='finalized-trace',
+                            )
+                        )
+                        if final_endpoint_disappearance is None:
+                            self._unfreeze_final_callback_ingress()
+                            continue
+                        consumer_source_anchor, source_finalization = (
+                            finalize_consumer_source_anchor(
+                                rechecked_snapshot,
+                                motion_proof_anchor=motion_proof_anchor,
+                                final_endpoint_fence=final_endpoint_fence,
+                            )
+                        )
+                        self._assert_final_callback_freeze_clean()
+                    controller_consumed_command_trace(
+                        rechecked_snapshot,
+                        rechecked_limited,
+                        source_anchor=consumer_source_anchor,
+                        zero_sim_ns=consumer_zero['zero_sim_ns'],
+                        zero_receipt_ns=consumer_zero['zero_receipt_ns'],
+                    )
+                    watermark = self._limited_zero_watermark(
+                        rechecked_limited,
+                        consumer_zero,
+                        source_anchor=consumer_source_anchor,
+                    )
+                    if watermark is None:
+                        if final_endpoint_fence is not None:
+                            self._unfreeze_final_callback_ingress()
+                        time.sleep(0.01)
+                        continue
+                    result = consumer_timeout_result(
+                        rechecked_snapshot,
+                        rechecked_limited,
+                        source_anchor=consumer_source_anchor,
+                        zero_sim_ns=consumer_zero['zero_sim_ns'],
+                        zero_receipt_ns=consumer_zero['zero_receipt_ns'],
+                        source_finalization=source_finalization,
+                    )
+                    result['final_quiescence'] = {
+                        'stable_key': list(final_stable_key),
+                        'wall_elapsed_ns': now_ns - final_stable_since_ns,
+                        'sim_elapsed_ns': (
+                            rechecked_clock[1] - final_stable_clock_ns
+                        ),
+                    }
+                    result['limited_zero_watermark'] = watermark
+                    result['endpoint_continuity'] = {
+                        'endpoint_gid': rechecked_endpoint_gid,
+                        'signal_boundary_checkpoint': 'singleton',
+                        'first_zero_checkpoint': 'singleton',
+                        'observation_checkpoint': 'singleton',
+                        'final_checkpoint': 'singleton',
+                        'limited_receipt_fence_ns': limited_receipt_fence_ns,
+                    }
+                    if final_callback_ingress is not None:
+                        result['final_callback_ingress'] = (
+                            final_callback_ingress
+                        )
+                    if final_endpoint_disappearance is not None:
+                        result['final_endpoint_disappearance'] = (
+                            final_endpoint_disappearance
+                        )
+                    if final_endpoint_fence is not None:
+                        self._assert_final_callback_freeze_clean()
+                        result['finalized_trace_checkpoint'] = (
+                            self._commit_finalized_trace_checkpoint(
+                                rechecked_snapshot
+                            )
+                        )
+                    return result
+                except Exception:
+                    if final_endpoint_fence is not None:
+                        self._unfreeze_final_callback_ingress()
+                    raise
             time.sleep(0.01)
         with self.lock:
             deadline_now_ns = time.monotonic_ns()
@@ -1633,7 +2557,7 @@ class CrashStopProbe:
                 deadline_watermark = self._limited_zero_watermark(
                     limited_snapshot,
                     consumer_zero,
-                    source_anchor=source_anchor,
+                    source_anchor=motion_proof_anchor,
                 )
                 if (
                     deadline_final_key == final_stable_key
@@ -1659,11 +2583,19 @@ class CrashStopProbe:
                         **self._limited_zero_watermark_evidence(
                             limited_snapshot,
                             consumer_zero,
-                            source_anchor=source_anchor,
+                            source_anchor=motion_proof_anchor,
                         ),
                     )
-        raise AssertionError(
-            'final command observer did not quiesce with advancing clock'
+        raise ConsumerTraceAmbiguous(
+            'final command observer did not quiesce with advancing clock',
+            final_sample_count=len(final_snapshot),
+            final_last_receipt_ns=(
+                final_snapshot[-1][0] if final_snapshot else None
+            ),
+            final_last_stamp_ns=(
+                _stamp_ns(final_snapshot[-1][1]) if final_snapshot else None
+            ),
+            clock_ns=(clock_sample[1] if clock_sample is not None else None),
         )
 
     @staticmethod
@@ -2061,7 +2993,21 @@ class CrashStopProbe:
             raise AssertionError(
                 'MotionGate is not the unique final-command publisher'
             )
-        return bytes(matching[0].endpoint_gid).hex()
+        try:
+            endpoint_gid = bytes(matching[0].endpoint_gid)
+        except (AttributeError, TypeError, ValueError) as error:
+            raise AssertionError(
+                'final-command endpoint GID is unavailable at signal boundary'
+            ) from error
+        if not endpoint_gid:
+            raise AssertionError(
+                'final-command endpoint GID is unavailable at signal boundary'
+            )
+        if not any(endpoint_gid):
+            raise AssertionError(
+                'final-command endpoint GID is invalid at signal boundary'
+            )
+        return endpoint_gid.hex()
 
     def publisher_count(self, topic: str) -> int:
         return len(self.node.get_publishers_info_by_topic(topic))

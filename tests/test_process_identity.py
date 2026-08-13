@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import replace
 import os
 from pathlib import Path
@@ -23,6 +24,8 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -53,6 +56,30 @@ def _load_support():
 support = _load_support()
 
 
+def _load_crash_stop_support():
+    support_path = (
+        Path(__file__).resolve().parents[1]
+        / 'src'
+        / 'voice_nav_bringup'
+        / 'test'
+        / 'crash_stop_support.py'
+    )
+    import importlib.util
+
+    specification = importlib.util.spec_from_file_location(
+        'voice_nav_crash_stop_support_pidfd_unit', support_path
+    )
+    if specification is None or specification.loader is None:
+        raise RuntimeError('could not load crash-stop support')
+    module = importlib.util.module_from_spec(specification)
+    sys.modules[specification.name] = module
+    specification.loader.exec_module(module)
+    return module
+
+
+crash_stop_support = _load_crash_stop_support()
+
+
 @unittest.skipUnless(
     hasattr(os, 'pidfd_open') and hasattr(signal, 'pidfd_send_signal'),
     'pidfd is a Linux test requirement',
@@ -78,6 +105,64 @@ class ProcessIdentityTest(unittest.TestCase):
             pid=child.pid,
         )
         return child, action, event
+
+    @staticmethod
+    def _command(stamp_ns, linear_x):
+        stamp = SimpleNamespace(
+            sec=stamp_ns // 1_000_000_000,
+            nanosec=stamp_ns % 1_000_000_000,
+        )
+        vector = SimpleNamespace(x=linear_x, y=0.0, z=0.0)
+        return SimpleNamespace(
+            header=SimpleNamespace(stamp=stamp),
+            twist=SimpleNamespace(linear=vector, angular=vector),
+        )
+
+    def _signal_boundary_probe(self, endpoint_gids):
+        probe = crash_stop_support.CrashStopProbe.__new__(
+            crash_stop_support.CrashStopProbe
+        )
+        probe.lock = threading.Lock()
+        probe._gate_state_type = SimpleNamespace(ARMED=1)
+        probe._limited_endpoint_snapshot_provider = lambda: ('gid-controller',)
+        probe.node = SimpleNamespace(
+            get_publishers_info_by_topic=lambda _topic: tuple(
+                SimpleNamespace(
+                    node_name=crash_stop_support.GATE_NODE,
+                    node_namespace='/',
+                    endpoint_gid=endpoint_gid,
+                )
+                for endpoint_gid in endpoint_gids
+            )
+        )
+        probe.gate_states = deque(
+            ((900, SimpleNamespace(
+                state=1,
+                authority_live=True,
+                candidate_fresh=True,
+                motion_inhibited=False,
+                zero_selected=False,
+            )),),
+            maxlen=20,
+        )
+        probe.final_commands = deque(
+            (crash_stop_support.CommandObservation(
+                receipt_ns=901,
+                message=self._command(4_000_000_000, 0.01),
+                publication_sequence_number=8,
+                source_timestamp_ns=1_000,
+                received_timestamp_ns=2_000,
+                final_subscription_identity='signal-boundary-subscription',
+            ),),
+            maxlen=20,
+        )
+        probe.limited_commands = deque(
+            ((902, self._command(4_001_000_000, 0.01)),), maxlen=20
+        )
+        probe.clock_samples = deque(
+            ((800, 4_000_000_000), (903, 4_001_000_000)), maxlen=20
+        )
+        return probe
 
     def test_event_absolute_executable_is_used_when_node_is_not_on_path(self):
         temporary_directory = tempfile.TemporaryDirectory()
@@ -294,6 +379,48 @@ class ProcessIdentityTest(unittest.TestCase):
             if child.poll() is None:
                 child.terminate()
                 child.wait(timeout=2)
+
+    def test_invalid_final_endpoint_gid_does_not_kill_before_signal(self):
+        cases = (
+            ('missing', (None,), 'final-command endpoint GID is unavailable'),
+            ('empty', (b'',), 'final-command endpoint GID is unavailable'),
+            ('all-zero', (b'\x00' * 16,), 'final-command endpoint GID is invalid'),
+            ('duplicate', (b'\x01', b'\x02'), 'unique final-command publisher'),
+        )
+        for case, endpoint_gids, reason in cases:
+            with self.subTest(case=case):
+                child, action, event = self.make_child()
+                guard = None
+                try:
+                    guard = support.ExactPidfdProcess.from_process_started(
+                        action=action,
+                        event=event,
+                        expected_executable=Path(sys.executable).name,
+                        expected_node_name='pidfd_test_child',
+                    )
+                    probe = self._signal_boundary_probe(endpoint_gids)
+                    with (
+                        mock.patch.object(
+                            crash_stop_support.time,
+                            'monotonic_ns',
+                            return_value=1_000,
+                        ),
+                        self.assertRaisesRegex(AssertionError, reason),
+                    ):
+                        guard.kill(
+                            lambda: 1,
+                            before_signal=(
+                                probe.capture_motion_at_signal_boundary
+                            ),
+                        )
+                    self.assertFalse(guard.sigkill_sent)
+                    self.assertIsNone(child.poll())
+                finally:
+                    if guard is not None:
+                        guard.close()
+                    if child.poll() is None:
+                        child.terminate()
+                        child.wait(timeout=2)
 
     def test_identity_change_after_motion_boundary_does_not_kill(self):
         child, action, event = self.make_child()
