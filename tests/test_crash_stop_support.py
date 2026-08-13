@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from collections import deque
+from copy import deepcopy
 import importlib.util
 from pathlib import Path
 import sys
@@ -145,6 +146,32 @@ def fenced_consumer_zero(
             endpoint_gid=endpoint_gid,
             limited_receipt_fence_ns=limited_receipt_fence_ns,
         ),
+    }
+
+
+def writer_retirement_certificate(*, endpoint_gid='gid-gate'):
+    """Build the exact-death evidence required before graph stale handling."""
+    return {
+        'identity': {
+            'pid': 120,
+            'starttime_ticks': 240,
+            'executable': '/opt/voice_nav/lib/motion_gate_node',
+            'cmdline': ['motion_gate_node', '--ros-args'],
+        },
+        'signal': {
+            'name': 'SIGKILL',
+            'call_start_monotonic_ns': 63_374_470_300_000,
+            'ack_monotonic_ns': 63_374_470_335_330,
+        },
+        'pidfd_exit': {
+            'ready_monotonic_ns': 63_374_470_400_000,
+        },
+        'launch_process_exited': {
+            'action_matches_captured': True,
+            'returncode': -9,
+            'observed_monotonic_ns': 63_374_470_320_000,
+        },
+        'final_endpoint_gid': endpoint_gid,
     }
 
 
@@ -1144,6 +1171,7 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
                     'final_received_timestamp_ns': 2_000,
                     'final_reception_sequence_number': None,
                 },
+                writer_retirement_certificate=writer_retirement_certificate(),
                 timeout=1.0,
             )
         self.assertEqual(result['last_nonzero_sim_ns'], 4_100_000_000)
@@ -1635,6 +1663,9 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
                     probe._require_final_endpoint_disappearance(
                         final_fence,
                         checkpoint='unit',
+                        writer_retirement_certificate=(
+                            writer_retirement_certificate()
+                        ),
                     )
 
         probe._final_endpoint_snapshot_provider = lambda: ()
@@ -1642,9 +1673,114 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
             probe._require_final_endpoint_disappearance(
                 final_fence,
                 checkpoint='unit',
+                writer_retirement_certificate=writer_retirement_certificate(),
             )['remaining_endpoint_gids'],
             [],
         )
+
+    def test_00bee9e_replay_accepts_only_stale_exact_retired_gid_after_certificate(self):
+        """Replay #110's exact stale-GID trace without Gazebo.
+
+        The final receipt stopped at 63374475559097 ns, while Linux pidfd and
+        launch had already proved the exact Gate exited.  Jazzy graph discovery
+        still returned only the captured GID.  The old protocol waited for the
+        graph to become empty and timed out; this is the intended RED loop.
+        """
+        probe = support.CrashStopProbe.__new__(support.CrashStopProbe)
+        probe._final_endpoint_snapshot_provider = lambda: (
+            '010f0c266499c44d0000000000001503',
+        )
+        certificate = writer_retirement_certificate(
+            endpoint_gid='010f0c266499c44d0000000000001503'
+        )
+
+        result = probe.wait_final_endpoint_disappearance(
+            {
+                'endpoint_gid': '010f0c266499c44d0000000000001503',
+                'final_receipt_fence_ns': 63_374_475_559_097,
+            },
+            writer_retirement_certificate=certificate,
+        )
+
+        self.assertEqual(result['graph_state'], 'stale_exact_retired_gid')
+        self.assertEqual(
+            result['remaining_endpoint_gids'],
+            ['010f0c266499c44d0000000000001503'],
+        )
+
+    def test_retirement_certificate_fails_closed_for_missing_or_mismatched_axis(self):
+        probe = support.CrashStopProbe.__new__(support.CrashStopProbe)
+        probe._final_endpoint_snapshot_provider = lambda: ('gid-gate',)
+        final_fence = {
+            'endpoint_gid': 'gid-gate',
+            'final_receipt_fence_ns': 63_374_475_559_097,
+        }
+        cases = (
+            (
+                'signal',
+                lambda certificate: certificate.pop('signal'),
+                'signal evidence was incomplete',
+            ),
+            (
+                'signal-call-start',
+                lambda certificate: certificate['signal'].pop(
+                    'call_start_monotonic_ns'
+                ),
+                'signal evidence was incomplete',
+            ),
+            (
+                'pidfd-exit',
+                lambda certificate: certificate.pop('pidfd_exit'),
+                'pidfd exit evidence was incomplete',
+            ),
+            (
+                'launch-action',
+                lambda certificate: certificate['launch_process_exited'].update(
+                    action_matches_captured=False
+                ),
+                'launch exit evidence was incomplete',
+            ),
+            (
+                'launch-before-signal-call',
+                lambda certificate: certificate['launch_process_exited'].update(
+                    observed_monotonic_ns=(
+                        certificate['signal']['call_start_monotonic_ns'] - 1
+                    )
+                ),
+                'launch exit evidence was incomplete',
+            ),
+            (
+                'launch-returncode',
+                lambda certificate: certificate['launch_process_exited'].update(
+                    returncode=0
+                ),
+                'launch exit evidence was incomplete',
+            ),
+            (
+                'identity',
+                lambda certificate: certificate['identity'].pop('starttime_ticks'),
+                'identity was incomplete',
+            ),
+            (
+                'endpoint',
+                lambda certificate: certificate.update(
+                    final_endpoint_gid='gid-replacement'
+                ),
+                'endpoint did not match signal boundary',
+            ),
+        )
+        for name, mutate, reason in cases:
+            with self.subTest(name=name):
+                certificate = deepcopy(writer_retirement_certificate())
+                mutate(certificate)
+                with self.assertRaisesRegex(
+                    support.ConsumerTraceAmbiguous,
+                    reason,
+                ):
+                    probe.wait_final_endpoint_disappearance(
+                        final_fence,
+                        writer_retirement_certificate=certificate,
+                    )
 
     def test_final_endpoint_disappearance_times_out_when_exact_gate_remains(self):
         probe = support.CrashStopProbe.__new__(support.CrashStopProbe)
@@ -1669,13 +1805,14 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
         with mock.patch.object(support, 'time', FakeTime):
             with self.assertRaisesRegex(
                 support.ConsumerTraceAmbiguous,
-                'exact Gate final endpoint did not disappear',
+                'writer retirement certificate was unavailable',
             ):
                 probe.wait_final_endpoint_disappearance(
                     {
                         'endpoint_gid': 'gid-gate',
                         'final_receipt_fence_ns': 902,
                     },
+                    writer_retirement_certificate=None,
                     timeout=0.2,
                 )
 
@@ -1683,7 +1820,7 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
         probe = support.CrashStopProbe.__new__(support.CrashStopProbe)
         probe.lock = threading.Lock()
         probe._limited_endpoint_snapshot_provider = lambda: ('gid-controller',)
-        probe._final_endpoint_snapshot_provider = lambda: ()
+        probe._final_endpoint_snapshot_provider = lambda: ('gid-gate',)
         motion_proof_anchor = FinalObservation(
             10, command(1_636_000_000, 0.02), 8
         )
@@ -1738,6 +1875,7 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
                     'final_received_timestamp_ns': 2_000,
                     'final_reception_sequence_number': None,
                 },
+                writer_retirement_certificate=writer_retirement_certificate(),
                 timeout=1.0,
             )
 
@@ -1750,7 +1888,11 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
         )
         self.assertEqual(
             result['final_endpoint_disappearance']['remaining_endpoint_gids'],
-            [],
+            ['gid-gate'],
+        )
+        self.assertEqual(
+            result['final_endpoint_disappearance']['graph_state'],
+            'stale_exact_retired_gid',
         )
 
     def test_confirmation_rejects_callback_entering_after_last_clean_check(self):
@@ -1853,6 +1995,9 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
                         'final_received_timestamp_ns': 2_000,
                         'final_reception_sequence_number': None,
                     },
+                    writer_retirement_certificate=(
+                        writer_retirement_certificate()
+                    ),
                     timeout=1.0,
                 )
 
@@ -1920,6 +2065,7 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
                     'final_received_timestamp_ns': 2_000,
                     'final_reception_sequence_number': None,
                 },
+                writer_retirement_certificate=writer_retirement_certificate(),
                 timeout=1.0,
             )
             old_epoch = probe._final_observation_epoch
@@ -2142,6 +2288,7 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
                     'final_received_timestamp_ns': 2_000,
                     'final_reception_sequence_number': None,
                 },
+                writer_retirement_certificate=writer_retirement_certificate(),
                 timeout=1.0,
             )
             finalized_trace = tuple(probe.final_commands)
@@ -2281,6 +2428,9 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
                         'final_received_timestamp_ns': 2_000,
                         'final_reception_sequence_number': None,
                     },
+                    writer_retirement_certificate=(
+                        writer_retirement_certificate()
+                    ),
                     timeout=0.2,
                 )
 
@@ -2388,6 +2538,9 @@ class ConsumerTimeoutAnchorTest(unittest.TestCase):
                             'final_received_timestamp_ns': 2_000,
                             'final_reception_sequence_number': None,
                         },
+                        writer_retirement_certificate=(
+                            writer_retirement_certificate()
+                        ),
                         timeout=1.0,
                     )
         finally:

@@ -19,12 +19,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import select
 import signal
 import threading
 import time
 from typing import Callable, Iterable
 
-from launch.events.process import ProcessStarted
+from launch.events.process import ProcessExited, ProcessStarted
 
 
 class ProcessIdentityError(RuntimeError):
@@ -190,6 +191,8 @@ class ExactPidfdProcess:
             )
         self._closed = False
         self.sigkill_sent = False
+        self._sigkill_call_start_monotonic_ns: int | None = None
+        self._sigkill_ack_monotonic_ns: int | None = None
 
     @classmethod
     def from_process_started(
@@ -262,13 +265,105 @@ class ExactPidfdProcess:
             before_signal()
         self._validate_process_identity()
         try:
+            self._sigkill_call_start_monotonic_ns = time.monotonic_ns()
             signal.pidfd_send_signal(self.pidfd, signal.SIGKILL)
         except (AttributeError, OSError) as error:
             raise ProcessIdentityError(
                 'pidfd SIGKILL injection failed'
             ) from error
         self.sigkill_sent = True
+        self._sigkill_ack_monotonic_ns = time.monotonic_ns()
+        return self._sigkill_ack_monotonic_ns
+
+    def _wait_pidfd_exit_ready(self, timeout: float) -> int:
+        """Observe Linux pidfd exit readiness without reusing a PID."""
+        if self._closed:
+            raise ProcessIdentityError('pidfd was already closed')
+        if timeout <= 0:
+            raise ProcessIdentityError('pidfd exit readiness timeout was invalid')
+        try:
+            readable, _, _ = select.select([self.pidfd], [], [], timeout)
+        except (OSError, ValueError) as error:
+            raise ProcessIdentityError(
+                'could not wait for pidfd exit readiness'
+            ) from error
+        if self.pidfd not in readable:
+            raise ProcessIdentityError(
+                'pidfd did not become exit-readable before watchdog'
+            )
         return time.monotonic_ns()
+
+    def writer_retirement_certificate(
+        self,
+        event: ProcessExited,
+        *,
+        endpoint_gid: str,
+        timeout: float,
+        launch_exit_observed_monotonic_ns: int | None = None,
+    ) -> dict[str, object]:
+        """Bind one SIGKILL, pidfd exit, and launch exit to one writer."""
+        if (
+            not self.sigkill_sent
+            or self._sigkill_call_start_monotonic_ns is None
+            or self._sigkill_ack_monotonic_ns is None
+        ):
+            raise ProcessIdentityError(
+                'writer retirement requires a recorded pidfd SIGKILL acknowledgement'
+            )
+        if (
+            not isinstance(endpoint_gid, str)
+            or not endpoint_gid
+            or all(character == '0' for character in endpoint_gid)
+        ):
+            raise ProcessIdentityError(
+                'writer retirement requires the signal-boundary endpoint GID'
+            )
+        if getattr(event, 'action', None) is not self.action:
+            raise ProcessIdentityError(
+                'ProcessExited action did not match the captured launch action'
+            )
+        if getattr(event, 'pid', None) != self.snapshot.pid:
+            raise ProcessIdentityError(
+                'ProcessExited pid did not match the captured launch process'
+            )
+        if getattr(event, 'returncode', None) != -signal.SIGKILL:
+            raise ProcessIdentityError(
+                'ProcessExited return code was not SIGKILL (-9)'
+            )
+        pidfd_exit_ready_ns = self._wait_pidfd_exit_ready(timeout)
+        exit_observed_ns = (
+            launch_exit_observed_monotonic_ns
+            if launch_exit_observed_monotonic_ns is not None
+            else time.monotonic_ns()
+        )
+        if exit_observed_ns < self._sigkill_call_start_monotonic_ns:
+            raise ProcessIdentityError(
+                'ProcessExited observation predated pidfd SIGKILL call start'
+            )
+        return {
+            'identity': {
+                'pid': self.snapshot.pid,
+                'starttime_ticks': self.snapshot.starttime_ticks,
+                'executable': self.snapshot.executable,
+                'cmdline': list(self.snapshot.cmdline),
+            },
+            'signal': {
+                'name': 'SIGKILL',
+                'call_start_monotonic_ns': (
+                    self._sigkill_call_start_monotonic_ns
+                ),
+                'ack_monotonic_ns': self._sigkill_ack_monotonic_ns,
+            },
+            'pidfd_exit': {
+                'ready_monotonic_ns': pidfd_exit_ready_ns,
+            },
+            'launch_process_exited': {
+                'action_matches_captured': True,
+                'returncode': event.returncode,
+                'observed_monotonic_ns': exit_observed_ns,
+            },
+            'final_endpoint_gid': endpoint_gid,
+        }
 
     def close(self) -> None:
         """Close the one captured pidfd after injection or teardown."""
@@ -291,8 +386,11 @@ class ProcessStartedCapture:
         self.expected_executable = expected_executable
         self.expected_node_name = expected_node_name
         self._ready = threading.Event()
+        self._exit_ready = threading.Event()
         self._process: ExactPidfdProcess | None = None
+        self._exit_event: ProcessExited | None = None
         self.started_monotonic_ns: int | None = None
+        self.exited_monotonic_ns: int | None = None
 
     def on_start(self, event: ProcessStarted, _context: object) -> list[object]:
         if event.action is self.action:
@@ -304,6 +402,14 @@ class ProcessStartedCapture:
                 expected_node_name=self.expected_node_name,
             )
             self._ready.set()
+        return []
+
+    def on_exit(self, event: ProcessExited, _context: object) -> list[object]:
+        """Record the exit event for the exact launch action only."""
+        if event.action is self.action:
+            self.exited_monotonic_ns = time.monotonic_ns()
+            self._exit_event = event
+            self._exit_ready.set()
         return []
 
     def wait(self, timeout: float) -> ExactPidfdProcess:
@@ -319,6 +425,35 @@ class ProcessStartedCapture:
         if self._process is None or not self._ready.is_set():
             raise ProcessIdentityError('ProcessStarted identity is not ready')
         return self._process
+
+    def wait_writer_retirement_certificate(
+        self,
+        *,
+        endpoint_gid: str,
+        timeout: float,
+    ) -> dict[str, object]:
+        """Require exit evidence from the same captured launch action."""
+        deadline = time.monotonic() + timeout
+        if not self._exit_ready.wait(timeout=timeout):
+            raise ProcessIdentityError(
+                'timed out waiting for ProcessExited of the captured launch action'
+            )
+        event = self._exit_event
+        if event is None or self.exited_monotonic_ns is None:
+            raise ProcessIdentityError(
+                'captured ProcessExited evidence was incomplete'
+            )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ProcessIdentityError(
+                'writer retirement certificate exceeded its watchdog'
+            )
+        return self.process.writer_retirement_certificate(
+            event,
+            endpoint_gid=endpoint_gid,
+            timeout=remaining,
+            launch_exit_observed_monotonic_ns=self.exited_monotonic_ns,
+        )
 
     def close(self) -> None:
         if self._process is not None:

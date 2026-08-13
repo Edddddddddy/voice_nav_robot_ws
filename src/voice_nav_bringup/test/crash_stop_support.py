@@ -33,7 +33,7 @@ from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import TwistStamped
 from launch import LaunchDescription
 from launch.actions import RegisterEventHandler
-from launch.event_handlers import OnProcessStart
+from launch.event_handlers import OnProcessExit, OnProcessStart
 from launch_ros.actions import Node
 import launch_testing.actions
 from nav_msgs.msg import Odometry
@@ -301,7 +301,13 @@ def generate_product_test_description(scope: str):
         )
     )
     product_launch.add_action(
+        RegisterEventHandler(OnProcessExit(on_exit=runtime_capture.on_exit))
+    )
+    product_launch.add_action(
         RegisterEventHandler(OnProcessStart(on_start=gate_capture.on_start))
+    )
+    product_launch.add_action(
+        RegisterEventHandler(OnProcessExit(on_exit=gate_capture.on_exit))
     )
     product_launch.add_action(launch_testing.actions.ReadyToTest())
     return product_launch, {
@@ -346,6 +352,7 @@ def restart_product_node(
                 RegisterEventHandler(
                     OnProcessStart(on_start=capture.on_start)
                 ),
+                RegisterEventHandler(OnProcessExit(on_exit=capture.on_exit)),
                 action,
             ]
         )
@@ -608,7 +615,8 @@ def finalize_consumer_source_anchor(
     motion_proof_anchor: tuple[int, Any],
     final_endpoint_fence: dict[str, Any],
 ) -> tuple[tuple[int, Any], dict[str, Any]]:
-    """Freeze a drained final source without claiming per-message publisher GID.
+    """
+    Freeze a drained final source without claiming per-message publisher GID.
 
     Jazzy rclpy exposes timestamps and sequence numbers, but not an RMW
     publisher GID in the subscription callback.  The graph endpoint is frozen
@@ -998,7 +1006,7 @@ def controller_consumed_command_trace(
                 phase_isolation=phase_isolation,
             )
 
-    zero_index, (observed_zero_receipt_ns, observed_zero) = (
+    zero_index, _ = (
         _first_relevant_controller_zero(
             relevant_limited_samples,
             source_anchor=source_anchor,
@@ -1007,10 +1015,9 @@ def controller_consumed_command_trace(
             phase_isolation=phase_isolation,
         )
     )
-    observed_zero_sim_ns = _stamp_ns(observed_zero)
     if any(
         not is_zero(message)
-        for _, message in relevant_limited_samples[zero_index + 1 :]
+        for _, message in relevant_limited_samples[zero_index + 1:]
     ):
         raise ConsumerTraceAmbiguous(
             'unassociated non-zero controller output after first zero',
@@ -2237,9 +2244,15 @@ class CrashStopProbe:
         final_endpoint_fence: dict[str, Any],
         *,
         checkpoint: str,
-    ) -> dict[str, Any] | None:
+        writer_retirement_certificate: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         endpoint_gid, receipt_fence_ns = self._final_endpoint_fence(
             final_endpoint_fence
+        )
+        certificate = self._writer_retirement_certificate(
+            writer_retirement_certificate,
+            endpoint_gid=endpoint_gid,
+            checkpoint=checkpoint,
         )
         endpoint_gids = self._final_endpoint_snapshot()
         if not endpoint_gids:
@@ -2247,7 +2260,9 @@ class CrashStopProbe:
                 'endpoint_gid': endpoint_gid,
                 'final_receipt_fence_ns': receipt_fence_ns,
                 'checkpoint': checkpoint,
+                'graph_state': 'converged',
                 'remaining_endpoint_gids': [],
+                'writer_retirement_certificate': certificate,
             }
         if endpoint_gid not in endpoint_gids:
             raise ConsumerTraceAmbiguous(
@@ -2263,32 +2278,126 @@ class CrashStopProbe:
                 expected_endpoint_gid=endpoint_gid,
                 observed_endpoint_gids=list(endpoint_gids),
             )
-        return None
+        return {
+            'endpoint_gid': endpoint_gid,
+            'final_receipt_fence_ns': receipt_fence_ns,
+            'checkpoint': checkpoint,
+            'graph_state': 'stale_exact_retired_gid',
+            'remaining_endpoint_gids': list(endpoint_gids),
+            'writer_retirement_certificate': certificate,
+        }
+
+    @staticmethod
+    def _writer_retirement_certificate(
+        certificate: dict[str, Any] | None,
+        *,
+        endpoint_gid: str,
+        checkpoint: str,
+    ) -> dict[str, Any]:
+        """Validate exact Linux and launch death evidence before graph use."""
+        if not isinstance(certificate, dict):
+            raise ConsumerTraceAmbiguous(
+                'writer retirement certificate was unavailable',
+                checkpoint=checkpoint,
+                expected_endpoint_gid=endpoint_gid,
+            )
+        identity = certificate.get('identity')
+        signal_evidence = certificate.get('signal')
+        pidfd_exit = certificate.get('pidfd_exit')
+        launch_exit = certificate.get('launch_process_exited')
+        if not isinstance(identity, dict) or not all(
+            isinstance(identity.get(field), expected)
+            and not isinstance(identity.get(field), bool)
+            for field, expected in (
+                ('pid', int),
+                ('starttime_ticks', int),
+                ('executable', str),
+            )
+        ) or (
+            identity.get('pid', 0) <= 0
+            or identity.get('starttime_ticks', 0) <= 0
+            or not identity.get('executable')
+            or not isinstance(identity.get('cmdline'), list)
+            or not identity['cmdline']
+            or not all(
+                isinstance(argument, str) and argument
+                for argument in identity['cmdline']
+            )
+        ):
+            raise ConsumerTraceAmbiguous(
+                'writer retirement certificate identity was incomplete',
+                checkpoint=checkpoint,
+            )
+        if (
+            not isinstance(signal_evidence, dict)
+            or signal_evidence.get('name') != 'SIGKILL'
+            or not isinstance(
+                signal_evidence.get('call_start_monotonic_ns'), int
+            )
+            or isinstance(signal_evidence.get('call_start_monotonic_ns'), bool)
+            or signal_evidence['call_start_monotonic_ns'] <= 0
+            or not isinstance(signal_evidence.get('ack_monotonic_ns'), int)
+            or isinstance(signal_evidence.get('ack_monotonic_ns'), bool)
+            or signal_evidence['ack_monotonic_ns'] <= 0
+            or signal_evidence['ack_monotonic_ns']
+            < signal_evidence['call_start_monotonic_ns']
+        ):
+            raise ConsumerTraceAmbiguous(
+                'writer retirement certificate signal evidence was incomplete',
+                checkpoint=checkpoint,
+            )
+        if (
+            not isinstance(pidfd_exit, dict)
+            or not isinstance(pidfd_exit.get('ready_monotonic_ns'), int)
+            or isinstance(pidfd_exit.get('ready_monotonic_ns'), bool)
+            or pidfd_exit['ready_monotonic_ns']
+            < signal_evidence['ack_monotonic_ns']
+        ):
+            raise ConsumerTraceAmbiguous(
+                'writer retirement certificate pidfd exit evidence was incomplete',
+                checkpoint=checkpoint,
+            )
+        if (
+            not isinstance(launch_exit, dict)
+            or launch_exit.get('action_matches_captured') is not True
+            or launch_exit.get('returncode') != -9
+            or not isinstance(launch_exit.get('observed_monotonic_ns'), int)
+            or isinstance(launch_exit.get('observed_monotonic_ns'), bool)
+            or launch_exit['observed_monotonic_ns']
+            < signal_evidence['call_start_monotonic_ns']
+        ):
+            raise ConsumerTraceAmbiguous(
+                'writer retirement certificate launch exit evidence was incomplete',
+                checkpoint=checkpoint,
+            )
+        if certificate.get('final_endpoint_gid') != endpoint_gid:
+            raise ConsumerTraceAmbiguous(
+                'writer retirement certificate endpoint did not match signal boundary',
+                checkpoint=checkpoint,
+                expected_endpoint_gid=endpoint_gid,
+                certified_endpoint_gid=certificate.get('final_endpoint_gid'),
+            )
+        return certificate
 
     def wait_final_endpoint_disappearance(
         self,
         final_endpoint_fence: dict[str, Any],
         *,
+        writer_retirement_certificate: dict[str, Any] | None,
         timeout: float = WALL_WATCHDOG_SECONDS,
     ) -> dict[str, Any]:
-        """Wait for the signal-boundary Gate endpoint to leave the graph."""
+        """Classify graph convergence after exact writer retirement is proved."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            disappeared = self._require_final_endpoint_disappearance(
+            graph_state = self._require_final_endpoint_disappearance(
                 final_endpoint_fence,
                 checkpoint='post-pidfd',
+                writer_retirement_certificate=writer_retirement_certificate,
             )
-            if disappeared is not None:
-                disappeared['observed_ns'] = time.monotonic_ns()
-                return disappeared
-            time.sleep(0.01)
-        endpoint_gid, receipt_fence_ns = self._final_endpoint_fence(
-            final_endpoint_fence
-        )
+            graph_state['observed_ns'] = time.monotonic_ns()
+            return graph_state
         raise ConsumerTraceAmbiguous(
-            'exact Gate final endpoint did not disappear after pidfd acknowledgement',
-            endpoint_gid=endpoint_gid,
-            final_receipt_fence_ns=receipt_fence_ns,
+            'writer retirement graph state was not observed before watchdog',
         )
 
     def wait_confirm_consumer_timeout(
@@ -2297,12 +2406,22 @@ class CrashStopProbe:
         consumer_zero: dict[str, int],
         *,
         final_endpoint_fence: dict[str, Any] | None = None,
+        writer_retirement_certificate: dict[str, Any] | None = None,
         timeout: float = WALL_WATCHDOG_SECONDS,
     ):
         deadline = time.monotonic() + timeout
         endpoint_gid, limited_receipt_fence_ns = (
             self._consumer_zero_endpoint_fence(consumer_zero)
         )
+        if final_endpoint_fence is not None:
+            final_endpoint_gid, _ = self._final_endpoint_fence(
+                final_endpoint_fence
+            )
+            self._writer_retirement_certificate(
+                writer_retirement_certificate,
+                endpoint_gid=final_endpoint_gid,
+                checkpoint='confirmation-entry',
+            )
         final_stable_key = None
         final_stable_since_ns = None
         final_stable_clock_ns = None
@@ -2350,7 +2469,6 @@ class CrashStopProbe:
             ):
                 with self.lock:
                     confirmed_snapshot = tuple(self.final_commands)
-                    confirmed_limited = tuple(self.limited_commands)
                     confirmed_clock = (
                         self.clock_samples[-1]
                         if self.clock_samples
@@ -2366,11 +2484,9 @@ class CrashStopProbe:
                         confirmed_last[0],
                         _stamp_ns(confirmed_last[1]),
                     ) if confirmed_last is not None else None
-                    confirmed_endpoint_gid = (
-                        self._require_limited_endpoint_continuity(
-                            expected_gid=endpoint_gid,
-                            checkpoint='final',
-                        )
+                    self._require_limited_endpoint_continuity(
+                        expected_gid=endpoint_gid,
+                        checkpoint='final',
                     )
                     if confirmed_final_key != final_stable_key:
                         raise ConsumerTraceAmbiguous(
@@ -2401,6 +2517,7 @@ class CrashStopProbe:
                         final_callback_ingress = (
                             self._freeze_final_callback_ingress(deadline=deadline)
                         )
+                    rechecked_final_graph = None
                     with self.lock:
                         rechecked_snapshot = tuple(self.final_commands)
                         rechecked_limited = tuple(self.limited_commands)
@@ -2425,6 +2542,16 @@ class CrashStopProbe:
                                 checkpoint='finalized-trace',
                             )
                         )
+                        if final_endpoint_fence is not None:
+                            rechecked_final_graph = (
+                                self._require_final_endpoint_disappearance(
+                                    final_endpoint_fence,
+                                    checkpoint='finalized-trace',
+                                    writer_retirement_certificate=(
+                                        writer_retirement_certificate
+                                    ),
+                                )
+                            )
                     if rechecked_final_key != confirmed_final_key:
                         raise ConsumerTraceAmbiguous(
                             'final source appeared after quiescence freeze',
@@ -2453,15 +2580,7 @@ class CrashStopProbe:
                     source_finalization = None
                     final_endpoint_disappearance = None
                     if final_endpoint_fence is not None:
-                        final_endpoint_disappearance = (
-                            self._require_final_endpoint_disappearance(
-                                final_endpoint_fence,
-                                checkpoint='finalized-trace',
-                            )
-                        )
-                        if final_endpoint_disappearance is None:
-                            self._unfreeze_final_callback_ingress()
-                            continue
+                        final_endpoint_disappearance = rechecked_final_graph
                         consumer_source_anchor, source_finalization = (
                             finalize_consumer_source_anchor(
                                 rechecked_snapshot,
@@ -2518,6 +2637,9 @@ class CrashStopProbe:
                     if final_endpoint_disappearance is not None:
                         result['final_endpoint_disappearance'] = (
                             final_endpoint_disappearance
+                        )
+                        result['writer_retirement_certificate'] = (
+                            writer_retirement_certificate
                         )
                     if final_endpoint_fence is not None:
                         self._assert_final_callback_freeze_clean()

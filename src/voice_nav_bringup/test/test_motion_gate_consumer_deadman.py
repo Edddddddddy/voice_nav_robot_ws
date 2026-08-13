@@ -107,12 +107,14 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
         launch_service,
         proc_info,
         gate,
+        gate_capture,
         restarts,
     ):
         pidfd_identity = None
         pidfd_kill = None
         pre_kill_observation = None
         post_kill_observation = None
+        writer_retirement_certificate = None
         final_endpoint_disappearance = None
         signal_boundary_last_nonzero_sim_ns = None
         last_nonzero_sim_ns = None
@@ -173,9 +175,22 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                 signal_boundary_motion['observed_ns']
             )
             proc_info.assertWaitForShutdown(gate, timeout=10.0)
+            writer_retirement_certificate = (
+                gate_capture.wait_writer_retirement_certificate(
+                    endpoint_gid=(
+                        signal_boundary_motion['final_endpoint_fence'][
+                            'endpoint_gid'
+                        ]
+                    ),
+                    timeout=10.0,
+                )
+            )
             final_endpoint_disappearance = (
                 self.probe.wait_final_endpoint_disappearance(
-                    signal_boundary_motion['final_endpoint_fence']
+                    signal_boundary_motion['final_endpoint_fence'],
+                    writer_retirement_certificate=(
+                        writer_retirement_certificate
+                    ),
                 )
             )
             post_kill_observation = self.probe.diagnostic()
@@ -198,6 +213,7 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                 final_endpoint_fence=(
                     signal_boundary_motion['final_endpoint_fence']
                 ),
+                writer_retirement_certificate=writer_retirement_certificate,
             )
             consumer_timeout_trace = consumer_zero['association']
             last_nonzero_sim_ns = consumer_zero['last_nonzero_sim_ns']
@@ -299,6 +315,7 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                 post_pidfd_final_endpoint_disappearance=(
                     final_endpoint_disappearance
                 ),
+                writer_retirement_certificate=writer_retirement_certificate,
                 finalized_trace_final_endpoint_disappearance=(
                     consumer_zero['final_endpoint_disappearance']
                 ),
@@ -357,6 +374,7 @@ class MotionGateConsumerDeadmanTest(unittest.TestCase):
                 pre_kill_observation=pre_kill_observation,
                 post_kill_observation=post_kill_observation,
                 final_endpoint_disappearance=final_endpoint_disappearance,
+                writer_retirement_certificate=writer_retirement_certificate,
                 replacement_final_observation=(
                     replacement_final_observation
                 ),
