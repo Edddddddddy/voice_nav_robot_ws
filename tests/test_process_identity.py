@@ -29,7 +29,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
-from launch.events.process import ProcessStarted
+from launch.events.process import ProcessExited, ProcessStarted
 
 
 def _load_support():
@@ -105,6 +105,18 @@ class ProcessIdentityTest(unittest.TestCase):
             pid=child.pid,
         )
         return child, action, event
+
+    @staticmethod
+    def _process_exited(action, started, *, pid=None, returncode=None):
+        return ProcessExited(
+            action=action,
+            name='pidfd_test_child',
+            cmd=started.cmd,
+            cwd=started.cwd,
+            env=started.env,
+            pid=started.pid if pid is None else pid,
+            returncode=-signal.SIGKILL if returncode is None else returncode,
+        )
 
     @staticmethod
     def _command(stamp_ns, linear_x):
@@ -291,6 +303,331 @@ class ProcessIdentityTest(unittest.TestCase):
             if guard is not None:
                 guard.close()
             if child.poll() is None:
+                child.wait(timeout=2)
+
+    def test_writer_retirement_certificate_binds_pidfd_exit_to_launch_sigkill(self):
+        child, action, event = self.make_child()
+        guard = None
+        try:
+            guard = support.ExactPidfdProcess.from_process_started(
+                action=action,
+                event=event,
+                expected_executable=Path(sys.executable).name,
+                expected_node_name='pidfd_test_child',
+            )
+            acknowledged = guard.kill(lambda: 1)
+            self.assertGreater(acknowledged, 0)
+            self.assertEqual(child.wait(timeout=2), -signal.SIGKILL)
+            exited = ProcessExited(
+                action=action,
+                name='pidfd_test_child',
+                cmd=event.cmd,
+                cwd=event.cwd,
+                env=event.env,
+                pid=event.pid,
+                returncode=-signal.SIGKILL,
+            )
+
+            certificate = guard.writer_retirement_certificate(
+                exited,
+                endpoint_gid='010f0c266499c44d0000000000001503',
+                timeout=2.0,
+            )
+
+            self.assertEqual(certificate['identity']['pid'], child.pid)
+            self.assertEqual(certificate['signal']['name'], 'SIGKILL')
+            self.assertLessEqual(
+                certificate['signal']['call_start_monotonic_ns'],
+                certificate['signal']['ack_monotonic_ns'],
+            )
+            self.assertGreaterEqual(
+                certificate['pidfd_exit']['ready_monotonic_ns'],
+                certificate['signal']['ack_monotonic_ns'],
+            )
+            self.assertEqual(
+                certificate['launch_process_exited']['returncode'], -9
+            )
+            self.assertEqual(
+                certificate['final_endpoint_gid'],
+                '010f0c266499c44d0000000000001503',
+            )
+        finally:
+            if guard is not None:
+                guard.close()
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=2)
+
+    def test_writer_retirement_certificate_rejects_no_signal(self):
+        child, action, event = self.make_child()
+        guard = None
+        try:
+            guard = support.ExactPidfdProcess.from_process_started(
+                action=action,
+                event=event,
+                expected_executable=Path(sys.executable).name,
+                expected_node_name='pidfd_test_child',
+            )
+
+            with self.assertRaisesRegex(
+                support.ProcessIdentityError,
+                'recorded pidfd SIGKILL acknowledgement',
+            ):
+                guard.writer_retirement_certificate(
+                    self._process_exited(action, event),
+                    endpoint_gid='010f0c266499c44d0000000000001503',
+                    timeout=0.01,
+                )
+        finally:
+            if guard is not None:
+                guard.close()
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=2)
+
+    def test_writer_retirement_certificate_rejects_ack_only_unreadable_pidfd(self):
+        child, action, event = self.make_child()
+        guard = None
+        try:
+            guard = support.ExactPidfdProcess.from_process_started(
+                action=action,
+                event=event,
+                expected_executable=Path(sys.executable).name,
+                expected_node_name='pidfd_test_child',
+            )
+            with mock.patch.object(
+                support.signal, 'pidfd_send_signal', return_value=None
+            ):
+                guard.kill(lambda: 1)
+
+            with mock.patch.object(
+                support.select, 'select', return_value=([], [], [])
+            ):
+                with self.assertRaisesRegex(
+                    support.ProcessIdentityError,
+                    'pidfd did not become exit-readable before watchdog',
+                ):
+                    guard.writer_retirement_certificate(
+                        self._process_exited(action, event),
+                        endpoint_gid='010f0c266499c44d0000000000001503',
+                        timeout=0.01,
+                    )
+        finally:
+            if guard is not None:
+                guard.close()
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=2)
+
+    def test_writer_retirement_certificate_rejects_same_action_wrong_pid(self):
+        child, action, event = self.make_child()
+        guard = None
+        try:
+            guard = support.ExactPidfdProcess.from_process_started(
+                action=action,
+                event=event,
+                expected_executable=Path(sys.executable).name,
+                expected_node_name='pidfd_test_child',
+            )
+            guard.kill(lambda: 1)
+            self.assertEqual(child.wait(timeout=2), -signal.SIGKILL)
+
+            with self.assertRaisesRegex(
+                support.ProcessIdentityError,
+                'ProcessExited pid did not match the captured launch process',
+            ):
+                guard.writer_retirement_certificate(
+                    self._process_exited(action, event, pid=child.pid + 1),
+                    endpoint_gid='010f0c266499c44d0000000000001503',
+                    timeout=2.0,
+                )
+        finally:
+            if guard is not None:
+                guard.close()
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=2)
+
+    def test_writer_retirement_certificate_rejects_wrong_returncode(self):
+        child, action, event = self.make_child()
+        guard = None
+        try:
+            guard = support.ExactPidfdProcess.from_process_started(
+                action=action,
+                event=event,
+                expected_executable=Path(sys.executable).name,
+                expected_node_name='pidfd_test_child',
+            )
+            guard.kill(lambda: 1)
+            self.assertEqual(child.wait(timeout=2), -signal.SIGKILL)
+
+            with self.assertRaisesRegex(
+                support.ProcessIdentityError,
+                'ProcessExited return code was not SIGKILL',
+            ):
+                guard.writer_retirement_certificate(
+                    self._process_exited(action, event, returncode=0),
+                    endpoint_gid='010f0c266499c44d0000000000001503',
+                    timeout=2.0,
+                )
+        finally:
+            if guard is not None:
+                guard.close()
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=2)
+
+    def test_writer_retirement_certificate_rejects_closed_pidfd(self):
+        child, action, event = self.make_child()
+        guard = None
+        try:
+            guard = support.ExactPidfdProcess.from_process_started(
+                action=action,
+                event=event,
+                expected_executable=Path(sys.executable).name,
+                expected_node_name='pidfd_test_child',
+            )
+            guard.kill(lambda: 1)
+            self.assertEqual(child.wait(timeout=2), -signal.SIGKILL)
+            guard.close()
+
+            with self.assertRaisesRegex(
+                support.ProcessIdentityError,
+                'pidfd was already closed',
+            ):
+                guard.writer_retirement_certificate(
+                    self._process_exited(action, event),
+                    endpoint_gid='010f0c266499c44d0000000000001503',
+                    timeout=2.0,
+                )
+        finally:
+            if guard is not None:
+                guard.close()
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=2)
+
+    def test_writer_retirement_allows_exit_after_signal_call_before_ack_recording(self):
+        """A launch exit may race ahead of post-syscall ack bookkeeping."""
+        child, action, event = self.make_child()
+        guard = None
+        original_pidfd_send_signal = signal.pidfd_send_signal
+
+        class InterleavingClock:
+
+            signal_returned = False
+
+            @classmethod
+            def monotonic_ns(cls):
+                return 2_000 if cls.signal_returned else 1_000
+
+        def send_signal(pidfd, sig):
+            result = original_pidfd_send_signal(pidfd, sig)
+            if sig == signal.SIGKILL:
+                InterleavingClock.signal_returned = True
+            return result
+
+        try:
+            guard = support.ExactPidfdProcess.from_process_started(
+                action=action,
+                event=event,
+                expected_executable=Path(sys.executable).name,
+                expected_node_name='pidfd_test_child',
+            )
+            with (
+                mock.patch.object(support, 'time', InterleavingClock),
+                mock.patch.object(
+                    support.signal,
+                    'pidfd_send_signal',
+                    side_effect=send_signal,
+                ),
+            ):
+                guard.kill(lambda: 1)
+                self.assertEqual(child.wait(timeout=2), -signal.SIGKILL)
+                certificate = guard.writer_retirement_certificate(
+                    ProcessExited(
+                        action=action,
+                        name='pidfd_test_child',
+                        cmd=event.cmd,
+                        cwd=event.cwd,
+                        env=event.env,
+                        pid=event.pid,
+                        returncode=-signal.SIGKILL,
+                    ),
+                    endpoint_gid='010f0c266499c44d0000000000001503',
+                    timeout=2.0,
+                    launch_exit_observed_monotonic_ns=1_500,
+                )
+
+            self.assertEqual(
+                certificate['signal']['call_start_monotonic_ns'], 1_000
+            )
+            self.assertEqual(certificate['signal']['ack_monotonic_ns'], 2_000)
+        finally:
+            if guard is not None:
+                guard.close()
+            if child.poll() is None:
+                child.terminate()
+                child.wait(timeout=2)
+
+    def test_capture_binds_retirement_to_the_same_launch_process_exited_action(self):
+        child, action, event = self.make_child()
+        capture = support.ProcessStartedCapture(
+            action=action,
+            expected_executable=Path(sys.executable).name,
+            expected_node_name='pidfd_test_child',
+        )
+        guard = None
+        try:
+            capture.on_start(event, None)
+            guard = capture.process
+            guard.kill(lambda: 1)
+            self.assertEqual(child.wait(timeout=2), -signal.SIGKILL)
+            wrong_action_exit = ProcessExited(
+                action=object(),
+                name='pidfd_test_child',
+                cmd=event.cmd,
+                cwd=event.cwd,
+                env=event.env,
+                pid=event.pid,
+                returncode=-signal.SIGKILL,
+            )
+            capture.on_exit(wrong_action_exit, None)
+            with self.assertRaisesRegex(
+                support.ProcessIdentityError,
+                'timed out waiting for ProcessExited',
+            ):
+                capture.wait_writer_retirement_certificate(
+                    endpoint_gid='010f0c266499c44d0000000000001503',
+                    timeout=0.01,
+                )
+            capture.on_exit(
+                ProcessExited(
+                    action=action,
+                    name='pidfd_test_child',
+                    cmd=event.cmd,
+                    cwd=event.cwd,
+                    env=event.env,
+                    pid=event.pid,
+                    returncode=-signal.SIGKILL,
+                ),
+                None,
+            )
+
+            certificate = capture.wait_writer_retirement_certificate(
+                endpoint_gid='010f0c266499c44d0000000000001503',
+                timeout=2.0,
+            )
+
+            self.assertTrue(
+                certificate['launch_process_exited'][
+                    'action_matches_captured'
+                ]
+            )
+        finally:
+            capture.close()
+            if child.poll() is None:
+                child.terminate()
                 child.wait(timeout=2)
 
     def test_signal_boundary_proof_and_receipt_fence_run_before_sigkill(self):
