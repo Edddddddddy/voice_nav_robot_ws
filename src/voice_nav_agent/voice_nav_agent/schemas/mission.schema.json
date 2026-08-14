@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["kind", "steps"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "mission"},
+        "steps": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["kind", "distance_m"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"const": "move_distance"},
+              "distance_m": {"type": "number"}
+            }
+          },
+          {
+            "type": "object",
+            "required": ["kind", "angle_rad"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"const": "rotate_angle"},
+              "angle_rad": {"type": "number"}
+            }
+          },
+          {
+            "type": "object",
+            "required": ["kind", "target_id"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"const": "navigate_to"},
+              "target_id": {"type": "string"}
+            }
+          },
+          {
+            "type": "object",
+            "required": ["kind", "target_id"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"const": "save_map"},
+              "target_id": {"type": "string"}
+            }
+          }
+        ]
+      }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": ["kind", "prompt"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "clarify"},
+        "prompt": {"type": "string", "minLength": 1, "maxLength": 512}
+      }
+    },
+    {
+      "type": "object",
+      "required": ["kind", "text"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "reply"},
+        "text": {"type": "string", "minLength": 1, "maxLength": 512}
+      }
+    }
+  ]
+}

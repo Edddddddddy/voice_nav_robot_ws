@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 from action_msgs.srv import CancelGoal
@@ -19,14 +20,20 @@ import pytest
 import rclpy
 from voice_nav_agent.agent_node import (
     _publisher_signature,
+    _SerialSeam,
     AgentNode,
 )
 from voice_nav_agent.core import (
     Availability,
+    DecisionKind,
     GateState,
+    Mission,
     MissionState,
+    MissionStep,
     OperatingMode,
+    VoiceTurn as CoreVoiceTurn,
 )
+from voice_nav_agent.llm_fallback import LlmFallbackRequest, LlmFallbackResult
 from voice_nav_interfaces.action import ExecuteMission, Speak
 from voice_nav_interfaces.msg import VoiceTurn
 from voice_nav_interfaces.srv import StopMission
@@ -129,6 +136,27 @@ class FakeStopClient:
         self.requests.append(request)
         self.futures.append(future)
         return future
+
+
+class FakeLlmFallback:
+    """Records adapter requests without opening an HTTP connection."""
+
+    def __init__(self):
+        self.submissions = []
+        self.invalidations = []
+        self.shutdown_called = False
+        self.on_shutdown = None
+
+    def submit(self, request):
+        self.submissions.append(request)
+
+    def invalidate(self, generation):
+        self.invalidations.append(generation)
+
+    def shutdown(self):
+        self.shutdown_called = True
+        if self.on_shutdown is not None:
+            self.on_shutdown()
 
 
 class ScriptedTimer:
@@ -269,6 +297,251 @@ def test_rule_mission_maps_typed_goal_and_terminal_speech(monkeypatch):
         )
         assert node._mission_slot is None
         assert node._speak_client.goals[-1].text == '任务已完成。'
+    finally:
+        node.destroy_node()
+
+
+def test_serial_seam_returns_llm_admission_result():
+    seam = _SerialSeam()
+    observed = []
+
+    accepted = seam.invoke(lambda request: observed.append(request) or True, 'request')
+
+    assert accepted is True
+    assert observed == ['request']
+
+
+@pytest.mark.parametrize(
+    ('result', 'expected_text'),
+    [
+        (LlmFallbackResult('clarify', text='请说明目标地点。'), '请说明目标地点。'),
+        (LlmFallbackResult('reply', text='该请求不能执行。'), '该请求不能执行。'),
+    ],
+)
+def test_llm_closed_clarify_or_reply_speaks_once(monkeypatch, result, expected_text):
+    node = _make_node(monkeypatch)
+    try:
+        turn = CoreVoiceTurn(
+            voice_instance_id='voice-a',
+            voice_seq=1,
+            session_id='session-a',
+            turn_id='turn-1',
+            kind=CoreVoiceTurn.COMMAND,
+            text='请沿着大厅右侧绕过去',
+            confidence=1.0,
+            during_playback=False,
+        )
+        decision = node.core.handle_turn(turn, _make_state())
+        assert decision.kind is DecisionKind.LLM_NEEDED
+        request = LlmFallbackRequest(decision=decision, turn_generation=1)
+        node._turn_generation = 1
+        node._llm_request = request
+
+        node._handle_llm_result(request, result)
+        node._handle_llm_result(request, result)
+
+        assert len(node._speak_client.goals) == 1
+        goal = node._speak_client.goals[0]
+        assert goal.priority == Speak.Goal.NORMAL
+        assert goal.text == expected_text
+        assert goal.session_id == 'session-a'
+        assert goal.turn_id == 'turn-1'
+    finally:
+        node.destroy_node()
+
+
+def test_latest_llm_failure_speaks_one_bounded_normal_reply(monkeypatch):
+    node = _make_node(monkeypatch)
+    try:
+        turn = CoreVoiceTurn(
+            voice_instance_id='voice-a',
+            voice_seq=1,
+            session_id='session-a',
+            turn_id='turn-1',
+            kind=CoreVoiceTurn.COMMAND,
+            text='请沿着大厅右侧绕过去',
+            confidence=1.0,
+            during_playback=False,
+        )
+        decision = node.core.handle_turn(turn, _make_state())
+        request = LlmFallbackRequest(decision=decision, turn_generation=1)
+        node._turn_generation = 1
+        node._llm_request = request
+
+        node._handle_llm_failure(request)
+        node._handle_llm_failure(request)
+
+        assert len(node._speak_client.goals) == 1
+        goal = node._speak_client.goals[0]
+        assert goal.priority == Speak.Goal.NORMAL
+        assert goal.text == '当前无法处理该导航请求。'
+        assert len(goal.text) <= 512
+    finally:
+        node.destroy_node()
+
+
+@pytest.mark.parametrize(
+    'state_changes',
+    [
+        {'runtime_instance_id': 'runtime-b'},
+        {'admission_epoch': 8},
+        {'operating_mode': OperatingMode.MAPPING},
+        {'supported_step_mask': 0b0011},
+        {'named_place_ids': ('charging',)},
+        {'availability': Availability.BUSY},
+        {'gate_state': GateState.GATE_ARMED},
+    ],
+)
+def test_stale_llm_mission_cannot_side_effect_after_runtime_changes(
+    monkeypatch, state_changes
+):
+    node = _make_node(monkeypatch)
+    try:
+        turn = CoreVoiceTurn(
+            voice_instance_id='voice-a',
+            voice_seq=1,
+            session_id='session-a',
+            turn_id='turn-1',
+            kind=CoreVoiceTurn.COMMAND,
+            text='请沿着大厅右侧绕过去',
+            confidence=1.0,
+            during_playback=False,
+        )
+        decision = node.core.handle_turn(turn, _make_state())
+        request = LlmFallbackRequest(decision=decision, turn_generation=1)
+        node._turn_generation = 1
+        node._llm_request = request
+        node._latest_state = replace(_make_state(), **state_changes)
+        result = LlmFallbackResult(
+            'mission',
+            mission=Mission(
+                (
+                    MissionStep(MissionStep.NAVIGATE_TO, target_id='lobby'),
+                ),
+                decision.token,
+            ),
+        )
+
+        node._handle_llm_result(request, result)
+
+        assert node._mission_client.goals == []
+        assert node._speak_client.goals == []
+    finally:
+        node.destroy_node()
+
+
+def test_llm_mission_result_revalidates_and_sends_a_typed_goal(monkeypatch):
+    node = _make_node(monkeypatch)
+    try:
+        turn = CoreVoiceTurn(
+            voice_instance_id='voice-a',
+            voice_seq=1,
+            session_id='session-a',
+            turn_id='turn-1',
+            kind=CoreVoiceTurn.COMMAND,
+            text='请沿着大厅右侧绕过去',
+            confidence=1.0,
+            during_playback=False,
+        )
+        decision = node.core.handle_turn(turn, _make_state())
+        request = LlmFallbackRequest(decision=decision, turn_generation=1)
+        node._turn_generation = 1
+        node._llm_request = request
+        result = LlmFallbackResult(
+            'mission',
+            mission=Mission(
+                (
+                    MissionStep(MissionStep.NAVIGATE_TO, target_id='lobby'),
+                ),
+                decision.token,
+            ),
+        )
+
+        node._seam.invoke(node._handle_llm_result, request, result)
+
+        assert len(node._mission_client.goals) == 1
+        goal = node._mission_client.goals[0]
+        assert goal.source_instance_id == 'a' * 32
+        assert goal.source_seq == decision.token.source_seq
+        assert goal.runtime_instance_id == 'runtime-a'
+        assert goal.admission_epoch == 7
+        assert len(goal.steps) == 1
+        assert goal.steps[0].kind == MissionStep.NAVIGATE_TO
+        assert goal.steps[0].target_id == 'lobby'
+    finally:
+        node.destroy_node()
+
+
+@pytest.mark.parametrize('late_delivery', ['result', 'failure'])
+def test_destroy_node_revokes_llm_request_before_fallback_shutdown(
+    monkeypatch, late_delivery
+):
+    """A late fallback callback during teardown cannot start ROS side effects."""
+    node = _make_node(monkeypatch)
+    original_fallback = node._llm_fallback
+    fake_fallback = FakeLlmFallback()
+    node._llm_fallback = fake_fallback
+    original_fallback.shutdown()
+    destroyed = False
+    try:
+        turn = CoreVoiceTurn(
+            voice_instance_id='voice-a',
+            voice_seq=1,
+            session_id='session-a',
+            turn_id='turn-1',
+            kind=CoreVoiceTurn.COMMAND,
+            text='请沿着大厅右侧绕过去',
+            confidence=1.0,
+            during_playback=False,
+        )
+        decision = node.core.handle_turn(turn, _make_state())
+        request = LlmFallbackRequest(decision=decision, turn_generation=1)
+        result = LlmFallbackResult(
+            'mission',
+            mission=Mission(
+                (MissionStep(MissionStep.NAVIGATE_TO, target_id='lobby'),),
+                decision.token,
+            ),
+        )
+        node._turn_generation = 1
+        node._llm_request = request
+
+        if late_delivery == 'result':
+            fake_fallback.on_shutdown = lambda: node._seam.invoke(
+                node._handle_llm_result, request, result
+            )
+        else:
+            fake_fallback.on_shutdown = lambda: node._seam.invoke(
+                node._handle_llm_failure, request
+            )
+
+        node.destroy_node()
+        destroyed = True
+
+        assert fake_fallback.shutdown_called is True
+        assert node._llm_request is None
+        assert node._mission_client.goals == []
+        assert node._speak_client.goals == []
+    finally:
+        if not destroyed:
+            node.destroy_node()
+
+
+def test_rule_stop_and_existing_clarification_never_submit_http(monkeypatch):
+    node = _make_node(monkeypatch)
+    original_fallback = node._llm_fallback
+    fake_fallback = FakeLlmFallback()
+    node._llm_fallback = fake_fallback
+    original_fallback.shutdown()
+    try:
+        node._on_turn_message(_make_turn('前进 1 米', sequence=1))
+        node._on_turn_message(
+            _make_turn('停止', sequence=2, kind=VoiceTurn.STOP)
+        )
+        node._on_turn_message(_make_turn('前进', sequence=3))
+
+        assert fake_fallback.submissions == []
+        assert fake_fallback.invalidations == [1, 2, 3]
     finally:
         node.destroy_node()
 
@@ -888,6 +1161,31 @@ def test_speak_late_acceptance_is_canceled_after_timeout(monkeypatch):
 
         assert node._speak_operation is None
         assert handle.cancel_calls == 1
+    finally:
+        node.destroy_node()
+
+
+def test_speak_rechecks_action_server_once_before_dropping(monkeypatch):
+    node = _make_node(monkeypatch)
+    timers = _script_deadlines(monkeypatch, node)
+    node._speak_client = FakeActionClient(ready=False)
+    try:
+        node._speak_text(
+            '请说明目标地点。',
+            Speak.Goal.NORMAL,
+            'session-a',
+            'turn-a',
+            1,
+        )
+        assert node._speak_client.goals == []
+        assert node._speak_operation is not None
+        assert len(timers) == 1
+
+        node._speak_client._ready = True
+        timers[0].timeout()
+
+        assert len(node._speak_client.goals) == 1
+        assert node._speak_client.goals[0].text == '请说明目标地点。'
     finally:
         node.destroy_node()
 
