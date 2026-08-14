@@ -94,8 +94,11 @@ if(VOICE_NAV_AUDIO_WITH_PORTAUDIO)
 endif()
 
 if(BUILD_TESTING)
+  find_package(action_msgs REQUIRED)
+  find_package(ament_cmake_ros REQUIRED)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_lint_auto REQUIRED)
+  find_package(launch_testing_ament_cmake REQUIRED)
   # the following line skips the linter which checks for copyrights
   # comment the line when a copyright and license is added to all source files
   set(ament_cmake_copyright_FOUND TRUE)
@@ -104,6 +107,25 @@ if(BUILD_TESTING)
   # a copyright and license is added to all source files
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+
+  # This tracer bullet launches only test code around the installed Agent.
+  # The scripted driver remains a non-installed target below.
+  add_launch_test(
+    test/test_scripted_voice_agent_launch.py
+    TARGET scripted_voice_agent_launch_test
+    TIMEOUT 60
+  )
+  add_launch_test(
+    test/test_scripted_voice_agent_launch.py
+    TARGET scripted_voice_agent_llm_launch_test
+    TIMEOUT 60
+  )
+  add_launch_test(
+    test/test_scripted_voice_motion_smoke.py
+    TARGET scripted_voice_motion_smoke_test
+    TIMEOUT 300
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
+  )
 
   ament_add_gtest(
     audio_engine_test
@@ -151,6 +173,56 @@ if(BUILD_TESTING)
   target_include_directories(speech_input_node_test PRIVATE include src)
   ament_target_dependencies(speech_input_node_test rclcpp voice_nav_interfaces)
   target_link_libraries(speech_input_node_test speech_input_node)
+
+  # This executable is intentionally test-only: it links the package-private
+  # composition seam and is never installed or registered as a ROS component.
+  add_executable(
+    scripted_speech_agent_driver
+    test/scripted_speech_agent_driver.cpp
+  )
+  target_compile_features(scripted_speech_agent_driver PRIVATE cxx_std_17)
+  target_include_directories(scripted_speech_agent_driver PRIVATE include src)
+  ament_target_dependencies(
+    scripted_speech_agent_driver
+    rclcpp
+    voice_nav_interfaces
+  )
+  target_link_libraries(scripted_speech_agent_driver speech_input_node)
+
+  add_executable(
+    scripted_voice_motion_driver
+    test/scripted_voice_motion_driver.cpp
+  )
+  target_compile_features(scripted_voice_motion_driver PRIVATE cxx_std_17)
+  target_include_directories(scripted_voice_motion_driver PRIVATE include src)
+  ament_target_dependencies(
+    scripted_voice_motion_driver
+    action_msgs
+    rclcpp
+    voice_nav_interfaces
+  )
+  target_link_libraries(scripted_voice_motion_driver speech_input_node)
+  set_tests_properties(
+    scripted_voice_agent_launch_test
+    PROPERTIES
+      ENVIRONMENT
+        "VOICE_NAV_SCRIPTED_SPEECH_DRIVER=$<TARGET_FILE:scripted_speech_agent_driver>"
+  )
+  set_tests_properties(
+    scripted_voice_agent_llm_launch_test
+    PROPERTIES
+      ENVIRONMENT
+        "VOICE_NAV_SCRIPTED_SPEECH_DRIVER=$<TARGET_FILE:scripted_speech_agent_driver>;VOICE_NAV_SCRIPTED_SCENARIO=llm"
+  )
+  set_tests_properties(
+    scripted_voice_motion_smoke_test
+    PROPERTIES
+      ENVIRONMENT
+        "RMW_IMPLEMENTATION=rmw_fastrtps_cpp;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;VOICE_NAV_SCRIPTED_SPEECH_DRIVER=$<TARGET_FILE:scripted_voice_motion_driver>"
+      ENVIRONMENT_MODIFICATION
+        "ROS_DOMAIN_ID=unset:;DISABLE_ROS_ISOLATION=unset:"
+      RUN_SERIAL TRUE
+  )
 
   add_test(
     NAME speech_input_install_contract
