@@ -1,0 +1,6 @@
+if(EXISTS "${PACKAGE_PREFIX}/lib/voice_nav_audio")
+  file(GLOB installed_executables "${PACKAGE_PREFIX}/lib/voice_nav_audio/*")
+  if(installed_executables)
+    message(FATAL_ERROR "SpeechInput scripted injection must not install a voice_nav_audio executable")
+  endif()
+endif()

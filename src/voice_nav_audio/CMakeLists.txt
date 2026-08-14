@@ -7,6 +7,8 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(voice_nav_interfaces REQUIRED)
 # uncomment the following section in order to fill in
 # further dependencies manually.
 # find_package(<dependency> REQUIRED)
@@ -14,6 +16,8 @@ find_package(ament_cmake REQUIRED)
 add_library(audio_engine_callback OBJECT src/audio_engine_callback.cpp)
 add_library(audio_engine_core OBJECT src/audio_engine.cpp)
 add_library(dsp_pipeline STATIC src/dsp_pipeline.cpp)
+add_library(speech_input_core STATIC src/speech_input_core.cpp)
+add_library(speech_input_node STATIC src/speech_input_node.cpp)
 add_library(
   audio_engine STATIC
   $<TARGET_OBJECTS:audio_engine_core>
@@ -30,6 +34,8 @@ foreach(target
     audio_engine_core
     audio_engine_callback
     dsp_pipeline
+    speech_input_core
+    speech_input_node
     portaudio_adapter
     portaudio_adapter_callback)
   target_compile_features(${target} PUBLIC cxx_std_17)
@@ -39,6 +45,8 @@ foreach(target
       "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
   )
 endforeach()
+ament_target_dependencies(speech_input_node rclcpp voice_nav_interfaces)
+target_link_libraries(speech_input_node speech_input_core)
 target_link_libraries(portaudio_adapter PUBLIC audio_engine)
 
 option(
@@ -118,6 +126,38 @@ if(BUILD_TESTING)
   target_compile_features(dsp_pipeline_test PUBLIC cxx_std_17)
   target_include_directories(dsp_pipeline_test PRIVATE include src)
   target_link_libraries(dsp_pipeline_test dsp_pipeline)
+
+  ament_add_gtest(
+    speech_input_core_test
+    test/speech_input_core_test.cpp
+  )
+  add_executable(speech_input_identity_probe test/speech_input_identity_probe.cpp)
+  target_compile_features(speech_input_identity_probe PRIVATE cxx_std_17)
+  target_include_directories(speech_input_identity_probe PRIVATE include src)
+  target_link_libraries(speech_input_identity_probe speech_input_core)
+  target_compile_features(speech_input_core_test PUBLIC cxx_std_17)
+  target_include_directories(speech_input_core_test PRIVATE include src)
+  target_link_libraries(speech_input_core_test speech_input_core)
+  target_compile_definitions(
+    speech_input_core_test PRIVATE
+    "SPEECH_INPUT_IDENTITY_PROBE=\"$<TARGET_FILE:speech_input_identity_probe>\"")
+  add_dependencies(speech_input_core_test speech_input_identity_probe)
+
+  ament_add_gtest(
+    speech_input_node_test
+    test/speech_input_node_test.cpp
+  )
+  target_compile_features(speech_input_node_test PUBLIC cxx_std_17)
+  target_include_directories(speech_input_node_test PRIVATE include src)
+  ament_target_dependencies(speech_input_node_test rclcpp voice_nav_interfaces)
+  target_link_libraries(speech_input_node_test speech_input_node)
+
+  add_test(
+    NAME speech_input_install_contract
+    COMMAND "${CMAKE_COMMAND}"
+      "-DPACKAGE_PREFIX=${CMAKE_INSTALL_PREFIX}"
+      -P "${CMAKE_CURRENT_SOURCE_DIR}/test/speech_input_install_contract.cmake"
+  )
 
   if(VOICE_NAV_AUDIO_WITH_WEBRTC_APM)
     add_executable(dsp_webrtc_fixture_runner test/dsp_webrtc_fixture_runner.cpp)
