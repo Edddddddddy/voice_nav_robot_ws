@@ -51,11 +51,13 @@ from .core import (
     Decision,
     DecisionKind,
     MissionDecision,
+    MissionProposal,
     MissionState,
     PlanningToken,
     StopDecision,
     VoiceTurn,
 )
+from .llm_fallback import LlmFallback, LlmFallbackRequest, LlmFallbackResult
 
 
 VOICE_TURN_TOPIC = '/voice/turn'
@@ -64,6 +66,7 @@ MISSION_EXECUTE_ACTION = '/mission/execute'
 MISSION_STOP_SERVICE = '/mission/stop'
 VOICE_SPEAK_ACTION = '/voice/speak'
 RESPONSE_DEADLINE_SECONDS = 1.0
+SPEAK_DISCOVERY_RECHECK_SECONDS = 0.05
 MAX_UINT64 = (1 << 64) - 1
 _UNSET = object()
 
@@ -137,10 +140,10 @@ class _SerialSeam:
         """Create the short critical section used by all adapter callbacks."""
         self._lock = threading.RLock()
 
-    def invoke(self, callback: Callable[..., None], *args: Any) -> None:
+    def invoke(self, callback: Callable[..., Any], *args: Any) -> Any:
         """Run one adapter operation without concurrent state mutation."""
         with self._lock:
-            callback(*args)
+            return callback(*args)
 
 
 class AgentNode(Node):
@@ -171,6 +174,16 @@ class AgentNode(Node):
         self._mission_slot: Optional[_MissionSlot] = None
         self._speak_operation: Optional[_SpeakOperation] = None
         self._stop_operation: Optional[_StopOperation] = None
+        self._llm_request: Optional[LlmFallbackRequest] = None
+        self.declare_parameter('llm_endpoint', 'http://127.0.0.1:8080')
+        self._llm_fallback = LlmFallback(
+            self.get_parameter('llm_endpoint').value,
+            self._core.semantic_validator,
+            self._seam.invoke,
+            self._llm_admission_fence,
+            self._handle_llm_result,
+            self._handle_llm_failure,
+        )
 
         self._latest_state: Optional[MissionState] = None
         self._state_sample_signature: Optional[tuple[Any, ...]] = None
@@ -355,6 +368,8 @@ class AgentNode(Node):
 
         self._turn_generation += 1
         turn_generation = self._turn_generation
+        self._llm_fallback.invalidate(turn_generation)
+        self._llm_request = None
         self._stop_operation = None
         self._retire_speak_operation()
 
@@ -381,13 +396,102 @@ class AgentNode(Node):
                 turn_generation,
             )
         elif decision.kind is DecisionKind.LLM_NEEDED:
-            self._speak_text(
-                '当前仅支持确定性导航指令。',
-                Speak.Goal.NORMAL,
-                decision.token.session_id,
-                decision.token.turn_id,
-                turn_generation,
+            request = LlmFallbackRequest(
+                decision=decision,
+                turn_generation=turn_generation,
             )
+            self._llm_request = request
+            self._llm_fallback.submit(request)
+
+    def _llm_admission_fence(self, request: LlmFallbackRequest) -> bool:
+        """Fence one completion against the current turn and Runtime snapshot."""
+        if self._llm_request != request:
+            return False
+        if request.turn_generation != self._turn_generation:
+            return False
+        token = request.decision.token
+        if token.source_instance_id != self._agent_instance_id:
+            return False
+        snapshot = self._planning_snapshot(require_execute_ready=False)
+        if snapshot is None:
+            return False
+        return (
+            token.runtime_instance_id == snapshot.runtime_instance_id
+            and token.admission_epoch == snapshot.admission_epoch
+            and token.operating_mode == snapshot.operating_mode
+            and token.supported_step_mask == snapshot.supported_step_mask
+            and token.max_steps == snapshot.max_steps
+            and token.named_place_ids == snapshot.named_place_ids
+            and token.availability == snapshot.availability
+            and token.gate_state == snapshot.gate_state
+        )
+
+    def _handle_llm_result(
+        self, request: LlmFallbackRequest, result: LlmFallbackResult
+    ) -> None:
+        """Apply one already schema-decoded completion on the serial seam."""
+        if not self._llm_admission_fence(request):
+            return
+        self._llm_request = None
+        token = request.decision.token
+        if result.kind == 'mission' and result.mission is not None:
+            validation = self._core.semantic_validator.validate(
+                MissionProposal(result.mission.steps, token), token
+            )
+            if not validation.accepted:
+                self._speak_llm_failure(request)
+                return
+            turn = VoiceTurn(
+                voice_instance_id=token.voice_instance_id,
+                voice_seq=token.voice_seq,
+                session_id=token.session_id,
+                turn_id=token.turn_id,
+                kind=VoiceTurn.COMMAND,
+                text=request.decision.normalized_text,
+                confidence=1.0,
+                during_playback=False,
+            )
+            self._handle_mission(
+                MissionDecision(validation.mission, reason='llm_fallback'),
+                turn,
+                request.turn_generation,
+            )
+            return
+        if result.kind in ('clarify', 'reply') and 0 < len(result.text) <= 512:
+            self._speak_text(
+                result.text,
+                Speak.Goal.NORMAL,
+                token.session_id,
+                token.turn_id,
+                request.turn_generation,
+            )
+
+    def _handle_llm_failure(self, request: LlmFallbackRequest) -> None:
+        """Speak one fixed safe reply only for the latest failed completion."""
+        if not self._llm_admission_fence(request):
+            return
+        self._llm_request = None
+        self._speak_llm_failure(request)
+
+    def _speak_llm_failure(self, request: LlmFallbackRequest) -> None:
+        token = request.decision.token
+        self._speak_text(
+            '当前无法处理该导航请求。',
+            Speak.Goal.NORMAL,
+            token.session_id,
+            token.turn_id,
+            request.turn_generation,
+        )
+
+    def destroy_node(self) -> bool:
+        """Stop the bounded completion worker before destroying ROS resources."""
+        self._seam.invoke(self._invalidate_llm_request_for_shutdown)
+        self._llm_fallback.shutdown()
+        return super().destroy_node()
+
+    def _invalidate_llm_request_for_shutdown(self) -> None:
+        """Revoke fallback authority before shutdown can close its worker."""
+        self._llm_request = None
 
     def _planning_snapshot(
         self, *, require_execute_ready: bool
@@ -857,9 +961,26 @@ class AgentNode(Node):
         )
         self._speak_operation = operation
         if not _action_server_ready(self._speak_client):
+            operation.send_timer = self._one_shot_timer(
+                SPEAK_DISCOVERY_RECHECK_SECONDS,
+                lambda: self._speak_discovery_recheck(operation),
+            )
+            return
+        self._send_speak_goal(operation)
+
+    def _speak_discovery_recheck(self, operation: _SpeakOperation) -> None:
+        """Make one bounded discovery recheck before dropping unsent speech."""
+        if self._speak_operation is not operation or operation.stale:
+            return
+        operation.send_timer = None
+        if not _action_server_ready(self._speak_client):
             self.get_logger().warning('Speak server unavailable; dropping speech')
             self._speak_operation = None
             return
+        self._send_speak_goal(operation)
+
+    def _send_speak_goal(self, operation: _SpeakOperation) -> None:
+        """Submit exactly one already-admitted Speak action goal."""
         goal = Speak.Goal()
         goal.source_instance_id = self._agent_instance_id
         goal.source_seq = operation.source_seq
