@@ -61,6 +61,10 @@ EXPECTED_TESTS = {
             "source": "test_relative_motion_product.py",
             "timeout": 300.0,
         },
+        "mapping_mode": {
+            "source": "test_mapping_mode.py",
+            "timeout": 330.0,
+        },
     },
 }
 EXPECTED_LABELS = ["launch_test"]

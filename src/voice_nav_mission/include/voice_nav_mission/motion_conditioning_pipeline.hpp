@@ -166,6 +166,7 @@ struct MotionConditioningConfig
   std::function<void()> before_adapter_command_supplier;
   std::function<void()> before_adapter_ingress_wait;
   std::function<void()> before_adapter_completion_publish;
+  std::function<void()> after_adapter_completion_publish;
   std::function<bool(std::uint64_t)> admission_fence_check;
   std::shared_ptr<RuntimeTransactionPlane> transaction_plane;
   std::function<std::uint64_t()> transaction_generation_provider;

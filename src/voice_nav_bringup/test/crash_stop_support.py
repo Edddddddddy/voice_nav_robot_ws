@@ -1875,6 +1875,35 @@ class CrashStopProbe:
             raise AssertionError('Mission Goal was rejected by the server')
         return handle
 
+    def send_steps(
+        self,
+        state: Any,
+        *,
+        source_instance_id: str,
+        source_seq: int,
+        steps: tuple[Any, ...],
+    ):
+        """Submit one bounded semantic Mission without exposing velocity."""
+        self.wait_until(
+            lambda: self.action_client.wait_for_server(timeout_sec=0.2),
+            20.0,
+            'Mission Action server',
+        )
+        goal = self._execute_mission_type.Goal()
+        goal.source_instance_id = source_instance_id
+        goal.source_seq = source_seq
+        goal.runtime_instance_id = state.runtime_instance_id
+        goal.admission_epoch = state.admission_epoch
+        goal.steps.extend(steps)
+        handle = self._wait_future(
+            self.action_client.send_goal_async(goal),
+            10.0,
+            'Mission Goal response',
+        )
+        if not handle.accepted:
+            raise AssertionError('Mission Goal was rejected by the server')
+        return handle
+
     def wait_goal_result(self, handle: Any, timeout: float = 30.0):
         wrapped = self._wait_future(
             handle.get_result_async(),

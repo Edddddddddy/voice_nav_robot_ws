@@ -988,6 +988,47 @@ TEST_F(
 
 TEST_F(
   RelativeMotionRosAdapterTest,
+  TerminalCompletionPublishesOnlyAfterTransactionDrains)
+{
+  auto node = std::make_shared<rclcpp::Node>(
+    "relative_motion_adapter_completion_drain");
+  auto authority = std::make_shared<BlockingAuthority>();
+  MotionConditioningConfig conditioning_config;
+  conditioning_config.component_rpc_timeout = 100ms;
+  conditioning_config.prepare_open_deadline = 1s;
+  conditioning_config.stop_barrier = 100ms;
+  CallbackBarrier completion_barrier;
+  conditioning_config.after_adapter_completion_publish = [&completion_barrier]() {
+      completion_barrier.enter();
+    };
+  auto relay = install_completion_relay(conditioning_config);
+  RelativeMotionRosAdapter adapter(*node, authority, {}, conditioning_config);
+
+  std::atomic<std::size_t> result_count{0U};
+  relay->register_delivery([&result_count](const MotionToken &, const ChildResult &) {
+      result_count.fetch_add(1U);
+    });
+  adapter.start(
+    MotionToken{62U, 6U, 14U, 1U},
+    MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::MoveDistance), 0.1F, 0.0F, {}},
+    {},
+    {});
+  ASSERT_TRUE(authority->wait_for_prepare());
+  authority->release_prepare();
+
+  ASSERT_TRUE(completion_barrier.wait_for_entries(1U));
+  // Completion can admit the next Mission step only after the serial worker
+  // has no active transaction for the generation that produced it.
+  EXPECT_TRUE(detail::RelativeMotionRosAdapterTestAccess::transaction_is_idle(adapter));
+  completion_barrier.release();
+  ASSERT_TRUE(relay->wait_for_deliveries(1U));
+  EXPECT_EQ(result_count.load(), 1U);
+  adapter.shutdown();
+}
+
+TEST_F(
+  RelativeMotionRosAdapterTest,
   ExternalRelayEmergencyMayReleaseLastAdapterOwner)
 {
   auto node = std::make_shared<rclcpp::Node>(

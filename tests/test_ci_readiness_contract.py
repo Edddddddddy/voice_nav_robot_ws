@@ -421,6 +421,7 @@ class CiReadinessContractTest(unittest.TestCase):
                 "mission_runtime_crash_stop",
                 "motion_gate_consumer_deadman",
                 "test_test_relative_motion_product.py",
+                "mapping_mode",
             },
         )
 
@@ -448,7 +449,7 @@ class CiReadinessContractTest(unittest.TestCase):
         expected_launch_test_counts = {
             SIMULATION_CMAKE: 3,
             MISSION_CMAKE: 4,
-            BRINGUP_CMAKE: 4,
+            BRINGUP_CMAKE: 5,
         }
         expected_isolation_reset_counts = {
             SIMULATION_CMAKE: 1,

@@ -110,6 +110,8 @@ public:
   static bool start_raw_producer(
     RelativeMotionRosAdapter & adapter,
     const std::string & raw_topic);
+  [[nodiscard]] static bool transaction_is_idle(
+    const RelativeMotionRosAdapter & adapter);
 };
 
 }  // namespace detail

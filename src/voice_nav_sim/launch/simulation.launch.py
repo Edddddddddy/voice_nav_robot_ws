@@ -39,6 +39,8 @@ def start_after_success(next_action, stage):
 
 def generate_launch_description():
     headless = LaunchConfiguration('headless')
+    world_name = LaunchConfiguration('world_name')
+    laser_update_rate = LaunchConfiguration('laser_update_rate')
     shutdown_on_gazebo_exit = LaunchConfiguration(
         'shutdown_on_gazebo_exit'
     )
@@ -68,7 +70,7 @@ def generate_launch_description():
         [
             package_share,
             'worlds',
-            'voice_nav_test_world.sdf',
+            [world_name, '.sdf'],
         ]
     )
     robot_description = ParameterValue(
@@ -79,6 +81,8 @@ def generate_launch_description():
                 xacro_file,
                 ' controllers_file:=',
                 controllers_file,
+                ' laser_update_rate:=',
+                laser_update_rate,
             ]
         ),
         value_type=str,
@@ -175,7 +179,7 @@ def generate_launch_description():
         output='screen',
         arguments=[
             '--world',
-            'voice_nav_test_world',
+            world_name,
             '--topic',
             'robot_description',
             '--name',
@@ -258,6 +262,21 @@ def generate_launch_description():
                 default_value='true',
                 description='Run Gazebo server-only when true.',
                 choices=['true', 'false'],
+            ),
+            DeclareLaunchArgument(
+                'world_name',
+                default_value='voice_nav_test_world',
+                description='Select one packaged VoiceNav simulation world.',
+                choices=['voice_nav_test_world', 'voice_nav_house_world'],
+            ),
+            DeclareLaunchArgument(
+                'laser_update_rate',
+                default_value='10',
+                description=(
+                    'Select the trusted product or Mapping Mode LiDAR '
+                    'sampling profile.'
+                ),
+                choices=['10', '20'],
             ),
             DeclareLaunchArgument(
                 'shutdown_on_gazebo_exit',
