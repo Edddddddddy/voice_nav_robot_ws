@@ -13,6 +13,7 @@ find_package(ament_cmake REQUIRED)
 
 add_library(audio_engine_callback OBJECT src/audio_engine_callback.cpp)
 add_library(audio_engine_core OBJECT src/audio_engine.cpp)
+add_library(dsp_pipeline STATIC src/dsp_pipeline.cpp)
 add_library(
   audio_engine STATIC
   $<TARGET_OBJECTS:audio_engine_core>
@@ -28,6 +29,7 @@ foreach(target
     audio_engine
     audio_engine_core
     audio_engine_callback
+    dsp_pipeline
     portaudio_adapter
     portaudio_adapter_callback)
   target_compile_features(${target} PUBLIC cxx_std_17)
@@ -38,6 +40,32 @@ foreach(target
   )
 endforeach()
 target_link_libraries(portaudio_adapter PUBLIC audio_engine)
+
+option(
+  VOICE_NAV_AUDIO_WITH_WEBRTC_APM
+  "Build the WebRTC APM adapter from the explicitly provisioned #53 dependency"
+  OFF
+)
+if(VOICE_NAV_AUDIO_WITH_WEBRTC_APM)
+  set(
+    VOICE_NAV_WEBRTC_APM_PREFIX "" CACHE PATH
+    "Canonical #53 WebRTC APM and Abseil provenance receipt prefix"
+  )
+  include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/webrtc_apm_prefix_validation.cmake")
+  voice_nav_validate_webrtc_apm_prefix(
+    "${VOICE_NAV_WEBRTC_APM_PREFIX}" WEBRTC_APM_INCLUDE_DIR WEBRTC_APM_LIBRARY)
+  find_package(Threads REQUIRED)
+  add_library(webrtc_apm_adapter STATIC src/webrtc_apm_adapter.cpp)
+  target_compile_features(webrtc_apm_adapter PUBLIC cxx_std_17)
+  target_include_directories(
+    webrtc_apm_adapter
+    PRIVATE include src ${WEBRTC_APM_INCLUDE_DIR}
+  )
+  target_link_libraries(
+    webrtc_apm_adapter
+    PUBLIC "${WEBRTC_APM_LIBRARY}" Threads::Threads rt
+  )
+endif()
 
 option(
   VOICE_NAV_AUDIO_WITH_PORTAUDIO
@@ -82,6 +110,41 @@ if(BUILD_TESTING)
     audio_engine_test
     audio_engine
   )
+
+  ament_add_gtest(
+    dsp_pipeline_test
+    test/dsp_pipeline_test.cpp
+  )
+  target_compile_features(dsp_pipeline_test PUBLIC cxx_std_17)
+  target_include_directories(dsp_pipeline_test PRIVATE include src)
+  target_link_libraries(dsp_pipeline_test dsp_pipeline)
+
+  if(VOICE_NAV_AUDIO_WITH_WEBRTC_APM)
+    add_executable(dsp_webrtc_fixture_runner test/dsp_webrtc_fixture_runner.cpp)
+    target_compile_features(dsp_webrtc_fixture_runner PRIVATE cxx_std_17)
+    target_include_directories(
+      dsp_webrtc_fixture_runner
+      PRIVATE include src ${WEBRTC_APM_INCLUDE_DIR}
+    )
+    target_link_libraries(
+      dsp_webrtc_fixture_runner
+      PRIVATE dsp_pipeline webrtc_apm_adapter
+    )
+    add_test(
+      NAME dsp_webrtc_fixture_runner
+      COMMAND dsp_webrtc_fixture_runner
+        "${CMAKE_CURRENT_BINARY_DIR}/dsp_webrtc_fixture_report.json"
+    )
+    add_test(
+      NAME dsp_webrtc_fixture_runner_fails_when_report_unwritable
+      COMMAND dsp_webrtc_fixture_runner
+        "${CMAKE_CURRENT_BINARY_DIR}/fixture-report-unwritable/missing/report.json"
+    )
+    set_tests_properties(
+      dsp_webrtc_fixture_runner_fails_when_report_unwritable
+      PROPERTIES WILL_FAIL TRUE
+    )
+  endif()
 
   ament_add_gtest(
     portaudio_adapter_test
