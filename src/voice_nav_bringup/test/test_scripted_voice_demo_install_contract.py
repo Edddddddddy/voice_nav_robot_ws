@@ -17,6 +17,8 @@
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 from ament_index_python.packages import (
     get_package_prefix,
     get_package_share_directory,
@@ -49,5 +51,26 @@ def test_scripted_voice_demo_keeps_pipeline_node_names_unremapped():
     )
     try:
         assert fixtures['speech_driver']._Node__node_name is None
+    finally:
+        module._stop_loopback(fixtures['llm_server'], fixtures['llm_thread'])
+
+
+def test_scripted_voice_demo_stop_is_a_closed_installed_scenario():
+    launch = Path(
+        get_package_share_directory('voice_nav_bringup')
+    ) / 'launch' / 'scripted_voice_demo.launch.py'
+    spec = importlib.util.spec_from_file_location('scripted_voice_demo_launch', launch)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module.SCENARIOS == ('move', 'stop')
+    with pytest.raises(ValueError, match='move\\|stop'):
+        module.create_scripted_voice_demo(scenario='invalid')
+    _actions, fixtures = module.create_scripted_voice_demo(
+        scenario='stop', shutdown_when_demo_exits=False,
+    )
+    try:
+        assert fixtures['scenario'] == 'stop'
     finally:
         module._stop_loopback(fixtures['llm_server'], fixtures['llm_thread'])

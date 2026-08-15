@@ -67,6 +67,12 @@ enum class SpeechEventKind
   kFailure,
 };
 
+enum class VoiceTurnKind : std::uint8_t
+{
+  kCommand = 1U,
+  kStop = 2U,
+};
+
 struct SpeechRecognitionEvent
 {
   SpeechEventKind kind{SpeechEventKind::kWakeMiss};
@@ -75,6 +81,7 @@ struct SpeechRecognitionEvent
   TurnScopeIdentity scope{};
   std::string final_text{};
   float confidence{0.0F};
+  VoiceTurnKind voice_turn_kind{VoiceTurnKind::kCommand};
 
   [[nodiscard]] static SpeechRecognitionEvent wake_accepted(
     const CleanedAudioFrame & frame) noexcept;
@@ -85,7 +92,8 @@ struct SpeechRecognitionEvent
     const CleanedAudioFrame & frame,
     const TurnScopeIdentity & scope,
     std::string text,
-    float confidence) noexcept;
+    float confidence,
+    VoiceTurnKind voice_turn_kind = VoiceTurnKind::kCommand) noexcept;
 };
 
 class SpeechEventSink
@@ -109,11 +117,6 @@ public:
     SpeechEventSink & sink) noexcept = 0;
   virtual void on_turn_scope_opened(const TurnScopeIdentity & scope) noexcept = 0;
   virtual void on_turn_scope_retired(const TurnScopeIdentity & scope) noexcept = 0;
-};
-
-enum class VoiceTurnKind : std::uint8_t
-{
-  kCommand = 1U,
 };
 
 struct VoiceTurnPublication

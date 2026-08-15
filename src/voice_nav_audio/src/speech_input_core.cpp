@@ -106,7 +106,9 @@ bool valid_final(const SpeechRecognitionEvent & event) noexcept
 {
   return !event.final_text.empty() && event.final_text.size() <= 512U &&
          is_valid_utf8(event.final_text) && std::isfinite(event.confidence) &&
-         event.confidence >= 0.0F && event.confidence <= 1.0F;
+         event.confidence >= 0.0F && event.confidence <= 1.0F &&
+         (event.voice_turn_kind == VoiceTurnKind::kCommand ||
+         event.voice_turn_kind == VoiceTurnKind::kStop);
 }
 
 }  // namespace
@@ -143,7 +145,8 @@ SpeechRecognitionEvent SpeechRecognitionEvent::endpoint_final(
   const CleanedAudioFrame & frame,
   const TurnScopeIdentity & scope,
   std::string text,
-  const float confidence) noexcept
+  const float confidence,
+  const VoiceTurnKind voice_turn_kind) noexcept
 {
   SpeechRecognitionEvent event{};
   event.kind = SpeechEventKind::kEndpointFinal;
@@ -152,6 +155,7 @@ SpeechRecognitionEvent SpeechRecognitionEvent::endpoint_final(
   event.scope = scope;
   event.final_text = std::move(text);
   event.confidence = confidence;
+  event.voice_turn_kind = voice_turn_kind;
   return event;
 }
 
@@ -241,7 +245,7 @@ void SpeechInputCore::on_speech_event(const SpeechRecognitionEvent & event) noex
         publication.voice_seq = next_voice_seq_++;
         publication.session_id = active_scope_.session_id;
         publication.turn_id = active_scope_.turn_id;
-        publication.kind = VoiceTurnKind::kCommand;
+        publication.kind = event.voice_turn_kind;
         publication.text = event.final_text;
         publication.confidence = event.confidence;
         sink_.publish(publication);
