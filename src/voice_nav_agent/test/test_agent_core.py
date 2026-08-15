@@ -776,6 +776,19 @@ def test_unknown_well_formed_expression_becomes_llm_needed_with_same_token():
     assert decision.token.runtime_instance_id == 'runtime-a'
 
 
+def test_issue136_scripted_turn_texts_both_take_llm_needed_path():
+    """The product scenario must not bypass its provider dialogue locally."""
+    core = make_core()
+
+    first = core.handle_turn(make_turn('绕到大厅'), make_state())
+    second = core.handle_turn(make_turn('半米', sequence=2), make_state())
+
+    assert first.kind is DecisionKind.LLM_NEEDED
+    assert second.kind is DecisionKind.LLM_NEEDED
+    assert first.normalized_text == '绕到大厅'
+    assert second.normalized_text == '半米'
+
+
 @pytest.mark.parametrize(
     'text',
     [
