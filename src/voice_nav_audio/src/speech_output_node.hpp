@@ -28,13 +28,26 @@
 namespace voice_nav_audio
 {
 
+// Package-private observation seam for composition tests. It exposes no ROS
+// endpoint and receives only playback facts already produced by this node.
+class SpeechOutputTraceSink
+{
+public:
+  virtual ~SpeechOutputTraceSink() = default;
+
+  virtual void on_played(std::uint64_t scope_id, std::uint64_t samples) noexcept = 0;
+  virtual void on_result(const SpeechResult & result) noexcept = 0;
+};
+
 class SpeechOutputNode final : public rclcpp::Node, private SpeechOutputObserver
 {
 public:
   using Speak = voice_nav_interfaces::action::Speak;
   using GoalHandleSpeak = rclcpp_action::ServerGoalHandle<Speak>;
 
-  SpeechOutputNode(AudioEngine & engine, std::unique_ptr<TtsAdapter> tts);
+  SpeechOutputNode(
+    AudioEngine & engine, std::unique_ptr<TtsAdapter> tts,
+    SpeechOutputTraceSink * trace = nullptr);
   ~SpeechOutputNode() override;
 
   void pump() noexcept;
@@ -65,6 +78,7 @@ private:
   std::unordered_map<std::uint64_t, std::shared_ptr<GoalHandleSpeak>> handles_{};
   std::unordered_map<const GoalHandleSpeak *, std::uint64_t> scope_by_handle_{};
   std::uint64_t cancel_requested_scope_id_{0U};
+  SpeechOutputTraceSink * trace_{nullptr};
 };
 
 }  // namespace voice_nav_audio

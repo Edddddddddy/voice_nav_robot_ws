@@ -36,9 +36,10 @@ constexpr std::uint64_t kNanosecondsPerSecond = 1000000000U;
 
 }  // namespace
 
-SpeechOutputNode::SpeechOutputNode(AudioEngine & engine, std::unique_ptr<TtsAdapter> tts)
+SpeechOutputNode::SpeechOutputNode(
+  AudioEngine & engine, std::unique_ptr<TtsAdapter> tts, SpeechOutputTraceSink * const trace)
 : Node("voice_speech_output"), engine_(engine), tts_(checked_tts(std::move(tts))),
-  core_(engine_, *tts_, static_cast<SpeechOutputObserver &>(*this))
+  core_(engine_, *tts_, static_cast<SpeechOutputObserver &>(*this)), trace_(trace)
 {
   action_server_ = rclcpp_action::create_server<Speak>(
     this, "/voice/speak",
@@ -204,6 +205,9 @@ void SpeechOutputNode::on_played(
     feedback->played.nanosec = static_cast<std::uint32_t>(
       (samples % AudioEngine::kSampleRate) * kNanosecondsPerSecond / AudioEngine::kSampleRate);
     goal_handle->publish_feedback(feedback);
+    if (trace_ != nullptr) {
+      trace_->on_played(scope_id, samples);
+    }
   } catch (...) {
   }
 }
@@ -224,6 +228,9 @@ void SpeechOutputNode::on_result(const SpeechResult & result) noexcept
       if (cancel_requested_scope_id_ == result.scope_id) {
         cancel_requested_scope_id_ = 0U;
       }
+    }
+    if (trace_ != nullptr) {
+      trace_->on_result(result);
     }
     complete(goal_handle, result);
   } catch (...) {

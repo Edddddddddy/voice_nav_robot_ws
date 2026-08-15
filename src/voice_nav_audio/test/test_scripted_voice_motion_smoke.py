@@ -43,7 +43,6 @@ import launch_testing.markers
 from nav_msgs.msg import Odometry
 import pytest
 import rclpy
-from rclpy.action import ActionServer, GoalResponse
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 
 from voice_nav_agent._response_provider import _request_body
@@ -59,7 +58,6 @@ from voice_nav_agent.core import (
     OperatingMode,
     VoiceTurn as AgentVoiceTurn,
 )
-from voice_nav_interfaces.action import Speak
 from voice_nav_interfaces.msg import MissionState, VoiceTurn
 from voice_nav_mission.msg import InternalMotionGateState
 
@@ -314,18 +312,14 @@ def _replay_issue136_evidence(evidence):
     assert turns[0]['voice_instance_id'] == turns[1]['voice_instance_id']
     assert turns[0]['session_id'] == turns[1]['session_id']
     assert turns[0]['turn_id'] != turns[1]['turn_id']
-    assert speaks == [
-        {
-            'session_id': turns[0]['session_id'],
-            'turn_id': turns[0]['turn_id'],
-            'text': CLARIFICATION_TEXT,
-        },
-        {
-            'session_id': turns[1]['session_id'],
-            'turn_id': turns[1]['turn_id'],
-            'text': '任务已完成。',
-        },
-    ]
+    assert speaks == {
+        'tts_texts': [CLARIFICATION_TEXT, '任务已完成。'],
+        'manual_nonzero_pcm': True,
+        'played_feedback_scope_count': 2,
+        'completed_scope_count': 2,
+        'completed_goal_count': 2,
+        'first_completed_before_followup': True,
+    }
 
     provider = evidence['provider']
     assert set(provider) == {'model', 'response_kinds', 'requests'}
@@ -443,12 +437,14 @@ def _sample_issue136_evidence():
         'REAL_LLM_CORPUS': 'NOT_RUN',
         'voice': {
             'turns': turns,
-            'speaks': [
-                {'session_id': 'session-a', 'turn_id': 'turn-a',
-                 'text': CLARIFICATION_TEXT},
-                {'session_id': 'session-a', 'turn_id': 'turn-b',
-                 'text': '任务已完成。'},
-            ],
+            'speaks': {
+                'tts_texts': [CLARIFICATION_TEXT, '任务已完成。'],
+                'manual_nonzero_pcm': True,
+                'played_feedback_scope_count': 2,
+                'completed_scope_count': 2,
+                'completed_goal_count': 2,
+                'first_completed_before_followup': True,
+            },
         },
         'provider': {
             'model': 'Qwen3-0.6B-Q8_0.gguf',
@@ -681,7 +677,7 @@ PRODUCT_TEST_PARTITION = gazebo_shutdown.claim_unique_test_partition(
 @pytest.mark.launch_test
 @launch_testing.markers.keep_alive
 def generate_test_description():
-    """Compose the installed product with only test-only speech/LLM/Speak seams."""
+    """Compose product motion with scripted input/LLM and real Speak playback."""
     driver = os.environ.get('VOICE_NAV_SCRIPTED_SPEECH_DRIVER')
     assert driver and Path(driver).is_file()
     llm_server = _LoopbackLlmServer()
@@ -825,7 +821,8 @@ class ScriptedVoiceGazeboSmokeTest(unittest.TestCase):
         rclpy.init()
         self.node = rclpy.create_node('voice_agent_gazebo_probe')
         self.voice_turns = deque(maxlen=8)
-        self.speak_goals = deque(maxlen=8)
+        self.speak_successes = set()
+        self.speak_success_times = deque(maxlen=8)
         self.mission_successes = set()
         self.mission_goal_ids = set()
         self.mission_statuses = deque(maxlen=200)
@@ -874,22 +871,20 @@ class ScriptedVoiceGazeboSmokeTest(unittest.TestCase):
                 self._on_mission_status,
                 10,
             ),
+            self.node.create_subscription(
+                GoalStatusArray,
+                SPEAK_STATUS_TOPIC,
+                self._on_speak_status,
+                10,
+            ),
         ]
         self.initial_odom = self._wait_until(
             lambda: self.odometry[-1][1] if self._runtime_is_ready() and self.odometry else None,
             45.0,
             'available Runtime and initial odometry',
         )
-        self.speak_server = ActionServer(
-            self.node,
-            Speak,
-            '/voice/speak',
-            execute_callback=self._speak,
-            goal_callback=lambda _goal: GoalResponse.ACCEPT,
-        )
 
     def tearDown(self):
-        self.speak_server.destroy()
         self.llm_server.shutdown()
         self.llm_server.server_close()
         self.llm_thread.join(5.0)
@@ -917,12 +912,14 @@ class ScriptedVoiceGazeboSmokeTest(unittest.TestCase):
     def _on_gate_state(self, message):
         self.gate_states.append((time.monotonic(), message))
 
-    def _speak(self, goal_handle):
-        self.speak_goals.append((time.monotonic(), goal_handle.request))
-        goal_handle.succeed()
-        result = Speak.Result()
-        result.code = Speak.Result.COMPLETED
-        return result
+    def _on_speak_status(self, statuses):
+        for status in statuses.status_list:
+            if status.status != GoalStatus.STATUS_SUCCEEDED:
+                continue
+            goal_id = bytes(status.goal_info.goal_id.uuid)
+            if goal_id not in self.speak_successes:
+                self.speak_successes.add(goal_id)
+                self.speak_success_times.append((time.monotonic(), goal_id))
 
     def _runtime_is_ready(self):
         if not self.mission_states:
@@ -1036,16 +1033,18 @@ class ScriptedVoiceGazeboSmokeTest(unittest.TestCase):
             self._signed_displacement(window_odom[-1]), 0.0, delta=0.02,
         )
 
-    def test_multiturn_clarify_then_move_reaches_product_motion(self):
+    def test_multiturn_clarify_then_move_reaches_product_motion(
+        self, proc_output, speech_driver,
+    ):
         self._wait_until(
             lambda: len(self.mission_successes) == 1,
             120.0,
             'one successful product ExecuteMission Goal',
         )
         self._wait_until(
-            lambda: len(self.voice_turns) == 2 and len(self.speak_goals) == 2,
+            lambda: len(self.voice_turns) == 2 and len(self.speak_successes) == 2,
             30.0,
-            'two VoiceTurn and Speak correlations',
+            'two completed SpeechOutput Speak goals',
         )
         self._wait_for_zero_and_stationarity()
 
@@ -1067,16 +1066,21 @@ class ScriptedVoiceGazeboSmokeTest(unittest.TestCase):
             timed_turns[0][0], timed_turns[1][0],
         )
 
-        timed_speaks = tuple(self.speak_goals)
-        speaks = tuple(goal for _, goal in timed_speaks)
-        self.assertLess(timed_speaks[0][0], timed_turns[1][0])
-        self.assertEqual(
-            [(goal.session_id, goal.turn_id) for goal in speaks],
-            [(turn.session_id, turn.turn_id) for turn in turns],
+        successful_speaks = tuple(self.speak_success_times)
+        self.assertEqual(len(successful_speaks), 2)
+        self.assertLess(successful_speaks[0][0], timed_turns[1][0])
+        proc_output.assertWaitFor(
+            expected_output=(
+                'EVIDENCE issue142_voice_pipeline '
+                '{"schema_version":1,"tts_texts":["请说明需要前进多少米。",'
+                '"任务已完成。"],"manual_nonzero_pcm":true,'
+                '"played_feedback_scope_count":2,"completed_scope_count":2,'
+                '"first_completed_before_followup":true}'
+            ),
+            process=speech_driver,
+            timeout=30.0,
+            stream='stdout',
         )
-        self.assertEqual([goal.text for goal in speaks], [
-            CLARIFICATION_TEXT, '任务已完成。',
-        ])
 
         with self.llm_server.lock:
             request_paths = [path for path, _ in self.llm_server.requests]
@@ -1112,14 +1116,14 @@ class ScriptedVoiceGazeboSmokeTest(unittest.TestCase):
                     }
                     for turn in turns
                 ],
-                'speaks': [
-                    {
-                        'session_id': goal.session_id,
-                        'turn_id': goal.turn_id,
-                        'text': goal.text,
-                    }
-                    for goal in speaks
-                ],
+                'speaks': {
+                    'tts_texts': [CLARIFICATION_TEXT, '任务已完成。'],
+                    'manual_nonzero_pcm': True,
+                    'played_feedback_scope_count': 2,
+                    'completed_scope_count': 2,
+                    'completed_goal_count': len(self.speak_successes),
+                    'first_completed_before_followup': True,
+                },
             },
             'provider': {
                 'model': json.loads(
