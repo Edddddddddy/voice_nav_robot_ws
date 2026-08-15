@@ -897,6 +897,29 @@ def test_stop_uses_final_voice_identity_rule_and_bypasses_command_fencing():
     assert collision != first
 
 
+def test_late_command_after_stop_is_ignored_by_same_voice_sequence_fence():
+    core = make_core()
+
+    command = core.handle_turn(
+        make_turn('前进 2 米', sequence=1), make_state()
+    )
+    stop = core.handle_turn(
+        make_turn('停止', sequence=2, kind=VoiceTurn.STOP),
+        runtime_snapshot_or_none=None,
+    )
+    late_command = core.handle_turn(
+        make_turn('前进 2 米', sequence=1, turn_id='late-command'),
+        make_state(),
+    )
+
+    assert command.kind is DecisionKind.MISSION
+    assert stop.kind is DecisionKind.STOP
+    assert stop.source_instance_id == command.mission.token.voice_instance_id
+    assert stop.source_seq == 2
+    assert late_command.kind is DecisionKind.IGNORE
+    assert late_command.reason == 'duplicate_or_replayed_command'
+
+
 def test_duplicate_and_retired_commands_are_ignored_without_new_effect():
     core = make_core()
 
