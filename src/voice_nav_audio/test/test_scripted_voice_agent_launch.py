@@ -60,11 +60,17 @@ class _LoopbackLlmHandler(BaseHTTPRequestHandler):
         self.server.requests.append((self.path, request_body))
         self.server.request_event.set()
         mission = {
-            'kind': 'mission',
-            'steps': [{
-                'kind': 'rotate_angle',
-                'angle_rad': 1.570796,
-            }],
+            'kind': 'tool',
+            'tool_call': {
+                'name': 'propose_mission',
+                'arguments': {
+                    'kind': 'mission',
+                    'steps': [{
+                        'kind': 'rotate_angle',
+                        'angle_rad': 1.570796,
+                    }],
+                },
+            },
         }
         response = json.dumps({
             'choices': [{

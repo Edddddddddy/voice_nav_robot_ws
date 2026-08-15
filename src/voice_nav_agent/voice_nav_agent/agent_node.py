@@ -45,19 +45,25 @@ from voice_nav_interfaces.msg import (
 )
 from voice_nav_interfaces.srv import StopMission
 
+from ._response_provider import _LoopbackResponseProvider
+from ._response_session import (
+    _OwnedMission,
+    _ProviderResponse,
+    _ResponseRequest,
+    _ResponseSession,
+    _TOOL_REGISTRY,
+)
 from .core import (
     AgentCore,
     CancelDecision,
     Decision,
     DecisionKind,
     MissionDecision,
-    MissionProposal,
     MissionState,
     PlanningToken,
     StopDecision,
     VoiceTurn,
 )
-from .llm_fallback import LlmFallback, LlmFallbackRequest, LlmFallbackResult
 
 
 VOICE_TURN_TOPIC = '/voice/turn'
@@ -146,6 +152,45 @@ class _SerialSeam:
             return callback(*args)
 
 
+class _ResponseMissionPort:
+    """Bind Response semantic tools to the one installed Agent Mission slot."""
+
+    def __init__(self, node: 'AgentNode') -> None:
+        self._node = node
+
+    @staticmethod
+    def prepare_mission(mission: Any) -> Any:
+        """Keep preparation side-effect free so invalidation may win."""
+        return mission
+
+    def commit_mission_if_current(
+        self, mission: Any, request: _ResponseRequest, snapshot: object
+    ) -> Optional[_MissionSlot]:
+        return self._node._seam.invoke(
+            self._node._commit_response_mission, mission, request, snapshot
+        )
+
+    @staticmethod
+    def prepare_cancel(identity: _MissionSlot) -> _MissionSlot:
+        """Keep cancellation preparation side-effect free."""
+        return identity
+
+    def commit_cancel_if_current(
+        self,
+        identity: _MissionSlot,
+        request: _ResponseRequest,
+        owned: _OwnedMission,
+        snapshot: object,
+    ) -> bool:
+        return self._node._seam.invoke(
+            self._node._commit_response_cancel,
+            identity,
+            request,
+            owned,
+            snapshot,
+        )
+
+
 class AgentNode(Node):
     """The sole ROS process that adapts Voice Turns to Agent Core Ports."""
 
@@ -174,15 +219,21 @@ class AgentNode(Node):
         self._mission_slot: Optional[_MissionSlot] = None
         self._speak_operation: Optional[_SpeakOperation] = None
         self._stop_operation: Optional[_StopOperation] = None
-        self._llm_request: Optional[LlmFallbackRequest] = None
         self.declare_parameter('llm_endpoint', 'http://127.0.0.1:8080')
-        self._llm_fallback = LlmFallback(
+        self._response_mission_port = _ResponseMissionPort(self)
+        self._response_provider = _LoopbackResponseProvider(
             self.get_parameter('llm_endpoint').value,
+            _TOOL_REGISTRY,
+            self._on_response_provider_response,
+            self._on_response_provider_failure,
+            self._on_response_provider_capacity_ready,
+        )
+        self._response_session = _ResponseSession(
+            self._agent_instance_id,
+            self._response_provider,
+            self._response_runtime_snapshot,
+            self._response_mission_port,
             self._core.semantic_validator,
-            self._seam.invoke,
-            self._llm_admission_fence,
-            self._handle_llm_result,
-            self._handle_llm_failure,
         )
 
         self._latest_state: Optional[MissionState] = None
@@ -364,15 +415,29 @@ class AgentNode(Node):
 
     def _handle_decision(self, decision: Decision, turn: VoiceTurn) -> None:
         if decision.kind is DecisionKind.IGNORE:
+            if (
+                getattr(decision, 'reason', None) == 'invalid_envelope'
+                and self._response_session.observe_invalid_turn(turn)
+            ):
+                self._turn_generation += 1
+                self._retire_speak_operation()
+                self._response_provider.invalidate(self._turn_generation)
             return
 
         self._turn_generation += 1
         turn_generation = self._turn_generation
-        self._llm_fallback.invalidate(turn_generation)
-        self._llm_request = None
         self._stop_operation = None
         self._retire_speak_operation()
+        self._response_provider.invalidate(turn_generation)
 
+        if decision.kind is DecisionKind.LLM_NEEDED:
+            self._response_session.invalidate(clear_clarification=False)
+            self._response_session.accept_turn(
+                turn, decision.token, turn_generation
+            )
+            return
+
+        self._response_session.invalidate()
         if decision.kind is DecisionKind.MISSION:
             self._handle_mission(decision, turn, turn_generation)
         elif decision.kind is DecisionKind.CANCEL:
@@ -395,103 +460,110 @@ class AgentNode(Node):
                 turn.turn_id,
                 turn_generation,
             )
-        elif decision.kind is DecisionKind.LLM_NEEDED:
-            request = LlmFallbackRequest(
-                decision=decision,
-                turn_generation=turn_generation,
-            )
-            self._llm_request = request
-            self._llm_fallback.submit(request)
 
-    def _llm_admission_fence(self, request: LlmFallbackRequest) -> bool:
-        """Fence one completion against the current turn and Runtime snapshot."""
-        if self._llm_request != request:
-            return False
-        if request.turn_generation != self._turn_generation:
-            return False
-        token = request.decision.token
-        if token.source_instance_id != self._agent_instance_id:
+    def _response_runtime_snapshot(self) -> Optional[MissionState]:
+        """Read the current frozen Runtime projection through the Node seam."""
+        return self._seam.invoke(
+            lambda: self._planning_snapshot(require_execute_ready=False)
+        )
+
+    def _on_response_provider_response(
+        self, request: _ResponseRequest, response: _ProviderResponse
+    ) -> None:
+        """Apply provider work outside the ROS seam, then consume text inside it."""
+        self._response_session.complete(request, response, skip_runtime_check=True)
+        self._seam.invoke(self._consume_response_events)
+
+    def _on_response_provider_failure(self, request: _ResponseRequest) -> None:
+        """Convert a current transport/protocol failure into one bounded reply."""
+        self._response_session.complete(
+            request, _ProviderResponse(kind='failure'), skip_runtime_check=True
+        )
+        self._seam.invoke(self._consume_response_events)
+
+    def _on_response_provider_capacity_ready(self) -> None:
+        """Retry capacity-starved Response work without entering the ROS seam."""
+        self._response_session.provider_capacity_ready()
+
+    def _consume_response_events(self) -> None:
+        """Map each current package-private text event to the existing Speak port."""
+        for event in self._response_session.consume_events():
+            if event.adapter_generation != self._turn_generation:
+                continue
+            if self._planning_snapshot(require_execute_ready=False) != (
+                event.runtime_snapshot
+            ):
+                continue
+            self._speak_text(
+                event.text,
+                Speak.Goal.NORMAL,
+                event.session_id,
+                event.turn_id,
+                event.adapter_generation,
+            )
+
+    def _commit_response_mission(
+        self, mission: Any, request: _ResponseRequest, _snapshot: object
+    ) -> Optional[_MissionSlot]:
+        """Submit only a still-current Response Mission through the sole slot."""
+        if (
+            request.adapter_generation != self._turn_generation
+            or getattr(mission, 'token', None) != request.token
+        ):
+            return None
+        snapshot = self._planning_snapshot(require_execute_ready=False)
+        if snapshot != request.runtime_snapshot:
+            return None
+        return self._response_session.commit_prepared_mission_if_current(
+            request,
+            snapshot,
+            lambda: self._handle_mission(
+                MissionDecision(mission, reason='response_provider'),
+                request.turn,
+                request.adapter_generation,
+            ),
+        )
+
+    def _commit_response_cancel(
+        self,
+        identity: _MissionSlot,
+        request: _ResponseRequest,
+        owned: _OwnedMission,
+        _snapshot: object,
+    ) -> bool:
+        """Cancel only the exact live slot owned by this Response session."""
+        if request.adapter_generation != self._turn_generation:
             return False
         snapshot = self._planning_snapshot(require_execute_ready=False)
-        if snapshot is None:
+        if snapshot != request.runtime_snapshot:
             return False
-        return (
-            token.runtime_instance_id == snapshot.runtime_instance_id
-            and token.admission_epoch == snapshot.admission_epoch
-            and token.operating_mode == snapshot.operating_mode
-            and token.supported_step_mask == snapshot.supported_step_mask
-            and token.max_steps == snapshot.max_steps
-            and token.named_place_ids == snapshot.named_place_ids
-            and token.availability == snapshot.availability
-            and token.gate_state == snapshot.gate_state
+        return self._response_session.commit_prepared_cancel_if_current(
+            request,
+            owned,
+            snapshot,
+            lambda: self._commit_response_cancel_slot(identity, owned),
         )
 
-    def _handle_llm_result(
-        self, request: LlmFallbackRequest, result: LlmFallbackResult
-    ) -> None:
-        """Apply one already schema-decoded completion on the serial seam."""
-        if not self._llm_admission_fence(request):
-            return
-        self._llm_request = None
-        token = request.decision.token
-        if result.kind == 'mission' and result.mission is not None:
-            validation = self._core.semantic_validator.validate(
-                MissionProposal(result.mission.steps, token), token
-            )
-            if not validation.accepted:
-                self._speak_llm_failure(request)
-                return
-            turn = VoiceTurn(
-                voice_instance_id=token.voice_instance_id,
-                voice_seq=token.voice_seq,
-                session_id=token.session_id,
-                turn_id=token.turn_id,
-                kind=VoiceTurn.COMMAND,
-                text=request.decision.normalized_text,
-                confidence=1.0,
-                during_playback=False,
-            )
-            self._handle_mission(
-                MissionDecision(validation.mission, reason='llm_fallback'),
-                turn,
-                request.turn_generation,
-            )
-            return
-        if result.kind in ('clarify', 'reply') and 0 < len(result.text) <= 512:
-            self._speak_text(
-                result.text,
-                Speak.Goal.NORMAL,
-                token.session_id,
-                token.turn_id,
-                request.turn_generation,
-            )
-
-    def _handle_llm_failure(self, request: LlmFallbackRequest) -> None:
-        """Speak one fixed safe reply only for the latest failed completion."""
-        if not self._llm_admission_fence(request):
-            return
-        self._llm_request = None
-        self._speak_llm_failure(request)
-
-    def _speak_llm_failure(self, request: LlmFallbackRequest) -> None:
-        token = request.decision.token
-        self._speak_text(
-            '当前无法处理该导航请求。',
-            Speak.Goal.NORMAL,
-            token.session_id,
-            token.turn_id,
-            request.turn_generation,
-        )
+    def _commit_response_cancel_slot(
+        self, identity: _MissionSlot, owned: _OwnedMission
+    ) -> bool:
+        slot = self._mission_slot
+        if identity is not slot or owned.identity is not slot or slot.cancel_requested:
+            return False
+        slot.cancel_requested = True
+        slot.state = MissionSlotState.CANCEL_PENDING
+        slot.terminal_turn_generation = self._turn_generation
+        slot.terminal_session_id = slot.session_id
+        slot.terminal_turn_id = slot.turn_id
+        if slot.goal_handle is not None:
+            self._request_mission_cancel(slot)
+        return True
 
     def destroy_node(self) -> bool:
         """Stop the bounded completion worker before destroying ROS resources."""
-        self._seam.invoke(self._invalidate_llm_request_for_shutdown)
-        self._llm_fallback.shutdown()
+        self._seam.invoke(self._response_session.invalidate)
+        self._response_provider.shutdown()
         return super().destroy_node()
-
-    def _invalidate_llm_request_for_shutdown(self) -> None:
-        """Revoke fallback authority before shutdown can close its worker."""
-        self._llm_request = None
 
     def _planning_snapshot(
         self, *, require_execute_ready: bool
@@ -550,7 +622,7 @@ class AgentNode(Node):
         decision: MissionDecision,
         turn: VoiceTurn,
         turn_generation: int,
-    ) -> None:
+    ) -> Optional[_MissionSlot]:
         if self._mission_slot is not None:
             self._speak_text(
                 '本地任务正在处理。',
@@ -559,7 +631,7 @@ class AgentNode(Node):
                 turn.turn_id,
                 turn_generation,
             )
-            return
+            return None
 
         self._mission_generation += 1
         slot = _MissionSlot(
@@ -581,7 +653,7 @@ class AgentNode(Node):
                 f'Mission Goal transport failed before submission: {error}'
             )
             self._mission_send_failure(slot, 'mission_transport_error')
-            return
+            return None
         slot.send_timer = self._one_shot_timer(
             RESPONSE_DEADLINE_SECONDS,
             lambda: self._mission_send_timeout(slot),
@@ -591,6 +663,7 @@ class AgentNode(Node):
                 self._mission_goal_response, slot, completed
             )
         )
+        return slot
 
     def _mission_goal(self, mission: Any) -> ExecuteMission.Goal:
         goal = ExecuteMission.Goal()
@@ -1267,6 +1340,8 @@ def _is_control_turn(turn: VoiceTurn) -> bool:
     """Keep STOP and local CANCEL independent of planning readiness."""
     if turn.kind == VoiceTurn.STOP:
         return True
+    if not isinstance(turn.text, str):
+        return False
     normalized = unicodedata.normalize('NFKC', turn.text).strip()
     clauses = [clause.strip() for clause in _CONTROL_SEPARATOR_RE.split(normalized)]
     return any(

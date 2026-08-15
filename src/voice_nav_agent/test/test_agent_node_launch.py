@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.metadata import distribution
+import json
 import pathlib
 import threading
 from types import SimpleNamespace
@@ -30,6 +33,7 @@ import pytest
 import rclpy
 from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
 from rclpy.clock import Clock, ClockType
+from rclpy.duration import Duration
 from rclpy.event_handler import PublisherEventCallbacks
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.qos import (
@@ -42,6 +46,101 @@ from rclpy.qos import (
 from voice_nav_interfaces.action import ExecuteMission, Speak
 from voice_nav_interfaces.msg import MissionState, VoiceTurn
 from voice_nav_interfaces.srv import StopMission
+
+
+class _LoopbackResponseServer:
+    """Test-only literal loopback provider with the frozen three-round script."""
+
+    def __init__(self):
+        self.requests = []
+        self.request_received = threading.Event()
+        self.blocked_response_entered = threading.Event()
+        self.release_blocked_response = threading.Event()
+        self.blocked_response_released = threading.Event()
+        owner = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                if self.path != '/v1/chat/completions':
+                    self.send_error(404)
+                    return
+                length = int(self.headers['Content-Length'])
+                body = json.loads(self.rfile.read(length).decode('utf-8'))
+                owner.requests.append(body)
+                owner.request_received.set()
+                content = json.loads(body['messages'][-1]['content'])
+                turn_id = content['turn']['turn_id']
+                blocked = turn_id == 'provider-blocked'
+                if blocked:
+                    owner.blocked_response_entered.set()
+                    assert owner.release_blocked_response.wait(10.0)
+                    inner = {'kind': 'reply', 'text': '旧响应不得播报。'}
+                elif turn_id == 'provider-after-stop':
+                    inner = {'kind': 'reply', 'text': '新响应。'}
+                elif turn_id == 'llm-clarify':
+                    inner = {'kind': 'clarify', 'text': '请说明目的地。'}
+                elif content['round'] == 1:
+                    inner = {
+                        'kind': 'tool',
+                        'tool_call': {
+                            'name': 'read_runtime_snapshot',
+                            'arguments': {},
+                        },
+                    }
+                else:
+                    inner = {
+                        'kind': 'tool',
+                        'tool_call': {
+                            'name': 'propose_mission',
+                            'arguments': {
+                                'kind': 'mission',
+                                'steps': [
+                                    {
+                                        'kind': 'navigate_to',
+                                        'target_id': 'lobby',
+                                    }
+                                ],
+                            },
+                        },
+                    }
+                response = json.dumps(
+                    {
+                        'choices': [
+                            {'message': {'content': json.dumps(inner)}}
+                        ]
+                    }
+                ).encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(response)))
+                self.end_headers()
+                try:
+                    self.wfile.write(response)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                finally:
+                    if blocked:
+                        owner.blocked_response_released.set()
+
+            def log_message(self, _format, *_args):
+                pass
+
+        self._server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        port = self._server.server_address[1]
+        self.endpoint = f'http://127.0.0.1:{port}'
+        self._thread = threading.Thread(
+            target=self._server.serve_forever,
+            daemon=True,
+        )
+        self._thread.start()
+
+    def close(self):
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(5.0)
+
+
+_LOOPBACK_RESPONSE_SERVER = None
 
 
 def _test_state_qos():
@@ -68,11 +167,14 @@ def _test_voice_turn_qos():
 @launch_testing.markers.keep_alive
 def generate_test_description():
     """Launch the installed product entry point under test."""
+    global _LOOPBACK_RESPONSE_SERVER
+    _LOOPBACK_RESPONSE_SERVER = _LoopbackResponseServer()
     agent = Node(
         package='voice_nav_agent',
         executable='agent_node',
         name='agent_node',
         output='screen',
+        parameters=[{'llm_endpoint': _LOOPBACK_RESPONSE_SERVER.endpoint}],
     )
     return LaunchDescription(
         [agent, launch_testing.actions.ReadyToTest()]
@@ -176,6 +278,11 @@ class AgentNodeLaunchTest(unittest.TestCase):
 
     def setUp(self, proc_info, agent):
         rclpy.init(args=[])
+        identity = hashlib.sha256(
+            self._testMethodName.encode('utf-8')
+        ).hexdigest()[:12]
+        self.voice_instance_id = f'voice-{identity}'
+        self.session_id = f'session-{identity}'
         self.node = rclpy.create_node('agent_launch_probe')
         self.executor = SingleThreadedExecutor()
         self.executor.add_node(self.node)
@@ -191,6 +298,10 @@ class AgentNodeLaunchTest(unittest.TestCase):
             'B': threading.Event(),
         }
         self.state_current_match_events = {
+            'A': threading.Event(),
+            'B': threading.Event(),
+        }
+        self.state_disconnect_events = {
             'A': threading.Event(),
             'B': threading.Event(),
         }
@@ -215,10 +326,14 @@ class AgentNodeLaunchTest(unittest.TestCase):
         )
         self.stop_event = threading.Event()
         self.speak_event = threading.Event()
+        self.new_provider_reply_event = threading.Event()
+        self.clarification_speak_event = threading.Event()
         self.mission_event = threading.Event()
         self.stop_requests = []
         self.mission_goals = []
         self.speak_goals = []
+        self.hold_mission_result = False
+        self.release_mission_result = threading.Event()
         self.stop_service = self.node.create_service(
             StopMission,
             '/mission/stop',
@@ -278,6 +393,7 @@ class AgentNodeLaunchTest(unittest.TestCase):
         def matched(event):
             if event.current_count_change < 0:
                 self.state_current_match_events[label].clear()
+                self.state_disconnect_events[label].set()
                 return
             if (
                 event.current_count_change > 0
@@ -312,26 +428,110 @@ class AgentNodeLaunchTest(unittest.TestCase):
         return message
 
     def _publish_rule_turn(self, sequence, turn_id):
+        self._publish_command_turn(sequence, turn_id, '前进 1 米')
+
+    def _publish_command_turn(self, sequence, turn_id, text):
         turn = VoiceTurn()
-        turn.voice_instance_id = 'voice-launch'
+        turn.voice_instance_id = self.voice_instance_id
         turn.voice_seq = sequence
-        turn.session_id = 'session-launch'
+        turn.session_id = self.session_id
         turn.turn_id = turn_id
         turn.kind = VoiceTurn.COMMAND
-        turn.text = '前进 1 米'
+        turn.text = text
         turn.confidence = 1.0
         self.turn_publisher.publish(turn)
 
-    def _publish_stop_turn(self, sequence, turn_id):
+    def _publish_unknown_turn(
+        self,
+        sequence,
+        turn_id,
+        text,
+        *,
+        voice_instance_id=None,
+        session_id=None,
+    ):
         turn = VoiceTurn()
-        turn.voice_instance_id = 'voice-launch'
+        turn.voice_instance_id = voice_instance_id or self.voice_instance_id
         turn.voice_seq = sequence
-        turn.session_id = 'session-launch'
+        turn.session_id = session_id or self.session_id
+        turn.turn_id = turn_id
+        turn.kind = VoiceTurn.COMMAND
+        turn.text = text
+        turn.confidence = 1.0
+        self.turn_publisher.publish(turn)
+
+    def _publish_stop_turn(
+        self,
+        sequence,
+        turn_id,
+        *,
+        voice_instance_id=None,
+        session_id=None,
+    ):
+        turn = VoiceTurn()
+        turn.voice_instance_id = voice_instance_id or self.voice_instance_id
+        turn.voice_seq = sequence
+        turn.session_id = session_id or self.session_id
         turn.turn_id = turn_id
         turn.kind = VoiceTurn.STOP
         turn.text = '停止'
         turn.confidence = 1.0
         self.turn_publisher.publish(turn)
+
+    def _refresh_runtime_snapshot(self, sequence, turn_id):
+        """Force A-to-B recovery and prove that the new Runtime is usable."""
+        assert self.stop_probe.wait_for_service(timeout_sec=10.0)
+        assert self.state_current_match_events['A'].wait(10.0)
+        old_subscription_gid = self._agent_state_subscription_gid()
+        old_publisher = self.state_publisher
+        old_node = self.state_publisher_node
+        old_node.destroy_publisher(old_publisher)
+        self.state_current_match_events['B'].clear()
+        self.state_disconnect_events['B'].clear()
+        self.state_publisher = self._create_state_publisher('B')
+        assert self.state_current_match_events['B'].wait(10.0)
+        rebuilt_before_stop = old_subscription_gid is None or (
+            self._agent_state_subscription_gid() != old_subscription_gid
+        )
+
+        self.stop_event.clear()
+        self.speak_event.clear()
+        if not rebuilt_before_stop:
+            self.state_current_match_events['B'].clear()
+        self._publish_stop_turn(sequence, turn_id)
+        assert self.stop_event.wait(10.0)
+        assert self.speak_event.wait(10.0)
+        if not rebuilt_before_stop:
+            assert self.state_disconnect_events['B'].wait(10.0)
+            assert self.state_current_match_events['B'].wait(10.0)
+        if old_subscription_gid is not None:
+            assert self._agent_state_subscription_gid() != old_subscription_gid
+        self.state_publisher.publish(self._state_message('runtime-b', 22))
+        assert self.state_publisher.wait_for_all_acked(
+            Duration(seconds=10)
+        )
+
+        initial_missions = len(self.mission_goals)
+        initial_requests = (
+            len(_LOOPBACK_RESPONSE_SERVER.requests)
+            if _LOOPBACK_RESPONSE_SERVER is not None
+            else 0
+        )
+        self.speak_event.clear()
+        visible_turn_id = f'snapshot-{sequence}'
+        self._publish_command_turn(sequence + 1, visible_turn_id, '前进 3 米')
+        assert self.speak_event.wait(10.0)
+        visible_goals = [
+            goal for goal in self.speak_goals
+            if goal.turn_id == visible_turn_id
+        ]
+        assert [goal.text for goal in visible_goals] == [
+            '移动距离超出安全范围。'
+        ]
+        assert len(self.mission_goals) == initial_missions
+        if _LOOPBACK_RESPONSE_SERVER is not None:
+            assert len(_LOOPBACK_RESPONSE_SERVER.requests) == initial_requests
+        return sequence + 1
 
     def _state_endpoint_gid(self, label='A'):
         node_name = (
@@ -383,6 +583,8 @@ class AgentNodeLaunchTest(unittest.TestCase):
     def _mission(self, goal_handle):
         self.mission_goals.append(goal_handle.request)
         self.mission_event.set()
+        if self.hold_mission_result:
+            assert self.release_mission_result.wait(10.0)
         goal_handle.succeed()
         result = ExecuteMission.Result()
         result.code = ExecuteMission.Result.SUCCEEDED
@@ -392,6 +594,10 @@ class AgentNodeLaunchTest(unittest.TestCase):
     def _speak(self, goal_handle):
         self.speak_goals.append(goal_handle.request)
         self.speak_event.set()
+        if goal_handle.request.text == '新响应。':
+            self.new_provider_reply_event.set()
+        if goal_handle.request.text == '请说明目的地。':
+            self.clarification_speak_event.set()
         goal_handle.succeed()
         result = Speak.Result()
         result.code = Speak.Result.COMPLETED
@@ -405,6 +611,9 @@ class AgentNodeLaunchTest(unittest.TestCase):
         return response
 
     def tearDown(self):
+        self.release_mission_result.set()
+        if _LOOPBACK_RESPONSE_SERVER is not None:
+            _LOOPBACK_RESPONSE_SERVER.release_blocked_response.set()
         self.executor.shutdown()
         self.spin_thread.join(5.0)
         self.speak_probe.destroy()
@@ -502,39 +711,162 @@ class AgentNodeLaunchTest(unittest.TestCase):
             and state_qos.depth == 0
         )
 
+    def test_installed_response_provider_clarifies_then_proposes_one_mission(self):
+        """Exercise the installed Agent through the frozen loopback provider."""
+        assert _LOOPBACK_RESPONSE_SERVER is not None
+        assert self.turn_matched.wait(10.0)
+        assert self.state_matched.wait(10.0)
+        assert self.speak_probe.wait_for_server(timeout_sec=10.0)
+        assert self.mission_probe.wait_for_server(timeout_sec=10.0)
+        barrier_sequence = self._refresh_runtime_snapshot(
+            9, 'response-state-refresh'
+        )
+        first_request = len(_LOOPBACK_RESPONSE_SERVER.requests)
+
+        self.speak_event.clear()
+        self.clarification_speak_event.clear()
+        _LOOPBACK_RESPONSE_SERVER.request_received.clear()
+        self._publish_unknown_turn(
+            barrier_sequence + 1,
+            'llm-clarify',
+            '请沿着大厅右侧绕过去',
+        )
+        assert _LOOPBACK_RESPONSE_SERVER.request_received.wait(10.0)
+        assert self.clarification_speak_event.wait(10.0)
+        clarification_goals = [
+            goal for goal in self.speak_goals
+            if goal.turn_id == 'llm-clarify'
+        ]
+        assert [goal.text for goal in clarification_goals] == ['请说明目的地。']
+
+        self.hold_mission_result = True
+        self.mission_event.clear()
+        self._publish_unknown_turn(
+            barrier_sequence + 2,
+            'llm-mission',
+            '请继续带我去那里',
+        )
+        assert self.mission_event.wait(10.0)
+
+        requests = _LOOPBACK_RESPONSE_SERVER.requests[first_request:]
+        assert len(requests) == 3
+        assert requests[0]['model'] == 'Qwen3-0.6B-Q8_0.gguf'
+        assert requests[0]['stream'] is False
+        assert requests[0]['messages'][0]['content'] == '/no_think'
+        assert [tool['function']['name'] for tool in requests[0]['tools']] == [
+            'read_runtime_snapshot',
+            'propose_mission',
+            'cancel_owned_mission',
+        ]
+        second = json.loads(requests[1]['messages'][-1]['content'])
+        third = json.loads(requests[2]['messages'][-1]['content'])
+        assert second['clarification'] == '请说明目的地。'
+        assert second['round'] == 1
+        assert third['round'] == 2
+        assert third['snapshot_output'] == {
+            'runtime_instance_id': 'runtime-b',
+            'admission_epoch': 22,
+            'operating_mode': MissionState.NAVIGATION,
+            'availability': MissionState.AVAILABLE,
+            'gate_state': MissionState.GATE_INHIBITED,
+            'supported_step_mask': 0b1111,
+            'max_steps': 3,
+            'named_place_ids': ['lobby'],
+        }
+        response_missions = [
+            goal for goal in self.mission_goals
+            if goal.source_seq > 0 and goal.runtime_instance_id == 'runtime-b'
+        ]
+        assert len(response_missions) == 1
+        goal = response_missions[0]
+        assert goal.source_seq > 0
+        assert goal.runtime_instance_id == 'runtime-b'
+        assert goal.admission_epoch == 22
+        assert goal.steps[0].target_id == 'lobby'
+
+        self.release_mission_result.set()
+
+    def test_z_blocked_provider_stop_is_direct_and_late_reply_is_fenced(self):
+        """STOP reaches its port before a blocked provider can create effects."""
+        assert _LOOPBACK_RESPONSE_SERVER is not None
+        assert self.turn_matched.wait(10.0)
+        assert self.state_matched.wait(10.0)
+        assert self.stop_probe.wait_for_service(timeout_sec=10.0)
+        barrier_sequence = self._refresh_runtime_snapshot(
+            12, 'blocked-state-refresh'
+        )
+
+        self.stop_event.clear()
+        self.speak_event.clear()
+        self.new_provider_reply_event.clear()
+        _LOOPBACK_RESPONSE_SERVER.blocked_response_entered.clear()
+        _LOOPBACK_RESPONSE_SERVER.blocked_response_released.clear()
+        _LOOPBACK_RESPONSE_SERVER.release_blocked_response.clear()
+        initial_stops = len(self.stop_requests)
+        initial_speaks = len(self.speak_goals)
+        initial_missions = len(self.mission_goals)
+
+        self._publish_unknown_turn(
+            barrier_sequence + 1,
+            'provider-blocked',
+            '请沿着大厅右侧绕过去',
+        )
+        assert _LOOPBACK_RESPONSE_SERVER.blocked_response_entered.wait(10.0)
+
+        self._publish_stop_turn(
+            barrier_sequence + 2,
+            'stop-during-provider',
+        )
+        assert self.stop_event.wait(10.0)
+        assert self.speak_event.wait(10.0)
+        assert len(self.stop_requests) == initial_stops + 1
+        assert len(self.speak_goals) == initial_speaks + 1
+        assert len(self.mission_goals) == initial_missions
+
+        _LOOPBACK_RESPONSE_SERVER.release_blocked_response.set()
+        assert _LOOPBACK_RESPONSE_SERVER.blocked_response_released.wait(10.0)
+        self._publish_unknown_turn(
+            barrier_sequence + 3,
+            'provider-after-stop',
+            '请继续说明情况',
+        )
+        assert self.new_provider_reply_event.wait(10.0)
+
+        assert len(self.stop_requests) == initial_stops + 1
+        assert len(self.speak_goals) == initial_speaks + 2
+        assert self.speak_goals[-1].text == '新响应。'
+        assert len(self.mission_goals) == initial_missions
+
     def test_installed_agent_restarts_state_epoch_through_public_ros_behavior(self):
         """Prove installed A-to-B GID rebuild, B live delivery, and B-token Missions."""
         assert self.turn_matched.wait(10.0)
         assert self.state_matched.wait(10.0)
-        assert self.state_current_match_events['A'].wait(10.0)
         assert self.speak_probe.wait_for_server(timeout_sec=10.0)
         assert self.mission_probe.wait_for_server(timeout_sec=10.0)
-
-        state_a_gid = self._state_endpoint_gid()
-
-        assert self.stop_probe.wait_for_service(timeout_sec=10.0)
-        self.stop_event.clear()
-        self.speak_event.clear()
-        self._publish_stop_turn(1, 'state-a-barrier')
-        assert self.stop_event.wait(10.0)
-        assert self.speak_event.wait(10.0)
+        barrier_sequence = self._refresh_runtime_snapshot(
+            1, 'state-a-refresh'
+        )
+        state_a_gid = self._state_endpoint_gid('B')
 
         self.mission_event.clear()
         self.speak_event.clear()
-        self._publish_rule_turn(2, 'mission-a')
+        self._publish_rule_turn(barrier_sequence + 1, 'mission-a')
         assert self.speak_event.wait(10.0)
         assert self.mission_event.wait(10.0)
         assert self.speak_event.wait(10.0)
         assert len(self.mission_goals) == 1
-        assert self.mission_goals[0].runtime_instance_id == 'runtime-a'
-        assert self.mission_goals[0].admission_epoch == 11
+        assert self.mission_goals[0].runtime_instance_id == 'runtime-b'
+        assert self.mission_goals[0].admission_epoch == 22
         state_a_subscription_gid = self._agent_state_subscription_gid()
         assert state_a_subscription_gid
 
         state_a_publisher = self.state_publisher
         # Destroy A immediately after its accepted sample; the old sample may
         # still be queued while the graph changes to B.
-        self.node.destroy_publisher(state_a_publisher)
+        self.state_matched_events['B'].clear()
+        self.state_current_match_events['B'].clear()
+        self.state_disconnect_events['B'].clear()
+        self.state_publisher_node.destroy_publisher(state_a_publisher)
         self.state_publisher = self._create_state_publisher('B')
         assert self.state_matched_events['B'].wait(10.0)
         assert self.state_current_match_events['B'].wait(10.0)
@@ -547,14 +879,14 @@ class AgentNodeLaunchTest(unittest.TestCase):
 
         self.mission_event.clear()
         self.speak_event.clear()
-        self._publish_rule_turn(3, 'mission-without-b-state')
+        self._publish_rule_turn(barrier_sequence + 2, 'mission-without-b-state')
         assert self.speak_event.wait(10.0)
         assert len(self.mission_goals) == 1
         assert not self.mission_event.is_set()
 
         self.stop_event.clear()
         self.speak_event.clear()
-        self._publish_stop_turn(4, 'state-b-barrier')
+        self._publish_stop_turn(barrier_sequence + 3, 'state-b-barrier')
         assert self.stop_event.wait(10.0)
         assert self.speak_event.wait(10.0)
         assert self.state_current_match_events['B'].wait(10.0)
@@ -565,7 +897,7 @@ class AgentNodeLaunchTest(unittest.TestCase):
         self.b_publish_on_speak = True
         self.mission_event.clear()
         self.speak_event.clear()
-        self._publish_rule_turn(5, 'publish-b-state')
+        self._publish_rule_turn(barrier_sequence + 4, 'publish-b-state')
         assert self.speak_event.wait(10.0)
         assert len(self.mission_goals) == 1
         assert not self.mission_event.is_set()
@@ -574,13 +906,15 @@ class AgentNodeLaunchTest(unittest.TestCase):
 
         self.stop_event.clear()
         self.speak_event.clear()
-        self._publish_stop_turn(6, 'state-b-barrier-after-publish')
+        self._publish_stop_turn(
+            barrier_sequence + 5, 'state-b-barrier-after-publish'
+        )
         assert self.stop_event.wait(10.0)
         assert self.speak_event.wait(10.0)
 
         self.mission_event.clear()
         self.speak_event.clear()
-        self._publish_rule_turn(7, 'mission-b')
+        self._publish_rule_turn(barrier_sequence + 6, 'mission-b')
         assert self.mission_event.wait(10.0)
         assert self.speak_event.wait(10.0)
         assert len(self.mission_goals) == 2
@@ -589,7 +923,7 @@ class AgentNodeLaunchTest(unittest.TestCase):
 
         self.mission_event.clear()
         self.speak_event.clear()
-        self._publish_rule_turn(8, 'mission-b-again')
+        self._publish_rule_turn(barrier_sequence + 7, 'mission-b-again')
         assert self.mission_event.wait(10.0)
         assert self.speak_event.wait(10.0)
         assert len(self.mission_goals) == 3
@@ -719,3 +1053,10 @@ class AgentNodeLaunchShutdownTest(unittest.TestCase):
     def test_agent_exits_cleanly(self, proc_info, agent):
         """Check launch-managed process exit status after the test."""
         assertExitCodes(proc_info, process=agent, allowable_exit_codes=[0, -2])
+
+    def test_loopback_server_exits_cleanly(self):
+        """Release the test-only HTTP server after the installed-node scenario."""
+        global _LOOPBACK_RESPONSE_SERVER
+        if _LOOPBACK_RESPONSE_SERVER is not None:
+            _LOOPBACK_RESPONSE_SERVER.close()
+            _LOOPBACK_RESPONSE_SERVER = None

@@ -18,6 +18,7 @@ from types import SimpleNamespace
 from action_msgs.srv import CancelGoal
 import pytest
 import rclpy
+from voice_nav_agent._response_session import _ProviderResponse, _ToolCall
 from voice_nav_agent.agent_node import (
     _publisher_signature,
     _SerialSeam,
@@ -25,15 +26,11 @@ from voice_nav_agent.agent_node import (
 )
 from voice_nav_agent.core import (
     Availability,
-    DecisionKind,
     GateState,
-    Mission,
     MissionState,
     MissionStep,
     OperatingMode,
-    VoiceTurn as CoreVoiceTurn,
 )
-from voice_nav_agent.llm_fallback import LlmFallbackRequest, LlmFallbackResult
 from voice_nav_interfaces.action import ExecuteMission, Speak
 from voice_nav_interfaces.msg import VoiceTurn
 from voice_nav_interfaces.srv import StopMission
@@ -138,8 +135,8 @@ class FakeStopClient:
         return future
 
 
-class FakeLlmFallback:
-    """Records adapter requests without opening an HTTP connection."""
+class FakeResponseProvider:
+    """Records ResponseSession work without opening an HTTP connection."""
 
     def __init__(self):
         self.submissions = []
@@ -254,6 +251,33 @@ def _make_node(monkeypatch):
     return node
 
 
+def _replace_response_provider(node):
+    """Install an explicit fake without retaining the real transport worker."""
+    original_provider = node._response_provider
+    provider = FakeResponseProvider()
+    node._response_provider = provider
+    node._response_session._provider = provider
+    original_provider.shutdown()
+    return provider
+
+
+def _response_mission_call():
+    return _ProviderResponse(
+        kind='tool',
+        tool_calls=(
+            _ToolCall(
+                'propose_mission',
+                {
+                    'kind': 'mission',
+                    'steps': [
+                        {'kind': 'navigate_to', 'target_id': 'lobby'},
+                    ],
+                },
+            ),
+        ),
+    )
+
+
 def _script_deadlines(monkeypatch, node):
     """Replace only the ROS clock/timer seam with explicit deadlines."""
     timers = []
@@ -312,33 +336,22 @@ def test_serial_seam_returns_llm_admission_result():
 
 
 @pytest.mark.parametrize(
-    ('result', 'expected_text'),
+    ('response', 'expected_text'),
     [
-        (LlmFallbackResult('clarify', text='请说明目标地点。'), '请说明目标地点。'),
-        (LlmFallbackResult('reply', text='该请求不能执行。'), '该请求不能执行。'),
+        (_ProviderResponse(kind='clarify', text='请说明目标地点。'), '请说明目标地点。'),
+        (_ProviderResponse(kind='reply', text='该请求不能执行。'), '该请求不能执行。'),
     ],
 )
-def test_llm_closed_clarify_or_reply_speaks_once(monkeypatch, result, expected_text):
+def test_response_clarify_or_reply_speaks_once(
+    monkeypatch, response, expected_text
+):
     node = _make_node(monkeypatch)
+    provider = _replace_response_provider(node)
     try:
-        turn = CoreVoiceTurn(
-            voice_instance_id='voice-a',
-            voice_seq=1,
-            session_id='session-a',
-            turn_id='turn-1',
-            kind=CoreVoiceTurn.COMMAND,
-            text='请沿着大厅右侧绕过去',
-            confidence=1.0,
-            during_playback=False,
-        )
-        decision = node.core.handle_turn(turn, _make_state())
-        assert decision.kind is DecisionKind.LLM_NEEDED
-        request = LlmFallbackRequest(decision=decision, turn_generation=1)
-        node._turn_generation = 1
-        node._llm_request = request
-
-        node._handle_llm_result(request, result)
-        node._handle_llm_result(request, result)
+        node._on_turn_message(_make_turn('请沿着大厅右侧绕过去'))
+        request = provider.submissions[-1]
+        node._on_response_provider_response(request, response)
+        node._on_response_provider_response(request, response)
 
         assert len(node._speak_client.goals) == 1
         goal = node._speak_client.goals[0]
@@ -350,26 +363,14 @@ def test_llm_closed_clarify_or_reply_speaks_once(monkeypatch, result, expected_t
         node.destroy_node()
 
 
-def test_latest_llm_failure_speaks_one_bounded_normal_reply(monkeypatch):
+def test_response_failure_speaks_one_bounded_normal_reply(monkeypatch):
     node = _make_node(monkeypatch)
+    provider = _replace_response_provider(node)
     try:
-        turn = CoreVoiceTurn(
-            voice_instance_id='voice-a',
-            voice_seq=1,
-            session_id='session-a',
-            turn_id='turn-1',
-            kind=CoreVoiceTurn.COMMAND,
-            text='请沿着大厅右侧绕过去',
-            confidence=1.0,
-            during_playback=False,
-        )
-        decision = node.core.handle_turn(turn, _make_state())
-        request = LlmFallbackRequest(decision=decision, turn_generation=1)
-        node._turn_generation = 1
-        node._llm_request = request
-
-        node._handle_llm_failure(request)
-        node._handle_llm_failure(request)
+        node._on_turn_message(_make_turn('请沿着大厅右侧绕过去'))
+        request = provider.submissions[-1]
+        node._on_response_provider_failure(request)
+        node._on_response_provider_failure(request)
 
         assert len(node._speak_client.goals) == 1
         goal = node._speak_client.goals[0]
@@ -392,37 +393,17 @@ def test_latest_llm_failure_speaks_one_bounded_normal_reply(monkeypatch):
         {'gate_state': GateState.GATE_ARMED},
     ],
 )
-def test_stale_llm_mission_cannot_side_effect_after_runtime_changes(
+def test_stale_response_mission_cannot_side_effect_after_runtime_changes(
     monkeypatch, state_changes
 ):
     node = _make_node(monkeypatch)
+    provider = _replace_response_provider(node)
     try:
-        turn = CoreVoiceTurn(
-            voice_instance_id='voice-a',
-            voice_seq=1,
-            session_id='session-a',
-            turn_id='turn-1',
-            kind=CoreVoiceTurn.COMMAND,
-            text='请沿着大厅右侧绕过去',
-            confidence=1.0,
-            during_playback=False,
-        )
-        decision = node.core.handle_turn(turn, _make_state())
-        request = LlmFallbackRequest(decision=decision, turn_generation=1)
-        node._turn_generation = 1
-        node._llm_request = request
+        node._on_turn_message(_make_turn('请沿着大厅右侧绕过去'))
+        request = provider.submissions[-1]
         node._latest_state = replace(_make_state(), **state_changes)
-        result = LlmFallbackResult(
-            'mission',
-            mission=Mission(
-                (
-                    MissionStep(MissionStep.NAVIGATE_TO, target_id='lobby'),
-                ),
-                decision.token,
-            ),
-        )
 
-        node._handle_llm_result(request, result)
+        node._on_response_provider_response(request, _response_mission_call())
 
         assert node._mission_client.goals == []
         assert node._speak_client.goals == []
@@ -430,39 +411,18 @@ def test_stale_llm_mission_cannot_side_effect_after_runtime_changes(
         node.destroy_node()
 
 
-def test_llm_mission_result_revalidates_and_sends_a_typed_goal(monkeypatch):
+def test_response_mission_revalidates_and_sends_a_typed_goal(monkeypatch):
     node = _make_node(monkeypatch)
+    provider = _replace_response_provider(node)
     try:
-        turn = CoreVoiceTurn(
-            voice_instance_id='voice-a',
-            voice_seq=1,
-            session_id='session-a',
-            turn_id='turn-1',
-            kind=CoreVoiceTurn.COMMAND,
-            text='请沿着大厅右侧绕过去',
-            confidence=1.0,
-            during_playback=False,
-        )
-        decision = node.core.handle_turn(turn, _make_state())
-        request = LlmFallbackRequest(decision=decision, turn_generation=1)
-        node._turn_generation = 1
-        node._llm_request = request
-        result = LlmFallbackResult(
-            'mission',
-            mission=Mission(
-                (
-                    MissionStep(MissionStep.NAVIGATE_TO, target_id='lobby'),
-                ),
-                decision.token,
-            ),
-        )
-
-        node._seam.invoke(node._handle_llm_result, request, result)
+        node._on_turn_message(_make_turn('请沿着大厅右侧绕过去'))
+        request = provider.submissions[-1]
+        node._on_response_provider_response(request, _response_mission_call())
 
         assert len(node._mission_client.goals) == 1
         goal = node._mission_client.goals[0]
         assert goal.source_instance_id == 'a' * 32
-        assert goal.source_seq == decision.token.source_seq
+        assert goal.source_seq == request.token.source_seq
         assert goal.runtime_instance_id == 'runtime-a'
         assert goal.admission_epoch == 7
         assert len(goal.steps) == 1
@@ -472,54 +432,74 @@ def test_llm_mission_result_revalidates_and_sends_a_typed_goal(monkeypatch):
         node.destroy_node()
 
 
-@pytest.mark.parametrize('late_delivery', ['result', 'failure'])
-def test_destroy_node_revokes_llm_request_before_fallback_shutdown(
-    monkeypatch, late_delivery
+def test_response_clarify_snapshot_then_mission_uses_one_speak_and_slot(
+    monkeypatch,
 ):
-    """A late fallback callback during teardown cannot start ROS side effects."""
+    """The installed adapter carries one clarification into a two-round Mission."""
     node = _make_node(monkeypatch)
-    original_fallback = node._llm_fallback
-    fake_fallback = FakeLlmFallback()
-    node._llm_fallback = fake_fallback
-    original_fallback.shutdown()
-    destroyed = False
+    provider = _replace_response_provider(node)
     try:
-        turn = CoreVoiceTurn(
-            voice_instance_id='voice-a',
-            voice_seq=1,
-            session_id='session-a',
-            turn_id='turn-1',
-            kind=CoreVoiceTurn.COMMAND,
-            text='请沿着大厅右侧绕过去',
-            confidence=1.0,
-            during_playback=False,
+        node._on_turn_message(_make_turn('请沿着大厅右侧绕过去', sequence=1))
+        first = provider.submissions[-1]
+        node._on_response_provider_response(
+            first, _ProviderResponse(kind='clarify', text='请说明目的地。')
         )
-        decision = node.core.handle_turn(turn, _make_state())
-        request = LlmFallbackRequest(decision=decision, turn_generation=1)
-        result = LlmFallbackResult(
-            'mission',
-            mission=Mission(
-                (MissionStep(MissionStep.NAVIGATE_TO, target_id='lobby'),),
-                decision.token,
+        assert len(node._speak_client.goals) == 1
+        assert node._speak_client.goals[0].text == '请说明目的地。'
+
+        node._on_turn_message(_make_turn('请继续帮我到那里', sequence=2))
+        second = provider.submissions[-1]
+        assert second.clarification == '请说明目的地。'
+        node._on_response_provider_response(
+            second,
+            _ProviderResponse(
+                kind='tool',
+                tool_calls=(_ToolCall('read_runtime_snapshot', {}),),
             ),
         )
-        node._turn_generation = 1
-        node._llm_request = request
+        continuation = provider.submissions[-1]
+        assert continuation.round == 2
+        assert continuation.snapshot_output.name == 'read_runtime_snapshot'
+
+        node._on_response_provider_response(
+            continuation, _response_mission_call()
+        )
+
+        assert len(node._mission_client.goals) == 1
+        assert len(node._speak_client.goals) == 1
+        goal = node._mission_client.goals[0]
+        assert goal.source_seq == continuation.token.source_seq
+        assert goal.runtime_instance_id == 'runtime-a'
+        assert goal.admission_epoch == 7
+    finally:
+        node.destroy_node()
+
+
+@pytest.mark.parametrize('late_delivery', ['result', 'failure'])
+def test_destroy_node_revokes_response_before_provider_shutdown(
+    monkeypatch, late_delivery
+):
+    """A late provider callback during teardown cannot start ROS side effects."""
+    node = _make_node(monkeypatch)
+    provider = _replace_response_provider(node)
+    destroyed = False
+    try:
+        node._on_turn_message(_make_turn('请沿着大厅右侧绕过去'))
+        request = provider.submissions[-1]
 
         if late_delivery == 'result':
-            fake_fallback.on_shutdown = lambda: node._seam.invoke(
-                node._handle_llm_result, request, result
+            provider.on_shutdown = lambda: node._on_response_provider_response(
+                request, _response_mission_call()
             )
         else:
-            fake_fallback.on_shutdown = lambda: node._seam.invoke(
-                node._handle_llm_failure, request
+            provider.on_shutdown = lambda: node._on_response_provider_failure(
+                request
             )
 
         node.destroy_node()
         destroyed = True
 
-        assert fake_fallback.shutdown_called is True
-        assert node._llm_request is None
+        assert provider.shutdown_called is True
         assert node._mission_client.goals == []
         assert node._speak_client.goals == []
     finally:
@@ -527,12 +507,9 @@ def test_destroy_node_revokes_llm_request_before_fallback_shutdown(
             node.destroy_node()
 
 
-def test_rule_stop_and_existing_clarification_never_submit_http(monkeypatch):
+def test_rule_and_stop_never_submit_response_http(monkeypatch):
     node = _make_node(monkeypatch)
-    original_fallback = node._llm_fallback
-    fake_fallback = FakeLlmFallback()
-    node._llm_fallback = fake_fallback
-    original_fallback.shutdown()
+    provider = _replace_response_provider(node)
     try:
         node._on_turn_message(_make_turn('前进 1 米', sequence=1))
         node._on_turn_message(
@@ -540,8 +517,47 @@ def test_rule_stop_and_existing_clarification_never_submit_http(monkeypatch):
         )
         node._on_turn_message(_make_turn('前进', sequence=3))
 
-        assert fake_fallback.submissions == []
-        assert fake_fallback.invalidations == [1, 2, 3]
+        assert provider.submissions == []
+        assert len(provider.invalidations) == 3
+    finally:
+        node.destroy_node()
+
+
+def test_higher_invalid_turn_fences_response_without_opening_provider(
+    monkeypatch,
+):
+    """A malformed higher sequence revokes old Response work exactly once."""
+    node = _make_node(monkeypatch)
+    provider = _replace_response_provider(node)
+    try:
+        node._on_turn_message(_make_turn('请沿着大厅右侧绕过去'))
+        old_request = provider.submissions[-1]
+
+        malformed = SimpleNamespace(
+            voice_instance_id='voice-a',
+            voice_seq=2,
+            session_id='session-a',
+            turn_id='malformed-2',
+            kind=VoiceTurn.COMMAND,
+            text=object(),
+            confidence=1.0,
+            during_playback=False,
+        )
+        node._on_turn_message(malformed)
+        node._on_turn_message(malformed)
+        stale = SimpleNamespace(**{
+            **malformed.__dict__,
+            'voice_seq': 1,
+            'turn_id': 'malformed-1',
+        })
+        node._on_turn_message(stale)
+        node._on_response_provider_response(old_request, _response_mission_call())
+
+        assert len(provider.submissions) == 1
+        assert provider.invalidations == [1, 2]
+        assert node._mission_client.goals == []
+        assert node._speak_client.goals == []
+        assert node._mission_slot is None
     finally:
         node.destroy_node()
 

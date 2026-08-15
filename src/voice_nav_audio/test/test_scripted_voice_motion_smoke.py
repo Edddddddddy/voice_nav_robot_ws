@@ -93,11 +93,17 @@ class _LoopbackLlmHandler(BaseHTTPRequestHandler):
         body = self.rfile.read(content_length)
         self.server.requests.append((self.path, body))
         result = {
-            'kind': 'mission',
-            'steps': [{
-                'kind': 'rotate_angle',
-                'angle_rad': 1.570796,
-            }],
+            'kind': 'tool',
+            'tool_call': {
+                'name': 'propose_mission',
+                'arguments': {
+                    'kind': 'mission',
+                    'steps': [{
+                        'kind': 'rotate_angle',
+                        'angle_rad': 1.570796,
+                    }],
+                },
+            },
         }
         response = json.dumps({
             'choices': [{
