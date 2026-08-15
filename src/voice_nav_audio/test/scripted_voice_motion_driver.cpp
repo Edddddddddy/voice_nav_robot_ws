@@ -15,9 +15,11 @@
 // Test-only two-turn driver.  It owns no installed executable or endpoint.
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <iostream>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -31,7 +33,7 @@
 #include "nav_msgs/msg/odometry.hpp"
 #include "rclcpp/executors/single_threaded_executor.hpp"
 #include "rclcpp/rclcpp.hpp"
-#include "speech_input_node.hpp"
+#include "voice_pipeline.hpp"
 #include "voice_nav_interfaces/msg/mission_state.hpp"
 
 namespace voice_nav_audio
@@ -84,6 +86,141 @@ CleanedAudioFrame cleaned_frame(const std::uint64_t sequence)
   return frame;
 }
 
+class PlaybackEvidenceRecorder final : public SpeechOutputTraceSink
+{
+public:
+  struct Snapshot
+  {
+    std::vector<std::string> tts_texts{};
+    std::size_t nonzero_callback_count{0U};
+    std::set<std::uint64_t> feedback_scope_ids{};
+    std::vector<std::uint64_t> completion_scope_ids{};
+    std::vector<SpeechResultCode> completion_codes{};
+  };
+
+  void record_tts_text(const std::string & text)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    snapshot_.tts_texts.push_back(text);
+  }
+
+  void record_nonzero_callback() noexcept
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++snapshot_.nonzero_callback_count;
+  }
+
+  void on_played(const std::uint64_t scope_id, const std::uint64_t samples) noexcept override
+  {
+    if (scope_id == 0U || samples == 0U) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    snapshot_.feedback_scope_ids.insert(scope_id);
+  }
+
+  void on_result(const SpeechResult & result) noexcept override
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    snapshot_.completion_scope_ids.push_back(result.scope_id);
+    snapshot_.completion_codes.push_back(result.code);
+  }
+
+  [[nodiscard]] Snapshot snapshot() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return snapshot_;
+  }
+
+private:
+  mutable std::mutex mutex_;
+  Snapshot snapshot_{};
+};
+
+class DeterministicFakeTts final : public TtsAdapter
+{
+public:
+  explicit DeterministicFakeTts(PlaybackEvidenceRecorder & recorder)
+  : recorder_(recorder)
+  {
+  }
+
+  void start(const TtsRequest & request, TtsSink & sink) noexcept override
+  {
+    recorder_.record_tts_text(request.text);
+    std::array<Sample, 147U> pcm{};
+    pcm.fill(1000);
+    (void)sink.on_pcm(request.scope_id, 22050U, 1U, pcm.data(), pcm.size());
+    sink.on_complete(request.scope_id);
+  }
+
+  void cancel(std::uint64_t) noexcept override
+  {
+  }
+
+private:
+  PlaybackEvidenceRecorder & recorder_;
+};
+
+class ManualDevice final : public FullDuplexAudioDevice
+{
+public:
+  explicit ManualDevice(PlaybackEvidenceRecorder & recorder)
+  : recorder_(recorder)
+  {
+  }
+
+  bool open(
+    const FullDuplexStreamSpec spec, const DeviceCallback callback,
+    void * context) noexcept override
+  {
+    if (spec.sample_rate != AudioEngine::kSampleRate || spec.channels != AudioEngine::kChannels ||
+      spec.frames_per_buffer != AudioEngine::kFrameSamples || callback == nullptr ||
+      context == nullptr)
+    {
+      return false;
+    }
+    callback_ = callback;
+    context_ = context;
+    return true;
+  }
+
+  void close() noexcept override
+  {
+    callback_ = nullptr;
+    context_ = nullptr;
+  }
+
+  void consume_once() noexcept
+  {
+    if (callback_ == nullptr || context_ == nullptr) {
+      return;
+    }
+    std::array<Sample, AudioEngine::kFrameSamples> capture{};
+    std::array<Sample, AudioEngine::kFrameSamples> output{};
+    callback_(context_, capture.data(), output.data(), output.size(), CallbackStatus{});
+    // The scripted recognizer receives cleaned frames directly. Drain the
+    // manual device's unused raw side so the real callback can continue to
+    // render playback without an artificial AudioEngine generation fence.
+    auto * const engine = static_cast<AudioEngine *>(context_);
+    AudioFrame ignored{};
+    while (engine->try_pop_reference(ignored)) {
+    }
+    while (engine->try_pop_capture(ignored)) {
+    }
+    if (std::any_of(
+        output.cbegin(), output.cend(), [](const Sample sample) {return sample != 0;}))
+    {
+      recorder_.record_nonzero_callback();
+    }
+  }
+
+private:
+  PlaybackEvidenceRecorder & recorder_;
+  DeviceCallback callback_{nullptr};
+  void * context_{nullptr};
+};
+
 bool has_endpoint(
   const std::vector<rclcpp::TopicEndpointInfo> & endpoints,
   const std::string & node_name)
@@ -105,7 +242,7 @@ bool graph_is_ready(rclcpp::Node & node)
     node.get_publishers_info_by_topic("/mission/state"), "mission_runtime_node") &&
          has_endpoint(
     node.get_publishers_info_by_topic("/voice/speak/_action/status"),
-    "voice_agent_gazebo_probe");
+    "voice_speech_output");
 }
 
 bool is_zero(const geometry_msgs::msg::TwistStamped & command)
@@ -143,8 +280,8 @@ bool wait_for_graph(rclcpp::Node & node)
 class CompletionObserver final
 {
 public:
-  CompletionObserver()
-  : node_(std::make_shared<rclcpp::Node>("scripted_voice_motion_driver_observer"))
+  explicit CompletionObserver(ManualDevice & device)
+  : device_(device), node_(std::make_shared<rclcpp::Node>("scripted_voice_motion_driver_observer"))
   {
     const auto state_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
     state_subscription_ = node_->create_subscription<voice_nav_interfaces::msg::MissionState>(
@@ -250,17 +387,35 @@ public:
                       self.successful_speeches_.size() >= 2U;
     });
   }
+  [[nodiscard]] std::size_t successful_speech_count()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return successful_speeches_.size();
+  }
 
 private:
   template<typename Predicate>
   bool wait_for(Predicate predicate)
   {
     std::unique_lock<std::mutex> lock(mutex_);
-    return condition_.wait_until(
-      lock, std::chrono::steady_clock::now() + 60s,
-      [this, &predicate]() {return predicate(*this);});
+    const auto deadline = std::chrono::steady_clock::now() + 60s;
+    while (!predicate(*this)) {
+      if (condition_.wait_until(lock, std::min(
+          deadline, std::chrono::steady_clock::now() + 10ms)) == std::cv_status::timeout &&
+        std::chrono::steady_clock::now() >= deadline)
+      {
+        return false;
+      }
+      if (!predicate(*this)) {
+        lock.unlock();
+        device_.consume_once();
+        lock.lock();
+      }
+    }
+    return true;
   }
 
+  ManualDevice & device_;
   rclcpp::Node::SharedPtr node_{};
   rclcpp::Subscription<voice_nav_interfaces::msg::MissionState>::SharedPtr state_subscription_{};
   rclcpp::Subscription<action_msgs::msg::GoalStatusArray>::SharedPtr mission_status_subscription_{};
@@ -286,36 +441,46 @@ private:
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
-  auto speech = std::make_shared<voice_nav_audio::SpeechInputNode>(
-    std::make_unique<voice_nav_audio::ScriptedRecognizer>());
-  if (!voice_nav_audio::wait_for_graph(*speech)) {
-    RCLCPP_ERROR(speech->get_logger(), "scripted motion smoke graph did not converge");
-    speech.reset();
+  voice_nav_audio::PlaybackEvidenceRecorder recorder;
+  voice_nav_audio::ManualDevice device(recorder);
+  auto pipeline = std::make_unique<voice_nav_audio::VoicePipeline>(
+    std::make_unique<voice_nav_audio::ScriptedRecognizer>(),
+    std::make_unique<voice_nav_audio::DeterministicFakeTts>(recorder), device, &recorder);
+  auto graph_probe = std::make_shared<rclcpp::Node>("scripted_voice_motion_driver_graph_probe");
+  if (!voice_nav_audio::wait_for_graph(*graph_probe)) {
+    RCLCPP_ERROR(graph_probe->get_logger(), "scripted motion smoke graph did not converge");
+    pipeline.reset();
+    graph_probe.reset();
     rclcpp::shutdown();
     return 1;
   }
 
-  voice_nav_audio::CompletionObserver observer;
+  voice_nav_audio::CompletionObserver observer(device);
   rclcpp::executors::SingleThreadedExecutor executor;
+  pipeline->add_to_executor(executor);
   executor.add_node(observer.node());
   std::thread spin_thread([&executor]() {executor.spin();});
   if (!observer.wait_for_runtime_ready()) {
-    RCLCPP_ERROR(speech->get_logger(), "Mission Runtime did not become available");
+    RCLCPP_ERROR(graph_probe->get_logger(), "Mission Runtime did not become available");
     executor.cancel();
     spin_thread.join();
-    speech.reset();
+    pipeline->remove_from_executor(executor);
+    pipeline.reset();
+    graph_probe.reset();
     rclcpp::shutdown();
     return 1;
   }
 
   for (std::uint64_t sequence = 1U; sequence <= 3U; ++sequence) {
-    speech->accept_cleaned_frame(voice_nav_audio::cleaned_frame(sequence));
+    pipeline->accept_cleaned_frame(voice_nav_audio::cleaned_frame(sequence));
   }
   if (!observer.wait_for_first_clarification()) {
-    RCLCPP_ERROR(speech->get_logger(), "first Voice turn did not clarify without Mission");
+    RCLCPP_ERROR(graph_probe->get_logger(), "first Voice turn did not clarify without Mission");
     executor.cancel();
     spin_thread.join();
-    speech.reset();
+    pipeline->remove_from_executor(executor);
+    pipeline.reset();
+    graph_probe.reset();
     rclcpp::shutdown();
     return 1;
   }
@@ -323,27 +488,60 @@ int main(int argc, char ** argv)
   // first-turn idle window rather than racing directly into the follow-up.
   observer.begin_first_turn_idle_window();
   if (!observer.wait_for_first_turn_idle_samples()) {
-    RCLCPP_ERROR(speech->get_logger(), "first Voice turn was not sampled as idle");
+    RCLCPP_ERROR(graph_probe->get_logger(), "first Voice turn was not sampled as idle");
     executor.cancel();
     spin_thread.join();
-    speech.reset();
+    pipeline->remove_from_executor(executor);
+    pipeline.reset();
+    graph_probe.reset();
     rclcpp::shutdown();
     return 1;
   }
   for (std::uint64_t sequence = 4U; sequence <= 6U; ++sequence) {
-    speech->accept_cleaned_frame(voice_nav_audio::cleaned_frame(sequence));
+    pipeline->accept_cleaned_frame(voice_nav_audio::cleaned_frame(sequence));
   }
   if (!observer.wait_for_mission_completion()) {
-    RCLCPP_ERROR(speech->get_logger(), "follow-up Voice Mission did not complete with Speak");
+    RCLCPP_ERROR(graph_probe->get_logger(), "follow-up Voice Mission did not complete with Speak");
     executor.cancel();
     spin_thread.join();
-    speech.reset();
+    pipeline->remove_from_executor(executor);
+    pipeline.reset();
+    graph_probe.reset();
     rclcpp::shutdown();
     return 1;
   }
+  const auto playback = recorder.snapshot();
+  const std::vector<std::string> expected_tts_texts{
+    "请说明需要前进多少米。", "任务已完成。"};
+  const std::set<std::uint64_t> completed_scope_ids(
+    playback.completion_scope_ids.cbegin(), playback.completion_scope_ids.cend());
+  const auto completed_only = std::all_of(
+    playback.completion_codes.cbegin(), playback.completion_codes.cend(),
+    [](const auto code) {return code == voice_nav_audio::SpeechResultCode::Completed;});
+  if (playback.tts_texts != expected_tts_texts || playback.nonzero_callback_count < 2U ||
+    playback.feedback_scope_ids.size() != 2U || playback.completion_scope_ids.size() != 2U ||
+    completed_scope_ids.size() != 2U || !completed_only || observer.successful_speech_count() != 2U)
+  {
+    RCLCPP_ERROR(graph_probe->get_logger(), "real Speak playback evidence did not converge");
+    executor.cancel();
+    spin_thread.join();
+    pipeline->remove_from_executor(executor);
+    pipeline.reset();
+    graph_probe.reset();
+    rclcpp::shutdown();
+    return 1;
+  }
+  std::cout <<
+    "EVIDENCE issue142_voice_pipeline "
+    "{\"schema_version\":1,\"tts_texts\":[\"请说明需要前进多少米。\",\"任务已完成。\"],"
+    "\"manual_nonzero_pcm\":true,\"played_feedback_scope_count\":2,"
+    "\"completed_scope_count\":2,\"first_completed_before_followup\":true}" <<
+    std::endl;
   executor.cancel();
   spin_thread.join();
-  speech.reset();
+  pipeline->remove_from_executor(executor);
+  pipeline.reset();
+  graph_probe.reset();
   if (rclcpp::ok()) {
     rclcpp::shutdown();
   }

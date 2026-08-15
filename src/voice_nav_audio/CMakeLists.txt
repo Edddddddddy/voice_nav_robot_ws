@@ -21,6 +21,7 @@ add_library(speech_input_core STATIC src/speech_input_core.cpp)
 add_library(speech_input_node STATIC src/speech_input_node.cpp)
 add_library(speech_output_core STATIC src/speech_output_core.cpp)
 add_library(speech_output_node STATIC src/speech_output_node.cpp)
+add_library(voice_pipeline STATIC src/voice_pipeline.cpp)
 add_library(chaowen_tts_adapter STATIC src/chaowen_tts_adapter.cpp)
 add_library(
   audio_engine STATIC
@@ -42,6 +43,7 @@ foreach(target
     speech_input_node
     speech_output_core
     speech_output_node
+    voice_pipeline
     chaowen_tts_adapter
     portaudio_adapter
     portaudio_adapter_callback)
@@ -57,6 +59,13 @@ target_link_libraries(speech_input_node speech_input_core)
 target_link_libraries(speech_output_core audio_engine)
 ament_target_dependencies(speech_output_node rclcpp rclcpp_action voice_nav_interfaces)
 target_link_libraries(speech_output_node speech_output_core)
+ament_target_dependencies(voice_pipeline rclcpp rclcpp_action)
+target_link_libraries(
+  voice_pipeline
+  speech_input_node
+  speech_output_node
+  portaudio_adapter
+)
 target_link_libraries(chaowen_tts_adapter speech_output_core)
 target_link_libraries(portaudio_adapter PUBLIC audio_engine)
 
@@ -204,6 +213,18 @@ if(BUILD_TESTING)
   ament_target_dependencies(speech_input_node_test rclcpp voice_nav_interfaces)
   target_link_libraries(speech_input_node_test speech_input_node)
 
+  ament_add_gtest(
+    voice_pipeline_test
+    test/voice_pipeline_test.cpp
+  )
+  target_compile_features(voice_pipeline_test PUBLIC cxx_std_17)
+  target_include_directories(voice_pipeline_test PRIVATE include src)
+  ament_target_dependencies(voice_pipeline_test rclcpp rclcpp_action voice_nav_interfaces)
+  target_link_libraries(
+    voice_pipeline_test
+    voice_pipeline
+  )
+
   # This executable is intentionally test-only: it links the package-private
   # composition seam and is never installed or registered as a ROS component.
   add_executable(
@@ -233,7 +254,7 @@ if(BUILD_TESTING)
     rclcpp
     voice_nav_interfaces
   )
-  target_link_libraries(scripted_voice_motion_driver speech_input_node)
+  target_link_libraries(scripted_voice_motion_driver voice_pipeline)
   set_tests_properties(
     scripted_voice_agent_launch_test
     PROPERTIES
