@@ -7,8 +7,12 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
+find_package(action_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
+find_package(rosgraph_msgs REQUIRED)
 find_package(voice_nav_interfaces REQUIRED)
 # uncomment the following section in order to fill in
 # further dependencies manually.
@@ -69,6 +73,25 @@ target_link_libraries(
 target_link_libraries(chaowen_tts_adapter speech_output_core)
 target_link_libraries(portaudio_adapter PUBLIC audio_engine)
 
+# This executable is deliberately limited to the installed, simulation-only
+# scripted demo.  It composes the existing private VoicePipeline rather than
+# creating a second voice or motion control path.
+add_executable(scripted_voice_demo src/scripted_voice_demo.cpp)
+target_compile_features(scripted_voice_demo PRIVATE cxx_std_17)
+target_include_directories(scripted_voice_demo PRIVATE include src)
+ament_target_dependencies(
+  scripted_voice_demo
+  action_msgs
+  geometry_msgs
+  nav_msgs
+  rclcpp
+  rosgraph_msgs
+  voice_nav_interfaces
+)
+target_link_libraries(scripted_voice_demo voice_pipeline)
+
+install(TARGETS scripted_voice_demo DESTINATION lib/${PROJECT_NAME})
+
 option(
   VOICE_NAV_AUDIO_WITH_WEBRTC_APM
   "Build the WebRTC APM adapter from the explicitly provisioned #53 dependency"
@@ -114,13 +137,10 @@ if(VOICE_NAV_AUDIO_WITH_PORTAUDIO)
 endif()
 
 if(BUILD_TESTING)
-  find_package(action_msgs REQUIRED)
   find_package(ament_cmake_ros REQUIRED)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_lint_auto REQUIRED)
-  find_package(geometry_msgs REQUIRED)
   find_package(launch_testing_ament_cmake REQUIRED)
-  find_package(nav_msgs REQUIRED)
   # the following line skips the linter which checks for copyrights
   # comment the line when a copyright and license is added to all source files
   set(ament_cmake_copyright_FOUND TRUE)
@@ -142,13 +162,6 @@ if(BUILD_TESTING)
     TARGET scripted_voice_agent_llm_launch_test
     TIMEOUT 60
   )
-  add_launch_test(
-    test/test_scripted_voice_motion_smoke.py
-    TARGET scripted_voice_motion_smoke_test
-    TIMEOUT 300
-    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
-  )
-
   ament_add_gtest(
     audio_engine_test
     test/audio_engine_test.cpp
@@ -240,21 +253,6 @@ if(BUILD_TESTING)
   )
   target_link_libraries(scripted_speech_agent_driver speech_input_node)
 
-  add_executable(
-    scripted_voice_motion_driver
-    test/scripted_voice_motion_driver.cpp
-  )
-  target_compile_features(scripted_voice_motion_driver PRIVATE cxx_std_17)
-  target_include_directories(scripted_voice_motion_driver PRIVATE include src)
-  ament_target_dependencies(
-    scripted_voice_motion_driver
-    action_msgs
-    geometry_msgs
-    nav_msgs
-    rclcpp
-    voice_nav_interfaces
-  )
-  target_link_libraries(scripted_voice_motion_driver voice_pipeline)
   set_tests_properties(
     scripted_voice_agent_launch_test
     PROPERTIES
@@ -267,16 +265,6 @@ if(BUILD_TESTING)
       ENVIRONMENT
         "VOICE_NAV_SCRIPTED_SPEECH_DRIVER=$<TARGET_FILE:scripted_speech_agent_driver>;VOICE_NAV_SCRIPTED_SCENARIO=llm"
   )
-  set_tests_properties(
-    scripted_voice_motion_smoke_test
-    PROPERTIES
-      ENVIRONMENT
-        "RMW_IMPLEMENTATION=rmw_fastrtps_cpp;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST;VOICE_NAV_SCRIPTED_SPEECH_DRIVER=$<TARGET_FILE:scripted_voice_motion_driver>"
-      ENVIRONMENT_MODIFICATION
-        "ROS_DOMAIN_ID=unset:;DISABLE_ROS_ISOLATION=unset:"
-      RUN_SERIAL TRUE
-  )
-
   add_test(
     NAME speech_input_install_contract
     COMMAND "${CMAKE_COMMAND}"

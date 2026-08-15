@@ -65,6 +65,18 @@ Agent、Nav2 和 Gazebo bridge 均不能绕过它。
 
 ## 构建与验证
 
+### Scripted VoiceNav 仿真 Demo
+
+完成普通安装并 source 工作区后，可运行固定的、仅仿真两轮演示：
+
+```bash
+ros2 launch voice_nav_bringup scripted_voice_demo.launch.py headless:=true
+```
+
+该入口只使用 deterministic scripted recognizer、loopback provider、fake TTS 与 manual
+full-duplex device，明确不加载模型、不访问云、不打开物理声卡，也不能用于物理机器人。它会在
+确认首轮澄清播放完成后提交唯一的 `MOVE_DISTANCE +0.5 m`，输出机器可读 summary，并有界退出。
+
 开发中运行聚焦的仓库检查：
 
 ```bash

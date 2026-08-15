@@ -11,25 +11,23 @@
 
   <depend>rclcpp</depend>
   <depend>rclcpp_action</depend>
+  <depend>action_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>rosgraph_msgs</depend>
   <depend>voice_nav_interfaces</depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
   <test_depend>ament_cmake_gtest</test_depend>
   <test_depend>ament_cmake_ros</test_depend>
-  <test_depend>action_msgs</test_depend>
-  <test_depend>geometry_msgs</test_depend>
   <test_depend>launch</test_depend>
   <test_depend>launch_ros</test_depend>
   <test_depend>launch_testing</test_depend>
   <test_depend>launch_testing_ament_cmake</test_depend>
-  <test_depend>nav_msgs</test_depend>
   <test_depend>python3-pytest</test_depend>
   <test_depend>rclpy</test_depend>
   <test_depend>voice_nav_agent</test_depend>
-  <test_depend>voice_nav_bringup</test_depend>
-  <test_depend>voice_nav_mission</test_depend>
-  <test_depend>voice_nav_sim</test_depend>
 
   <export>
     <build_type>ament_cmake</build_type>
