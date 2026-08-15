@@ -15,15 +15,19 @@
 """Headless product smoke for scripted Voice -> Agent -> Mission -> Motion."""
 
 from collections import deque
+import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import json
 import math
 import os
 from pathlib import Path
+import re
+import subprocess
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from action_msgs.msg import GoalStatus, GoalStatusArray
 from ament_index_python.packages import get_package_share_directory
@@ -42,6 +46,19 @@ import rclpy
 from rclpy.action import ActionServer, GoalResponse
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 
+from voice_nav_agent._response_provider import _request_body
+from voice_nav_agent._response_session import (
+    _ProviderResponse,
+    _ResponseSession,
+    _ToolCall,
+)
+from voice_nav_agent.core import (
+    Availability,
+    GateState,
+    MissionState as AgentMissionState,
+    OperatingMode,
+    VoiceTurn as AgentVoiceTurn,
+)
 from voice_nav_interfaces.action import Speak
 from voice_nav_interfaces.msg import MissionState, VoiceTurn
 from voice_nav_mission.msg import InternalMotionGateState
@@ -55,6 +72,18 @@ MISSION_STATUS_TOPIC = '/mission/execute/_action/status'
 SPEAK_STATUS_TOPIC = '/voice/speak/_action/status'
 VOICE_TURN_TOPIC = '/voice/turn'
 ZERO_EPSILON = 1.0e-6
+CLARIFICATION_TEXT = '请说明需要前进多少米。'
+FROZEN_SNAPSHOT = {
+    'runtime_instance_id': 'runtime-a',
+    'admission_epoch': 7,
+    'operating_mode': 1,
+    'availability': 1,
+    'gate_state': 0,
+    'supported_step_mask': 0b0011,
+    'max_steps': 3,
+    'named_place_ids': [],
+}
+_REQUIRES_FROZEN_SNAPSHOT = object()
 
 
 def _state_qos():
@@ -81,6 +110,10 @@ class _LoopbackLlmServer(ThreadingHTTPServer):
     def __init__(self):
         super().__init__(('127.0.0.1', 0), _LoopbackLlmHandler)
         self.requests = []
+        self.response_kinds = []
+        self.agent_identity = None
+        self.runtime_identity = None
+        self.lock = threading.Lock()
 
     @property
     def endpoint(self):
@@ -91,20 +124,21 @@ class _LoopbackLlmHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         content_length = int(self.headers['Content-Length'])
         body = self.rfile.read(content_length)
-        self.server.requests.append((self.path, body))
-        result = {
-            'kind': 'tool',
-            'tool_call': {
-                'name': 'propose_mission',
-                'arguments': {
-                    'kind': 'mission',
-                    'steps': [{
-                        'kind': 'rotate_angle',
-                        'angle_rad': 1.570796,
-                    }],
-                },
-            },
-        }
+        try:
+            payload = json.loads(body.decode('utf-8'))
+            content = json.loads(payload['messages'][-1]['content'])
+        except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+            self.send_error(400, 'invalid loopback request')
+            return
+        with self.server.lock:
+            self.server.requests.append((self.path, body))
+            request_index = len(self.server.requests)
+        result = self._result_for(request_index, content)
+        if result is None:
+            self.send_error(400, 'unexpected loopback request sequence')
+            return
+        with self.server.lock:
+            self.server.response_kinds.append(result['kind'])
         response = json.dumps({
             'choices': [{
                 'message': {
@@ -118,8 +152,507 @@ class _LoopbackLlmHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(response)
 
+    def _result_for(self, request_index, content):
+        if not isinstance(content, dict):
+            return None
+        expected = {
+            1: ('绕到大厅', None, 1, None),
+            2: ('半米', CLARIFICATION_TEXT, 1, None),
+            3: ('半米', CLARIFICATION_TEXT, 2, _REQUIRES_FROZEN_SNAPSHOT),
+        }.get(request_index)
+        if expected is None:
+            return None
+        text, clarification, round_number, snapshot_output = expected
+        turn = content.get('turn')
+        if (
+            set(content) != {
+                'agent', 'runtime', 'turn', 'clarification', 'round',
+                'snapshot_output',
+            }
+            or not isinstance(turn, dict)
+            or set(turn) != {
+                'voice_instance_id', 'voice_seq', 'session_id', 'turn_id',
+                'text',
+            }
+            or turn.get('text') != text
+            or content.get('clarification') != clarification
+            or content.get('round') != round_number
+            or (
+                content.get('snapshot_output') != snapshot_output
+                if snapshot_output is not _REQUIRES_FROZEN_SNAPSHOT
+                else not _is_frozen_snapshot(content.get('snapshot_output'))
+            )
+        ):
+            return None
+        if not self._accept_identity(request_index, content):
+            return None
+        if request_index == 1:
+            return {'kind': 'clarify', 'text': CLARIFICATION_TEXT}
+        if request_index == 2:
+            return {
+                'kind': 'tool',
+                'tool_call': {
+                    'name': 'read_runtime_snapshot',
+                    'arguments': {},
+                },
+            }
+        return {
+            'kind': 'tool',
+            'tool_call': {
+                'name': 'propose_mission',
+                'arguments': {
+                    'kind': 'mission',
+                    'steps': [{
+                        'kind': 'move_distance',
+                        'distance_m': 0.5,
+                    }],
+                },
+            },
+        }
+
+    def _accept_identity(self, request_index, content):
+        agent = content['agent']
+        runtime = content['runtime']
+        expected_turn_generation = (1, 2, 2)[request_index - 1]
+        if (
+            not isinstance(agent, dict)
+            or set(agent) != {
+                'source_instance_id', 'lifetime_generation', 'turn_generation',
+            }
+            or not isinstance(agent['source_instance_id'], str)
+            or not 1 <= len(agent['source_instance_id']) <= 64
+            or not isinstance(agent['lifetime_generation'], int)
+            or agent['lifetime_generation'] < 1
+            or agent['turn_generation'] != expected_turn_generation
+            or not isinstance(runtime, dict)
+            or set(runtime) != {'runtime_instance_id', 'admission_epoch'}
+            or not isinstance(runtime['runtime_instance_id'], str)
+            or not 1 <= len(runtime['runtime_instance_id']) <= 64
+            or not isinstance(runtime['admission_epoch'], int)
+            or runtime['admission_epoch'] < 1
+        ):
+            return False
+        agent_identity = {
+            'source_instance_id': agent['source_instance_id'],
+            'lifetime_generation': agent['lifetime_generation'],
+        }
+        if request_index == 1:
+            with self.server.lock:
+                self.server.agent_identity = agent_identity
+                self.server.runtime_identity = runtime
+            return True
+        with self.server.lock:
+            return (
+                self.server.agent_identity == agent_identity
+                and self.server.runtime_identity == runtime
+            )
+
     def log_message(self, _format, *_args):
         pass
+
+
+def _post_loopback_request(endpoint, body):
+    """Send one literal provider request through the test-only loopback."""
+    host, port = endpoint.removeprefix('http://').rsplit(':', 1)
+    connection = http.client.HTTPConnection(host, int(port), timeout=2.0)
+    try:
+        connection.request(
+            'POST',
+            '/v1/chat/completions',
+            body=body,
+            headers={'Content-Type': 'application/json'},
+        )
+        response = connection.getresponse()
+        assert response.status == 200
+        envelope = json.loads(response.read().decode('utf-8'))
+    finally:
+        connection.close()
+    return json.loads(envelope['choices'][0]['message']['content'])
+
+
+def _is_frozen_snapshot(value):
+    if not isinstance(value, dict) or set(value) != set(FROZEN_SNAPSHOT):
+        return False
+    return (
+        isinstance(value['runtime_instance_id'], str)
+        and bool(value['runtime_instance_id'])
+        and isinstance(value['admission_epoch'], int)
+        and value['admission_epoch'] > 0
+        and value['operating_mode'] == MissionState.MAPPING
+        and value['availability'] == MissionState.AVAILABLE
+        and value['gate_state'] == MissionState.GATE_INHIBITED
+        and value['supported_step_mask'] == 0b0011
+        and value['max_steps'] == 3
+        and value['named_place_ids'] == []
+    )
+
+
+def _replay_issue136_evidence(evidence):
+    """Reject a changed causal record instead of trusting the printed summary."""
+    assert set(evidence) == {
+        'schema_version', 'head', 'REAL_AUDIO_MODELS', 'REAL_LLM_CORPUS',
+        'voice', 'provider', 'missions', 'motion',
+    }
+    assert evidence['schema_version'] == 1
+    assert re.fullmatch(r'[0-9a-f]{40}', evidence['head'])
+    assert evidence['REAL_AUDIO_MODELS'] == 'NOT_RUN'
+    assert evidence['REAL_LLM_CORPUS'] == 'NOT_RUN'
+
+    voice = evidence['voice']
+    assert set(voice) == {'turns', 'speaks'}
+    turns = voice['turns']
+    speaks = voice['speaks']
+    assert isinstance(turns, list) and len(turns) == 2
+    assert [turn['text'] for turn in turns] == ['绕到大厅', '半米']
+    assert [turn['kind'] for turn in turns] == [
+        VoiceTurn.COMMAND, VoiceTurn.COMMAND,
+    ]
+    assert [turn['voice_seq'] for turn in turns] == [1, 2]
+    assert all(set(turn) == {
+        'voice_instance_id', 'voice_seq', 'session_id', 'turn_id', 'kind', 'text',
+    } for turn in turns)
+    assert turns[0]['voice_instance_id'] == turns[1]['voice_instance_id']
+    assert turns[0]['session_id'] == turns[1]['session_id']
+    assert turns[0]['turn_id'] != turns[1]['turn_id']
+    assert speaks == [
+        {
+            'session_id': turns[0]['session_id'],
+            'turn_id': turns[0]['turn_id'],
+            'text': CLARIFICATION_TEXT,
+        },
+        {
+            'session_id': turns[1]['session_id'],
+            'turn_id': turns[1]['turn_id'],
+            'text': '任务已完成。',
+        },
+    ]
+
+    provider = evidence['provider']
+    assert set(provider) == {'model', 'response_kinds', 'requests'}
+    assert provider['model'] == 'Qwen3-0.6B-Q8_0.gguf'
+    assert provider['response_kinds'] == ['clarify', 'tool', 'tool']
+    requests = provider['requests']
+    assert isinstance(requests, list) and len(requests) == 3
+    assert [request['turn']['text'] for request in requests] == [
+        '绕到大厅', '半米', '半米',
+    ]
+    assert [request['clarification'] for request in requests] == [
+        None, CLARIFICATION_TEXT, CLARIFICATION_TEXT,
+    ]
+    assert [request['round'] for request in requests] == [1, 1, 2]
+    assert [request['snapshot_output'] for request in requests[:2]] == [None, None]
+    assert all(set(request) == {
+        'agent', 'runtime', 'turn', 'clarification', 'round', 'snapshot_output',
+    } for request in requests)
+    assert all(set(request['agent']) == {
+        'source_instance_id', 'lifetime_generation', 'turn_generation',
+    } for request in requests)
+    assert all(set(request['runtime']) == {
+        'runtime_instance_id', 'admission_epoch',
+    } for request in requests)
+    assert [request['agent']['turn_generation'] for request in requests] == [1, 2, 2]
+    assert all(
+        request['agent']['source_instance_id'] ==
+        requests[0]['agent']['source_instance_id']
+        and request['agent']['lifetime_generation'] ==
+        requests[0]['agent']['lifetime_generation']
+        and request['runtime'] == requests[0]['runtime']
+        for request in requests
+    )
+    assert all(request['turn'] == {
+        'voice_instance_id': turn['voice_instance_id'],
+        'voice_seq': turn['voice_seq'],
+        'session_id': turn['session_id'],
+        'turn_id': turn['turn_id'],
+        'text': turn['text'],
+    } for request, turn in zip(requests[:2], turns))
+    assert requests[2]['turn'] == requests[1]['turn']
+    frozen_snapshot = requests[2]['snapshot_output']
+    assert _is_frozen_snapshot(frozen_snapshot)
+    assert frozen_snapshot['runtime_instance_id'] == (
+        requests[2]['runtime']['runtime_instance_id']
+    )
+    assert frozen_snapshot['admission_epoch'] == (
+        requests[2]['runtime']['admission_epoch']
+    )
+
+    missions = evidence['missions']
+    assert missions == {
+        'pre_followup_goal_count': 0,
+        'unique_goal_count': 1,
+        'successful_goal_count': 1,
+    }
+    motion = evidence['motion']
+    assert set(motion) == {
+        'displacement_m', 'yaw_delta_rad', 'pre_followup_displacement_m',
+        'pre_followup_nonzero_command_count', 'pre_followup_armed_count',
+        'gate_armed_observed', 'final_zero_stationary',
+    }
+    assert abs(motion['displacement_m'] - 0.50) <= 0.10
+    assert abs(motion['yaw_delta_rad']) <= 0.12
+    assert abs(motion['pre_followup_displacement_m']) <= 0.02
+    assert motion['pre_followup_nonzero_command_count'] == 0
+    assert motion['pre_followup_armed_count'] == 0
+    assert motion['gate_armed_observed'] is True
+    assert motion['final_zero_stationary'] is True
+    return True
+
+
+def _sample_issue136_evidence():
+    runtime = {
+        'runtime_instance_id': 'runtime-a',
+        'admission_epoch': 7,
+    }
+    agent = {
+        'source_instance_id': 'agent-a',
+        'lifetime_generation': 1,
+    }
+    turns = [
+        {
+            'voice_instance_id': 'voice-a', 'voice_seq': 1,
+            'session_id': 'session-a', 'turn_id': 'turn-a',
+            'kind': VoiceTurn.COMMAND, 'text': '绕到大厅',
+        },
+        {
+            'voice_instance_id': 'voice-a', 'voice_seq': 2,
+            'session_id': 'session-a', 'turn_id': 'turn-b',
+            'kind': VoiceTurn.COMMAND, 'text': '半米',
+        },
+    ]
+
+    def request(turn, generation, clarification, round_number, snapshot):
+        return {
+            'agent': {**agent, 'turn_generation': generation},
+            'runtime': runtime,
+            'turn': {
+                'voice_instance_id': turn['voice_instance_id'],
+                'voice_seq': turn['voice_seq'],
+                'session_id': turn['session_id'],
+                'turn_id': turn['turn_id'],
+                'text': turn['text'],
+            },
+            'clarification': clarification,
+            'round': round_number,
+            'snapshot_output': snapshot,
+        }
+    snapshot = {**FROZEN_SNAPSHOT, **runtime}
+    return {
+        'schema_version': 1,
+        'head': 'a' * 40,
+        'REAL_AUDIO_MODELS': 'NOT_RUN',
+        'REAL_LLM_CORPUS': 'NOT_RUN',
+        'voice': {
+            'turns': turns,
+            'speaks': [
+                {'session_id': 'session-a', 'turn_id': 'turn-a',
+                 'text': CLARIFICATION_TEXT},
+                {'session_id': 'session-a', 'turn_id': 'turn-b',
+                 'text': '任务已完成。'},
+            ],
+        },
+        'provider': {
+            'model': 'Qwen3-0.6B-Q8_0.gguf',
+            'response_kinds': ['clarify', 'tool', 'tool'],
+            'requests': [
+                request(turns[0], 1, None, 1, None),
+                request(turns[1], 2, CLARIFICATION_TEXT, 1, None),
+                request(turns[1], 2, CLARIFICATION_TEXT, 2, snapshot),
+            ],
+        },
+        'missions': {
+            'pre_followup_goal_count': 0,
+            'unique_goal_count': 1,
+            'successful_goal_count': 1,
+        },
+        'motion': {
+            'displacement_m': 0.50,
+            'yaw_delta_rad': 0.0,
+            'pre_followup_displacement_m': 0.0,
+            'pre_followup_nonzero_command_count': 0,
+            'pre_followup_armed_count': 0,
+            'gate_armed_observed': True,
+            'final_zero_stationary': True,
+        },
+    }
+
+
+class ScriptedVoiceLoopbackProtocolTest(unittest.TestCase):
+    """The fixture itself must honor the frozen three-request dialogue."""
+
+    def test_clarify_snapshot_then_move_contract(self):
+        server = _LoopbackLlmServer()
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            provider = _LoopbackRequestCollector()
+            mission_port = _LoopbackMissionPort()
+            session = _ResponseSession(
+                'agent-loopback', provider, _product_runtime_state, mission_port
+            )
+            first_turn = _loopback_turn('绕到大厅', 1)
+            session.accept_turn(first_turn, adapter_generation=1)
+            first_request = provider.requests[-1]
+            first = _post_loopback_request(
+                server.endpoint, _request_body(first_request, session.tool_registry)
+            )
+            self.assertEqual(first, {
+                'kind': 'clarify',
+                'text': CLARIFICATION_TEXT,
+            })
+            session.complete(
+                first_request,
+                _ProviderResponse(kind='clarify', text=first['text']),
+            )
+            self.assertEqual(mission_port.missions, [])
+
+            second_turn = _loopback_turn('半米', 2)
+            session.accept_turn(second_turn, adapter_generation=2)
+            second_request = provider.requests[-1]
+            second = _post_loopback_request(
+                server.endpoint, _request_body(second_request, session.tool_registry)
+            )
+            self.assertEqual(second, {
+                'kind': 'tool',
+                'tool_call': {
+                    'name': 'read_runtime_snapshot',
+                    'arguments': {},
+                },
+            })
+            session.complete(
+                second_request,
+                _ProviderResponse(
+                    kind='tool',
+                    tool_calls=(_ToolCall('read_runtime_snapshot', {}),),
+                ),
+            )
+
+            continuation = provider.requests[-1]
+            third = _post_loopback_request(
+                server.endpoint, _request_body(continuation, session.tool_registry)
+            )
+            self.assertEqual(third, {
+                'kind': 'tool',
+                'tool_call': {
+                    'name': 'propose_mission',
+                    'arguments': {
+                        'kind': 'mission',
+                        'steps': [{
+                            'kind': 'move_distance',
+                            'distance_m': 0.5,
+                        }],
+                    },
+                },
+            })
+            session.complete(
+                continuation,
+                _ProviderResponse(
+                    kind='tool',
+                    tool_calls=(_ToolCall(
+                        'propose_mission', third['tool_call']['arguments']
+                    ),),
+                ),
+            )
+            self.assertEqual(len(server.requests), 3)
+            self.assertEqual(len(mission_port.missions), 1)
+            mission = mission_port.missions[0]
+            self.assertEqual(mission.token.turn_id, second_turn.turn_id)
+            self.assertEqual(mission.steps[0].kind, 1)
+            self.assertEqual(mission.steps[0].distance_m, 0.5)
+            self.assertEqual(server.response_kinds, [
+                'clarify', 'tool', 'tool',
+            ])
+        finally:
+            server.shutdown()
+            server.server_close()
+            worker.join(2.0)
+
+    def test_evidence_replay_rejects_first_turn_mission_mutation(self):
+        evidence = _sample_issue136_evidence()
+        self.assertTrue(_replay_issue136_evidence(evidence))
+        evidence['missions']['pre_followup_goal_count'] = 1
+        with self.assertRaises(AssertionError):
+            _replay_issue136_evidence(evidence)
+
+    def test_exact_head_injection_must_match_the_checkout(self):
+        exact_head = _git_head()
+        with patch.dict(os.environ, {'VOICE_NAV_EXACT_HEAD': exact_head}):
+            self.assertEqual(_git_head(), exact_head)
+        for malformed in ('', 'not-a-commit', 'a' * 39, 'A' * 40):
+            with patch.dict(os.environ, {'VOICE_NAV_EXACT_HEAD': malformed}):
+                with self.assertRaises(AssertionError):
+                    _git_head()
+        different_head = (
+            ('0' if exact_head[0] != '0' else '1') + exact_head[1:]
+        )
+        with patch.dict(os.environ, {'VOICE_NAV_EXACT_HEAD': different_head}):
+            with self.assertRaises(AssertionError):
+                _git_head()
+
+    def test_checkout_head_resolution_failure_is_rejected(self):
+        def unavailable_checkout_head():
+            raise OSError('unavailable checkout metadata')
+
+        with self.assertRaises(AssertionError):
+            _git_head(unavailable_checkout_head)
+
+
+class _LoopbackRequestCollector:
+    def __init__(self):
+        self.requests = []
+
+    def submit(self, request):
+        self.requests.append(request)
+
+
+class _LoopbackMissionPort:
+    def __init__(self):
+        self.missions = []
+
+    @staticmethod
+    def prepare_mission(mission):
+        return mission
+
+    def commit_mission(self, mission):
+        self.missions.append(mission)
+        return object()
+
+    @staticmethod
+    def prepare_cancel(identity):
+        return identity
+
+    @staticmethod
+    def is_active(_identity):
+        return False
+
+    @staticmethod
+    def commit_cancel(_identity):
+        pass
+
+
+def _product_runtime_state():
+    return AgentMissionState(
+        runtime_instance_id='runtime-a',
+        admission_epoch=7,
+        operating_mode=OperatingMode.MAPPING,
+        availability=Availability.AVAILABLE,
+        gate_state=GateState.GATE_INHIBITED,
+        active_step=2**32 - 1,
+        supported_step_mask=0b0011,
+        max_steps=3,
+        named_place_ids=(),
+    )
+
+
+def _loopback_turn(text, sequence):
+    return AgentVoiceTurn(
+        voice_instance_id='voice-a',
+        voice_seq=sequence,
+        session_id='session-a',
+        turn_id=f'turn-{sequence}',
+        kind=AgentVoiceTurn.COMMAND,
+        text=text,
+        confidence=1.0,
+    )
 
 
 def _load_gazebo_shutdown_support():
@@ -141,7 +674,7 @@ def _load_gazebo_shutdown_support():
 
 gazebo_shutdown = _load_gazebo_shutdown_support()
 PRODUCT_TEST_PARTITION = gazebo_shutdown.claim_unique_test_partition(
-    'i128_scripted_voice_gazebo'
+    'i136_multiturn_voice_gazebo'
 )
 
 
@@ -215,6 +748,70 @@ def _is_zero(message):
     )
 
 
+def _provider_contents(server):
+    with server.lock:
+        requests = tuple(server.requests)
+    return [
+        json.loads(json.loads(body.decode('utf-8'))['messages'][-1]['content'])
+        for _, body in requests
+    ]
+
+
+def _source_checkout_git_context():
+    """Resolve the Git metadata owned by this test source checkout."""
+    source_checkout = Path(__file__).resolve().parents[3]
+    git_pointer = source_checkout / '.git'
+    if git_pointer.is_dir():
+        return source_checkout, git_pointer
+
+    pointer_contents = git_pointer.read_text(encoding='utf-8')
+    assert '\r' not in pointer_contents
+    pointer_lines = pointer_contents.splitlines()
+    assert len(pointer_lines) == 1
+    pointer_line = pointer_lines[0]
+    assert pointer_line.startswith('gitdir: ')
+    gitdir_text = pointer_line.removeprefix('gitdir: ')
+    assert gitdir_text
+
+    windows_gitdir = re.fullmatch(
+        r'([A-Za-z]):[\\/]([^\\/:]+(?:[\\/][^\\/:]+)*)', gitdir_text
+    )
+    if windows_gitdir is not None and os.name != 'nt':
+        git_dir = Path('/mnt', windows_gitdir.group(1).lower())
+        for component in windows_gitdir.group(2).replace('\\', '/').split('/'):
+            git_dir /= component
+    else:
+        candidate = Path(gitdir_text)
+        git_dir = candidate if candidate.is_absolute() else git_pointer.parent / candidate
+    assert git_dir.is_dir()
+    return source_checkout, git_dir
+
+
+def _actual_checkout_head():
+    source_checkout, git_dir = _source_checkout_git_context()
+    return subprocess.check_output(
+        [
+            'git', f'--git-dir={git_dir}', f'--work-tree={source_checkout}',
+            'rev-parse', '--verify', 'HEAD^{commit}',
+        ],
+        text=True,
+    ).strip()
+
+
+def _git_head(actual_head_resolver=_actual_checkout_head):
+    try:
+        actual_head = actual_head_resolver()
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise AssertionError('unable to resolve the source checkout HEAD') from error
+    assert re.fullmatch(r'[0-9a-f]{40}', actual_head)
+
+    injected_head = os.environ.get('VOICE_NAV_EXACT_HEAD')
+    if injected_head is not None:
+        assert re.fullmatch(r'[0-9a-f]{40}', injected_head)
+        assert injected_head == actual_head
+    return actual_head
+
+
 class ScriptedVoiceGazeboSmokeTest(unittest.TestCase):
     def setUp(self, proc_info, llm_server, llm_thread):
         self.addCleanup(self._destroy_ros_fixture)
@@ -230,6 +827,8 @@ class ScriptedVoiceGazeboSmokeTest(unittest.TestCase):
         self.voice_turns = deque(maxlen=8)
         self.speak_goals = deque(maxlen=8)
         self.mission_successes = set()
+        self.mission_goal_ids = set()
+        self.mission_statuses = deque(maxlen=200)
         self.mission_states = deque(maxlen=200)
         self.gate_states = deque(maxlen=400)
         self.odometry = deque(maxlen=800)
@@ -303,11 +902,15 @@ class ScriptedVoiceGazeboSmokeTest(unittest.TestCase):
             rclpy.shutdown()
 
     def _on_voice_turn(self, turn):
-        self.voice_turns.append(turn)
+        self.voice_turns.append((time.monotonic(), turn))
 
     def _on_mission_status(self, statuses):
         for status in statuses.status_list:
             goal_id = bytes(status.goal_info.goal_id.uuid)
+            self.mission_goal_ids.add(goal_id)
+            self.mission_statuses.append((
+                time.monotonic(), status.status, goal_id,
+            ))
             if status.status == GoalStatus.STATUS_SUCCEEDED:
                 self.mission_successes.add(goal_id)
 
@@ -315,7 +918,7 @@ class ScriptedVoiceGazeboSmokeTest(unittest.TestCase):
         self.gate_states.append((time.monotonic(), message))
 
     def _speak(self, goal_handle):
-        self.speak_goals.append(goal_handle.request)
+        self.speak_goals.append((time.monotonic(), goal_handle.request))
         goal_handle.succeed()
         result = Speak.Result()
         result.code = Speak.Result.COMPLETED
@@ -326,6 +929,8 @@ class ScriptedVoiceGazeboSmokeTest(unittest.TestCase):
             return False
         state = self.mission_states[-1][1]
         return (
+            state.operating_mode == MissionState.MAPPING
+            and
             state.availability == MissionState.AVAILABLE
             and state.gate_state == MissionState.GATE_INHIBITED
         )
@@ -370,7 +975,7 @@ class ScriptedVoiceGazeboSmokeTest(unittest.TestCase):
                 and gate.zero_publish_seq >= gate.output_publish_seq
             )
 
-        self._wait_until(
+        return self._wait_until(
             zero_and_stationary,
             10.0,
             'final controller/Gate zero and stationary odometry',
@@ -384,11 +989,58 @@ class ScriptedVoiceGazeboSmokeTest(unittest.TestCase):
             for _, state in self.gate_states
         ))
 
-    def test_two_scripted_voice_scenarios_reach_product_motion(self):
+    def _signed_displacement(self, odometry):
+        start_yaw = _yaw_from_odom(self.initial_odom)
+        return (
+            (odometry.pose.pose.position.x - self.initial_odom.pose.pose.position.x)
+            * math.cos(start_yaw)
+            + (odometry.pose.pose.position.y - self.initial_odom.pose.pose.position.y)
+            * math.sin(start_yaw)
+        )
+
+    def _assert_first_turn_was_side_effect_free(self, first_at, followup_at):
+        window_commands = [
+            message for received_at, message in self.final_commands
+            if first_at <= received_at < followup_at
+        ]
+        window_odom = [
+            message for received_at, message in self.odometry
+            if first_at <= received_at < followup_at
+        ]
+        self.assertGreaterEqual(
+            len(window_commands), 4,
+            'driver barrier must leave actual first-turn command samples',
+        )
+        self.assertGreaterEqual(
+            len(window_odom), 4,
+            'driver barrier must leave actual first-turn odometry samples',
+        )
+        self.assertEqual(
+            [entry for entry in self.mission_statuses
+             if first_at <= entry[0] < followup_at],
+            [],
+        )
+        self.assertFalse(any(
+            state.state == InternalMotionGateState.ARMED
+            and not state.motion_inhibited
+            for received_at, state in self.gate_states
+            if first_at <= received_at < followup_at
+        ))
+        self.assertTrue(all(_is_zero(message) for message in window_commands))
+        self.assertTrue(all(
+            abs(message.twist.twist.linear.x) <= 0.01
+            and abs(message.twist.twist.angular.z) <= 0.02
+            for message in window_odom
+        ))
+        self.assertAlmostEqual(
+            self._signed_displacement(window_odom[-1]), 0.0, delta=0.02,
+        )
+
+    def test_multiturn_clarify_then_move_reaches_product_motion(self):
         self._wait_until(
-            lambda: len(self.mission_successes) == 2,
+            lambda: len(self.mission_successes) == 1,
             120.0,
-            'two successful product ExecuteMission Goals',
+            'one successful product ExecuteMission Goal',
         )
         self._wait_until(
             lambda: len(self.voice_turns) == 2 and len(self.speak_goals) == 2,
@@ -397,8 +1049,9 @@ class ScriptedVoiceGazeboSmokeTest(unittest.TestCase):
         )
         self._wait_for_zero_and_stationarity()
 
-        turns = tuple(self.voice_turns)
-        self.assertEqual([turn.text for turn in turns], ['前进半米', '绕个弯'])
+        timed_turns = tuple(self.voice_turns)
+        turns = tuple(turn for _, turn in timed_turns)
+        self.assertEqual([turn.text for turn in turns], ['绕到大厅', '半米'])
         self.assertEqual([turn.kind for turn in turns], [
             VoiceTurn.COMMAND,
             VoiceTurn.COMMAND,
@@ -406,53 +1059,107 @@ class ScriptedVoiceGazeboSmokeTest(unittest.TestCase):
         self.assertEqual([turn.voice_seq for turn in turns], [1, 2])
         self.assertEqual(turns[0].voice_instance_id, turns[1].voice_instance_id)
         self.assertTrue(all(turn.session_id and turn.turn_id for turn in turns))
-        self.assertEqual(len(self.mission_successes), 2)
+        self.assertEqual(turns[0].session_id, turns[1].session_id)
+        self.assertNotEqual(turns[0].turn_id, turns[1].turn_id)
+        self.assertEqual(len(self.mission_goal_ids), 1)
+        self.assertEqual(len(self.mission_successes), 1)
+        self._assert_first_turn_was_side_effect_free(
+            timed_turns[0][0], timed_turns[1][0],
+        )
 
-        speaks = tuple(self.speak_goals)
+        timed_speaks = tuple(self.speak_goals)
+        speaks = tuple(goal for _, goal in timed_speaks)
+        self.assertLess(timed_speaks[0][0], timed_turns[1][0])
         self.assertEqual(
             [(goal.session_id, goal.turn_id) for goal in speaks],
             [(turn.session_id, turn.turn_id) for turn in turns],
         )
-        self.assertEqual([goal.text for goal in speaks], ['任务已完成。', '任务已完成。'])
+        self.assertEqual([goal.text for goal in speaks], [
+            CLARIFICATION_TEXT, '任务已完成。',
+        ])
 
-        self.assertEqual(len(self.llm_server.requests), 1)
-        request_path, request_body = self.llm_server.requests[0]
-        self.assertEqual(request_path, '/v1/chat/completions')
-        self.assertEqual(
-            json.loads(request_body.decode('utf-8'))['model'],
-            'Qwen3-0.6B-Q8_0.gguf',
-        )
+        with self.llm_server.lock:
+            request_paths = [path for path, _ in self.llm_server.requests]
+            response_kinds = list(self.llm_server.response_kinds)
+            first_request_body = self.llm_server.requests[0][1]
+        self.assertEqual(request_paths, ['/v1/chat/completions'] * 3)
+        self.assertEqual(response_kinds, ['clarify', 'tool', 'tool'])
+        contents = _provider_contents(self.llm_server)
 
         final_odom = self.odometry[-1][1]
         start_yaw = _yaw_from_odom(self.initial_odom)
-        displacement = (
-            (final_odom.pose.pose.position.x - self.initial_odom.pose.pose.position.x)
-            * math.cos(start_yaw)
-            + (final_odom.pose.pose.position.y - self.initial_odom.pose.pose.position.y)
-            * math.sin(start_yaw)
-        )
+        displacement = self._signed_displacement(final_odom)
         yaw_delta = _wrapped_angle(_yaw_from_odom(final_odom) - start_yaw)
         self.assertAlmostEqual(displacement, 0.50, delta=0.10)
-        self.assertAlmostEqual(yaw_delta, 1.570796, delta=0.12)
+        self.assertAlmostEqual(yaw_delta, 0.0, delta=0.12)
 
         self._assert_gate_armed_observed()
         self.assertTrue(self._runtime_is_ready())
         evidence = {
+            'schema_version': 1,
+            'head': _git_head(),
             'REAL_AUDIO_MODELS': 'NOT_RUN',
             'REAL_LLM_CORPUS': 'NOT_RUN',
-            'displacement_m': displacement,
-            'gate_armed_observed': True,
-            'llm_requests': len(self.llm_server.requests),
-            'mission_goals': len(self.mission_successes),
-            'speak_correlations': [
-                {'session_id': goal.session_id, 'turn_id': goal.turn_id}
-                for goal in speaks
-            ],
-            'voice_turns': len(turns),
-            'yaw_delta_rad': yaw_delta,
+            'voice': {
+                'turns': [
+                    {
+                        'voice_instance_id': turn.voice_instance_id,
+                        'voice_seq': turn.voice_seq,
+                        'session_id': turn.session_id,
+                        'turn_id': turn.turn_id,
+                        'kind': turn.kind,
+                        'text': turn.text,
+                    }
+                    for turn in turns
+                ],
+                'speaks': [
+                    {
+                        'session_id': goal.session_id,
+                        'turn_id': goal.turn_id,
+                        'text': goal.text,
+                    }
+                    for goal in speaks
+                ],
+            },
+            'provider': {
+                'model': json.loads(
+                    first_request_body.decode('utf-8')
+                )['model'],
+                'response_kinds': response_kinds,
+                'requests': contents,
+            },
+            'missions': {
+                'pre_followup_goal_count': 0,
+                'unique_goal_count': len(self.mission_goal_ids),
+                'successful_goal_count': len(self.mission_successes),
+            },
+            'motion': {
+                'displacement_m': displacement,
+                'yaw_delta_rad': yaw_delta,
+                'pre_followup_displacement_m': self._signed_displacement(
+                    [message for received_at, message in self.odometry
+                     if timed_turns[0][0] <= received_at < timed_turns[1][0]][-1]
+                ),
+                'pre_followup_nonzero_command_count': sum(
+                    not _is_zero(message)
+                    for received_at, message in self.final_commands
+                    if timed_turns[0][0] <= received_at < timed_turns[1][0]
+                ),
+                'pre_followup_armed_count': sum(
+                    state.state == InternalMotionGateState.ARMED
+                    and not state.motion_inhibited
+                    for received_at, state in self.gate_states
+                    if timed_turns[0][0] <= received_at < timed_turns[1][0]
+                ),
+                'gate_armed_observed': True,
+                'final_zero_stationary': True,
+            },
         }
+        self.assertTrue(_replay_issue136_evidence(
+            json.loads(json.dumps(evidence, ensure_ascii=False))
+        ))
         print(
-            'EVIDENCE issue128_scripted_voice_gazebo '
+            'EVIDENCE issue136_multiturn_scripted_voice_gazebo '
             + json.dumps(evidence, sort_keys=True, separators=(',', ':')),
             flush=True,
         )

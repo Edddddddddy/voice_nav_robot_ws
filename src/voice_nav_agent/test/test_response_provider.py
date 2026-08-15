@@ -25,7 +25,11 @@ from voice_nav_agent._response_provider import (
     _LoopbackResponseProvider,
     _request_body,
 )
-from voice_nav_agent._response_session import _ResponseSession
+from voice_nav_agent._response_session import (
+    _ProviderResponse,
+    _ResponseSession,
+    _ToolCall,
+)
 from voice_nav_agent.core import (
     Availability,
     GateState,
@@ -100,6 +104,15 @@ def test_literal_loopback_request_and_closed_clarify_response():
         'cancel_owned_mission',
     ]
     assert json.loads(body['messages'][-1]['content']) == {
+        'agent': {
+            'source_instance_id': 'agent-a',
+            'lifetime_generation': 1,
+            'turn_generation': 0,
+        },
+        'runtime': {
+            'runtime_instance_id': 'runtime-a',
+            'admission_epoch': 7,
+        },
         'clarification': None,
         'round': 1,
         'snapshot_output': None,
@@ -130,6 +143,75 @@ def test_literal_loopback_request_and_closed_clarify_response():
     assert response is not None
     assert response.kind == 'clarify'
     assert response.text == '请说明目的地。'
+
+
+def test_multiturn_request_keeps_agent_runtime_and_clarification_identity():
+    """Provider recording carries the frozen identity chain across rounds."""
+    provider = _Provider()
+    session = _ResponseSession('agent-a', provider, _state, _MissionPort())
+    first_turn = VoiceTurn(
+        voice_instance_id='voice-a',
+        voice_seq=1,
+        session_id='session-a',
+        turn_id='turn-a',
+        kind=VoiceTurn.COMMAND,
+        text='绕到大厅',
+        confidence=1.0,
+    )
+    session.accept_turn(first_turn, adapter_generation=1)
+    first = provider.requests[-1]
+    session.complete(
+        first, _ProviderResponse(kind='clarify', text='请说明需要前进多少米。')
+    )
+
+    second_turn = VoiceTurn(
+        voice_instance_id='voice-a',
+        voice_seq=2,
+        session_id='session-a',
+        turn_id='turn-b',
+        kind=VoiceTurn.COMMAND,
+        text='半米',
+        confidence=1.0,
+    )
+    session.accept_turn(second_turn, adapter_generation=2)
+    second = provider.requests[-1]
+    session.complete(
+        second,
+        _ProviderResponse(
+            kind='tool',
+            tool_calls=(_ToolCall('read_runtime_snapshot', {}),),
+        ),
+    )
+    continuation = provider.requests[-1]
+
+    first_body = json.loads(_request_body(first, session.tool_registry))
+    second_body = json.loads(_request_body(second, session.tool_registry))
+    continuation_body = json.loads(
+        _request_body(continuation, session.tool_registry)
+    )
+    for body, turn, generation in (
+        (first_body, first_turn, 1),
+        (second_body, second_turn, 2),
+        (continuation_body, second_turn, 2),
+    ):
+        content = json.loads(body['messages'][-1]['content'])
+        assert content['agent'] == {
+            'source_instance_id': 'agent-a',
+            'lifetime_generation': 1,
+            'turn_generation': generation,
+        }
+        assert content['runtime'] == {
+            'runtime_instance_id': 'runtime-a',
+            'admission_epoch': 7,
+        }
+        assert content['turn']['voice_instance_id'] == turn.voice_instance_id
+        assert content['turn']['voice_seq'] == turn.voice_seq
+        assert content['turn']['session_id'] == 'session-a'
+        assert content['turn']['turn_id'] == turn.turn_id
+    assert json.loads(second_body['messages'][-1]['content'])['clarification'] == (
+        '请说明需要前进多少米。'
+    )
+    assert json.loads(continuation_body['messages'][-1]['content'])['round'] == 2
 
 
 @pytest.mark.parametrize('operation', ['invalidate', 'shutdown'])

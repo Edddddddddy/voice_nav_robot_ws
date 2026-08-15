@@ -291,6 +291,15 @@ def _request_body(
     if request.snapshot_output is not None:
         snapshot_output = dict(request.snapshot_output.value)
     content = {
+        'agent': {
+            'source_instance_id': request.token.source_instance_id,
+            'lifetime_generation': request.agent_generation,
+            'turn_generation': request.adapter_generation,
+        },
+        'runtime': {
+            'runtime_instance_id': request.token.runtime_instance_id,
+            'admission_epoch': request.token.admission_epoch,
+        },
         'turn': {
             'voice_instance_id': request.turn.voice_instance_id,
             'voice_seq': request.turn.voice_seq,
