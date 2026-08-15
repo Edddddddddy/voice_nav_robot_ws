@@ -8,6 +8,7 @@ endif()
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
+find_package(rclcpp_action REQUIRED)
 find_package(voice_nav_interfaces REQUIRED)
 # uncomment the following section in order to fill in
 # further dependencies manually.
@@ -18,6 +19,9 @@ add_library(audio_engine_core OBJECT src/audio_engine.cpp)
 add_library(dsp_pipeline STATIC src/dsp_pipeline.cpp)
 add_library(speech_input_core STATIC src/speech_input_core.cpp)
 add_library(speech_input_node STATIC src/speech_input_node.cpp)
+add_library(speech_output_core STATIC src/speech_output_core.cpp)
+add_library(speech_output_node STATIC src/speech_output_node.cpp)
+add_library(chaowen_tts_adapter STATIC src/chaowen_tts_adapter.cpp)
 add_library(
   audio_engine STATIC
   $<TARGET_OBJECTS:audio_engine_core>
@@ -36,6 +40,9 @@ foreach(target
     dsp_pipeline
     speech_input_core
     speech_input_node
+    speech_output_core
+    speech_output_node
+    chaowen_tts_adapter
     portaudio_adapter
     portaudio_adapter_callback)
   target_compile_features(${target} PUBLIC cxx_std_17)
@@ -47,6 +54,10 @@ foreach(target
 endforeach()
 ament_target_dependencies(speech_input_node rclcpp voice_nav_interfaces)
 target_link_libraries(speech_input_node speech_input_core)
+target_link_libraries(speech_output_core audio_engine)
+ament_target_dependencies(speech_output_node rclcpp rclcpp_action voice_nav_interfaces)
+target_link_libraries(speech_output_node speech_output_core)
+target_link_libraries(chaowen_tts_adapter speech_output_core)
 target_link_libraries(portaudio_adapter PUBLIC audio_engine)
 
 option(
@@ -166,6 +177,23 @@ if(BUILD_TESTING)
     speech_input_core_test PRIVATE
     "SPEECH_INPUT_IDENTITY_PROBE=\"$<TARGET_FILE:speech_input_identity_probe>\"")
   add_dependencies(speech_input_core_test speech_input_identity_probe)
+
+  ament_add_gtest(
+    speech_output_core_test
+    test/speech_output_core_test.cpp
+  )
+  target_compile_features(speech_output_core_test PUBLIC cxx_std_17)
+  target_include_directories(speech_output_core_test PRIVATE include src)
+  target_link_libraries(speech_output_core_test speech_output_core)
+
+  ament_add_gtest(
+    speech_output_node_test
+    test/speech_output_node_test.cpp
+  )
+  target_compile_features(speech_output_node_test PUBLIC cxx_std_17)
+  target_include_directories(speech_output_node_test PRIVATE include src)
+  ament_target_dependencies(speech_output_node_test rclcpp rclcpp_action voice_nav_interfaces)
+  target_link_libraries(speech_output_node_test speech_output_node)
 
   ament_add_gtest(
     speech_input_node_test

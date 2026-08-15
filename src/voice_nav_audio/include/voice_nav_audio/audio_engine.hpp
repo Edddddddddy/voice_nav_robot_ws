@@ -56,6 +56,13 @@ struct AudioMetrics
   std::uint64_t discontinuities{0U};
 };
 
+struct PlaybackWrite
+{
+  std::uint64_t scope_id{0U};
+  std::uint64_t generation{0U};
+  std::size_t sample_count{0U};
+};
+
 // Package-private real-time core.  Its callback only copies fixed-size PCM,
 // updates atomics, and selects already-prepared output state.
 class AudioEngine final
@@ -68,9 +75,11 @@ public:
 
   AudioEngine() = default;
 
-  [[nodiscard]] bool enqueue_playback(const Sample * samples, std::size_t sample_count) noexcept;
+  [[nodiscard]] bool enqueue_playback(
+    const Sample * samples, std::size_t sample_count, std::uint64_t scope_id = 0U) noexcept;
   [[nodiscard]] bool try_pop_capture(AudioFrame & frame) noexcept;
   [[nodiscard]] bool try_pop_reference(AudioFrame & frame) noexcept;
+  [[nodiscard]] bool try_pop_playback_write(PlaybackWrite & write) noexcept;
 
   void set_playback_gain(float gain) noexcept;
   void request_fade_to_silence(std::size_t sample_count) noexcept;
@@ -91,6 +100,7 @@ private:
   struct PlaybackPacket
   {
     std::uint64_t generation{0U};
+    std::uint64_t scope_id{0U};
     std::size_t sample_count{0U};
     std::array<Sample, kFrameSamples> samples{};
   };
@@ -225,13 +235,15 @@ private:
     PlaybackPacket & packet, std::uint64_t expected_generation) noexcept;
   [[nodiscard]] bool has_pending_discontinuities() const noexcept;
   void commit_pending_discontinuities() noexcept;
-  void render_playback(
-    AudioFrame & rendered, std::uint64_t callback_generation) noexcept;
+  [[nodiscard]] bool render_playback(
+    AudioFrame & rendered, std::uint64_t callback_generation,
+    PlaybackPacket & rendered_packet) noexcept;
   static Sample saturate(std::int64_t value) noexcept;
 
   OverwriteAudioFrameRing capture_ring_;
   SpscRing<PlaybackPacket, kRingCapacity> playback_ring_;
   SpscRing<AudioFrame, kRingCapacity> reference_ring_;
+  SpscRing<PlaybackWrite, kRingCapacity> playback_write_ring_;
   std::atomic<std::uint64_t> generation_{1U};
   std::atomic<std::uint64_t> discontinuity_requests_{0U};
   std::uint64_t observed_discontinuity_requests_{0U};
