@@ -23,6 +23,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -38,6 +39,7 @@
 #include "action_msgs/msg/goal_status_array.hpp"
 #include "geometry_msgs/msg/twist_stamped.hpp"
 #include "nav_msgs/msg/odometry.hpp"
+#include "rcl_interfaces/msg/set_parameters_result.hpp"
 #include "rclcpp/executors/single_threaded_executor.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rosgraph_msgs/msg/clock.hpp"
@@ -58,6 +60,7 @@ enum class ScriptedScenario
   kStop,
   kRoute,
   kCommand,
+  kSession,
 };
 
 std::optional<ScriptedScenario> scripted_scenario(const std::string & value)
@@ -73,6 +76,9 @@ std::optional<ScriptedScenario> scripted_scenario(const std::string & value)
   }
   if (value == "command") {
     return ScriptedScenario::kCommand;
+  }
+  if (value == "session") {
+    return ScriptedScenario::kSession;
   }
   return std::nullopt;
 }
@@ -119,10 +125,33 @@ public:
   {
   }
 
+  void start_session_command(std::string command_text, const std::uint64_t first_sequence) noexcept
+  {
+    command_text_ = std::move(command_text);
+    session_first_sequence_ = first_sequence;
+    session_active_ = true;
+  }
+
   void process_frame(
     const CleanedAudioFrame & frame,
     SpeechEventSink & sink) noexcept override
   {
+    if (scenario_ == ScriptedScenario::kSession) {
+      if (!session_active_) {
+        return;
+      }
+      const auto offset = frame.audio_seq - session_first_sequence_;
+      if (frame.audio_seq == session_first_sequence_) {
+        sink.on_speech_event(SpeechRecognitionEvent::wake_accepted(frame));
+      } else if (offset == 1U) {
+        sink.on_speech_event(SpeechRecognitionEvent::activity(frame, active_scope_));
+      } else if (offset == 2U) {
+        sink.on_speech_event(SpeechRecognitionEvent::endpoint_final(
+          frame, active_scope_, command_text_, 1.0F, VoiceTurnKind::kCommand));
+        session_active_ = false;
+      }
+      return;
+    }
     if (frame.audio_seq == 1U || frame.audio_seq == 4U) {
       sink.on_speech_event(SpeechRecognitionEvent::wake_accepted(frame));
     } else if (frame.audio_seq == 2U || frame.audio_seq == 5U) {
@@ -154,6 +183,8 @@ private:
   ScriptedScenario scenario_;
   std::string command_text_{};
   TurnScopeIdentity active_scope_{};
+  std::uint64_t session_first_sequence_{0U};
+  bool session_active_{false};
 };
 
 CleanedAudioFrame cleaned_frame(const std::uint64_t sequence)
@@ -369,7 +400,54 @@ bool wait_for_graph(rclcpp::Node & node)
   return graph_is_ready(node);
 }
 
-class CompletionObserver final
+// Package-private startup gate. A safe sample starts the steady-clock window;
+// every unsafe sample resets it. The injected clock keeps this behavior
+// testable without sleeping.
+class InitialSafetyStability final
+{
+public:
+  using Clock = std::chrono::steady_clock;
+  using Now = std::function<Clock::time_point()>;
+
+  explicit InitialSafetyStability(Now now = []() {return Clock::now();})
+  : now_(std::move(now))
+  {
+  }
+
+  [[nodiscard]] bool observe(const bool safe)
+  {
+    if (!safe) {
+      safe_since_.reset();
+      return false;
+    }
+    if (!safe_since_.has_value()) {
+      safe_since_ = now_();
+      return false;
+    }
+    return is_stable();
+  }
+
+  [[nodiscard]] bool is_stable() const
+  {
+    return safe_since_.has_value() && now_() - *safe_since_ >= 2s;
+  }
+
+private:
+  Now now_;
+  std::optional<Clock::time_point> safe_since_{};
+};
+
+class SessionCommandAdmission
+{
+public:
+  virtual ~SessionCommandAdmission() = default;
+  [[nodiscard]] virtual bool session_can_accept_command() const = 0;
+  virtual void begin_session_command() = 0;
+  [[nodiscard]] virtual bool session_finished_safely() const = 0;
+  virtual void finish_session_command() = 0;
+};
+
+class CompletionObserver final : public SessionCommandAdmission
 {
 public:
   struct DemoSummary
@@ -395,7 +473,13 @@ public:
   };
 
   explicit CompletionObserver(ManualDevice & device)
-  : device_(device), node_(std::make_shared<rclcpp::Node>("scripted_voice_motion_driver_observer"))
+  : CompletionObserver(device, []() {return InitialSafetyStability::Clock::now();})
+  {
+  }
+
+  CompletionObserver(ManualDevice & device, InitialSafetyStability::Now now)
+  : device_(device), node_(std::make_shared<rclcpp::Node>("scripted_voice_motion_driver_observer")),
+    now_(now), initial_safety_stability_(std::move(now))
   {
     const auto state_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local();
     state_subscription_ = node_->create_subscription<voice_nav_interfaces::msg::MissionState>(
@@ -407,6 +491,13 @@ public:
         state->gate_state == voice_nav_interfaces::msg::MissionState::GATE_INHIBITED;
         if (state->gate_state == voice_nav_interfaces::msg::MissionState::GATE_ARMED) {
           gate_armed_observed_ = true;
+        }
+        if (session_command_active_ &&
+          (state->gate_state == voice_nav_interfaces::msg::MissionState::GATE_ARMED ||
+          state->active_step != std::numeric_limits<std::uint32_t>::max()))
+        {
+          session_command_activity_ = true;
+          session_stationary_started_at_.reset();
         }
         latest_gate_armed_ = state->gate_state ==
           voice_nav_interfaces::msg::MissionState::GATE_ARMED;
@@ -423,6 +514,8 @@ public:
         }
         final_gate_inhibited_ = state->gate_state ==
         voice_nav_interfaces::msg::MissionState::GATE_INHIBITED;
+        observe_session_safety_locked();
+        observe_initial_safety_locked();
         condition_.notify_all();
       });
     clock_subscription_ = node_->create_subscription<rosgraph_msgs::msg::Clock>(
@@ -471,6 +564,10 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         final_command_is_zero_ = is_zero(*command);
         controller_nonzero_observed_ = controller_nonzero_observed_ || !is_zero(*command);
+        if (session_command_active_ && !is_zero(*command)) {
+          session_command_activity_ = true;
+          session_stationary_started_at_.reset();
+        }
         if (!is_zero(*command) && latest_gate_armed_ && latest_active_step_ <= 1U) {
           armed_nonzero_controller_steps_.insert(latest_active_step_);
         }
@@ -485,6 +582,8 @@ public:
           ++first_turn_command_samples_;
           first_turn_nonzero_command_ = first_turn_nonzero_command_ || !is_zero(*command);
         }
+        observe_session_safety_locked();
+        observe_initial_safety_locked();
         condition_.notify_all();
       });
     odometry_subscription_ = node_->create_subscription<nav_msgs::msg::Odometry>(
@@ -507,6 +606,7 @@ public:
         latest_odometry_ = *odometry;
         have_latest_odometry_ = true;
         final_odometry_is_stationary_ = is_stationary(*odometry);
+        observe_session_safety_locked();
         if (gate_inhibited_after_motion_) {
           ++post_stop_odom_samples_;
           if (final_odometry_is_stationary_) {
@@ -521,6 +621,7 @@ public:
           ++first_turn_odom_samples_;
           first_turn_moving_ = first_turn_moving_ || !is_stationary(*odometry);
         }
+        observe_initial_safety_locked();
         condition_.notify_all();
       });
     speak_status_subscription_ = node_->create_subscription<action_msgs::msg::GoalStatusArray>(
@@ -540,11 +641,56 @@ public:
 
   [[nodiscard]] const rclcpp::Node::SharedPtr & node() const noexcept {return node_;}
 
+  void start(rclcpp::executors::SingleThreadedExecutor & executor)
+  {
+    executor.add_node(node_);
+  }
+
   [[nodiscard]] bool wait_for_runtime_ready()
   {
     return wait_for([](const auto & self) {
                return self.clock_received_ && self.runtime_ready_;
     }, 120s);
+  }
+
+  [[nodiscard]] bool session_can_accept_command() const override
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return !session_command_active_ && runtime_ready_ && final_gate_inhibited_ &&
+           final_command_is_zero_ && final_odometry_is_stationary_ &&
+           (session_started_ || initial_safety_stability_.is_stable());
+  }
+
+  void begin_session_command() override
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    session_command_active_ = true;
+    session_started_ = true;
+    session_turn_baseline_ = turns_.size();
+    session_successful_speech_baseline_ = successful_speeches_.size();
+    session_command_activity_ = false;
+    session_stationary_started_at_.reset();
+    observe_session_safety_locked();
+  }
+
+  [[nodiscard]] bool session_finished_safely() const override
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!session_command_active_ || turns_.size() <= session_turn_baseline_ ||
+      successful_speeches_.size() <= session_successful_speech_baseline_ || !runtime_ready_ ||
+      !final_gate_inhibited_ || !final_command_is_zero_ || !final_odometry_is_stationary_ ||
+      !session_stationary_started_at_.has_value())
+    {
+      return false;
+    }
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+      now_() - *session_stationary_started_at_).count() >= 200;
+  }
+
+  void finish_session_command() override
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    session_command_active_ = false;
   }
   [[nodiscard]] bool wait_for_first_clarification()
   {
@@ -674,6 +820,29 @@ public:
   }
 
 private:
+  void observe_session_safety_locked()
+  {
+    if (!session_command_active_) {
+      return;
+    }
+    if (runtime_ready_ && final_gate_inhibited_ && final_command_is_zero_ &&
+      final_odometry_is_stationary_)
+    {
+      if (!session_stationary_started_at_.has_value()) {
+        session_stationary_started_at_ = now_();
+      }
+    } else {
+      session_stationary_started_at_.reset();
+    }
+  }
+
+  void observe_initial_safety_locked()
+  {
+    (void)initial_safety_stability_.observe(
+      runtime_ready_ && final_gate_inhibited_ && final_command_is_zero_ &&
+      final_odometry_is_stationary_);
+  }
+
   [[nodiscard]] std::int64_t final_stationary_hold_ms() const
   {
     if (!final_stationary_started_at_.has_value()) {
@@ -706,6 +875,7 @@ private:
 
   ManualDevice & device_;
   rclcpp::Node::SharedPtr node_{};
+  InitialSafetyStability::Now now_{};
   rclcpp::Subscription<voice_nav_interfaces::msg::MissionState>::SharedPtr state_subscription_{};
   rclcpp::Subscription<rosgraph_msgs::msg::Clock>::SharedPtr clock_subscription_{};
   rclcpp::Subscription<voice_nav_interfaces::msg::VoiceTurn>::SharedPtr voice_turn_subscription_{};
@@ -713,7 +883,7 @@ private:
   rclcpp::Subscription<action_msgs::msg::GoalStatusArray>::SharedPtr speak_status_subscription_{};
   rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr command_subscription_{};
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odometry_subscription_{};
-  std::mutex mutex_{};
+  mutable std::mutex mutex_{};
   std::condition_variable condition_{};
   bool runtime_ready_{false};
   bool clock_received_{false};
@@ -732,6 +902,11 @@ private:
   bool first_turn_moving_{false};
   bool gate_armed_observed_{false};
   bool gate_inhibited_after_motion_{false};
+  bool session_started_{false};
+  bool session_command_active_{false};
+  bool session_command_activity_{false};
+  std::size_t session_turn_baseline_{0U};
+  std::size_t session_successful_speech_baseline_{0U};
   bool controller_nonzero_observed_{false};
   bool post_stop_nonzero_command_observed_{false};
   std::size_t post_stop_odom_samples_{0U};
@@ -748,7 +923,95 @@ private:
   double previous_yaw_{0.0};
   double initial_yaw_{0.0};
   double yaw_delta_rad_{0.0};
+  InitialSafetyStability initial_safety_stability_{};
   std::optional<std::chrono::steady_clock::time_point> final_stationary_started_at_{};
+  std::optional<std::chrono::steady_clock::time_point> session_stationary_started_at_{};
+};
+
+// Package-private parameter gateway.  Its callback only validates and queues
+// one bounded command; the main session loop owns VoicePipeline execution.
+class VoiceCommandGateway final
+{
+public:
+  explicit VoiceCommandGateway(SessionCommandAdmission & observer)
+  : observer_(observer)
+  {
+  }
+
+  rcl_interfaces::msg::SetParametersResult on_parameters(
+    const std::vector<rclcpp::Parameter> & parameters)
+  {
+    rcl_interfaces::msg::SetParametersResult result;
+    result.successful = true;
+    for (const auto & parameter : parameters) {
+      if (parameter.get_name() != "command_text") {
+        continue;
+      }
+      if (parameter.get_type() != rclcpp::ParameterType::PARAMETER_STRING) {
+        return rejected("command_text must be a string");
+      }
+      const auto text = parameter.as_string();
+      if (text.empty()) {
+        continue;
+      }
+      if (!valid_command_text(text)) {
+        return rejected("command_text must contain non-whitespace UTF-8 text of at most 512 bytes");
+      }
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (busy_ || pending_.has_value()) {
+        return rejected("command_text is busy; wait for the safe stationary barrier");
+      }
+      if (!observer_.session_can_accept_command()) {
+        return rejected("command_text is busy; runtime is not at the safe stationary barrier");
+      }
+      pending_ = text;
+      busy_ = true;
+    }
+    return result;
+  }
+
+  [[nodiscard]] std::optional<std::string> take()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!pending_.has_value()) {
+      return std::nullopt;
+    }
+    auto command = std::move(pending_);
+    pending_.reset();
+    observer_.begin_session_command();
+    return command;
+  }
+
+  void complete_if_safe()
+  {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!busy_) {
+        return;
+      }
+    }
+    if (!observer_.session_finished_safely()) {
+      return;
+    }
+    observer_.finish_session_command();
+    std::lock_guard<std::mutex> lock(mutex_);
+    busy_ = false;
+  }
+
+private:
+  [[nodiscard]] static rcl_interfaces::msg::SetParametersResult rejected(
+    const char * reason)
+  {
+    rcl_interfaces::msg::SetParametersResult result;
+    result.successful = false;
+    result.reason = reason;
+    return result;
+  }
+
+  SessionCommandAdmission & observer_;
+  std::mutex mutex_{};
+  std::optional<std::string> pending_{};
+  bool busy_{false};
 };
 
 }  // namespace
@@ -759,59 +1022,93 @@ int main(int argc, char ** argv)
   rclcpp::init(argc, argv);
   rclcpp::NodeOptions configuration_options;
   configuration_options.start_parameter_services(false).start_parameter_event_publisher(false);
-  auto configuration = std::make_shared<rclcpp::Node>(
-    "scripted_voice_demo_configuration", configuration_options);
-  const auto configured_scenario = configuration->declare_parameter<std::string>("scenario", "move");
+  auto configuration_probe = std::make_shared<rclcpp::Node>(
+    "scripted_voice_demo_configuration_probe", configuration_options);
+  const auto configured_scenario = configuration_probe->declare_parameter<std::string>(
+    "scenario", "move");
   const auto scenario = voice_nav_audio::scripted_scenario(configured_scenario);
   if (!scenario.has_value()) {
     RCLCPP_ERROR(
-      configuration->get_logger(),
-      "scenario must be one of move|stop|route|command; received '%s'",
+      configuration_probe->get_logger(),
+      "scenario must be one of move|stop|route|command|session; received '%s'",
       configured_scenario.c_str());
-    configuration.reset();
+    configuration_probe.reset();
     rclcpp::shutdown();
     return 1;
   }
-  const auto command_text = configuration->declare_parameter<std::string>("command_text", "");
+  const auto command_text = configuration_probe->declare_parameter<std::string>(
+    "command_text", "");
   if (*scenario == voice_nav_audio::ScriptedScenario::kCommand &&
     !voice_nav_audio::valid_command_text(command_text))
   {
     RCLCPP_ERROR(
-      configuration->get_logger(),
+      configuration_probe->get_logger(),
       "command_text must contain non-whitespace UTF-8 text of at most 512 bytes");
-    configuration.reset();
+    configuration_probe.reset();
     rclcpp::shutdown();
     return 1;
   }
   std::optional<std::string> exact_head;
   if (!voice_nav_audio::load_optional_exact_head(exact_head)) {
     RCLCPP_ERROR(
-      configuration->get_logger(),
+      configuration_probe->get_logger(),
       "VOICE_NAV_EXACT_HEAD must be a lowercase 40-character Git commit");
-    configuration.reset();
+    configuration_probe.reset();
     rclcpp::shutdown();
     return 1;
   }
-  configuration.reset();
+  const bool is_session = *scenario == voice_nav_audio::ScriptedScenario::kSession;
   voice_nav_audio::PlaybackEvidenceRecorder recorder;
   voice_nav_audio::ManualDevice device(recorder);
+  auto recognizer = std::make_unique<voice_nav_audio::ScriptedRecognizer>(*scenario, command_text);
+  auto * const session_recognizer = recognizer.get();
   auto pipeline = std::make_unique<voice_nav_audio::VoicePipeline>(
-    std::make_unique<voice_nav_audio::ScriptedRecognizer>(*scenario, command_text),
+    std::move(recognizer),
     std::make_unique<voice_nav_audio::DeterministicFakeTts>(recorder), device, &recorder);
   auto graph_probe = std::make_shared<rclcpp::Node>("scripted_voice_demo_graph_probe");
+  voice_nav_audio::CompletionObserver observer(device);
+  rclcpp::executors::SingleThreadedExecutor executor;
+  observer.start(executor);
+  std::thread spin_thread([&executor]() {executor.spin();});
   if (!voice_nav_audio::wait_for_graph(*graph_probe)) {
     RCLCPP_ERROR(graph_probe->get_logger(), "scripted motion smoke graph did not converge");
+    executor.cancel();
+    spin_thread.join();
+    executor.remove_node(observer.node());
     pipeline.reset();
     graph_probe.reset();
+    configuration_probe.reset();
     rclcpp::shutdown();
     return 1;
   }
 
-  voice_nav_audio::CompletionObserver observer(device);
-  rclcpp::executors::SingleThreadedExecutor executor;
+  configuration_probe.reset();
+  configuration_options.start_parameter_services(true).start_parameter_event_publisher(true);
+  auto configuration = std::make_shared<rclcpp::Node>(
+    "scripted_voice_demo_configuration", configuration_options);
+  (void)configuration->declare_parameter<std::string>("scenario", configured_scenario);
+  (void)configuration->declare_parameter<std::string>("command_text", command_text);
+
+  std::unique_ptr<voice_nav_audio::VoiceCommandGateway> gateway;
+  if (is_session) {
+    gateway = std::make_unique<voice_nav_audio::VoiceCommandGateway>(observer);
+  }
+  auto parameter_callback = configuration->add_on_set_parameters_callback(
+    [is_session, &gateway](const std::vector<rclcpp::Parameter> & parameters) {
+      rcl_interfaces::msg::SetParametersResult result;
+      result.successful = true;
+      if (is_session) {
+        return gateway->on_parameters(parameters);
+      }
+      return result;
+    });
+  (void)parameter_callback;
   pipeline->add_to_executor(executor);
-  executor.add_node(observer.node());
-  std::thread spin_thread([&executor]() {executor.spin();});
+  if (is_session) {
+    executor.add_node(configuration);
+  } else {
+    configuration.reset();
+  }
   if (!observer.wait_for_runtime_ready()) {
     RCLCPP_ERROR(graph_probe->get_logger(), "Mission Runtime did not become available");
     executor.cancel();
@@ -821,6 +1118,89 @@ int main(int argc, char ** argv)
     graph_probe.reset();
     rclcpp::shutdown();
     return 1;
+  }
+
+  if (is_session) {
+    if (!command_text.empty()) {
+      const auto initial_result = gateway->on_parameters({
+          rclcpp::Parameter("command_text", command_text)});
+      if (!initial_result.successful) {
+        RCLCPP_ERROR(
+          graph_probe->get_logger(), "initial command_text rejected: %s",
+          initial_result.reason.c_str());
+      }
+    }
+    std::uint64_t next_audio_sequence = 1U;
+    while (rclcpp::ok()) {
+      device.consume_once();
+      if (const auto command = gateway->take(); command.has_value()) {
+        session_recognizer->start_session_command(*command, next_audio_sequence);
+        (void)configuration->set_parameter(rclcpp::Parameter("command_text", ""));
+        for (std::uint64_t offset = 0U; offset < 3U; ++offset) {
+          pipeline->accept_cleaned_frame(
+            voice_nav_audio::cleaned_frame(next_audio_sequence + offset));
+        }
+        next_audio_sequence += 3U;
+      }
+      gateway->complete_if_safe();
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    const auto playback = recorder.snapshot();
+    const auto summary = observer.summary();
+    const bool session_closed_safely = summary.final_gate_inhibited &&
+      summary.final_command_is_zero && summary.final_odometry_is_stationary;
+    std::cout << "EVIDENCE scripted_voice_demo {\"schema_version\":5,\"head\":";
+    if (exact_head.has_value()) {
+      std::cout << std::quoted(*exact_head);
+    } else {
+      std::cout << "null";
+    }
+    std::cout << ",\"scenario\":\"session\",\"simulation_only\":true,\"voice\":{\"turns\":[";
+    for (std::size_t index = 0U; index < summary.turns.size(); ++index) {
+      if (index != 0U) {
+        std::cout << ',';
+      }
+      const auto & turn = summary.turns.at(index);
+      std::cout << "{\"voice_instance_id\":" << std::quoted(turn.voice_instance_id)
+                << ",\"voice_seq\":" << turn.voice_seq
+                << ",\"session_id\":" << std::quoted(turn.session_id)
+                << ",\"turn_id\":" << std::quoted(turn.turn_id)
+                << ",\"kind\":" << static_cast<unsigned int>(turn.kind)
+                << ",\"text\":" << std::quoted(turn.text) << '}';
+    }
+    std::cout << "],\"speak_completed_count\":" << summary.successful_speech_count
+              << ",\"speak_texts\":[";
+    for (std::size_t index = 0U; index < playback.tts_texts.size(); ++index) {
+      if (index != 0U) {
+        std::cout << ',';
+      }
+      std::cout << std::quoted(playback.tts_texts.at(index));
+    }
+    std::cout << "]},\"provider\":{\"llm_http_request_count\":0},\"missions\":{"
+              << "\"unique_goal_count\":" << summary.unique_mission_count
+              << ",\"successful_goal_count\":" << summary.successful_mission_count
+              << "},\"motion\":{\"displacement_m\":" << summary.displacement_m
+              << ",\"yaw_delta_rad\":" << summary.yaw_delta_rad
+              << ",\"final_gate_inhibited\":"
+              << (summary.final_gate_inhibited ? "true" : "false")
+              << ",\"final_command_is_zero\":"
+              << (summary.final_command_is_zero ? "true" : "false")
+              << ",\"final_odometry_is_stationary\":"
+              << (summary.final_odometry_is_stationary ? "true" : "false")
+              << ",\"stationary_hold_ms\":" << summary.final_stationary_hold_ms
+              << "},\"teardown\":\"bounded_clean_exit\",\"REAL_AUDIO_MODELS\":\"NOT_RUN\","
+              << "\"REAL_LLM_CORPUS\":\"NOT_RUN\"}" << std::endl;
+    if (!session_closed_safely) {
+      RCLCPP_ERROR(graph_probe->get_logger(), "session did not close at a safe stationary barrier");
+    }
+    executor.cancel();
+    spin_thread.join();
+    pipeline->remove_from_executor(executor);
+    pipeline.reset();
+    graph_probe.reset();
+    configuration.reset();
+    rclcpp::shutdown();
+    return session_closed_safely ? 0 : 1;
   }
 
   if (*scenario == voice_nav_audio::ScriptedScenario::kMove) {

@@ -12,6 +12,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
+find_package(rcl_interfaces REQUIRED)
 find_package(rosgraph_msgs REQUIRED)
 find_package(voice_nav_interfaces REQUIRED)
 # uncomment the following section in order to fill in
@@ -85,6 +86,7 @@ ament_target_dependencies(
   geometry_msgs
   nav_msgs
   rclcpp
+  rcl_interfaces
   rosgraph_msgs
   voice_nav_interfaces
 )
@@ -235,6 +237,30 @@ if(BUILD_TESTING)
   ament_target_dependencies(voice_pipeline_test rclcpp rclcpp_action voice_nav_interfaces)
   target_link_libraries(
     voice_pipeline_test
+    voice_pipeline
+  )
+
+  ament_add_gtest(
+    voice_command_gateway_readiness_test
+    test/voice_command_gateway_readiness_test.cpp
+  )
+  target_compile_features(voice_command_gateway_readiness_test PUBLIC cxx_std_17)
+  target_include_directories(
+    voice_command_gateway_readiness_test
+    PRIVATE include src
+  )
+  ament_target_dependencies(
+    voice_command_gateway_readiness_test
+    action_msgs
+    geometry_msgs
+    nav_msgs
+    rclcpp
+    rcl_interfaces
+    rosgraph_msgs
+    voice_nav_interfaces
+  )
+  target_link_libraries(
+    voice_command_gateway_readiness_test
     voice_pipeline
   )
 
