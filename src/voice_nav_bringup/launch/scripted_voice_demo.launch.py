@@ -33,7 +33,7 @@ from launch_ros.substitutions import FindPackageShare
 
 
 CLARIFICATION_TEXT = '请说明需要前进多少米。'
-SCENARIOS = ('move', 'stop')
+SCENARIOS = ('move', 'stop', 'route')
 
 
 class ScriptedLoopbackServer(ThreadingHTTPServer):
@@ -225,7 +225,7 @@ def generate_launch_description():
             'scenario',
             default_value='move',
             choices=SCENARIOS,
-            description='Run the fixed simulation-only move or stop scenario.',
+            description='Run the fixed simulation-only move, stop, or route scenario.',
         ),
         *actions,
     ])

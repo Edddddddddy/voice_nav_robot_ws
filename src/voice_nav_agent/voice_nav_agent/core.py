@@ -1408,6 +1408,8 @@ def _parse_chinese_integer(token: str) -> int:
     }
     if token == '十':
         return 10
+    if token == '九十':
+        return 90
     if len(token) == 1 and token in values:
         return values[token]
     raise ValueError('only zero through ten are supported')

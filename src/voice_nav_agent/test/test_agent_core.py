@@ -152,6 +152,22 @@ def test_rule_mission_preserves_one_to_three_step_order_and_place_id():
     assert decision.mission.steps[2].target_id == 'lobby'
 
 
+def test_rule_mission_accepts_the_scripted_route_without_llm_fallback():
+    core = make_core()
+
+    decision = core.handle_turn(
+        make_turn('前进半米然后左转九十度'), make_state()
+    )
+
+    assert decision.kind is DecisionKind.MISSION
+    assert [step.kind for step in decision.mission.steps] == [
+        MissionStep.MOVE_DISTANCE,
+        MissionStep.ROTATE_ANGLE,
+    ]
+    assert decision.mission.steps[0].distance_m == pytest.approx(0.5)
+    assert decision.mission.steps[1].angle_rad == pytest.approx(math.pi / 2)
+
+
 @pytest.mark.parametrize(
     'text',
     [
