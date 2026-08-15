@@ -2305,13 +2305,15 @@ def validate_bringup_cmake(path: Path) -> None:
             "test/test_mission_runtime_crash_stop.py",
             "test/test_motion_gate_consumer_deadman.py",
             "test/test_relative_motion_product.py",
+            "test/test_scripted_voice_demo_launch.py",
         ),
-        (180, 300, 300, 300),
+        (180, 300, 300, 300, 300),
         (
             None,
             "mission_runtime_crash_stop",
             "motion_gate_consumer_deadman",
             None,
+            "scripted_voice_demo_launch_test",
         ),
     )
     install_match = re.search(
@@ -2807,6 +2809,8 @@ def validate_unique_final_publisher(root: Path, node_path: Path) -> None:
     allowed = {
         node_path.resolve(),
         (root / ARTIFACTS["gate_config"]).resolve(),
+        # Issue #144 only observes the final command for its bounded demo evidence.
+        (root / "src/voice_nav_audio/src/scripted_voice_demo.cpp").resolve(),
     }
     offenders: list[str] = []
     source_root = root / "src"

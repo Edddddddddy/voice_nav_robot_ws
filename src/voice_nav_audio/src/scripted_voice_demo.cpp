@@ -12,13 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Test-only two-turn driver.  It owns no installed executable or endpoint.
+// Simulation-only two-turn demo.  It owns no motion authority or endpoint
+// beyond the existing VoicePipeline public seams.
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -33,8 +35,10 @@
 #include "nav_msgs/msg/odometry.hpp"
 #include "rclcpp/executors/single_threaded_executor.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "rosgraph_msgs/msg/clock.hpp"
 #include "voice_pipeline.hpp"
 #include "voice_nav_interfaces/msg/mission_state.hpp"
+#include "voice_nav_interfaces/msg/voice_turn.hpp"
 
 namespace voice_nav_audio
 {
@@ -280,6 +284,16 @@ bool wait_for_graph(rclcpp::Node & node)
 class CompletionObserver final
 {
 public:
+  struct DemoSummary
+  {
+    std::vector<voice_nav_interfaces::msg::VoiceTurn> turns{};
+    std::size_t successful_mission_count{0U};
+    std::size_t successful_speech_count{0U};
+    double displacement_m{0.0};
+    bool final_gate_inhibited{false};
+    bool final_zero_stationary{false};
+  };
+
   explicit CompletionObserver(ManualDevice & device)
   : device_(device), node_(std::make_shared<rclcpp::Node>("scripted_voice_motion_driver_observer"))
   {
@@ -291,6 +305,22 @@ public:
         runtime_ready_ = state->availability ==
         voice_nav_interfaces::msg::MissionState::AVAILABLE &&
         state->gate_state == voice_nav_interfaces::msg::MissionState::GATE_INHIBITED;
+        final_gate_inhibited_ = state->gate_state ==
+        voice_nav_interfaces::msg::MissionState::GATE_INHIBITED;
+        condition_.notify_all();
+      });
+    clock_subscription_ = node_->create_subscription<rosgraph_msgs::msg::Clock>(
+      "/clock", rclcpp::SensorDataQoS(),
+      [this](const rosgraph_msgs::msg::Clock::SharedPtr) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        clock_received_ = true;
+        condition_.notify_all();
+      });
+    voice_turn_subscription_ = node_->create_subscription<voice_nav_interfaces::msg::VoiceTurn>(
+      "/voice/turn", rclcpp::QoS(rclcpp::KeepLast(1)).reliable(),
+      [this](const voice_nav_interfaces::msg::VoiceTurn::SharedPtr turn) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        turns_.push_back(*turn);
         condition_.notify_all();
       });
     mission_status_subscription_ = node_->create_subscription<action_msgs::msg::GoalStatusArray>(
@@ -313,6 +343,7 @@ public:
       "/diff_drive_controller/cmd_vel", rclcpp::QoS(rclcpp::KeepLast(10)),
       [this](const geometry_msgs::msg::TwistStamped::SharedPtr command) {
         std::lock_guard<std::mutex> lock(mutex_);
+        final_command_is_zero_ = is_zero(*command);
         if (first_turn_idle_window_) {
           ++first_turn_command_samples_;
           first_turn_nonzero_command_ = first_turn_nonzero_command_ || !is_zero(*command);
@@ -323,6 +354,13 @@ public:
       "/odom", rclcpp::QoS(rclcpp::KeepLast(10)),
       [this](const nav_msgs::msg::Odometry::SharedPtr odometry) {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (!have_initial_odometry_) {
+          initial_odometry_ = *odometry;
+          have_initial_odometry_ = true;
+        }
+        latest_odometry_ = *odometry;
+        have_latest_odometry_ = true;
+        final_odometry_is_stationary_ = is_stationary(*odometry);
         if (first_turn_idle_window_) {
           ++first_turn_odom_samples_;
           first_turn_moving_ = first_turn_moving_ || !is_stationary(*odometry);
@@ -349,7 +387,7 @@ public:
   [[nodiscard]] bool wait_for_runtime_ready()
   {
     return wait_for([](const auto & self) {
-               return self.runtime_ready_;
+               return self.clock_received_ && self.runtime_ready_;
     });
   }
   [[nodiscard]] bool wait_for_first_clarification()
@@ -384,13 +422,35 @@ public:
   {
     return wait_for([](const auto & self) {
                return self.successful_missions_.size() == 1U &&
-                      self.successful_speeches_.size() >= 2U;
+                       self.successful_speeches_.size() >= 2U && self.turns_.size() == 2U;
+    });
+  }
+  [[nodiscard]] bool wait_for_final_zero_and_stationarity()
+  {
+    return wait_for([](const auto & self) {
+               return self.runtime_ready_ && self.final_command_is_zero_ &&
+                       self.final_odometry_is_stationary_;
     });
   }
   [[nodiscard]] std::size_t successful_speech_count()
   {
     std::lock_guard<std::mutex> lock(mutex_);
     return successful_speeches_.size();
+  }
+  [[nodiscard]] DemoSummary summary()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    DemoSummary result{};
+    result.turns = turns_;
+    result.successful_mission_count = successful_missions_.size();
+    result.successful_speech_count = successful_speeches_.size();
+    if (have_initial_odometry_ && have_latest_odometry_) {
+      result.displacement_m = latest_odometry_.pose.pose.position.x -
+        initial_odometry_.pose.pose.position.x;
+    }
+    result.final_gate_inhibited = final_gate_inhibited_;
+    result.final_zero_stationary = final_command_is_zero_ && final_odometry_is_stationary_;
+    return result;
   }
 
 private:
@@ -418,6 +478,8 @@ private:
   ManualDevice & device_;
   rclcpp::Node::SharedPtr node_{};
   rclcpp::Subscription<voice_nav_interfaces::msg::MissionState>::SharedPtr state_subscription_{};
+  rclcpp::Subscription<rosgraph_msgs::msg::Clock>::SharedPtr clock_subscription_{};
+  rclcpp::Subscription<voice_nav_interfaces::msg::VoiceTurn>::SharedPtr voice_turn_subscription_{};
   rclcpp::Subscription<action_msgs::msg::GoalStatusArray>::SharedPtr mission_status_subscription_{};
   rclcpp::Subscription<action_msgs::msg::GoalStatusArray>::SharedPtr speak_status_subscription_{};
   rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr command_subscription_{};
@@ -425,6 +487,12 @@ private:
   std::mutex mutex_{};
   std::condition_variable condition_{};
   bool runtime_ready_{false};
+  bool clock_received_{false};
+  bool final_gate_inhibited_{false};
+  bool final_command_is_zero_{false};
+  bool final_odometry_is_stationary_{false};
+  bool have_initial_odometry_{false};
+  bool have_latest_odometry_{false};
   bool first_turn_idle_window_{false};
   std::size_t first_turn_mission_statuses_{0U};
   std::size_t first_turn_command_samples_{0U};
@@ -433,6 +501,9 @@ private:
   bool first_turn_moving_{false};
   std::set<std::string> successful_missions_{};
   std::set<std::string> successful_speeches_{};
+  std::vector<voice_nav_interfaces::msg::VoiceTurn> turns_{};
+  nav_msgs::msg::Odometry initial_odometry_{};
+  nav_msgs::msg::Odometry latest_odometry_{};
 };
 
 }  // namespace
@@ -446,7 +517,7 @@ int main(int argc, char ** argv)
   auto pipeline = std::make_unique<voice_nav_audio::VoicePipeline>(
     std::make_unique<voice_nav_audio::ScriptedRecognizer>(),
     std::make_unique<voice_nav_audio::DeterministicFakeTts>(recorder), device, &recorder);
-  auto graph_probe = std::make_shared<rclcpp::Node>("scripted_voice_motion_driver_graph_probe");
+  auto graph_probe = std::make_shared<rclcpp::Node>("scripted_voice_demo_graph_probe");
   if (!voice_nav_audio::wait_for_graph(*graph_probe)) {
     RCLCPP_ERROR(graph_probe->get_logger(), "scripted motion smoke graph did not converge");
     pipeline.reset();
@@ -484,8 +555,7 @@ int main(int argc, char ** argv)
     rclcpp::shutdown();
     return 1;
   }
-  // This test-only barrier gives the Python observer a bounded, sampled
-  // first-turn idle window rather than racing directly into the follow-up.
+  // Keep the first clarification observable before the scripted follow-up.
   observer.begin_first_turn_idle_window();
   if (!observer.wait_for_first_turn_idle_samples()) {
     RCLCPP_ERROR(graph_probe->get_logger(), "first Voice turn was not sampled as idle");
@@ -502,6 +572,16 @@ int main(int argc, char ** argv)
   }
   if (!observer.wait_for_mission_completion()) {
     RCLCPP_ERROR(graph_probe->get_logger(), "follow-up Voice Mission did not complete with Speak");
+    executor.cancel();
+    spin_thread.join();
+    pipeline->remove_from_executor(executor);
+    pipeline.reset();
+    graph_probe.reset();
+    rclcpp::shutdown();
+    return 1;
+  }
+  if (!observer.wait_for_final_zero_and_stationarity()) {
+    RCLCPP_ERROR(graph_probe->get_logger(), "Mission did not return to zero and stationary");
     executor.cancel();
     spin_thread.join();
     pipeline->remove_from_executor(executor);
@@ -531,12 +611,23 @@ int main(int argc, char ** argv)
     rclcpp::shutdown();
     return 1;
   }
-  std::cout <<
-    "EVIDENCE issue142_voice_pipeline "
-    "{\"schema_version\":1,\"tts_texts\":[\"请说明需要前进多少米。\",\"任务已完成。\"],"
-    "\"manual_nonzero_pcm\":true,\"played_feedback_scope_count\":2,"
-    "\"completed_scope_count\":2,\"first_completed_before_followup\":true}" <<
-    std::endl;
+  const auto summary = observer.summary();
+  std::cout << "EVIDENCE scripted_voice_demo "
+            << "{\"schema_version\":1,\"simulation_only\":true,\"node_graph\":[\"agent_node\","
+            << "\"mission_runtime_node\",\"motion_gate_node\",\"voice_speech_input\","
+            << "\"voice_speech_output\"],\"voice\":{\"voice_instance_id\":"
+            << std::quoted(summary.turns.front().voice_instance_id)
+            << ",\"session_id\":" << std::quoted(summary.turns.front().session_id)
+            << ",\"voice_seq\":[" << summary.turns.front().voice_seq << ","
+            << summary.turns.back().voice_seq << "]},\"mission_success_count\":"
+            << summary.successful_mission_count << ",\"speak_completed_count\":"
+            << summary.successful_speech_count << ",\"motion\":{\"displacement_m\":"
+            << summary.displacement_m << ",\"final_gate_inhibited\":"
+            << (summary.final_gate_inhibited ? "true" : "false")
+            << ",\"final_zero_stationary\":"
+            << (summary.final_zero_stationary ? "true" : "false")
+            << "},\"REAL_AUDIO_MODELS\":\"NOT_RUN\",\"REAL_LLM_CORPUS\":\"NOT_RUN\"}"
+            << std::endl;
   executor.cancel();
   spin_thread.join();
   pipeline->remove_from_executor(executor);

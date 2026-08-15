@@ -33,9 +33,6 @@ from action_msgs.msg import GoalStatus, GoalStatusArray
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import TwistStamped
 from launch import LaunchDescription
-from launch.actions import ExecuteProcess, IncludeLaunchDescription
-from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch_ros.actions import Node
 import launch_testing
 import launch_testing.actions
 from launch_testing.asserts import assertExitCodes
@@ -668,6 +665,22 @@ def _load_gazebo_shutdown_support():
     return module
 
 
+def _load_scripted_voice_demo_launch():
+    launch_path = (
+        Path(get_package_share_directory('voice_nav_bringup'))
+        / 'launch' / 'scripted_voice_demo.launch.py'
+    )
+    specification = importlib.util.spec_from_file_location(
+        'voice_nav_scripted_voice_demo_launch',
+        launch_path,
+    )
+    if specification is None or specification.loader is None:
+        raise RuntimeError('could not load scripted simulation demo launch')
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
 gazebo_shutdown = _load_gazebo_shutdown_support()
 PRODUCT_TEST_PARTITION = gazebo_shutdown.claim_unique_test_partition(
     'i136_multiturn_voice_gazebo'
@@ -677,44 +690,17 @@ PRODUCT_TEST_PARTITION = gazebo_shutdown.claim_unique_test_partition(
 @pytest.mark.launch_test
 @launch_testing.markers.keep_alive
 def generate_test_description():
-    """Compose product motion with scripted input/LLM and real Speak playback."""
-    driver = os.environ.get('VOICE_NAV_SCRIPTED_SPEECH_DRIVER')
-    assert driver and Path(driver).is_file()
-    llm_server = _LoopbackLlmServer()
-    llm_thread = threading.Thread(
-        target=llm_server.serve_forever,
-        daemon=True,
+    """Exercise the installed demo launch rather than a test-only graph."""
+    launch_module = _load_scripted_voice_demo_launch()
+    actions, fixtures = launch_module.create_scripted_voice_demo(
+        headless='true',
+        shutdown_on_gazebo_exit='false',
+        shutdown_when_demo_exits=False,
     )
-    llm_thread.start()
-    bringup_share = get_package_share_directory('voice_nav_bringup')
-    product = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            f'{bringup_share}/launch/product_sim.launch.py'
-        ),
-        launch_arguments={
-            'headless': 'true',
-            'shutdown_on_gazebo_exit': 'false',
-        }.items(),
-    )
-    agent = Node(
-        package='voice_nav_agent',
-        executable='agent_node',
-        name='agent_node',
-        output='screen',
-        parameters=[{'llm_endpoint': llm_server.endpoint}],
-    )
-    speech_driver = ExecuteProcess(cmd=[driver], output='screen')
     return LaunchDescription([
-        product,
-        agent,
-        speech_driver,
+        *actions,
         launch_testing.actions.ReadyToTest(),
-    ]), {
-        'agent': agent,
-        'llm_server': llm_server,
-        'llm_thread': llm_thread,
-        'speech_driver': speech_driver,
-    }
+    ]), fixtures
 
 
 def _yaw_from_odom(message):
@@ -1071,11 +1057,11 @@ class ScriptedVoiceGazeboSmokeTest(unittest.TestCase):
         self.assertLess(successful_speaks[0][0], timed_turns[1][0])
         proc_output.assertWaitFor(
             expected_output=(
-                'EVIDENCE issue142_voice_pipeline '
-                '{"schema_version":1,"tts_texts":["请说明需要前进多少米。",'
-                '"任务已完成。"],"manual_nonzero_pcm":true,'
-                '"played_feedback_scope_count":2,"completed_scope_count":2,'
-                '"first_completed_before_followup":true}'
+                'EVIDENCE scripted_voice_demo '
+                '{"schema_version":1,"simulation_only":true,'
+                '"node_graph":["agent_node","mission_runtime_node",'
+                '"motion_gate_node","voice_speech_input","voice_speech_output"],'
+                '"voice":'
             ),
             process=speech_driver,
             timeout=30.0,
