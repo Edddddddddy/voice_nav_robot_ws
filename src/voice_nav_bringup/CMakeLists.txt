@@ -41,6 +41,11 @@ if(BUILD_TESTING)
     test/test_voice_nav_session_install_contract.py
     TIMEOUT 30
   )
+  ament_add_pytest_test(
+    canonical_session_driver
+    test/test_canonical_session_driver.py
+    TIMEOUT 30
+  )
 
   add_launch_test(
     test/test_motion_gate_product.py

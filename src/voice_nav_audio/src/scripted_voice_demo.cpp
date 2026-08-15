@@ -94,6 +94,11 @@ bool valid_command_text(const std::string & text)
     });
 }
 
+bool is_exact_stop_command(const std::string & text)
+{
+  return text == "停止" || text == "小智停止" || text == "紧急停止";
+}
+
 bool load_optional_exact_head(std::optional<std::string> & head)
 {
   const char * const value = std::getenv("VOICE_NAV_EXACT_HEAD");
@@ -128,6 +133,8 @@ public:
   void start_session_command(std::string command_text, const std::uint64_t first_sequence) noexcept
   {
     command_text_ = std::move(command_text);
+    voice_turn_kind_ = is_exact_stop_command(command_text_) ?
+      VoiceTurnKind::kStop : VoiceTurnKind::kCommand;
     session_first_sequence_ = first_sequence;
     session_active_ = true;
   }
@@ -147,7 +154,7 @@ public:
         sink.on_speech_event(SpeechRecognitionEvent::activity(frame, active_scope_));
       } else if (offset == 2U) {
         sink.on_speech_event(SpeechRecognitionEvent::endpoint_final(
-          frame, active_scope_, command_text_, 1.0F, VoiceTurnKind::kCommand));
+          frame, active_scope_, command_text_, 1.0F, voice_turn_kind_));
         session_active_ = false;
       }
       return;
@@ -184,6 +191,7 @@ private:
   std::string command_text_{};
   TurnScopeIdentity active_scope_{};
   std::uint64_t session_first_sequence_{0U};
+  VoiceTurnKind voice_turn_kind_{VoiceTurnKind::kCommand};
   bool session_active_{false};
 };
 
@@ -958,6 +966,11 @@ public:
         return rejected("command_text must contain non-whitespace UTF-8 text of at most 512 bytes");
       }
       std::lock_guard<std::mutex> lock(mutex_);
+      if (is_exact_stop_command(text)) {
+        pending_ = text;
+        busy_ = true;
+        return result;
+      }
       if (busy_ || pending_.has_value()) {
         return rejected("command_text is busy; wait for the safe stationary barrier");
       }

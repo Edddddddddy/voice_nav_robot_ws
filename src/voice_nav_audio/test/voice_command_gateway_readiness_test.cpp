@@ -54,6 +54,29 @@ public:
   bool finished_safely{false};
 };
 
+class CollectingVoiceTurnSink final : public VoiceTurnSink
+{
+public:
+  void publish(const VoiceTurnPublication & turn) noexcept override
+  {
+    turns.push_back(turn);
+  }
+
+  std::vector<VoiceTurnPublication> turns{};
+};
+
+class FixedVoiceIdentityGenerator final : public VoiceIdentityGenerator
+{
+public:
+  bool generate(std::array<std::uint8_t, 16U> & bytes) noexcept override
+  {
+    for (std::size_t index = 0U; index < bytes.size(); ++index) {
+      bytes[index] = static_cast<std::uint8_t>(index);
+    }
+    return true;
+  }
+};
+
 class RclcppContextGuard final
 {
 public:
@@ -116,7 +139,73 @@ TEST(VoiceCommandGateway, RejectsUntilInitialSafetyIsStable)
   EXPECT_EQ(*command, "前进半米");
 }
 
-TEST(VoiceCommandGateway, ReleasesAfterFreshClarificationReplyAtSafeBarrier)
+TEST(VoiceCommandGateway, AcceptsExactStopPhrasesWhileBusyAndPublishesFormalStopTurns)
+{
+  auto now = std::chrono::steady_clock::time_point{};
+  InitialSafetyStability stability([&now]() {return now;});
+  FakeSessionAdmission admission(stability);
+  VoiceCommandGateway gateway(admission);
+
+  EXPECT_FALSE(stability.observe(true));
+  now += 2s;
+  const auto command_result = gateway.on_parameters({
+      rclcpp::Parameter("command_text", "前进两米")});
+  ASSERT_TRUE(command_result.successful) << command_result.reason;
+  const auto command = gateway.take();
+  ASSERT_TRUE(command.has_value());
+  ASSERT_TRUE(admission.active);
+
+  EXPECT_FALSE(gateway.on_parameters({
+      rclcpp::Parameter("command_text", "右转九十度")}).successful);
+
+  ScriptedRecognizer recognizer(ScriptedScenario::kSession);
+  CollectingVoiceTurnSink sink;
+  FixedVoiceIdentityGenerator identity_generator;
+  SpeechInputCore input(recognizer, sink, identity_generator);
+  std::uint64_t next_audio_sequence = 1U;
+  recognizer.start_session_command(*command, next_audio_sequence);
+  for (std::uint64_t offset = 0U; offset < 3U; ++offset) {
+    input.accept_cleaned_frame(cleaned_frame(next_audio_sequence + offset));
+  }
+  next_audio_sequence += 3U;
+
+  ASSERT_EQ(sink.turns.size(), 1U);
+  EXPECT_EQ(sink.turns.front().kind, VoiceTurnKind::kCommand);
+  const auto voice_instance_id = sink.turns.front().voice_instance_id;
+  EXPECT_EQ(sink.turns.front().voice_seq, 1U);
+
+  const std::array<const char *, 3U> stop_phrases{"停止", "小智停止", "紧急停止"};
+  for (std::size_t stop_phrase_index = 0U;
+    stop_phrase_index < stop_phrases.size(); ++stop_phrase_index)
+  {
+    const auto * const stop_phrase = stop_phrases.at(stop_phrase_index);
+    SCOPED_TRACE(stop_phrase);
+    const auto stop_result = gateway.on_parameters({
+        rclcpp::Parameter("command_text", stop_phrase)});
+    ASSERT_TRUE(stop_result.successful) << stop_result.reason;
+    const auto stop_command = gateway.take();
+    ASSERT_TRUE(stop_command.has_value());
+    EXPECT_EQ(*stop_command, stop_phrase);
+
+    recognizer.start_session_command(*stop_command, next_audio_sequence);
+    for (std::uint64_t offset = 0U; offset < 3U; ++offset) {
+      input.accept_cleaned_frame(cleaned_frame(next_audio_sequence + offset));
+    }
+    next_audio_sequence += 3U;
+
+    const auto expected_turn_count = 2U + stop_phrase_index;
+    ASSERT_EQ(sink.turns.size(), expected_turn_count);
+    const auto & stop_turn = sink.turns.back();
+    EXPECT_EQ(stop_turn.kind, VoiceTurnKind::kStop);
+    EXPECT_EQ(stop_turn.text, stop_phrase);
+    EXPECT_EQ(stop_turn.voice_instance_id, voice_instance_id);
+    EXPECT_EQ(stop_turn.voice_seq, expected_turn_count);
+    EXPECT_FALSE(gateway.on_parameters({
+        rclcpp::Parameter("command_text", "右转九十度")}).successful);
+  }
+}
+
+TEST(VoiceCommandGateway, ReleasesAfterStopAtSafeBarrierOnlyAfterTwoHundredMilliseconds)
 {
   RclcppContextGuard rclcpp_context;
   PlaybackEvidenceRecorder recorder;
@@ -205,8 +294,19 @@ TEST(VoiceCommandGateway, ReleasesAfterFreshClarificationReplyAtSafeBarrier)
   EXPECT_FALSE(gateway.on_parameters({
       rclcpp::Parameter("command_text", "前进")}).successful);
 
+  const auto stop_accepted = gateway.on_parameters({
+      rclcpp::Parameter("command_text", "停止")});
+  ASSERT_TRUE(stop_accepted.successful) << stop_accepted.reason;
+  const auto stop_command = gateway.take();
+  ASSERT_TRUE(stop_command.has_value());
+  EXPECT_EQ(*stop_command, "停止");
+  EXPECT_FALSE(gateway.on_parameters({
+      rclcpp::Parameter("command_text", "右转九十度")}).successful);
+
   turn.voice_seq = 2U;
   turn.turn_id = "current-turn";
+  turn.kind = voice_nav_interfaces::msg::VoiceTurn::STOP;
+  turn.text = "停止";
   speak_status.status_list.front().goal_info.goal_id.uuid[0] = 2U;
   bool fresh_reply_observed = false;
   for (std::size_t attempt = 0U; attempt < 1000U && !fresh_reply_observed; ++attempt) {
