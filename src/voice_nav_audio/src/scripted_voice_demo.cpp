@@ -19,6 +19,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cctype>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
@@ -56,6 +57,7 @@ enum class ScriptedScenario
   kMove,
   kStop,
   kRoute,
+  kCommand,
 };
 
 std::optional<ScriptedScenario> scripted_scenario(const std::string & value)
@@ -69,7 +71,21 @@ std::optional<ScriptedScenario> scripted_scenario(const std::string & value)
   if (value == "route") {
     return ScriptedScenario::kRoute;
   }
+  if (value == "command") {
+    return ScriptedScenario::kCommand;
+  }
   return std::nullopt;
+}
+
+bool valid_command_text(const std::string & text)
+{
+  if (text.empty() || text.size() > 512U) {
+    return false;
+  }
+  return std::any_of(
+    text.cbegin(), text.cend(), [](const char character) {
+      return std::isspace(static_cast<unsigned char>(character)) == 0;
+    });
 }
 
 bool load_optional_exact_head(std::optional<std::string> & head)
@@ -96,8 +112,10 @@ bool load_optional_exact_head(std::optional<std::string> & head)
 class ScriptedRecognizer final : public SpeechRecognizerAdapter
 {
 public:
-  explicit ScriptedRecognizer(const ScriptedScenario scenario)
-  : scenario_(scenario)
+  explicit ScriptedRecognizer(
+    const ScriptedScenario scenario,
+    std::string command_text = {})
+  : scenario_(scenario), command_text_(std::move(command_text))
   {
   }
 
@@ -112,7 +130,8 @@ public:
     } else if (frame.audio_seq == 3U) {
       sink.on_speech_event(SpeechRecognitionEvent::endpoint_final(
         frame, active_scope_, scenario_ == ScriptedScenario::kMove ? "绕到大厅" :
-        scenario_ == ScriptedScenario::kRoute ? "前进半米然后左转九十度" : "前进 2 米",
+        scenario_ == ScriptedScenario::kRoute ? "前进半米然后左转九十度" :
+        scenario_ == ScriptedScenario::kCommand ? command_text_ : "前进 2 米",
         1.0F));
     } else if (frame.audio_seq == 6U) {
       sink.on_speech_event(SpeechRecognitionEvent::endpoint_final(
@@ -133,6 +152,7 @@ public:
 
 private:
   ScriptedScenario scenario_;
+  std::string command_text_{};
   TurnScopeIdentity active_scope_{};
 };
 
@@ -570,6 +590,24 @@ public:
                       self.armed_nonzero_controller_steps_ == std::set<std::uint32_t>{0U, 1U};
     });
   }
+  [[nodiscard]] bool wait_for_command_outcome()
+  {
+    return wait_for([](const auto & self) {
+               const bool mission_succeeded = self.successful_missions_.size() == 1U &&
+                 self.mission_goal_ids_.size() == 1U;
+               const bool safe_reply = self.mission_goal_ids_.empty() &&
+                 self.successful_missions_.empty();
+               return self.successful_speeches_.size() == 1U && self.turns_.size() == 1U &&
+                      (mission_succeeded || safe_reply);
+    });
+  }
+  void begin_final_stationarity_window()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!final_stationary_started_at_.has_value()) {
+      final_stationary_started_at_ = std::chrono::steady_clock::now();
+    }
+  }
   [[nodiscard]] bool wait_for_controller_nonzero()
   {
     return wait_for([](const auto & self) {
@@ -728,7 +766,19 @@ int main(int argc, char ** argv)
   if (!scenario.has_value()) {
     RCLCPP_ERROR(
       configuration->get_logger(),
-      "scenario must be one of move|stop|route; received '%s'", configured_scenario.c_str());
+      "scenario must be one of move|stop|route|command; received '%s'",
+      configured_scenario.c_str());
+    configuration.reset();
+    rclcpp::shutdown();
+    return 1;
+  }
+  const auto command_text = configuration->declare_parameter<std::string>("command_text", "");
+  if (*scenario == voice_nav_audio::ScriptedScenario::kCommand &&
+    !voice_nav_audio::valid_command_text(command_text))
+  {
+    RCLCPP_ERROR(
+      configuration->get_logger(),
+      "command_text must contain non-whitespace UTF-8 text of at most 512 bytes");
     configuration.reset();
     rclcpp::shutdown();
     return 1;
@@ -746,7 +796,7 @@ int main(int argc, char ** argv)
   voice_nav_audio::PlaybackEvidenceRecorder recorder;
   voice_nav_audio::ManualDevice device(recorder);
   auto pipeline = std::make_unique<voice_nav_audio::VoicePipeline>(
-    std::make_unique<voice_nav_audio::ScriptedRecognizer>(*scenario),
+    std::make_unique<voice_nav_audio::ScriptedRecognizer>(*scenario, command_text),
     std::make_unique<voice_nav_audio::DeterministicFakeTts>(recorder), device, &recorder);
   auto graph_probe = std::make_shared<rclcpp::Node>("scripted_voice_demo_graph_probe");
   if (!voice_nav_audio::wait_for_graph(*graph_probe)) {
@@ -848,6 +898,84 @@ int main(int argc, char ** argv)
       rclcpp::shutdown();
       return 1;
     }
+  } else if (*scenario == voice_nav_audio::ScriptedScenario::kCommand) {
+    observer.begin_first_turn_idle_window();
+    if (!observer.wait_for_first_turn_idle_samples()) {
+      RCLCPP_ERROR(
+        graph_probe->get_logger(),
+        "command Voice Mission did not observe a stable idle controller and odometry barrier");
+      executor.cancel();
+      spin_thread.join();
+      pipeline->remove_from_executor(executor);
+      pipeline.reset();
+      graph_probe.reset();
+      rclcpp::shutdown();
+      return 1;
+    }
+    for (std::uint64_t sequence = 1U; sequence <= 3U; ++sequence) {
+      pipeline->accept_cleaned_frame(voice_nav_audio::cleaned_frame(sequence));
+    }
+    if (!observer.wait_for_command_outcome()) {
+      const auto command_summary = observer.summary();
+      RCLCPP_ERROR(
+        graph_probe->get_logger(),
+        "command Voice Mission did not complete safely: turns=%zu goals=%zu successes=%zu "
+        "steps=%zu controller_steps=%zu gate=%d command_zero=%d odom_stationary=%d hold_ms=%ld",
+        command_summary.turns.size(), command_summary.unique_mission_count,
+        command_summary.successful_mission_count, command_summary.active_step_sequence.size(),
+        command_summary.armed_nonzero_controller_steps.size(), command_summary.final_gate_inhibited,
+        command_summary.final_command_is_zero, command_summary.final_odometry_is_stationary,
+        static_cast<long>(command_summary.final_stationary_hold_ms));
+      executor.cancel();
+      spin_thread.join();
+      pipeline->remove_from_executor(executor);
+      pipeline.reset();
+      graph_probe.reset();
+      rclcpp::shutdown();
+      return 1;
+    }
+    const auto command_summary = observer.summary();
+    if (command_summary.unique_mission_count > 0U &&
+      (command_summary.successful_mission_count != 1U ||
+      !command_summary.controller_nonzero_observed))
+    {
+      RCLCPP_ERROR(
+        graph_probe->get_logger(),
+        "command outcome had an invalid Mission/controller record: goals=%zu successes=%zu "
+        "controller_nonzero=%d",
+        command_summary.unique_mission_count, command_summary.successful_mission_count,
+        command_summary.controller_nonzero_observed);
+      executor.cancel();
+      spin_thread.join();
+      pipeline->remove_from_executor(executor);
+      pipeline.reset();
+      graph_probe.reset();
+      rclcpp::shutdown();
+      return 1;
+    }
+    if (command_summary.unique_mission_count == 0U && command_summary.controller_nonzero_observed) {
+      RCLCPP_ERROR(
+        graph_probe->get_logger(),
+        "unsupported command produced a nonzero controller output");
+      executor.cancel();
+      spin_thread.join();
+      pipeline->remove_from_executor(executor);
+      pipeline.reset();
+      graph_probe.reset();
+      rclcpp::shutdown();
+      return 1;
+    }
+    observer.begin_final_stationarity_window();
+    if (!observer.wait_for_final_zero_and_stationarity()) {
+      RCLCPP_ERROR(graph_probe->get_logger(), "command outcome did not hold a final stationary state");
+      executor.cancel();
+      spin_thread.join();
+      pipeline->remove_from_executor(executor);
+      pipeline.reset();
+      graph_probe.reset();
+      rclcpp::shutdown();
+      return 1;
+    }
   } else {
     for (std::uint64_t sequence = 1U; sequence <= 3U; ++sequence) {
       pipeline->accept_cleaned_frame(voice_nav_audio::cleaned_frame(sequence));
@@ -887,11 +1015,16 @@ int main(int argc, char ** argv)
     }
   }
   const auto playback = recorder.snapshot();
+  const auto summary = observer.summary();
   const std::vector<std::string> expected_tts_texts = *scenario ==
     voice_nav_audio::ScriptedScenario::kMove ?
     std::vector<std::string>{"请说明需要前进多少米。", "任务已完成。"} :
     *scenario == voice_nav_audio::ScriptedScenario::kRoute ?
-    std::vector<std::string>{"任务已完成。"} : std::vector<std::string>{"已停止。"};
+    std::vector<std::string>{"任务已完成。"} :
+    *scenario == voice_nav_audio::ScriptedScenario::kCommand ?
+    summary.successful_mission_count == 1U ?
+    std::vector<std::string>{"任务已完成。"} :
+    std::vector<std::string>{"当前无法处理该导航请求。"} : std::vector<std::string>{"已停止。"};
   const std::set<std::uint64_t> completed_scope_ids(
     playback.completion_scope_ids.cbegin(), playback.completion_scope_ids.cend());
   const auto completed_only = std::all_of(
@@ -913,7 +1046,6 @@ int main(int argc, char ** argv)
     rclcpp::shutdown();
     return 1;
   }
-  const auto summary = observer.summary();
   if (*scenario == voice_nav_audio::ScriptedScenario::kMove) {
     std::cout << "EVIDENCE scripted_voice_demo "
               << "{\"schema_version\":1,\"simulation_only\":true,\"node_graph\":[\"agent_node\","
@@ -968,7 +1100,7 @@ int main(int argc, char ** argv)
               << "},\"speak_completed_count\":" << summary.successful_speech_count
               << ",\"teardown\":\"bounded_clean_exit\",\"REAL_AUDIO_MODELS\":\"NOT_RUN\","
               << "\"REAL_LLM_CORPUS\":\"NOT_RUN\"}" << std::endl;
-  } else {
+  } else if (*scenario == voice_nav_audio::ScriptedScenario::kRoute) {
     const auto & route = summary.turns.front();
     std::cout << "EVIDENCE scripted_voice_demo "
               << "{\"schema_version\":3,\"head\":";
@@ -995,6 +1127,47 @@ int main(int argc, char ** argv)
               << *summary.armed_nonzero_controller_steps.crbegin()
               << "]},\"motion\":{\"displacement_m\":" << summary.displacement_m
               << ",\"yaw_delta_rad\":" << summary.yaw_delta_rad
+              << ",\"final_gate_inhibited\":"
+              << (summary.final_gate_inhibited ? "true" : "false")
+              << ",\"final_command_is_zero\":"
+              << (summary.final_command_is_zero ? "true" : "false")
+              << ",\"final_odometry_is_stationary\":"
+              << (summary.final_odometry_is_stationary ? "true" : "false")
+              << ",\"stationary_hold_ms\":" << summary.final_stationary_hold_ms
+              << "},\"teardown\":\"bounded_clean_exit\",\"REAL_AUDIO_MODELS\":\"NOT_RUN\","
+              << "\"REAL_LLM_CORPUS\":\"NOT_RUN\"}" << std::endl;
+  } else {
+    const auto & command = summary.turns.front();
+    std::cout << "EVIDENCE scripted_voice_demo "
+              << "{\"schema_version\":4,\"head\":";
+    if (exact_head.has_value()) {
+      std::cout << std::quoted(*exact_head);
+    } else {
+      std::cout << "null";
+    }
+    std::cout << ",\"scenario\":\"command\",\"simulation_only\":true,\"voice\":{\"turns\":[{"
+              << "\"voice_instance_id\":" << std::quoted(command.voice_instance_id)
+              << ",\"voice_seq\":" << command.voice_seq
+              << ",\"session_id\":" << std::quoted(command.session_id)
+              << ",\"turn_id\":" << std::quoted(command.turn_id)
+              << ",\"kind\":" << static_cast<unsigned int>(command.kind)
+              << ",\"text\":" << std::quoted(command.text)
+              << "}],\"speak_completed_count\":" << summary.successful_speech_count
+              << ",\"speak_texts\":[" << std::quoted(playback.tts_texts.front())
+              << "]},\"provider\":{\"llm_http_request_count\":"
+              << (summary.successful_mission_count == 1U ? 0 : 1) << "},\"missions\":{"
+              << "\"unique_goal_count\":" << summary.unique_mission_count
+              << ",\"successful_goal_count\":" << summary.successful_mission_count
+              << ",\"steps\":[";
+    if (summary.successful_mission_count == 1U) {
+      std::cout << "{\"kind\":2,\"angle_rad\":-1.570796}";
+    }
+    std::cout << "]},\"motion\":{";
+    std::cout
+              << "\"displacement_m\":" << summary.displacement_m
+              << ",\"yaw_delta_rad\":" << summary.yaw_delta_rad
+              << ",\"controller_nonzero_observed\":"
+              << (summary.controller_nonzero_observed ? "true" : "false")
               << ",\"final_gate_inhibited\":"
               << (summary.final_gate_inhibited ? "true" : "false")
               << ",\"final_command_is_zero\":"

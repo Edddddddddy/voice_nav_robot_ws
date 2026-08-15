@@ -34,6 +34,7 @@ from launch_ros.substitutions import FindPackageShare
 
 CLARIFICATION_TEXT = '请说明需要前进多少米。'
 SCENARIOS = ('move', 'stop', 'route')
+COMMAND_TEXT_MAX_BYTES = 512
 
 
 class ScriptedLoopbackServer(ThreadingHTTPServer):
@@ -138,6 +139,23 @@ def _literal_scenario(scenario):
     return scenario
 
 
+def _literal_command_text(command_text):
+    """Validate a literal demo command before any VoiceTurn can be emitted."""
+    if not isinstance(command_text, str):
+        return command_text
+    if not command_text.strip():
+        raise ValueError('command_text must not be empty')
+    try:
+        encoded = command_text.encode('utf-8')
+    except UnicodeEncodeError as error:
+        raise ValueError('command_text must be valid UTF-8') from error
+    if len(encoded) > COMMAND_TEXT_MAX_BYTES:
+        raise ValueError(
+            f'command_text must be at most {COMMAND_TEXT_MAX_BYTES} UTF-8 bytes'
+        )
+    return command_text
+
+
 def create_scripted_voice_demo(
     *,
     headless='true',
@@ -194,6 +212,71 @@ def create_scripted_voice_demo(
         'llm_server': server,
         'llm_thread': worker,
         'scenario': scenario,
+        'speech_driver': speech_driver,
+    }
+
+
+def create_voice_nav_demo(
+    *,
+    command_text='',
+    headless='true',
+    shutdown_on_gazebo_exit='true',
+    shutdown_when_demo_exits=True,
+):
+    """Build the one-command installed demo on the existing product graph."""
+    command_text = _literal_command_text(command_text)
+    server = ScriptedLoopbackServer()
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+
+    product = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([
+                FindPackageShare('voice_nav_bringup'),
+                'launch',
+                'product_sim.launch.py',
+            ])
+        ),
+        launch_arguments={
+            'headless': headless,
+            'shutdown_on_gazebo_exit': shutdown_on_gazebo_exit,
+        }.items(),
+    )
+    agent = Node(
+        package='voice_nav_agent',
+        executable='agent_node',
+        name='agent_node',
+        output='screen',
+        parameters=[{'llm_endpoint': server.endpoint}],
+    )
+    speech_driver = Node(
+        package='voice_nav_audio',
+        executable='scripted_voice_demo',
+        output='screen',
+        parameters=[{
+            'use_sim_time': True,
+            'scenario': 'command',
+            'command_text': command_text,
+        }],
+    )
+    actions = [product, agent, speech_driver]
+    if shutdown_when_demo_exits:
+        actions.append(RegisterEventHandler(OnProcessExit(
+            target_action=speech_driver,
+            on_exit=[Shutdown(reason='VoiceNav command demo completed.')],
+        )))
+
+    def cleanup(_event, _context):
+        _stop_loopback(server, worker)
+        return []
+
+    actions.append(RegisterEventHandler(OnShutdown(on_shutdown=cleanup)))
+    return actions, {
+        'agent': agent,
+        'command_text': command_text,
+        'llm_server': server,
+        'llm_thread': worker,
+        'scenario': 'command',
         'speech_driver': speech_driver,
     }
 

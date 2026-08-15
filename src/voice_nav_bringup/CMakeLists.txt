@@ -26,6 +26,16 @@ if(BUILD_TESTING)
     test/test_scripted_voice_demo_route_replay.py
     TIMEOUT 30
   )
+  ament_add_pytest_test(
+    voice_nav_demo_command_entry
+    test/test_voice_nav_demo_command_entry.py
+    TIMEOUT 30
+  )
+  ament_add_pytest_test(
+    voice_nav_demo_command_replay
+    test/test_voice_nav_demo_command_replay.py
+    TIMEOUT 30
+  )
 
   add_launch_test(
     test/test_motion_gate_product.py
