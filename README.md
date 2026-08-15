@@ -74,11 +74,15 @@ ros2 launch voice_nav_bringup scripted_voice_demo.launch.py headless:=true
 
 # Scripted STOP：实际 VoicePipeline → Agent → Runtime → MotionGate/controller
 ros2 launch voice_nav_bringup scripted_voice_demo.launch.py headless:=true scenario:=stop
+
+# Scripted Route：单一复合 COMMAND 依次前进半米、左转九十度
+ros2 launch voice_nav_bringup scripted_voice_demo.launch.py headless:=true scenario:=route
 ```
 
-两个命令都只用于 Gazebo 仿真。`move` 为默认两轮澄清后前进场景；`stop` 会先观测真实
-controller 非零输出，再由 scripted STOP 走既有 VoiceTurn、Agent 与 `StopMission` 链路停止运动。
-它们不使用真实模型、声卡或云服务，也不是功能安全急停。
+三个命令都只用于 Gazebo 仿真。`move` 为默认两轮澄清后前进场景；`stop` 会先观测真实
+controller 非零输出，再由 scripted STOP 走既有 VoiceTurn、Agent 与 `StopMission` 链路停止运动；
+`route` 由一个确定性 COMMAND 通过同一链路产生 `MOVE_DISTANCE(0.5 m)`、
+`ROTATE_ANGLE(+π/2 rad)` 两步 Mission。它们不使用真实模型、声卡或云服务，也不是功能安全急停。
 
 该入口只使用 deterministic scripted recognizer、loopback provider、fake TTS 与 manual
 full-duplex device，明确不加载模型、不访问云、不打开物理声卡，也不能用于物理机器人。它会在

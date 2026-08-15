@@ -20,11 +20,13 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdint>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <limits>
 #include <optional>
 #include <set>
 #include <string>
@@ -53,6 +55,7 @@ enum class ScriptedScenario
 {
   kMove,
   kStop,
+  kRoute,
 };
 
 std::optional<ScriptedScenario> scripted_scenario(const std::string & value)
@@ -62,6 +65,9 @@ std::optional<ScriptedScenario> scripted_scenario(const std::string & value)
   }
   if (value == "stop") {
     return ScriptedScenario::kStop;
+  }
+  if (value == "route") {
+    return ScriptedScenario::kRoute;
   }
   return std::nullopt;
 }
@@ -105,7 +111,8 @@ public:
       sink.on_speech_event(SpeechRecognitionEvent::activity(frame, active_scope_));
     } else if (frame.audio_seq == 3U) {
       sink.on_speech_event(SpeechRecognitionEvent::endpoint_final(
-        frame, active_scope_, scenario_ == ScriptedScenario::kMove ? "绕到大厅" : "前进 2 米",
+        frame, active_scope_, scenario_ == ScriptedScenario::kMove ? "绕到大厅" :
+        scenario_ == ScriptedScenario::kRoute ? "前进半米然后左转九十度" : "前进 2 米",
         1.0F));
     } else if (frame.audio_seq == 6U) {
       sink.on_speech_event(SpeechRecognitionEvent::endpoint_final(
@@ -315,6 +322,19 @@ bool is_stationary(const nav_msgs::msg::Odometry & odometry)
          std::abs(twist.angular.z) <= 0.02;
 }
 
+double yaw_from_odometry(const nav_msgs::msg::Odometry & odometry)
+{
+  const auto & orientation = odometry.pose.pose.orientation;
+  return std::atan2(
+    2.0 * (orientation.w * orientation.z + orientation.x * orientation.y),
+    1.0 - 2.0 * (orientation.y * orientation.y + orientation.z * orientation.z));
+}
+
+double wrapped_angle(const double angle)
+{
+  return std::atan2(std::sin(angle), std::cos(angle));
+}
+
 bool wait_for_graph(rclcpp::Node & node)
 {
   const auto graph_event = node.get_graph_event();
@@ -340,6 +360,9 @@ public:
     std::size_t terminal_non_success_mission_count{0U};
     std::size_t successful_speech_count{0U};
     double displacement_m{0.0};
+    double yaw_delta_rad{0.0};
+    std::vector<std::uint32_t> active_step_sequence{};
+    std::set<std::uint32_t> armed_nonzero_controller_steps{};
     bool controller_nonzero_observed{false};
     bool post_stop_nonzero_command_observed{false};
     bool final_gate_inhibited{false};
@@ -347,6 +370,7 @@ public:
     bool gate_inhibited_after_motion{false};
     bool final_command_is_zero{false};
     bool final_odometry_is_stationary{false};
+    std::int64_t final_stationary_hold_ms{0};
     std::size_t post_stop_odom_samples{0U};
   };
 
@@ -363,6 +387,14 @@ public:
         state->gate_state == voice_nav_interfaces::msg::MissionState::GATE_INHIBITED;
         if (state->gate_state == voice_nav_interfaces::msg::MissionState::GATE_ARMED) {
           gate_armed_observed_ = true;
+        }
+        latest_gate_armed_ = state->gate_state ==
+          voice_nav_interfaces::msg::MissionState::GATE_ARMED;
+        latest_active_step_ = state->active_step;
+        if (state->active_step <= 1U &&
+          (active_step_sequence_.empty() || active_step_sequence_.back() != state->active_step))
+        {
+          active_step_sequence_.push_back(state->active_step);
         }
         if (gate_armed_observed_ &&
           state->gate_state == voice_nav_interfaces::msg::MissionState::GATE_INHIBITED)
@@ -419,9 +451,15 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         final_command_is_zero_ = is_zero(*command);
         controller_nonzero_observed_ = controller_nonzero_observed_ || !is_zero(*command);
+        if (!is_zero(*command) && latest_gate_armed_ && latest_active_step_ <= 1U) {
+          armed_nonzero_controller_steps_.insert(latest_active_step_);
+        }
         if (gate_inhibited_after_motion_) {
           post_stop_nonzero_command_observed_ =
             post_stop_nonzero_command_observed_ || !is_zero(*command);
+          if (!is_zero(*command)) {
+            final_stationary_started_at_.reset();
+          }
         }
         if (first_turn_idle_window_) {
           ++first_turn_command_samples_;
@@ -433,15 +471,31 @@ public:
       "/odom", rclcpp::QoS(rclcpp::KeepLast(10)),
       [this](const nav_msgs::msg::Odometry::SharedPtr odometry) {
         std::lock_guard<std::mutex> lock(mutex_);
+        const auto yaw = yaw_from_odometry(*odometry);
         if (!have_initial_odometry_) {
           initial_odometry_ = *odometry;
+          initial_yaw_ = yaw;
           have_initial_odometry_ = true;
         }
+        if (have_previous_yaw_) {
+          yaw_delta_rad_ += wrapped_angle(yaw - previous_yaw_);
+        } else {
+          previous_yaw_ = yaw;
+          have_previous_yaw_ = true;
+        }
+        previous_yaw_ = yaw;
         latest_odometry_ = *odometry;
         have_latest_odometry_ = true;
         final_odometry_is_stationary_ = is_stationary(*odometry);
         if (gate_inhibited_after_motion_) {
           ++post_stop_odom_samples_;
+          if (final_odometry_is_stationary_) {
+            if (!final_stationary_started_at_.has_value()) {
+              final_stationary_started_at_ = std::chrono::steady_clock::now();
+            }
+          } else {
+            final_stationary_started_at_.reset();
+          }
         }
         if (first_turn_idle_window_) {
           ++first_turn_odom_samples_;
@@ -507,6 +561,15 @@ public:
                        self.successful_speeches_.size() >= 2U && self.turns_.size() == 2U;
     });
   }
+  [[nodiscard]] bool wait_for_route_completion()
+  {
+    return wait_for([](const auto & self) {
+               return self.successful_missions_.size() == 1U &&
+                      self.successful_speeches_.size() == 1U && self.turns_.size() == 1U &&
+                      self.active_step_sequence_ == std::vector<std::uint32_t>{0U, 1U} &&
+                      self.armed_nonzero_controller_steps_ == std::set<std::uint32_t>{0U, 1U};
+    });
+  }
   [[nodiscard]] bool wait_for_controller_nonzero()
   {
     return wait_for([](const auto & self) {
@@ -531,7 +594,8 @@ public:
   {
     return wait_for([](const auto & self) {
                return self.runtime_ready_ && self.final_command_is_zero_ &&
-                       self.final_odometry_is_stationary_;
+                       self.final_odometry_is_stationary_ &&
+                       self.final_stationary_hold_ms() >= 200;
     });
   }
   [[nodiscard]] std::size_t successful_speech_count()
@@ -549,9 +613,16 @@ public:
     result.terminal_non_success_mission_count = terminal_non_success_missions_.size();
     result.successful_speech_count = successful_speeches_.size();
     if (have_initial_odometry_ && have_latest_odometry_) {
-      result.displacement_m = latest_odometry_.pose.pose.position.x -
+      const auto delta_x = latest_odometry_.pose.pose.position.x -
         initial_odometry_.pose.pose.position.x;
+      const auto delta_y = latest_odometry_.pose.pose.position.y -
+        initial_odometry_.pose.pose.position.y;
+      result.displacement_m = delta_x * std::cos(initial_yaw_) +
+        delta_y * std::sin(initial_yaw_);
     }
+    result.yaw_delta_rad = yaw_delta_rad_;
+    result.active_step_sequence = active_step_sequence_;
+    result.armed_nonzero_controller_steps = armed_nonzero_controller_steps_;
     result.controller_nonzero_observed = controller_nonzero_observed_;
     result.post_stop_nonzero_command_observed = post_stop_nonzero_command_observed_;
     result.final_gate_inhibited = final_gate_inhibited_;
@@ -559,11 +630,21 @@ public:
     result.gate_inhibited_after_motion = gate_inhibited_after_motion_;
     result.final_command_is_zero = final_command_is_zero_;
     result.final_odometry_is_stationary = final_odometry_is_stationary_;
+    result.final_stationary_hold_ms = final_stationary_hold_ms();
     result.post_stop_odom_samples = post_stop_odom_samples_;
     return result;
   }
 
 private:
+  [[nodiscard]] std::int64_t final_stationary_hold_ms() const
+  {
+    if (!final_stationary_started_at_.has_value()) {
+      return 0;
+    }
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now() - *final_stationary_started_at_).count();
+  }
+
   template<typename Predicate>
   bool wait_for(Predicate predicate, const std::chrono::seconds timeout = 60s)
   {
@@ -601,6 +682,8 @@ private:
   bool final_gate_inhibited_{false};
   bool final_command_is_zero_{false};
   bool final_odometry_is_stationary_{false};
+  bool latest_gate_armed_{false};
+  std::uint32_t latest_active_step_{std::numeric_limits<std::uint32_t>::max()};
   bool have_initial_odometry_{false};
   bool have_latest_odometry_{false};
   bool first_turn_idle_window_{false};
@@ -614,6 +697,8 @@ private:
   bool controller_nonzero_observed_{false};
   bool post_stop_nonzero_command_observed_{false};
   std::size_t post_stop_odom_samples_{0U};
+  std::vector<std::uint32_t> active_step_sequence_{};
+  std::set<std::uint32_t> armed_nonzero_controller_steps_{};
   std::set<std::string> mission_goal_ids_{};
   std::set<std::string> successful_missions_{};
   std::set<std::string> terminal_non_success_missions_{};
@@ -621,6 +706,11 @@ private:
   std::vector<voice_nav_interfaces::msg::VoiceTurn> turns_{};
   nav_msgs::msg::Odometry initial_odometry_{};
   nav_msgs::msg::Odometry latest_odometry_{};
+  bool have_previous_yaw_{false};
+  double previous_yaw_{0.0};
+  double initial_yaw_{0.0};
+  double yaw_delta_rad_{0.0};
+  std::optional<std::chrono::steady_clock::time_point> final_stationary_started_at_{};
 };
 
 }  // namespace
@@ -638,7 +728,7 @@ int main(int argc, char ** argv)
   if (!scenario.has_value()) {
     RCLCPP_ERROR(
       configuration->get_logger(),
-      "scenario must be one of move|stop; received '%s'", configured_scenario.c_str());
+      "scenario must be one of move|stop|route; received '%s'", configured_scenario.c_str());
     configuration.reset();
     rclcpp::shutdown();
     return 1;
@@ -722,6 +812,42 @@ int main(int argc, char ** argv)
       rclcpp::shutdown();
       return 1;
     }
+  } else if (*scenario == voice_nav_audio::ScriptedScenario::kRoute) {
+    observer.begin_first_turn_idle_window();
+    if (!observer.wait_for_first_turn_idle_samples()) {
+      RCLCPP_ERROR(
+        graph_probe->get_logger(),
+        "route Voice Mission did not observe a stable idle controller and odometry barrier");
+      executor.cancel();
+      spin_thread.join();
+      pipeline->remove_from_executor(executor);
+      pipeline.reset();
+      graph_probe.reset();
+      rclcpp::shutdown();
+      return 1;
+    }
+    for (std::uint64_t sequence = 1U; sequence <= 3U; ++sequence) {
+      pipeline->accept_cleaned_frame(voice_nav_audio::cleaned_frame(sequence));
+    }
+    if (!observer.wait_for_route_completion() || !observer.wait_for_final_zero_and_stationarity()) {
+      const auto route_summary = observer.summary();
+      RCLCPP_ERROR(
+        graph_probe->get_logger(),
+        "route Voice Mission did not prove ordered motion safely: turns=%zu goals=%zu successes=%zu "
+        "steps=%zu controller_steps=%zu gate=%d command_zero=%d odom_stationary=%d hold_ms=%ld",
+        route_summary.turns.size(), route_summary.unique_mission_count,
+        route_summary.successful_mission_count, route_summary.active_step_sequence.size(),
+        route_summary.armed_nonzero_controller_steps.size(), route_summary.final_gate_inhibited,
+        route_summary.final_command_is_zero, route_summary.final_odometry_is_stationary,
+        static_cast<long>(route_summary.final_stationary_hold_ms));
+      executor.cancel();
+      spin_thread.join();
+      pipeline->remove_from_executor(executor);
+      pipeline.reset();
+      graph_probe.reset();
+      rclcpp::shutdown();
+      return 1;
+    }
   } else {
     for (std::uint64_t sequence = 1U; sequence <= 3U; ++sequence) {
       pipeline->accept_cleaned_frame(voice_nav_audio::cleaned_frame(sequence));
@@ -764,7 +890,8 @@ int main(int argc, char ** argv)
   const std::vector<std::string> expected_tts_texts = *scenario ==
     voice_nav_audio::ScriptedScenario::kMove ?
     std::vector<std::string>{"请说明需要前进多少米。", "任务已完成。"} :
-    std::vector<std::string>{"已停止。"};
+    *scenario == voice_nav_audio::ScriptedScenario::kRoute ?
+    std::vector<std::string>{"任务已完成。"} : std::vector<std::string>{"已停止。"};
   const std::set<std::uint64_t> completed_scope_ids(
     playback.completion_scope_ids.cbegin(), playback.completion_scope_ids.cend());
   const auto completed_only = std::all_of(
@@ -804,7 +931,7 @@ int main(int argc, char ** argv)
               << (summary.final_zero_stationary ? "true" : "false")
               << "},\"REAL_AUDIO_MODELS\":\"NOT_RUN\",\"REAL_LLM_CORPUS\":\"NOT_RUN\"}"
               << std::endl;
-  } else {
+  } else if (*scenario == voice_nav_audio::ScriptedScenario::kStop) {
     const auto & command = summary.turns.front();
     const auto & stop = summary.turns.back();
     std::cout << "EVIDENCE scripted_voice_demo "
@@ -840,6 +967,42 @@ int main(int argc, char ** argv)
               << (summary.final_zero_stationary ? "true" : "false")
               << "},\"speak_completed_count\":" << summary.successful_speech_count
               << ",\"teardown\":\"bounded_clean_exit\",\"REAL_AUDIO_MODELS\":\"NOT_RUN\","
+              << "\"REAL_LLM_CORPUS\":\"NOT_RUN\"}" << std::endl;
+  } else {
+    const auto & route = summary.turns.front();
+    std::cout << "EVIDENCE scripted_voice_demo "
+              << "{\"schema_version\":3,\"head\":";
+    if (exact_head.has_value()) {
+      std::cout << std::quoted(*exact_head);
+    } else {
+      std::cout << "null";
+    }
+    std::cout << ",\"scenario\":\"route\",\"simulation_only\":true,\"voice\":{\"turns\":[{"
+              << "\"voice_instance_id\":" << std::quoted(route.voice_instance_id)
+              << ",\"voice_seq\":" << route.voice_seq
+              << ",\"session_id\":" << std::quoted(route.session_id)
+              << ",\"turn_id\":" << std::quoted(route.turn_id)
+              << ",\"kind\":" << static_cast<unsigned int>(route.kind)
+              << ",\"text\":" << std::quoted(route.text)
+              << "}],\"speak_completed_count\":" << summary.successful_speech_count
+              << "},\"provider\":{\"llm_http_request_count\":0},\"missions\":{"
+              << "\"unique_goal_count\":" << summary.unique_mission_count
+              << ",\"successful_goal_count\":" << summary.successful_mission_count
+              << ",\"active_step_sequence\":[" << summary.active_step_sequence.at(0U) << ","
+              << summary.active_step_sequence.at(1U)
+              << "],\"armed_nonzero_controller_steps\":["
+              << *summary.armed_nonzero_controller_steps.cbegin() << ","
+              << *summary.armed_nonzero_controller_steps.crbegin()
+              << "]},\"motion\":{\"displacement_m\":" << summary.displacement_m
+              << ",\"yaw_delta_rad\":" << summary.yaw_delta_rad
+              << ",\"final_gate_inhibited\":"
+              << (summary.final_gate_inhibited ? "true" : "false")
+              << ",\"final_command_is_zero\":"
+              << (summary.final_command_is_zero ? "true" : "false")
+              << ",\"final_odometry_is_stationary\":"
+              << (summary.final_odometry_is_stationary ? "true" : "false")
+              << ",\"stationary_hold_ms\":" << summary.final_stationary_hold_ms
+              << "},\"teardown\":\"bounded_clean_exit\",\"REAL_AUDIO_MODELS\":\"NOT_RUN\","
               << "\"REAL_LLM_CORPUS\":\"NOT_RUN\"}" << std::endl;
   }
   executor.cancel();

@@ -25,6 +25,30 @@ from ament_index_python.packages import (
 )
 
 
+def _load_launch_module(launch):
+    spec = importlib.util.spec_from_file_location('scripted_voice_demo_launch', launch)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_scripted_voice_demo_route_is_a_closed_source_scenario():
+    launch = Path(__file__).resolve().parents[1] / 'launch' / 'scripted_voice_demo.launch.py'
+    module = _load_launch_module(launch)
+
+    assert module.SCENARIOS == ('move', 'stop', 'route')
+    with pytest.raises(ValueError, match='move\\|stop\\|route'):
+        module.create_scripted_voice_demo(scenario='invalid')
+    _actions, fixtures = module.create_scripted_voice_demo(
+        scenario='route', shutdown_when_demo_exits=False,
+    )
+    try:
+        assert fixtures['scenario'] == 'route'
+    finally:
+        module._stop_loopback(fixtures['llm_server'], fixtures['llm_thread'])
+
+
 def test_scripted_voice_demo_is_available_without_a_test_environment():
     executable = Path(
         get_package_prefix('voice_nav_audio')
@@ -42,10 +66,7 @@ def test_scripted_voice_demo_keeps_pipeline_node_names_unremapped():
     launch = Path(
         get_package_share_directory('voice_nav_bringup')
     ) / 'launch' / 'scripted_voice_demo.launch.py'
-    spec = importlib.util.spec_from_file_location('scripted_voice_demo_launch', launch)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = _load_launch_module(launch)
     _actions, fixtures = module.create_scripted_voice_demo(
         shutdown_when_demo_exits=False,
     )
@@ -55,22 +76,19 @@ def test_scripted_voice_demo_keeps_pipeline_node_names_unremapped():
         module._stop_loopback(fixtures['llm_server'], fixtures['llm_thread'])
 
 
-def test_scripted_voice_demo_stop_is_a_closed_installed_scenario():
+def test_scripted_voice_demo_route_is_a_closed_installed_scenario():
     launch = Path(
         get_package_share_directory('voice_nav_bringup')
     ) / 'launch' / 'scripted_voice_demo.launch.py'
-    spec = importlib.util.spec_from_file_location('scripted_voice_demo_launch', launch)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = _load_launch_module(launch)
 
-    assert module.SCENARIOS == ('move', 'stop')
-    with pytest.raises(ValueError, match='move\\|stop'):
+    assert module.SCENARIOS == ('move', 'stop', 'route')
+    with pytest.raises(ValueError, match='move\\|stop\\|route'):
         module.create_scripted_voice_demo(scenario='invalid')
     _actions, fixtures = module.create_scripted_voice_demo(
-        scenario='stop', shutdown_when_demo_exits=False,
+        scenario='route', shutdown_when_demo_exits=False,
     )
     try:
-        assert fixtures['scenario'] == 'stop'
+        assert fixtures['scenario'] == 'route'
     finally:
         module._stop_loopback(fixtures['llm_server'], fixtures['llm_thread'])
