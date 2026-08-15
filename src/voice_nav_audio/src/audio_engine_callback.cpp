@@ -72,7 +72,9 @@ void AudioEngine::process_callback(
       }
       return;
     }
-    render_playback(rendered, callback_generation);
+    PlaybackPacket rendered_packet{};
+    const bool rendered_playback = render_playback(
+      rendered, callback_generation, rendered_packet);
 
     // This is the publication linearization point for an already-entered
     // callback.  Both externally visible playback copies must originate from
@@ -83,6 +85,23 @@ void AudioEngine::process_callback(
     }
     if (device_output != nullptr) {
       std::copy(rendered.samples.begin(), rendered.samples.end(), device_output);
+    }
+
+    const bool wrote_non_silent_pcm = rendered_playback &&
+      std::any_of(
+      rendered.samples.begin(),
+      rendered.samples.begin() + static_cast<std::ptrdiff_t>(rendered_packet.sample_count),
+      [](const Sample sample) {return sample != 0;});
+    if (device_output != nullptr && wrote_non_silent_pcm && rendered_packet.scope_id != 0U &&
+      !has_pending_discontinuities())
+    {
+      const PlaybackWrite write{
+        rendered_packet.scope_id, callback_generation, rendered_packet.sample_count};
+      if (!playback_write_ring_.push(write)) {
+        // Losing accounting would falsely inflate played.  Fail closed before
+        // a subsequent callback can expose more scope-owned audio.
+        mark_discontinuity();
+      }
     }
 
     (void)reference_ring_.push(rendered);
@@ -137,8 +156,9 @@ void AudioEngine::commit_pending_discontinuities() noexcept
   observed_discontinuity_requests_ = requested;
 }
 
-void AudioEngine::render_playback(
-  AudioFrame & rendered, const std::uint64_t callback_generation) noexcept
+bool AudioEngine::render_playback(
+  AudioFrame & rendered, const std::uint64_t callback_generation,
+  PlaybackPacket & rendered_packet) noexcept
 {
   const auto requested_fade = fade_request_.load(std::memory_order_acquire);
   if (requested_fade != observed_fade_request_) {
@@ -167,6 +187,13 @@ void AudioEngine::render_playback(
     }
     rendered.samples[index] = saturate(value);
   }
+  if (fade_remaining_ == 0U) {
+    fade_total_ = 0U;
+  }
+  if (have_playback) {
+    rendered_packet = packet;
+  }
+  return have_playback;
 }
 
 Sample AudioEngine::saturate(const std::int64_t value) noexcept

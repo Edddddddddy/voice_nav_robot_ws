@@ -30,7 +30,8 @@ constexpr std::uint32_t kMaximumGainQ15 = 4U * kUnityGainQ15;
 
 bool AudioEngine::enqueue_playback(
   const Sample * const samples,
-  const std::size_t sample_count) noexcept
+  const std::size_t sample_count,
+  const std::uint64_t scope_id) noexcept
 {
   if (samples == nullptr || sample_count == 0U || sample_count > kFrameSamples) {
     return false;
@@ -38,6 +39,7 @@ bool AudioEngine::enqueue_playback(
 
   PlaybackPacket packet{};
   packet.generation = generation();
+  packet.scope_id = scope_id;
   packet.sample_count = sample_count;
   std::copy_n(samples, sample_count, packet.samples.begin());
   if (playback_ring_.push(packet)) {
@@ -87,6 +89,11 @@ bool AudioEngine::try_pop_reference(AudioFrame & frame) noexcept
     }
   }
   return false;
+}
+
+bool AudioEngine::try_pop_playback_write(PlaybackWrite & write) noexcept
+{
+  return playback_write_ring_.pop(write);
 }
 
 void AudioEngine::set_playback_gain(float gain) noexcept
