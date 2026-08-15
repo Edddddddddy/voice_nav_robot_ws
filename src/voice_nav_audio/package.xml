@@ -15,6 +15,7 @@
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>rosgraph_msgs</depend>
+  <depend>rcl_interfaces</depend>
   <depend>voice_nav_interfaces</depend>
 
   <test_depend>ament_lint_auto</test_depend>
