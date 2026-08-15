@@ -42,6 +42,29 @@ class _FakeProvider:
         self.requests.append(request)
 
 
+class _GenerationProvider(_FakeProvider):
+    """Provider double with the production adapter-generation admission rule."""
+
+    def __init__(self):
+        super().__init__()
+        self.generation = 0
+        self.block_continuation = False
+        self.continuation_ready = threading.Event()
+        self.release_continuation = threading.Event()
+
+    def invalidate(self, generation):
+        self.generation = generation
+
+    def submit(self, request):
+        if request.round == 2 and self.block_continuation:
+            self.continuation_ready.set()
+            assert self.release_continuation.wait(1.0)
+        if request.adapter_generation != self.generation:
+            return False
+        self.requests.append(request)
+        return True
+
+
 class _FakeMissionPort:
     def __init__(self):
         self.missions = []
@@ -199,6 +222,113 @@ def test_clarify_then_next_turn_proposes_one_valid_mission():
     assert mission_port.cancelled == []
 
 
+def test_clarification_then_snapshot_continuation_proposes_one_mission():
+    """One bounded response carries clarification and one snapshot follow-up."""
+    provider = _FakeProvider()
+    mission_port = _FakeMissionPort()
+    session = _ResponseSession('agent-a', provider, _state, mission_port)
+
+    session.accept_turn(_turn('带我去一个地方', 1))
+    first = provider.requests[-1]
+    session.complete(
+        first,
+        _ProviderResponse(kind='clarify', text='请说明目的地。'),
+    )
+
+    session.accept_turn(_turn('去大厅', 2))
+    second = provider.requests[-1]
+    assert second.clarification == '请说明目的地。'
+    session.complete(
+        second,
+        _ProviderResponse(
+            kind='tool',
+            tool_calls=(_ToolCall('read_runtime_snapshot', {}),),
+        ),
+    )
+
+    continuation = provider.requests[-1]
+    assert continuation.round == 2
+    assert continuation.snapshot_output.name == 'read_runtime_snapshot'
+    session.complete(continuation, _mission_call())
+
+    assert len(mission_port.missions) == 1
+
+
+def test_new_turn_rejects_late_continuation_and_starts_latest_immediately():
+    """An invalidated continuation cannot restart HTTP or strand latest work."""
+    provider = _GenerationProvider()
+    provider.invalidate(1)
+    session = _ResponseSession('agent-a', provider, _state, _FakeMissionPort())
+    session.accept_turn(_turn('first', 1), adapter_generation=1)
+    first = provider.requests[-1]
+    provider.block_continuation = True
+
+    worker = threading.Thread(
+        target=lambda: session.complete(
+            first,
+            _ProviderResponse(
+                kind='tool',
+                tool_calls=(_ToolCall('read_runtime_snapshot', {}),),
+            ),
+        ),
+    )
+    worker.start()
+    assert provider.continuation_ready.wait(1.0)
+
+    provider.invalidate(2)
+    session.invalidate()
+    session.accept_turn(
+        _turn('latest', 2, voice_instance_id='voice-b'),
+        adapter_generation=2,
+    )
+
+    # The continuation has only been admitted by the Session, not by the
+    # adapter.  A newer accepted turn must not wait for it to resume.
+    assert [request.turn.turn_id for request in provider.requests] == [
+        'turn-1',
+        'turn-2',
+    ]
+    provider.release_continuation.set()
+    worker.join(1.0)
+
+    assert not worker.is_alive()
+    assert [request.turn.turn_id for request in provider.requests] == [
+        'turn-1',
+        'turn-2',
+    ]
+    assert provider.requests[-1].round == 1
+
+
+def test_new_session_drops_clarification_and_late_old_session_result():
+    """A strictly newer session begins fresh without retaining A dialogue state."""
+    provider = _FakeProvider()
+    mission_port = _FakeMissionPort()
+    session = _ResponseSession('agent-a', provider, _state, mission_port)
+    session.accept_turn(_turn('A', 1))
+    first = provider.requests[-1]
+    session.complete(
+        first, _ProviderResponse(kind='clarify', text='请说明目的地。')
+    )
+
+    session.accept_turn(
+        VoiceTurn(
+            voice_instance_id='voice-a',
+            voice_seq=2,
+            session_id='session-b',
+            turn_id='turn-b',
+            kind=VoiceTurn.COMMAND,
+            text='B',
+            confidence=1.0,
+        )
+    )
+    second = provider.requests[-1]
+
+    assert second.turn.session_id == 'session-b'
+    assert second.clarification is None
+    session.complete(first, _mission_call())
+    assert mission_port.missions == []
+
+
 def test_one_active_response_retains_only_the_latest_pending_turn():
     """A stale active Response cannot displace the latest pending turn."""
     provider = _FakeProvider()
@@ -354,6 +484,44 @@ def test_normal_new_turn_preserves_committed_mission_until_owned_cancel():
     assert len(mission_port.missions) == 1
 
 
+def test_owned_cancel_stays_with_the_session_that_committed_mission():
+    """A new session cannot cancel another session's owned Mission."""
+    provider = _FakeProvider()
+    mission_port = _FakeMissionPort()
+    session = _ResponseSession('agent-a', provider, _state, mission_port)
+
+    session.accept_turn(_turn('commit', 1))
+    session.complete(provider.requests[-1], _mission_call())
+    committed_identity = next(iter(mission_port.active))
+
+    session.accept_turn(
+        replace(_turn('foreign cancel', 2), session_id='session-b')
+    )
+    session.complete(
+        provider.requests[-1],
+        _ProviderResponse(
+            kind='tool',
+            tool_calls=(_ToolCall('cancel_owned_mission', {}),),
+        ),
+    )
+
+    assert mission_port.cancelled == []
+    assert mission_port.active == {committed_identity}
+
+    session.accept_turn(
+        replace(_turn('owned cancel', 3), session_id='session-a')
+    )
+    session.complete(
+        provider.requests[-1],
+        _ProviderResponse(
+            kind='tool',
+            tool_calls=(_ToolCall('cancel_owned_mission', {}),),
+        ),
+    )
+
+    assert mission_port.cancelled == [committed_identity]
+
+
 def test_agent_generation_invalidation_drops_late_provider_result():
     """An Agent generation transition drops a late provider result."""
     provider = _FakeProvider()
@@ -437,6 +605,41 @@ def test_stop_control_invalidates_blocked_response_without_entering_tool_loop(
 
     session.complete(request, _mission_call())
 
+    assert mission_port.missions == []
+    assert mission_port.cancelled == []
+
+
+def test_snapshot_capture_barrier_does_not_deadlock_stop_or_commit_late_work():
+    """Snapshot capture stays outside the session lock, so STOP wins cleanly."""
+    runtime = [_state()]
+    capture_entered = threading.Event()
+    release_capture = threading.Event()
+    block_capture = [False]
+
+    def snapshot():
+        if block_capture[0]:
+            capture_entered.set()
+            assert release_capture.wait(1.0)
+        return runtime[0]
+
+    provider = _FakeProvider()
+    mission_port = _FakeMissionPort()
+    session = _ResponseSession('agent-a', provider, snapshot, mission_port)
+    session.accept_turn(_turn('blocked completion', 1))
+    request = provider.requests[-1]
+    block_capture[0] = True
+
+    worker = threading.Thread(
+        target=lambda: session.complete(request, _mission_call()),
+    )
+    worker.start()
+    assert capture_entered.wait(1.0)
+
+    session.invalidate()
+    release_capture.set()
+    worker.join(1.0)
+
+    assert not worker.is_alive()
     assert mission_port.missions == []
     assert mission_port.cancelled == []
 
@@ -561,6 +764,11 @@ def test_sequential_snapshot_reads_retain_one_consumable_delivery():
                 tool_calls=(_ToolCall('read_runtime_snapshot', {}),),
             ),
         )
+        session.complete(
+            provider.requests.pop(),
+            _ProviderResponse(kind='reply', text='已读取当前状态。'),
+        )
+        session.consume_events()
 
     retained = session.retained_state
 
