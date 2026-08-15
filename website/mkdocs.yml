@@ -1,0 +1,105 @@
+site_name: VoiceNav Robot
+site_description: 本地中文语音驱动的 ROS 2 仿真导航机器人项目文档
+site_author: Edddddddddy
+site_url: http://47.116.57.154/voice-nav/
+repo_url: https://github.com/Edddddddddy/voice_nav_robot_ws
+repo_name: Edddddddddy/voice_nav_robot_ws
+edit_uri: ""
+copyright: Copyright &copy; 2026 Edddddddddy · Apache-2.0
+
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  language: zh
+  custom_dir: overrides
+  icon:
+    logo: material/robot
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: voicenav-light
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: 切换到深色模式
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: 切换到浅色模式
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.path
+    - navigation.top
+    - navigation.tracking
+    - search.highlight
+    - search.share
+    - search.suggest
+    - toc.follow
+    - content.code.copy
+    - content.code.annotate
+
+nav:
+  - 首页: index.md
+  - 快速开始:
+      - 运行项目: quick-start.md
+  - 核心架构:
+      - 系统总览: architecture/overview.md
+      - Mission Runtime: architecture/mission-runtime.md
+      - 运动安全链: architecture/motion-safety.md
+      - Voice 与 Agent: architecture/voice-agent.md
+  - 项目参考:
+      - 公共 ROS 接口: reference/interfaces.md
+      - 六个 Package: reference/packages.md
+      - 当前状态与路线图: roadmap.md
+  - 开发:
+      - 测试与贡献: development/verification.md
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      toc_depth: 3
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+plugins:
+  - search:
+      lang:
+        - zh
+        - en
+      separator: '[\s\-\.\_]+'
+
+extra_css:
+  - assets/stylesheets/extra.css
+
+extra:
+  status:
+    verified: 已验证
+    target: 目标能力
+    boundary: 边界
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/Edddddddddy/voice_nav_robot_ws
+      name: VoiceNav Robot on GitHub

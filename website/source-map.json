@@ -1,0 +1,59 @@
+{
+  "index.md": [
+    "README.md",
+    "docs/architecture/overview.md",
+    "docs/architecture/safety-and-motion-contract.md"
+  ],
+  "quick-start.md": [
+    "README.md",
+    "src/voice_nav_bringup/launch/product_sim.launch.py",
+    "scripts/verify.sh"
+  ],
+  "architecture/overview.md": [
+    "docs/architecture/overview.md",
+    "docs/adr/0003-use-one-deep-mission-runtime.md",
+    "docs/adr/0004-separate-mapping-and-navigation-modes.md"
+  ],
+  "architecture/mission-runtime.md": [
+    "docs/architecture/mission-runtime-interface.md",
+    "src/voice_nav_mission/include/voice_nav_mission/mission_runtime_core.hpp",
+    "src/voice_nav_interfaces/action/ExecuteMission.action"
+  ],
+  "architecture/motion-safety.md": [
+    "docs/architecture/safety-and-motion-contract.md",
+    "src/voice_nav_mission/include/voice_nav_mission/motion_gate_core.hpp",
+    "docs/adr/0002-migrate-to-gz-ros2-control.md"
+  ],
+  "architecture/voice-agent.md": [
+    "docs/architecture/voice-and-agent.md",
+    "src/voice_nav_agent/voice_nav_agent/core.py",
+    "src/voice_nav_agent/voice_nav_agent/agent_node.py",
+    "src/voice_nav_audio/src/speech_input_core.hpp"
+  ],
+  "reference/interfaces.md": [
+    "src/voice_nav_interfaces/msg/MissionStep.msg",
+    "src/voice_nav_interfaces/msg/MissionState.msg",
+    "src/voice_nav_interfaces/msg/VoiceTurn.msg",
+    "src/voice_nav_interfaces/action/ExecuteMission.action",
+    "src/voice_nav_interfaces/action/Speak.action",
+    "src/voice_nav_interfaces/srv/StopMission.srv"
+  ],
+  "reference/packages.md": [
+    "src/voice_nav_interfaces/package.xml",
+    "src/voice_nav_sim/package.xml",
+    "src/voice_nav_mission/package.xml",
+    "src/voice_nav_agent/package.xml",
+    "src/voice_nav_audio/package.xml",
+    "src/voice_nav_bringup/package.xml"
+  ],
+  "roadmap.md": [
+    "README.md",
+    "docs/product/v1.0-product-spec.md",
+    "docs/process/release-policy.md"
+  ],
+  "development/verification.md": [
+    "CONTRIBUTING.md",
+    "docs/process/change-lifecycle.md",
+    "docs/process/testing-strategy.md"
+  ]
+}
