@@ -33,6 +33,7 @@ from launch_ros.substitutions import FindPackageShare
 
 
 CLARIFICATION_TEXT = '请说明需要前进多少米。'
+SCENARIOS = ('move', 'stop')
 
 
 class ScriptedLoopbackServer(ThreadingHTTPServer):
@@ -131,13 +132,21 @@ def _stop_loopback(server, worker):
     worker.join(5.0)
 
 
+def _literal_scenario(scenario):
+    if isinstance(scenario, str) and scenario not in SCENARIOS:
+        raise ValueError(f'scenario must be one of {"|".join(SCENARIOS)}')
+    return scenario
+
+
 def create_scripted_voice_demo(
     *,
     headless='true',
     shutdown_on_gazebo_exit='true',
     shutdown_when_demo_exits=True,
+    scenario='move',
 ):
     """Build the installed demo graph and return its test observation seams."""
+    scenario = _literal_scenario(scenario)
     server = ScriptedLoopbackServer()
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
@@ -166,7 +175,7 @@ def create_scripted_voice_demo(
         package='voice_nav_audio',
         executable='scripted_voice_demo',
         output='screen',
-        parameters=[{'use_sim_time': True}],
+        parameters=[{'use_sim_time': True, 'scenario': scenario}],
     )
     actions = [product, agent, speech_driver]
     if shutdown_when_demo_exits:
@@ -184,6 +193,7 @@ def create_scripted_voice_demo(
         'agent': agent,
         'llm_server': server,
         'llm_thread': worker,
+        'scenario': scenario,
         'speech_driver': speech_driver,
     }
 
@@ -192,9 +202,11 @@ def generate_launch_description():
     """Launch the self-contained, headless-by-default simulation demo."""
     headless = LaunchConfiguration('headless')
     shutdown_on_gazebo_exit = LaunchConfiguration('shutdown_on_gazebo_exit')
+    scenario = LaunchConfiguration('scenario')
     actions, _ = create_scripted_voice_demo(
         headless=headless,
         shutdown_on_gazebo_exit=shutdown_on_gazebo_exit,
+        scenario=scenario,
     )
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -208,6 +220,12 @@ def generate_launch_description():
             default_value='true',
             choices=['true', 'false'],
             description='Fail closed when the required Gazebo simulation exits.',
+        ),
+        DeclareLaunchArgument(
+            'scenario',
+            default_value='move',
+            choices=SCENARIOS,
+            description='Run the fixed simulation-only move or stop scenario.',
         ),
         *actions,
     ])

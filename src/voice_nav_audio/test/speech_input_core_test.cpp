@@ -368,6 +368,30 @@ TEST(SpeechInputCoreTest, PublishesExactlyOneCommandForAnAcceptedFinalTurn)
   EXPECT_FALSE(turn.during_playback);
 }
 
+TEST(SpeechInputCoreTest, PublishesScriptedStopWithTheCompletedVoiceTurnIdentity)
+{
+  ManualRecognizer recognizer;
+  CollectingVoiceTurnSink sink;
+  SpeechInputCore core(recognizer, sink);
+
+  const auto wake = frame(7U, 1U);
+  core.accept_cleaned_frame(wake);
+  recognizer.emit(SpeechRecognitionEvent::wake_accepted(wake));
+  const auto scope = recognizer.active_scope;
+  const auto final = frame(7U, 2U);
+  core.accept_cleaned_frame(final);
+  recognizer.emit(SpeechRecognitionEvent::endpoint_final(
+      final, scope, "停止", 1.0F, VoiceTurnKind::kStop));
+
+  ASSERT_EQ(sink.turns.size(), 1U);
+  const auto & turn = sink.turns.front();
+  EXPECT_EQ(turn.kind, VoiceTurnKind::kStop);
+  EXPECT_EQ(turn.voice_seq, 1U);
+  EXPECT_EQ(turn.session_id, scope.session_id);
+  EXPECT_EQ(turn.turn_id, scope.turn_id);
+  EXPECT_EQ(turn.text, "停止");
+}
+
 TEST(SpeechInputCoreTest, RejectsEveryInvalidFinalAndTerminalEventWithoutAPublication)
 {
   struct InvalidFinal
