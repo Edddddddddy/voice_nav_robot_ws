@@ -136,7 +136,10 @@ AudioMetrics AudioEngine::metrics() const noexcept
     reference_overflows_.load(std::memory_order_relaxed),
     playback_underflows_.load(std::memory_order_relaxed),
     xruns_.load(std::memory_order_relaxed),
-    discontinuities_.load(std::memory_order_relaxed)};
+    discontinuities_.load(std::memory_order_relaxed),
+    last_fence_generation_before_.load(std::memory_order_acquire),
+    last_fence_generation_after_.load(std::memory_order_acquire),
+    stale_pcm_after_fence_.load(std::memory_order_acquire)};
 }
 
 }  // namespace voice_nav_audio

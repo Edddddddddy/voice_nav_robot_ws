@@ -96,7 +96,7 @@ bool valid_command_text(const std::string & text)
 
 bool is_exact_stop_command(const std::string & text)
 {
-  return text == "停止" || text == "小智停止" || text == "紧急停止";
+  return text == "小智停止" || text == "紧急停止";
 }
 
 bool load_optional_exact_head(std::optional<std::string> & head)
@@ -149,19 +149,26 @@ public:
       }
       const auto offset = frame.audio_seq - session_first_sequence_;
       if (frame.audio_seq == session_first_sequence_) {
-        sink.on_speech_event(SpeechRecognitionEvent::wake_accepted(frame));
-      } else if (offset == 1U) {
+        if (voice_turn_kind_ != VoiceTurnKind::kStop) {
+          sink.on_speech_event(SpeechRecognitionEvent::wake_accepted(frame));
+        }
+      } else if (offset == 1U && voice_turn_kind_ != VoiceTurnKind::kStop) {
         sink.on_speech_event(SpeechRecognitionEvent::activity(frame, active_scope_));
       } else if (offset == 2U) {
         sink.on_speech_event(SpeechRecognitionEvent::endpoint_final(
-          frame, active_scope_, command_text_, 1.0F, voice_turn_kind_));
+          frame, voice_turn_kind_ == VoiceTurnKind::kStop ? TurnScopeIdentity{} : active_scope_,
+          command_text_, 1.0F, voice_turn_kind_));
         session_active_ = false;
       }
       return;
     }
-    if (frame.audio_seq == 1U || frame.audio_seq == 4U) {
+    if (frame.audio_seq == 1U ||
+      (frame.audio_seq == 4U && scenario_ != ScriptedScenario::kStop))
+    {
       sink.on_speech_event(SpeechRecognitionEvent::wake_accepted(frame));
-    } else if (frame.audio_seq == 2U || frame.audio_seq == 5U) {
+    } else if ((frame.audio_seq == 2U || frame.audio_seq == 5U) &&
+      scenario_ != ScriptedScenario::kStop)
+    {
       sink.on_speech_event(SpeechRecognitionEvent::activity(frame, active_scope_));
     } else if (frame.audio_seq == 3U) {
       sink.on_speech_event(SpeechRecognitionEvent::endpoint_final(
@@ -171,7 +178,8 @@ public:
         1.0F));
     } else if (frame.audio_seq == 6U) {
       sink.on_speech_event(SpeechRecognitionEvent::endpoint_final(
-        frame, active_scope_, scenario_ == ScriptedScenario::kMove ? "半米" : "停止", 1.0F,
+        frame, scenario_ == ScriptedScenario::kMove ? active_scope_ : TurnScopeIdentity{},
+        scenario_ == ScriptedScenario::kMove ? "半米" : "小智停止", 1.0F,
         scenario_ == ScriptedScenario::kMove ? VoiceTurnKind::kCommand : VoiceTurnKind::kStop));
     }
   }
@@ -214,6 +222,7 @@ public:
     std::set<std::uint64_t> feedback_scope_ids{};
     std::vector<std::uint64_t> completion_scope_ids{};
     std::vector<SpeechResultCode> completion_codes{};
+    std::size_t barged_in_count{0U};
   };
 
   void record_tts_text(const std::string & text)
@@ -242,6 +251,9 @@ public:
     std::lock_guard<std::mutex> lock(mutex_);
     snapshot_.completion_scope_ids.push_back(result.scope_id);
     snapshot_.completion_codes.push_back(result.code);
+    if (result.code == SpeechResultCode::BargedIn) {
+      ++snapshot_.barged_in_count;
+    }
   }
 
   [[nodiscard]] Snapshot snapshot() const
@@ -258,8 +270,9 @@ private:
 class DeterministicFakeTts final : public TtsAdapter
 {
 public:
-  explicit DeterministicFakeTts(PlaybackEvidenceRecorder & recorder)
-  : recorder_(recorder)
+  explicit DeterministicFakeTts(
+    PlaybackEvidenceRecorder & recorder, const bool hold_first_active)
+  : recorder_(recorder), hold_first_active_(hold_first_active)
   {
   }
 
@@ -269,15 +282,30 @@ public:
     std::array<Sample, 147U> pcm{};
     pcm.fill(1000);
     (void)sink.on_pcm(request.scope_id, 22050U, 1U, pcm.data(), pcm.size());
+    if (hold_first_active_ && !held_active_ && request.text != "已停止。") {
+      held_active_ = true;
+      held_scope_id_ = request.scope_id;
+      held_sink_ = &sink;
+      return;
+    }
     sink.on_complete(request.scope_id);
   }
 
-  void cancel(std::uint64_t) noexcept override
+  void cancel(const std::uint64_t scope_id) noexcept override
   {
+    if (held_active_ && scope_id == held_scope_id_) {
+      held_active_ = false;
+      held_scope_id_ = 0U;
+      held_sink_ = nullptr;
+    }
   }
 
 private:
   PlaybackEvidenceRecorder & recorder_;
+  bool hold_first_active_{false};
+  bool held_active_{false};
+  std::uint64_t held_scope_id_{0U};
+  TtsSink * held_sink_{nullptr};
 };
 
 class ManualDevice final : public FullDuplexAudioDevice
@@ -469,7 +497,10 @@ public:
     double yaw_delta_rad{0.0};
     std::vector<std::uint32_t> active_step_sequence{};
     std::set<std::uint32_t> armed_nonzero_controller_steps{};
+    bool gate_armed_observed{false};
     bool controller_nonzero_observed{false};
+    std::size_t controller_nonzero_callback_count{0U};
+    std::size_t command_callback_count{0U};
     bool post_stop_nonzero_command_observed{false};
     bool final_gate_inhibited{false};
     bool final_zero_stationary{false};
@@ -570,8 +601,12 @@ public:
       "/diff_drive_controller/cmd_vel", rclcpp::QoS(rclcpp::KeepLast(10)),
       [this](const geometry_msgs::msg::TwistStamped::SharedPtr command) {
         std::lock_guard<std::mutex> lock(mutex_);
+        ++command_callback_count_;
         final_command_is_zero_ = is_zero(*command);
-        controller_nonzero_observed_ = controller_nonzero_observed_ || !is_zero(*command);
+        if (!is_zero(*command)) {
+          controller_nonzero_observed_ = true;
+          ++controller_nonzero_callback_count_;
+        }
         if (session_command_active_ && !is_zero(*command)) {
           session_command_activity_ = true;
           session_stationary_started_at_.reset();
@@ -619,7 +654,7 @@ public:
           ++post_stop_odom_samples_;
           if (final_odometry_is_stationary_) {
             if (!final_stationary_started_at_.has_value()) {
-              final_stationary_started_at_ = std::chrono::steady_clock::now();
+              final_stationary_started_at_ = now_();
             }
           } else {
             final_stationary_started_at_.reset();
@@ -764,7 +799,7 @@ public:
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!final_stationary_started_at_.has_value()) {
-      final_stationary_started_at_ = std::chrono::steady_clock::now();
+      final_stationary_started_at_ = now_();
     }
   }
   [[nodiscard]] bool wait_for_controller_nonzero()
@@ -773,7 +808,19 @@ public:
                return self.mission_goal_ids_.size() == 1U && self.controller_nonzero_observed_;
     });
   }
-  [[nodiscard]] bool wait_for_stop_completion()
+  [[nodiscard]] bool wait_for_first_speak_playback(
+    PlaybackEvidenceRecorder & playback, const std::chrono::seconds timeout = 60s)
+  {
+    return wait_for([&playback](const auto &) {
+             const auto snapshot = playback.snapshot();
+             return snapshot.tts_texts.size() == 1U &&
+                    snapshot.nonzero_callback_count >= 1U &&
+                    snapshot.feedback_scope_ids.size() == 1U &&
+                    snapshot.completion_scope_ids.empty();
+           }, timeout);
+  }
+  [[nodiscard]] bool wait_for_stop_completion(
+    const std::chrono::milliseconds timeout = 60s)
   {
     return wait_for([](const auto & self) {
                return self.turns_.size() == 2U && self.turns_.front().kind ==
@@ -785,15 +832,22 @@ public:
                self.final_command_is_zero_ && self.final_odometry_is_stationary_ &&
                self.post_stop_odom_samples_ >= 4U &&
                !self.post_stop_nonzero_command_observed_;
-    });
+    }, timeout);
   }
-  [[nodiscard]] bool wait_for_final_zero_and_stationarity()
+  [[nodiscard]] bool wait_for_final_zero_and_stationarity(
+    const std::chrono::milliseconds timeout = 60s)
   {
     return wait_for([](const auto & self) {
                return self.runtime_ready_ && self.final_command_is_zero_ &&
                        self.final_odometry_is_stationary_ &&
                        self.final_stationary_hold_ms() >= 200;
-    });
+    }, timeout);
+  }
+  [[nodiscard]] bool wait_for_stop_completion_and_final_stationarity(
+    const std::chrono::milliseconds timeout = 60s)
+  {
+    return wait_for_stop_completion(timeout) &&
+           wait_for_final_zero_and_stationarity(timeout);
   }
   [[nodiscard]] std::size_t successful_speech_count()
   {
@@ -820,7 +874,10 @@ public:
     result.yaw_delta_rad = yaw_delta_rad_;
     result.active_step_sequence = active_step_sequence_;
     result.armed_nonzero_controller_steps = armed_nonzero_controller_steps_;
+    result.gate_armed_observed = gate_armed_observed_;
     result.controller_nonzero_observed = controller_nonzero_observed_;
+    result.controller_nonzero_callback_count = controller_nonzero_callback_count_;
+    result.command_callback_count = command_callback_count_;
     result.post_stop_nonzero_command_observed = post_stop_nonzero_command_observed_;
     result.final_gate_inhibited = final_gate_inhibited_;
     result.final_zero_stationary = final_command_is_zero_ && final_odometry_is_stationary_;
@@ -869,11 +926,11 @@ private:
       return 0;
     }
     return std::chrono::duration_cast<std::chrono::milliseconds>(
-      std::chrono::steady_clock::now() - *final_stationary_started_at_).count();
+      now_() - *final_stationary_started_at_).count();
   }
 
   template<typename Predicate>
-  bool wait_for(Predicate predicate, const std::chrono::seconds timeout = 60s)
+  bool wait_for(Predicate predicate, const std::chrono::milliseconds timeout = 60s)
   {
     std::unique_lock<std::mutex> lock(mutex_);
     const auto deadline = std::chrono::steady_clock::now() + timeout;
@@ -928,6 +985,8 @@ private:
   std::size_t session_turn_baseline_{0U};
   std::size_t session_successful_speech_baseline_{0U};
   bool controller_nonzero_observed_{false};
+  std::size_t controller_nonzero_callback_count_{0U};
+  std::size_t command_callback_count_{0U};
   bool post_stop_nonzero_command_observed_{false};
   std::size_t post_stop_odom_samples_{0U};
   std::vector<std::uint32_t> active_step_sequence_{};
@@ -1121,7 +1180,8 @@ int main(int argc, char ** argv)
   auto * const session_recognizer = recognizer.get();
   auto pipeline = std::make_unique<voice_nav_audio::VoicePipeline>(
     std::move(recognizer),
-    std::make_unique<voice_nav_audio::DeterministicFakeTts>(recorder), device, &recorder);
+    std::make_unique<voice_nav_audio::DeterministicFakeTts>(
+      recorder, *scenario == voice_nav_audio::ScriptedScenario::kStop), device, &recorder);
   auto graph_probe = std::make_shared<rclcpp::Node>("scripted_voice_demo_graph_probe");
   voice_nav_audio::CompletionObserver observer(device);
   rclcpp::executors::SingleThreadedExecutor executor;
@@ -1420,20 +1480,40 @@ int main(int argc, char ** argv)
       rclcpp::shutdown();
       return 1;
     }
+    if (!observer.wait_for_first_speak_playback(recorder)) {
+      const auto playback_barrier = recorder.snapshot();
+      RCLCPP_ERROR(
+        graph_probe->get_logger(),
+        "scripted STOP playback barrier did not converge: tts_started=%zu "
+        "nonzero_callbacks=%zu feedback_scopes=%zu completion_scopes=%zu "
+        "barged_in=%zu direct_stop_requests=%zu",
+        playback_barrier.tts_texts.size(), playback_barrier.nonzero_callback_count,
+        playback_barrier.feedback_scope_ids.size(), playback_barrier.completion_scope_ids.size(),
+        playback_barrier.barged_in_count,
+        pipeline->direct_stop_request_count());
+      executor.cancel();
+      spin_thread.join();
+      pipeline->remove_from_executor(executor);
+      pipeline.reset();
+      graph_probe.reset();
+      rclcpp::shutdown();
+      return 1;
+    }
     for (std::uint64_t sequence = 4U; sequence <= 6U; ++sequence) {
       pipeline->accept_cleaned_frame(voice_nav_audio::cleaned_frame(sequence));
     }
-    if (!observer.wait_for_stop_completion()) {
+    if (!observer.wait_for_stop_completion_and_final_stationarity()) {
       const auto stop_summary = observer.summary();
       RCLCPP_ERROR(
         graph_probe->get_logger(),
         "scripted STOP did not return to an inhibited, stationary state: turns=%zu goals=%zu "
         "terminal_non_success=%zu speaks=%zu gate_transition=%d final_gate=%d command_zero=%d "
-        "odom_stationary=%d post_stop_odom=%zu post_stop_nonzero=%d",
+        "odom_stationary=%d stationary_hold_ms=%ld post_stop_odom=%zu post_stop_nonzero=%d",
         stop_summary.turns.size(), stop_summary.unique_mission_count,
         stop_summary.terminal_non_success_mission_count, stop_summary.successful_speech_count,
         stop_summary.gate_inhibited_after_motion, stop_summary.final_gate_inhibited,
         stop_summary.final_command_is_zero, stop_summary.final_odometry_is_stationary,
+        static_cast<long>(stop_summary.final_stationary_hold_ms),
         stop_summary.post_stop_odom_samples, stop_summary.post_stop_nonzero_command_observed);
       executor.cancel();
       spin_thread.join();
@@ -1446,6 +1526,8 @@ int main(int argc, char ** argv)
   }
   const auto playback = recorder.snapshot();
   const auto summary = observer.summary();
+  const auto direct_stop_request_count = pipeline->direct_stop_request_count();
+  const auto audio_metrics = pipeline->audio_metrics();
   const std::vector<std::string> expected_tts_texts = *scenario ==
     voice_nav_audio::ScriptedScenario::kMove ?
     std::vector<std::string>{"请说明需要前进多少米。", "任务已完成。"} :
@@ -1460,12 +1542,33 @@ int main(int argc, char ** argv)
   const auto completed_only = std::all_of(
     playback.completion_codes.cbegin(), playback.completion_codes.cend(),
     [](const auto code) {return code == voice_nav_audio::SpeechResultCode::Completed;});
-  if (playback.tts_texts != expected_tts_texts ||
-    playback.nonzero_callback_count < expected_tts_texts.size() ||
-    playback.feedback_scope_ids.size() != expected_tts_texts.size() ||
-    playback.completion_scope_ids.size() != expected_tts_texts.size() ||
-    completed_scope_ids.size() != expected_tts_texts.size() || !completed_only ||
-    observer.successful_speech_count() != expected_tts_texts.size())
+  const auto completed_speech_count = static_cast<std::size_t>(std::count(
+      playback.completion_codes.cbegin(), playback.completion_codes.cend(),
+      voice_nav_audio::SpeechResultCode::Completed));
+  const auto stop_turn_count = static_cast<std::size_t>(std::count_if(
+      summary.turns.cbegin(), summary.turns.cend(), [](const auto & turn) {
+        return turn.kind == voice_nav_interfaces::msg::VoiceTurn::STOP;
+      }));
+  const bool normal_playback_ok = *scenario != voice_nav_audio::ScriptedScenario::kStop &&
+    playback.tts_texts == expected_tts_texts &&
+    playback.nonzero_callback_count >= expected_tts_texts.size() &&
+    playback.feedback_scope_ids.size() == expected_tts_texts.size() &&
+    playback.completion_scope_ids.size() == expected_tts_texts.size() &&
+    completed_scope_ids.size() == expected_tts_texts.size() && completed_only &&
+    observer.successful_speech_count() == expected_tts_texts.size();
+  const bool stop_playback_ok = *scenario == voice_nav_audio::ScriptedScenario::kStop &&
+    direct_stop_request_count == 1U && stop_turn_count == 1U &&
+    playback.tts_texts.size() == 2U && playback.tts_texts.back() == "已停止。" &&
+    playback.nonzero_callback_count >= 2U && playback.feedback_scope_ids.size() == 2U &&
+    playback.completion_scope_ids.size() == 2U && completed_scope_ids.size() == 2U &&
+    audio_metrics.last_fence_generation_before > 0U &&
+    audio_metrics.last_fence_generation_after ==
+    audio_metrics.last_fence_generation_before + 1U &&
+    audio_metrics.stale_pcm_after_fence == 0U && playback.barged_in_count == 1U &&
+    completed_speech_count == 1U && observer.successful_speech_count() == 1U &&
+    summary.final_gate_inhibited && summary.final_command_is_zero &&
+    summary.final_odometry_is_stationary && summary.final_stationary_hold_ms >= 200;
+  if (!normal_playback_ok && !stop_playback_ok)
   {
     RCLCPP_ERROR(graph_probe->get_logger(), "real Speak playback evidence did not converge");
     executor.cancel();
@@ -1515,7 +1618,8 @@ int main(int argc, char ** argv)
               << ",\"session_id\":" << std::quoted(stop.session_id)
               << ",\"turn_id\":" << std::quoted(stop.turn_id)
               << ",\"kind\":" << static_cast<unsigned int>(stop.kind)
-              << ",\"text\":" << std::quoted(stop.text) << "}]},\"missions\":{\"unique_goal_count\":"
+              << ",\"text\":" << std::quoted(stop.text)
+              << "}]},\"missions\":{\"unique_goal_count\":"
               << summary.unique_mission_count << ",\"terminal_non_success_goal_count\":"
               << summary.terminal_non_success_mission_count << "},\"stop\":{\"turn_count\":1,"
               << "\"controller_nonzero_before_stop\":"
@@ -1527,9 +1631,16 @@ int main(int argc, char ** argv)
               << (summary.final_gate_inhibited ? "true" : "false")
               << ",\"final_zero_stationary\":"
               << (summary.final_zero_stationary ? "true" : "false")
+              << ",\"stationary_hold_ms\":" << summary.final_stationary_hold_ms
               << "},\"speak_completed_count\":" << summary.successful_speech_count
-              << ",\"teardown\":\"bounded_clean_exit\",\"REAL_AUDIO_MODELS\":\"NOT_RUN\","
-              << "\"REAL_LLM_CORPUS\":\"NOT_RUN\"}" << std::endl;
+              << ",\"direct_stop_request_count\":" << direct_stop_request_count
+              << ",\"speak_barged_in_count\":" << playback.barged_in_count
+              << ",\"audio_fence\":{\"generation_before\":"
+              << audio_metrics.last_fence_generation_before
+              << ",\"generation_after\":" << audio_metrics.last_fence_generation_after
+              << ",\"stale_pcm_after\":" << audio_metrics.stale_pcm_after_fence << "},"
+              << "\"REAL_AUDIO_MODELS\":\"NOT_RUN\","
+               << "\"REAL_LLM_CORPUS\":\"NOT_RUN\"}" << std::endl;
   } else if (*scenario == voice_nav_audio::ScriptedScenario::kRoute) {
     const auto & route = summary.turns.front();
     std::cout << "EVIDENCE scripted_voice_demo "

@@ -34,6 +34,7 @@ enum class SpeechResultCode : std::uint16_t
 {
   Completed = 0U,
   Canceled = 1U,
+  BargedIn = 2U,
   Failed = 10U
 };
 
@@ -89,6 +90,17 @@ public:
   virtual void on_result(const SpeechResult & result) noexcept = 0;
 };
 
+// Package-private PlaybackScope control seam used by the VoicePipeline
+// coordinator.  It exposes only wake admission and STOP fencing.
+class SpeechOutputControl
+{
+public:
+  virtual ~SpeechOutputControl() = default;
+
+  [[nodiscard]] virtual bool admit_ordinary_wake() noexcept = 0;
+  [[nodiscard]] virtual bool interrupt_for_stop() noexcept = 0;
+};
+
 struct SpeechAdmission
 {
   std::uint64_t scope_id{0U};
@@ -100,7 +112,7 @@ struct SpeechAdmission
 
 // Package-private output module.  The ROS layer only maps Speak values to this
 // stable contract; provider callbacks and raw PCM cannot escape this class.
-class SpeechOutputCore final : private TtsSink
+class SpeechOutputCore final : public SpeechOutputControl, private TtsSink
 {
 public:
   SpeechOutputCore(AudioEngine & engine, TtsAdapter & tts, SpeechOutputObserver & observer);
@@ -108,6 +120,9 @@ public:
   [[nodiscard]] SpeechAdmission start(const SpeechGoal & goal) noexcept;
   [[nodiscard]] bool begin_synthesis(std::uint64_t scope_id) noexcept;
   [[nodiscard]] bool cancel(std::uint64_t scope_id) noexcept;
+  [[nodiscard]] bool interrupt_for_barge_in() noexcept;
+  [[nodiscard]] bool interrupt_for_stop() noexcept override;
+  [[nodiscard]] bool admit_ordinary_wake() noexcept override;
   [[nodiscard]] bool advance() noexcept;
   [[nodiscard]] std::uint64_t ready_scope_id() const noexcept;
 

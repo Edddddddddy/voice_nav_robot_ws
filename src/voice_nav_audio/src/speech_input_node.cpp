@@ -25,7 +25,9 @@ rclcpp::QoS voice_turn_qos()
   return rclcpp::QoS(rclcpp::KeepLast(1)).reliable().durability_volatile();
 }
 
-SpeechInputNode::SpeechInputNode(std::unique_ptr<SpeechRecognizerAdapter> recognizer)
+SpeechInputNode::SpeechInputNode(
+  std::unique_ptr<SpeechRecognizerAdapter> recognizer,
+  SpeechInputCoordination * const coordination)
 : Node("voice_speech_input"),
   recognizer_(std::move(recognizer))
 {
@@ -35,7 +37,8 @@ SpeechInputNode::SpeechInputNode(std::unique_ptr<SpeechRecognizerAdapter> recogn
   turn_publisher_ = create_publisher<voice_nav_interfaces::msg::VoiceTurn>(
     "/voice/turn", voice_turn_qos());
   core_ = std::make_unique<SpeechInputCore>(
-    *recognizer_, static_cast<VoiceTurnSink &>(*this));
+    *recognizer_, static_cast<VoiceTurnSink &>(*this),
+    default_voice_identity_generator(), coordination);
 }
 
 void SpeechInputNode::accept_cleaned_frame(const CleanedAudioFrame & frame) noexcept

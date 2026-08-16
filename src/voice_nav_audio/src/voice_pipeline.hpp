@@ -16,10 +16,13 @@
 #define VOICE_NAV_AUDIO__VOICE_PIPELINE_HPP_
 
 #include <memory>
+#include <cstddef>
 
 #include "rclcpp/executor.hpp"
 #include "speech_input_node.hpp"
 #include "speech_output_node.hpp"
+#include "ros_stop_mission_port.hpp"
+#include "voice_pipeline_coordination.hpp"
 #include "voice_nav_audio/portaudio_adapter.hpp"
 
 namespace voice_nav_audio
@@ -36,7 +39,8 @@ public:
     std::unique_ptr<SpeechRecognizerAdapter> recognizer,
     std::unique_ptr<TtsAdapter> tts,
     FullDuplexAudioDevice & device,
-    SpeechOutputTraceSink * trace = nullptr);
+    SpeechOutputTraceSink * trace = nullptr,
+    StopMissionPort * stop_port = nullptr);
   ~VoicePipeline();
 
   VoicePipeline(const VoicePipeline &) = delete;
@@ -45,12 +49,16 @@ public:
   void accept_cleaned_frame(const CleanedAudioFrame & frame) noexcept;
   void add_to_executor(rclcpp::Executor & executor);
   void remove_from_executor(rclcpp::Executor & executor);
+  [[nodiscard]] std::size_t direct_stop_request_count() const noexcept;
+  [[nodiscard]] AudioMetrics audio_metrics() const noexcept;
 
 private:
   AudioEngine engine_{};
   PortAudioAdapter adapter_;
-  std::shared_ptr<SpeechInputNode> input_;
   std::shared_ptr<SpeechOutputNode> output_;
+  std::unique_ptr<RosStopMissionPort> owned_stop_port_;
+  std::unique_ptr<VoicePipelineCoordination> coordination_;
+  std::shared_ptr<SpeechInputNode> input_;
 };
 
 }  // namespace voice_nav_audio

@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "VoiceNav STOP post-exit evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "product_sha256",
+    "head",
+    "scenario",
+    "provider_measurement",
+    "audio_fence",
+    "post_exit"
+  ],
+  "properties": {
+    "schema_version": {"const": 4},
+    "product_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "head": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "scenario": {"const": "stop"},
+    "provider_measurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["transport", "request_count"],
+      "properties": {
+        "transport": {"const": "127.0.0.1"},
+        "request_count": {"const": 0}
+      }
+    },
+    "audio_fence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation_before", "generation_after", "stale_pcm_after"],
+      "properties": {
+        "generation_before": {"type": "integer", "minimum": 1},
+        "generation_after": {"type": "integer", "minimum": 2},
+        "stale_pcm_after": {"const": 0}
+      }
+    },
+    "post_exit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "exit_code",
+        "product_descendants_empty",
+        "product_owners_empty",
+        "start_count",
+        "restart_count",
+        "session",
+        "remaining_members"
+      ],
+      "properties": {
+        "exit_code": {"enum": [0, -2]},
+        "product_descendants_empty": {"const": true},
+        "product_owners_empty": {"const": true},
+        "start_count": {"const": 1},
+        "restart_count": {"const": 0},
+        "session": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "process_group_id", "start_identity"],
+          "properties": {
+            "id": {"type": "integer", "minimum": 1},
+            "process_group_id": {"type": "integer", "minimum": 1},
+            "start_identity": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "pid", "starttime_ticks", "executable", "cmdline",
+                "owner_uid"
+              ],
+              "properties": {
+                "pid": {"type": "integer", "minimum": 1},
+                "starttime_ticks": {"type": "integer", "minimum": 0},
+                "executable": {"type": "string", "minLength": 1},
+                "cmdline": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {"type": "string", "minLength": 1}
+                },
+                "owner_uid": {"type": "integer", "minimum": 0}
+              }
+            }
+          }
+        },
+        "remaining_members": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "pid", "ppid", "state", "process_group_id", "session_id",
+              "starttime_ticks", "executable", "cmdline", "owner_uid"
+            ],
+            "properties": {
+              "pid": {"type": "integer", "minimum": 1},
+              "ppid": {"type": "integer", "minimum": 0},
+              "state": {"type": "string", "minLength": 1, "maxLength": 1},
+              "process_group_id": {"type": "integer", "minimum": 1},
+              "session_id": {"type": "integer", "minimum": 1},
+              "starttime_ticks": {"type": "integer", "minimum": 0},
+              "executable": {"type": "string", "minLength": 1},
+              "cmdline": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"type": "string", "minLength": 1}
+              },
+              "owner_uid": {"type": "integer", "minimum": 0}
+            }
+          }
+        }
+      }
+    }
+  }
+}

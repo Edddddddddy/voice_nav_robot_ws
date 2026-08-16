@@ -99,6 +99,18 @@ void SpeechOutputNode::pump() noexcept
   }
 }
 
+bool SpeechOutputNode::admit_ordinary_wake() noexcept
+{
+  std::lock_guard<std::mutex> lock(core_mutex_);
+  return core_.admit_ordinary_wake();
+}
+
+bool SpeechOutputNode::interrupt_for_stop() noexcept
+{
+  std::lock_guard<std::mutex> lock(core_mutex_);
+  return core_.interrupt_for_stop();
+}
+
 rclcpp_action::GoalResponse SpeechOutputNode::handle_goal(
   const rclcpp_action::GoalUUID &, std::shared_ptr<const Speak::Goal>)
 {

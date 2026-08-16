@@ -162,6 +162,7 @@ def create_scripted_voice_demo(
     shutdown_on_gazebo_exit='true',
     shutdown_when_demo_exits=True,
     scenario='move',
+    speech_driver_prefix=None,
 ):
     """Build the installed demo graph and return its test observation seams."""
     scenario = _literal_scenario(scenario)
@@ -192,6 +193,7 @@ def create_scripted_voice_demo(
     speech_driver = Node(
         package='voice_nav_audio',
         executable='scripted_voice_demo',
+        prefix=speech_driver_prefix,
         output='screen',
         parameters=[{'use_sim_time': True, 'scenario': scenario}],
     )

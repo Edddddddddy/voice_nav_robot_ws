@@ -139,6 +139,18 @@ public:
   virtual void publish(const VoiceTurnPublication & turn) noexcept = 0;
 };
 
+// Package-private coordination seam. It admits only a wake decision and a
+// bounded final turn, keeping recognizer details and ROS transport outside the
+// VoicePipeline composition root.
+class SpeechInputCoordination
+{
+public:
+  virtual ~SpeechInputCoordination() = default;
+
+  [[nodiscard]] virtual bool on_wake_accepted() noexcept = 0;
+  virtual void before_turn_published(VoiceTurnPublication & turn) noexcept = 0;
+};
+
 // Package-private speech state machine.  It owns one capacity-one TurnScope
 // and never exposes recognizer internals beyond a completed VoiceTurn value.
 class SpeechInputCore final : private SpeechEventSink
@@ -147,7 +159,8 @@ public:
   SpeechInputCore(
     SpeechRecognizerAdapter & recognizer,
     VoiceTurnSink & sink,
-    VoiceIdentityGenerator & identity_generator = default_voice_identity_generator()) noexcept;
+    VoiceIdentityGenerator & identity_generator = default_voice_identity_generator(),
+    SpeechInputCoordination * coordination = nullptr) noexcept;
 
   void accept_cleaned_frame(const CleanedAudioFrame & frame) noexcept;
 
@@ -155,11 +168,14 @@ private:
   void on_speech_event(const SpeechRecognitionEvent & event) noexcept override;
   [[nodiscard]] bool accepts_event_frame(const SpeechRecognitionEvent & event) const noexcept;
   [[nodiscard]] bool matches_active_scope(const SpeechRecognitionEvent & event) const noexcept;
+  [[nodiscard]] bool is_duplicate_privileged_stop(
+    const SpeechRecognitionEvent & event) const noexcept;
   void open_turn_scope() noexcept;
   void retire_turn_scope() noexcept;
 
   SpeechRecognizerAdapter & recognizer_;
   VoiceTurnSink & sink_;
+  SpeechInputCoordination * coordination_{nullptr};
   std::string voice_instance_id_{};
   std::string session_id_{};
   std::uint64_t next_scope_id_{1U};
@@ -172,6 +188,9 @@ private:
   std::uint64_t latest_audio_seq_{0U};
   bool has_active_scope_{false};
   TurnScopeIdentity active_scope_{};
+  bool has_accepted_stop_frame_{false};
+  std::uint64_t accepted_stop_generation_{0U};
+  std::uint64_t accepted_stop_seq_{0U};
 };
 
 }  // namespace voice_nav_audio

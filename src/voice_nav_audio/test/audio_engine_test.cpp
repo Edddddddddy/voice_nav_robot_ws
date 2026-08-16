@@ -138,6 +138,24 @@ TEST(AudioEngineTest, ProducerDiscontinuityRequestCommitsAtCallbackBoundary)
     }));
 }
 
+TEST(AudioEngineTest, ReportsGenerationFenceAndNoStalePcmAfterCallbackBoundary)
+{
+  AudioEngine engine;
+  std::array<Sample, AudioEngine::kFrameSamples> output{};
+  const auto generation_before = engine.generation();
+  engine.mark_discontinuity();
+
+  engine.process_callback(nullptr, output.data(), output.size(), CallbackStatus{});
+
+  const auto metrics = engine.metrics();
+  EXPECT_EQ(metrics.last_fence_generation_before, generation_before);
+  EXPECT_EQ(metrics.last_fence_generation_after, generation_before + 1U);
+  EXPECT_EQ(metrics.stale_pcm_after_fence, 0U);
+  EXPECT_TRUE(std::all_of(output.begin(), output.end(), [](const Sample sample) {
+      return sample == 0;
+    }));
+}
+
 TEST(AudioEngineTest, RingLossFencesStaleFramesAndSelectsSilence)
 {
   AudioEngine engine;
