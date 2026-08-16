@@ -17,6 +17,7 @@
 
 #include <array>
 #include <cstdint>
+#include <mutex>
 #include <string>
 
 #include "voice_nav_audio/audio_engine.hpp"
@@ -34,6 +35,7 @@ struct CleanedAudioFrame
   std::uint32_t channels{kChannels};
   std::uint64_t audio_generation{0U};
   std::uint64_t audio_seq{0U};
+  std::size_t valid_samples{kSamples};
   std::array<Sample, kSamples> samples{};
 };
 
@@ -112,6 +114,14 @@ class SpeechRecognizerAdapter
 public:
   virtual ~SpeechRecognizerAdapter() = default;
 
+  // Stops admission and revokes delivery before ownership is released. The
+  // default keeps existing synchronous test adapters source-compatible.
+  virtual void shutdown() noexcept {}
+
+  // Completes the bounded input stream on the recognizer worker.  The default
+  // is a no-op for synchronous adapters that have no VAD flush seam.
+  virtual void finish_input() noexcept {}
+
   virtual void process_frame(
     const CleanedAudioFrame & frame,
     SpeechEventSink & sink) noexcept = 0;
@@ -163,6 +173,7 @@ public:
     SpeechInputCoordination * coordination = nullptr) noexcept;
 
   void accept_cleaned_frame(const CleanedAudioFrame & frame) noexcept;
+  void finish_input() noexcept;
 
 private:
   void on_speech_event(const SpeechRecognitionEvent & event) noexcept override;
@@ -186,11 +197,14 @@ private:
   std::uint64_t audio_generation_{0U};
   bool has_audio_seq_{false};
   std::uint64_t latest_audio_seq_{0U};
+  bool has_wake_audio_seq_{false};
+  std::uint64_t latest_wake_audio_seq_{0U};
   bool has_active_scope_{false};
   TurnScopeIdentity active_scope_{};
   bool has_accepted_stop_frame_{false};
   std::uint64_t accepted_stop_generation_{0U};
   std::uint64_t accepted_stop_seq_{0U};
+  mutable std::recursive_mutex delivery_mutex_{};
 };
 
 }  // namespace voice_nav_audio

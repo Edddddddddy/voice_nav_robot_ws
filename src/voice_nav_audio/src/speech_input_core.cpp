@@ -185,6 +185,7 @@ SpeechInputCore::SpeechInputCore(
 
 void SpeechInputCore::accept_cleaned_frame(const CleanedAudioFrame & frame) noexcept
 {
+  std::lock_guard<std::recursive_mutex> delivery_lock(delivery_mutex_);
   if (!identity_ready_) {
     return;
   }
@@ -196,6 +197,8 @@ void SpeechInputCore::accept_cleaned_frame(const CleanedAudioFrame & frame) noex
     has_audio_generation_ = true;
     audio_generation_ = frame.audio_generation;
     audio_generation_quarantined_ = false;
+    has_wake_audio_seq_ = false;
+    latest_wake_audio_seq_ = 0U;
   }
   if (audio_generation_quarantined_) {
     return;
@@ -219,7 +222,8 @@ void SpeechInputCore::accept_cleaned_frame(const CleanedAudioFrame & frame) noex
   has_audio_seq_ = true;
   latest_audio_seq_ = frame.audio_seq;
   if (frame.sample_rate_hz != CleanedAudioFrame::kSampleRateHz ||
-    frame.channels != CleanedAudioFrame::kChannels)
+    frame.channels != CleanedAudioFrame::kChannels || frame.valid_samples == 0U ||
+    frame.valid_samples > CleanedAudioFrame::kSamples)
   {
     retire_turn_scope();
     audio_generation_quarantined_ = true;
@@ -228,8 +232,18 @@ void SpeechInputCore::accept_cleaned_frame(const CleanedAudioFrame & frame) noex
   recognizer_.process_frame(frame, *this);
 }
 
+void SpeechInputCore::finish_input() noexcept
+{
+  std::lock_guard<std::recursive_mutex> delivery_lock(delivery_mutex_);
+  if (!identity_ready_ || audio_generation_quarantined_) {
+    return;
+  }
+  recognizer_.finish_input();
+}
+
 void SpeechInputCore::on_speech_event(const SpeechRecognitionEvent & event) noexcept
 {
+  std::lock_guard<std::recursive_mutex> delivery_lock(delivery_mutex_);
   if (!accepts_event_frame(event)) {
     return;
   }
@@ -237,8 +251,12 @@ void SpeechInputCore::on_speech_event(const SpeechRecognitionEvent & event) noex
     case SpeechEventKind::kWakeMiss:
       return;
     case SpeechEventKind::kWakeAccepted:
-      if (event.scope.id == 0U && event.audio_seq == latest_audio_seq_) {
+      if (event.scope.id == 0U &&
+        (!has_wake_audio_seq_ || event.audio_seq > latest_wake_audio_seq_))
+      {
         if (coordination_ == nullptr || coordination_->on_wake_accepted()) {
+          has_wake_audio_seq_ = true;
+          latest_wake_audio_seq_ = event.audio_seq;
           open_turn_scope();
         }
       }
