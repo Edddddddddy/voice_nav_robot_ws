@@ -104,11 +104,17 @@ bool is_valid_utf8(const std::string_view text) noexcept
 
 bool valid_final(const SpeechRecognitionEvent & event) noexcept
 {
-  return !event.final_text.empty() && event.final_text.size() <= 512U &&
-         is_valid_utf8(event.final_text) && std::isfinite(event.confidence) &&
-         event.confidence >= 0.0F && event.confidence <= 1.0F &&
-         (event.voice_turn_kind == VoiceTurnKind::kCommand ||
-         event.voice_turn_kind == VoiceTurnKind::kStop);
+  if (event.final_text.empty() || event.final_text.size() > 512U ||
+    !is_valid_utf8(event.final_text) || !std::isfinite(event.confidence) ||
+    event.confidence < 0.0F || event.confidence > 1.0F)
+  {
+    return false;
+  }
+  if (event.voice_turn_kind == VoiceTurnKind::kCommand) {
+    return true;
+  }
+  return event.voice_turn_kind == VoiceTurnKind::kStop &&
+         (event.final_text == "小智停止" || event.final_text == "紧急停止");
 }
 
 }  // namespace
@@ -162,9 +168,11 @@ SpeechRecognitionEvent SpeechRecognitionEvent::endpoint_final(
 SpeechInputCore::SpeechInputCore(
   SpeechRecognizerAdapter & recognizer,
   VoiceTurnSink & sink,
-  VoiceIdentityGenerator & identity_generator) noexcept
+  VoiceIdentityGenerator & identity_generator,
+  SpeechInputCoordination * const coordination) noexcept
 : recognizer_(recognizer),
-  sink_(sink)
+  sink_(sink),
+  coordination_(coordination)
 {
   std::array<std::uint8_t, 16U> identity_bytes{};
   identity_ready_ = identity_generator.generate(identity_bytes);
@@ -230,28 +238,54 @@ void SpeechInputCore::on_speech_event(const SpeechRecognitionEvent & event) noex
       return;
     case SpeechEventKind::kWakeAccepted:
       if (event.scope.id == 0U && event.audio_seq == latest_audio_seq_) {
-        open_turn_scope();
+        if (coordination_ == nullptr || coordination_->on_wake_accepted()) {
+          open_turn_scope();
+        }
       }
       return;
     case SpeechEventKind::kActivity:
       return;
-    case SpeechEventKind::kEndpointFinal:
-      if (!matches_active_scope(event)) {
+    case SpeechEventKind::kEndpointFinal: {
+      const bool privileged_stop_without_scope =
+        event.voice_turn_kind == VoiceTurnKind::kStop && !has_active_scope_ &&
+        event.scope.id == 0U;
+      if (privileged_stop_without_scope && is_duplicate_privileged_stop(event)) {
+        return;
+      }
+      if (!privileged_stop_without_scope && !matches_active_scope(event)) {
         return;
       }
       if (valid_final(event)) {
+        if (privileged_stop_without_scope) {
+          has_accepted_stop_frame_ = true;
+          accepted_stop_generation_ = event.audio_generation;
+          accepted_stop_seq_ = event.audio_seq;
+        }
+        TurnScopeIdentity publication_scope = active_scope_;
+        if (privileged_stop_without_scope) {
+          publication_scope.id = next_scope_id_++;
+          publication_scope.audio_generation = audio_generation_;
+          publication_scope.session_id = session_id_;
+          publication_scope.turn_id = turn_identity(voice_instance_id_, publication_scope.id);
+        }
         VoiceTurnPublication publication{};
         publication.voice_instance_id = voice_instance_id_;
         publication.voice_seq = next_voice_seq_++;
-        publication.session_id = active_scope_.session_id;
-        publication.turn_id = active_scope_.turn_id;
+        publication.session_id = publication_scope.session_id;
+        publication.turn_id = publication_scope.turn_id;
         publication.kind = event.voice_turn_kind;
         publication.text = event.final_text;
         publication.confidence = event.confidence;
+        if (coordination_ != nullptr) {
+          coordination_->before_turn_published(publication);
+        }
         sink_.publish(publication);
       }
-      retire_turn_scope();
+      if (!privileged_stop_without_scope) {
+        retire_turn_scope();
+      }
       return;
+    }
     case SpeechEventKind::kTimeout:
     case SpeechEventKind::kFailure:
       if (matches_active_scope(event)) {
@@ -274,6 +308,17 @@ bool SpeechInputCore::matches_active_scope(const SpeechRecognitionEvent & event)
          event.scope.audio_generation == active_scope_.audio_generation &&
          event.scope.session_id == active_scope_.session_id &&
          event.scope.turn_id == active_scope_.turn_id;
+}
+
+bool SpeechInputCore::is_duplicate_privileged_stop(
+  const SpeechRecognitionEvent & event) const noexcept
+{
+  if (!has_accepted_stop_frame_) {
+    return false;
+  }
+  return event.audio_generation < accepted_stop_generation_ ||
+         (event.audio_generation == accepted_stop_generation_ &&
+         event.audio_seq <= accepted_stop_seq_);
 }
 
 void SpeechInputCore::open_turn_scope() noexcept

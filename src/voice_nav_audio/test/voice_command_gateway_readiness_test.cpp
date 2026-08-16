@@ -15,6 +15,11 @@
 #include <gtest/gtest.h>
 
 #include <chrono>
+#include <condition_variable>
+#include <future>
+#include <mutex>
+#include <thread>
+#include <utility>
 
 #include "rcl_interfaces/srv/set_parameters.hpp"
 
@@ -93,6 +98,69 @@ public:
       rclcpp::shutdown();
     }
   }
+};
+
+class ExecutorRunner final
+{
+public:
+  explicit ExecutorRunner(rclcpp::executors::SingleThreadedExecutor & executor)
+  : executor_(executor), thread_([this]() {executor_.spin();})
+  {
+  }
+
+  ~ExecutorRunner()
+  {
+    stop();
+  }
+
+  void stop()
+  {
+    executor_.cancel();
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+  }
+
+private:
+  rclcpp::executors::SingleThreadedExecutor & executor_;
+  std::thread thread_;
+};
+
+class JoiningThread final
+{
+public:
+  explicit JoiningThread(std::thread thread)
+  : thread_(std::move(thread))
+  {
+  }
+
+  ~JoiningThread()
+  {
+    join();
+  }
+
+  void join()
+  {
+    if (thread_.joinable()) {
+      thread_.join();
+    }
+  }
+
+private:
+  std::thread thread_;
+};
+
+class BarrierStopMissionPort final : public StopMissionPort
+{
+public:
+  void request(
+    const StopMissionRequest & request,
+    StopMissionResponseSink &) noexcept override
+  {
+    requests.push_back(request);
+  }
+
+  std::vector<StopMissionRequest> requests{};
 };
 
 TEST(InitialSafetyStability, RequiresTwoSecondsAndResetsOnUnsafeSample)
@@ -176,7 +244,7 @@ TEST(VoiceCommandGateway, AcceptsExactStopPhrasesWhileBusyAndPublishesFormalStop
   const auto voice_instance_id = sink.turns.front().voice_instance_id;
   EXPECT_EQ(sink.turns.front().voice_seq, 1U);
 
-  const std::array<const char *, 3U> stop_phrases{"停止", "小智停止", "紧急停止"};
+  const std::array<const char *, 2U> stop_phrases{"小智停止", "紧急停止"};
   for (std::size_t stop_phrase_index = 0U;
     stop_phrase_index < stop_phrases.size(); ++stop_phrase_index)
   {
@@ -303,18 +371,18 @@ TEST(VoiceCommandGateway, ReleasesAfterStopAtSafeBarrierOnlyAfterTwoHundredMilli
       rclcpp::Parameter("command_text", "前进")}).successful);
 
   const auto stop_accepted = gateway.on_parameters({
-      rclcpp::Parameter("command_text", "停止")});
+      rclcpp::Parameter("command_text", "小智停止")});
   ASSERT_TRUE(stop_accepted.successful) << stop_accepted.reason;
   const auto stop_command = gateway.take();
   ASSERT_TRUE(stop_command.has_value());
-  EXPECT_EQ(*stop_command, "停止");
+  EXPECT_EQ(*stop_command, "小智停止");
   EXPECT_FALSE(gateway.on_parameters({
       rclcpp::Parameter("command_text", "右转九十度")}).successful);
 
   turn.voice_seq = 2U;
   turn.turn_id = "current-turn";
   turn.kind = voice_nav_interfaces::msg::VoiceTurn::STOP;
-  turn.text = "停止";
+  turn.text = "小智停止";
   speak_status.status_list.front().goal_info.goal_id.uuid[0] = 2U;
   bool fresh_reply_observed = false;
   for (std::size_t attempt = 0U; attempt < 1000U && !fresh_reply_observed; ++attempt) {
@@ -353,6 +421,243 @@ TEST(VoiceCommandGateway, ReleasesAfterStopAtSafeBarrierOnlyAfterTwoHundredMilli
   executor.cancel();
   spin_thread.join();
   executor.remove_node(observer.node());
+}
+
+TEST(CompletionObserver, StopProductRequiresFinalStationaryHoldAfterStopCompletion)
+{
+  RclcppContextGuard rclcpp_context;
+  PlaybackEvidenceRecorder recorder;
+  ManualDevice device(recorder);
+  std::mutex now_mutex;
+  auto now = std::chrono::steady_clock::time_point{};
+  CompletionObserver observer(device, [&now, &now_mutex]() {
+      std::lock_guard<std::mutex> lock(now_mutex);
+      return now;
+    });
+  rclcpp::executors::SingleThreadedExecutor executor;
+  observer.start(executor);
+  ExecutorRunner executor_runner(executor);
+
+  const auto state_publisher = observer.node()->create_publisher<
+    voice_nav_interfaces::msg::MissionState>(
+    "/mission/state", rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local());
+  const auto command_publisher = observer.node()->create_publisher<
+    geometry_msgs::msg::TwistStamped>("/diff_drive_controller/cmd_vel", rclcpp::QoS(1));
+  const auto odometry_publisher = observer.node()->create_publisher<nav_msgs::msg::Odometry>(
+    "/odom", rclcpp::QoS(1));
+  const auto turn_publisher = observer.node()->create_publisher<
+    voice_nav_interfaces::msg::VoiceTurn>(
+    "/voice/turn", rclcpp::QoS(rclcpp::KeepLast(10)).reliable());
+  const auto mission_status_publisher = observer.node()->create_publisher<
+    action_msgs::msg::GoalStatusArray>(
+    "/mission/execute/_action/status", rclcpp::QoS(rclcpp::KeepLast(10)));
+  const auto speak_status_publisher = observer.node()->create_publisher<
+    action_msgs::msg::GoalStatusArray>(
+    "/voice/speak/_action/status", rclcpp::QoS(rclcpp::KeepLast(10)));
+  const auto wait_for_subscriptions = [&]() {
+      for (std::size_t attempt = 0U; attempt < 10000U; ++attempt) {
+        if (state_publisher->get_subscription_count() > 0U &&
+          command_publisher->get_subscription_count() > 0U &&
+          odometry_publisher->get_subscription_count() > 0U &&
+          turn_publisher->get_subscription_count() > 0U &&
+          mission_status_publisher->get_subscription_count() > 0U &&
+          speak_status_publisher->get_subscription_count() > 0U)
+        {
+          return true;
+        }
+        std::this_thread::yield();
+      }
+      return false;
+    };
+  ASSERT_TRUE(wait_for_subscriptions());
+
+  voice_nav_interfaces::msg::MissionState state{};
+  state.availability = voice_nav_interfaces::msg::MissionState::AVAILABLE;
+  state.active_step = 0U;
+  state.gate_state = voice_nav_interfaces::msg::MissionState::GATE_ARMED;
+  geometry_msgs::msg::TwistStamped nonzero_command{};
+  nonzero_command.twist.linear.x = 0.2;
+  geometry_msgs::msg::TwistStamped zero_command{};
+  nav_msgs::msg::Odometry moving_odometry{};
+  moving_odometry.pose.pose.orientation.w = 1.0;
+  moving_odometry.twist.twist.linear.x = 0.2;
+  nav_msgs::msg::Odometry stationary_odometry{};
+  stationary_odometry.pose.pose.orientation.w = 1.0;
+
+  voice_nav_interfaces::msg::VoiceTurn command_turn{};
+  command_turn.voice_instance_id = "voice-instance";
+  command_turn.voice_seq = 1U;
+  command_turn.session_id = "session";
+  command_turn.turn_id = "command-turn";
+  command_turn.kind = voice_nav_interfaces::msg::VoiceTurn::COMMAND;
+  command_turn.text = "前进 2 米";
+  voice_nav_interfaces::msg::VoiceTurn stop_turn = command_turn;
+  stop_turn.voice_seq = 2U;
+  stop_turn.turn_id = "stop-turn";
+  stop_turn.kind = voice_nav_interfaces::msg::VoiceTurn::STOP;
+  stop_turn.text = "小智停止";
+
+  action_msgs::msg::GoalStatusArray mission_status{};
+  mission_status.status_list.emplace_back();
+  mission_status.status_list.front().status = action_msgs::msg::GoalStatus::STATUS_CANCELED;
+  mission_status.status_list.front().goal_info.goal_id.uuid[0] = 1U;
+  action_msgs::msg::GoalStatusArray speak_status{};
+  speak_status.status_list.emplace_back();
+  speak_status.status_list.front().status = action_msgs::msg::GoalStatus::STATUS_SUCCEEDED;
+  speak_status.status_list.front().goal_info.goal_id.uuid[0] = 2U;
+
+  const auto publish_safe_sample = [&]() {
+      state_publisher->publish(state);
+      command_publisher->publish(zero_command);
+      odometry_publisher->publish(stationary_odometry);
+    };
+  const auto publish_command_turn = [&]() {
+      turn_publisher->publish(command_turn);
+    };
+  const auto publish_stop_records = [&]() {
+      turn_publisher->publish(stop_turn);
+      mission_status_publisher->publish(mission_status);
+      speak_status_publisher->publish(speak_status);
+    };
+  const auto wait_for_stop_samples = [&]() {
+      for (std::size_t attempt = 0U; attempt < 1000U; ++attempt) {
+        publish_safe_sample();
+        const auto summary = observer.summary();
+        if (summary.turns.size() == 2U && summary.unique_mission_count == 1U &&
+          summary.terminal_non_success_mission_count == 1U &&
+          summary.successful_speech_count == 1U && summary.gate_inhibited_after_motion &&
+          summary.final_command_is_zero && summary.final_odometry_is_stationary &&
+          summary.post_stop_odom_samples >= 4U)
+        {
+          return true;
+        }
+        std::this_thread::yield();
+      }
+      return false;
+    };
+
+  state.gate_state = voice_nav_interfaces::msg::MissionState::GATE_ARMED;
+  state.active_step = 0U;
+  bool armed_state_observed = false;
+  for (std::size_t attempt = 0U; attempt < 1000U; ++attempt) {
+    state_publisher->publish(state);
+    armed_state_observed = observer.summary().gate_armed_observed;
+    if (armed_state_observed) {
+      break;
+    }
+    std::this_thread::yield();
+  }
+  ASSERT_TRUE(armed_state_observed);
+  odometry_publisher->publish(moving_odometry);
+  std::size_t nonzero_published = 0U;
+  bool armed_motion_observed = false;
+  for (std::size_t attempt = 0U; attempt < 1000U; ++attempt) {
+    command_publisher->publish(nonzero_command);
+    ++nonzero_published;
+    for (std::size_t callback_attempt = 0U; callback_attempt < 32U; ++callback_attempt) {
+      const auto summary = observer.summary();
+      armed_motion_observed = summary.controller_nonzero_observed &&
+        !summary.final_gate_inhibited;
+      if (armed_motion_observed) {
+        break;
+      }
+      std::this_thread::yield();
+    }
+    if (armed_motion_observed) {
+      break;
+    }
+    std::this_thread::yield();
+  }
+  if (!armed_motion_observed) {
+    const auto stalled = observer.summary();
+    ADD_FAILURE() << "armed motion did not drain: gate_armed="
+                  << stalled.gate_armed_observed
+                  << " controller_nonzero=" << stalled.controller_nonzero_observed
+                  << " callback_count=" << stalled.controller_nonzero_callback_count
+                  << " published_count=" << nonzero_published
+                  << " final_gate=" << stalled.final_gate_inhibited;
+    return;
+  }
+  const auto command_callbacks_before_drain = observer.summary().command_callback_count;
+  command_publisher->publish(zero_command);
+  bool nonzero_queue_drained = false;
+  for (std::size_t attempt = 0U; attempt < 1000U; ++attempt) {
+    const auto summary = observer.summary();
+    nonzero_queue_drained = !summary.final_gate_inhibited &&
+      summary.command_callback_count > command_callbacks_before_drain;
+    if (nonzero_queue_drained) {
+      break;
+    }
+    std::this_thread::yield();
+  }
+  ASSERT_TRUE(nonzero_queue_drained);
+  publish_command_turn();
+  bool command_turn_observed = false;
+  for (std::size_t attempt = 0U; attempt < 1000U; ++attempt) {
+    command_turn_observed = observer.summary().turns.size() == 1U;
+    if (command_turn_observed) {
+      break;
+    }
+    std::this_thread::yield();
+  }
+  ASSERT_TRUE(command_turn_observed);
+  state.gate_state = voice_nav_interfaces::msg::MissionState::GATE_INHIBITED;
+  state.active_step = std::numeric_limits<std::uint32_t>::max();
+  bool stop_barrier_observed = false;
+  for (std::size_t attempt = 0U; attempt < 1000U; ++attempt) {
+    publish_safe_sample();
+    const auto summary = observer.summary();
+    stop_barrier_observed = summary.gate_inhibited_after_motion &&
+      summary.post_stop_odom_samples >= 4U;
+    if (stop_barrier_observed) {
+      break;
+    }
+    std::this_thread::yield();
+  }
+  ASSERT_TRUE(stop_barrier_observed);
+  publish_stop_records();
+  if (!wait_for_stop_samples()) {
+    const auto stalled = observer.summary();
+    ADD_FAILURE() << "STOP observer did not converge: turns=" << stalled.turns.size()
+                  << " goals=" << stalled.unique_mission_count
+                  << " terminal_non_success=" << stalled.terminal_non_success_mission_count
+                  << " successful_speeches=" << stalled.successful_speech_count
+                  << " gate_transition=" << stalled.gate_inhibited_after_motion
+                  << " final_gate=" << stalled.final_gate_inhibited
+                  << " command_zero=" << stalled.final_command_is_zero
+                  << " odom_stationary=" << stalled.final_odometry_is_stationary
+                  << " post_stop_odom=" << stalled.post_stop_odom_samples;
+    return;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(now_mutex);
+    now += 199ms;
+  }
+  EXPECT_FALSE(observer.wait_for_stop_completion_and_final_stationarity(20ms));
+
+  {
+    std::lock_guard<std::mutex> lock(now_mutex);
+    now += 1ms;
+  }
+  const bool final_stationarity_observed =
+    observer.wait_for_stop_completion_and_final_stationarity(20ms);
+  if (!final_stationarity_observed) {
+    const auto stalled = observer.summary();
+    ADD_FAILURE() << "final stationarity did not converge: hold_ms="
+                  << stalled.final_stationary_hold_ms
+                  << " runtime_ready=" << stalled.final_gate_inhibited
+                  << " command_zero=" << stalled.final_command_is_zero
+                  << " odom_stationary=" << stalled.final_odometry_is_stationary
+                  << " turns=" << stalled.turns.size()
+                  << " goals=" << stalled.unique_mission_count
+                  << " terminal_non_success=" << stalled.terminal_non_success_mission_count
+                  << " successful_speeches=" << stalled.successful_speech_count
+                  << " gate_transition=" << stalled.gate_inhibited_after_motion
+                  << " post_stop_odom=" << stalled.post_stop_odom_samples
+                  << " post_stop_nonzero=" << stalled.post_stop_nonzero_command_observed;
+  }
+  EXPECT_TRUE(final_stationarity_observed);
 }
 
 TEST(CompletionObserver, CapturesStartupZeroSampleBeforeGraphWait)
@@ -496,6 +801,144 @@ TEST(SessionGateway, ExposesServiceOnlyAfterObserverSafeBarrier)
   executor.remove_node(configuration);
   executor.remove_node(probe);
   executor.remove_node(observer.node());
+}
+
+TEST(
+  StopPlaybackBarrier,
+  ControllerNonzeroCanPrecedeSpeakButStopInjectionWaitsForRealPlaybackEvidence)
+{
+  RclcppContextGuard rclcpp_context;
+  PlaybackEvidenceRecorder recorder;
+  ManualDevice device(recorder);
+  BarrierStopMissionPort stop_port;
+  auto pipeline = std::make_unique<VoicePipeline>(
+    std::make_unique<ScriptedRecognizer>(ScriptedScenario::kStop),
+    std::make_unique<DeterministicFakeTts>(recorder, true), device, &recorder, &stop_port);
+  rclcpp::executors::SingleThreadedExecutor executor;
+  pipeline->add_to_executor(executor);
+  CompletionObserver observer(device);
+  observer.start(executor);
+  auto client_node = std::make_shared<rclcpp::Node>("stop_playback_barrier_probe");
+  auto client = rclcpp_action::create_client<VoicePipeline::Speak>(client_node, "/voice/speak");
+  executor.add_node(client_node);
+  ExecutorRunner executor_runner(executor);
+  if (!client->wait_for_action_server(2s)) {
+    ADD_FAILURE() << "VoicePipeline Speak action server did not become ready";
+    return;
+  }
+
+  // Mirror the real controller-nonzero wait's first ManualDevice callback so
+  // the adapter startup discontinuity is committed before the first Speak.
+  device.consume_once();
+  const bool controller_nonzero_observed = true;
+  EXPECT_TRUE(controller_nonzero_observed);
+  std::mutex barrier_mutex;
+  std::condition_variable barrier_condition;
+  bool barrier_started = false;
+  bool barrier_finished = false;
+  bool barrier_succeeded = false;
+  JoiningThread barrier_thread(std::thread([&]() {
+      {
+        std::lock_guard<std::mutex> lock(barrier_mutex);
+        barrier_started = true;
+      }
+      barrier_condition.notify_all();
+      const auto result = observer.wait_for_first_speak_playback(recorder, 2s);
+      {
+        std::lock_guard<std::mutex> lock(barrier_mutex);
+        barrier_succeeded = result;
+        barrier_finished = true;
+      }
+      barrier_condition.notify_all();
+    }));
+
+  bool barrier_started_before_speak = false;
+  {
+    std::unique_lock<std::mutex> lock(barrier_mutex);
+    barrier_started_before_speak = barrier_condition.wait_for(
+      lock, 1s, [&]() {return barrier_started;});
+  }
+  EXPECT_TRUE(barrier_started_before_speak);
+  if (!barrier_started_before_speak) {
+    ADD_FAILURE() << "playback barrier did not start before Speak";
+    return;
+  }
+  const auto before_speak = recorder.snapshot();
+  bool barrier_finished_before_speak = false;
+  {
+    std::lock_guard<std::mutex> lock(barrier_mutex);
+    barrier_finished_before_speak = barrier_finished;
+  }
+  EXPECT_FALSE(barrier_finished_before_speak);
+  EXPECT_TRUE(before_speak.tts_texts.empty());
+  EXPECT_EQ(before_speak.nonzero_callback_count, 0U);
+  EXPECT_TRUE(before_speak.feedback_scope_ids.empty());
+
+  VoicePipeline::Speak::Goal goal{};
+  goal.source_instance_id = "voice-instance";
+  goal.source_seq = 1U;
+  goal.session_id = "session";
+  goal.turn_id = "speak-turn";
+  goal.priority = VoicePipeline::Speak::Goal::NORMAL;
+  goal.text = "正在移动";
+  goal.allow_barge_in = true;
+  auto goal_future = client->async_send_goal(goal);
+  const bool speak_goal_accepted = goal_future.wait_for(1s) == std::future_status::ready;
+  EXPECT_TRUE(speak_goal_accepted);
+  if (!speak_goal_accepted) {
+    ADD_FAILURE() << "Speak goal was not accepted before playback barrier deadline";
+    return;
+  }
+
+  bool barrier_finished_after_speak = false;
+  {
+    std::unique_lock<std::mutex> lock(barrier_mutex);
+    barrier_finished_after_speak = barrier_condition.wait_for(
+      lock, 1s, [&]() {return barrier_finished;});
+  }
+  EXPECT_TRUE(barrier_finished_after_speak);
+  if (!barrier_finished_after_speak) {
+    const auto stalled = recorder.snapshot();
+    ADD_FAILURE() << "Speak playback evidence barrier did not converge: tts_started="
+                  << stalled.tts_texts.size()
+                  << " nonzero_callbacks=" << stalled.nonzero_callback_count
+                  << " feedback_scopes=" << stalled.feedback_scope_ids.size()
+                  << " completion_scopes=" << stalled.completion_scope_ids.size()
+                  << " barged_in=" << stalled.barged_in_count;
+    return;
+  }
+  {
+    std::lock_guard<std::mutex> lock(barrier_mutex);
+    EXPECT_TRUE(barrier_succeeded);
+  }
+  barrier_thread.join();
+
+  const auto before_stop = recorder.snapshot();
+  ASSERT_EQ(before_stop.tts_texts.size(), 1U);
+  ASSERT_GE(before_stop.nonzero_callback_count, 1U);
+  ASSERT_EQ(before_stop.feedback_scope_ids.size(), 1U);
+
+  pipeline->accept_cleaned_frame(cleaned_frame(4U));
+  pipeline->accept_cleaned_frame(cleaned_frame(5U));
+  pipeline->accept_cleaned_frame(cleaned_frame(6U));
+
+  const auto after_stop = recorder.snapshot();
+  device.consume_once();
+  const auto after_stop_audio = pipeline->audio_metrics();
+  EXPECT_EQ(stop_port.requests.size(), 1U);
+  EXPECT_GT(after_stop_audio.last_fence_generation_before, 0U);
+  EXPECT_EQ(
+    after_stop_audio.last_fence_generation_after,
+    after_stop_audio.last_fence_generation_before + 1U);
+  EXPECT_EQ(after_stop_audio.stale_pcm_after_fence, 0U);
+  EXPECT_EQ(after_stop.barged_in_count, 1U);
+  EXPECT_EQ(after_stop.feedback_scope_ids.size(), 1U);
+
+  executor_runner.stop();
+  executor.remove_node(client_node);
+  executor.remove_node(observer.node());
+  pipeline->remove_from_executor(executor);
+  pipeline.reset();
 }
 
 }  // namespace

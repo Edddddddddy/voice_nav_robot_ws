@@ -18,6 +18,7 @@
 #include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -112,6 +113,23 @@ public:
   void close() noexcept override
   {
   }
+};
+
+class FakeStopMissionPort final : public StopMissionPort
+{
+public:
+  void request(
+    const StopMissionRequest & request,
+    StopMissionResponseSink & response_sink) noexcept override
+  {
+    requests.push_back(request);
+    response_sink_ = &response_sink;
+  }
+
+  std::vector<StopMissionRequest> requests{};
+
+private:
+  StopMissionResponseSink * response_sink_{nullptr};
 };
 
 class ScriptedRecognizer final : public SpeechRecognizerAdapter
@@ -226,8 +244,9 @@ TEST(VoicePipelineTest, SharesOneEngineForVoiceTurnAndActualSpeakPlayback)
     ManualDevice device;
     auto tts = std::make_unique<DeterministicFakeTts>();
     auto * const fake_tts = tts.get();
+    FakeStopMissionPort stop_port;
     auto pipeline = std::make_unique<VoicePipeline>(
-      std::make_unique<ScriptedRecognizer>(), std::move(tts), device);
+      std::make_unique<ScriptedRecognizer>(), std::move(tts), device, nullptr, &stop_port);
     ASSERT_TRUE(device.wait_opened());
     const auto initial = device.render_once();
     EXPECT_TRUE(std::all_of(
@@ -323,14 +342,44 @@ TEST(VoicePipelineTest, SharesOneEngineForVoiceTurnAndActualSpeakPlayback)
   }
 }
 
+TEST(VoicePipelineTest, DefaultPipelineReusesExistingVoiceNodeForStopClient)
+{
+  RclcppContextGuard rclcpp_context;
+  ManualDevice device;
+  auto pipeline = std::make_unique<VoicePipeline>(
+    std::make_unique<ScriptedRecognizer>(), std::make_unique<DeterministicFakeTts>(), device);
+  auto graph_observer = std::make_shared<rclcpp::Node>("voice_pipeline_graph_observer");
+  rclcpp::executors::SingleThreadedExecutor executor;
+  pipeline->add_to_executor(executor);
+  executor.add_node(graph_observer);
+
+  std::set<std::string> voice_nodes;
+  for (const auto & node : graph_observer->get_node_graph_interface()->get_node_names_and_namespaces()) {
+    if (node.second == "/" && node.first.rfind("voice_speech", 0U) == 0U) {
+      voice_nodes.insert(node.first);
+    }
+  }
+
+  EXPECT_EQ(voice_nodes, (std::set<std::string>{"voice_speech_input", "voice_speech_output"}));
+  const auto stop_clients =
+    graph_observer->get_node_graph_interface()->get_client_names_and_types_by_node(
+    "voice_speech_output", "/");
+  EXPECT_EQ(stop_clients.count("/mission/stop"), 1U);
+
+  executor.remove_node(graph_observer);
+  pipeline->remove_from_executor(executor);
+}
+
 TEST(VoicePipelineTest, FailsClosedWhenTheInjectedDeviceCannotOpen)
 {
   RclcppContextGuard rclcpp_context;
   {
     RejectingDevice device;
+    FakeStopMissionPort stop_port;
     EXPECT_THROW(
       (void)std::make_unique<VoicePipeline>(
-        std::make_unique<ScriptedRecognizer>(), std::make_unique<DeterministicFakeTts>(), device),
+        std::make_unique<ScriptedRecognizer>(), std::make_unique<DeterministicFakeTts>(),
+        device, nullptr, &stop_port),
       std::runtime_error);
   }
 }

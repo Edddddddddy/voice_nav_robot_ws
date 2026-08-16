@@ -100,6 +100,33 @@ bool SpeechOutputCore::cancel(const std::uint64_t scope_id) noexcept
   return true;
 }
 
+bool SpeechOutputCore::interrupt_for_barge_in() noexcept
+{
+  if (active_.id == 0U || !active_.allow_barge_in) {
+    return false;
+  }
+  tts_.cancel(active_.id);
+  retire(SpeechResultCode::BargedIn, "interrupted by ordinary wake");
+  request_fence();
+  return true;
+}
+
+bool SpeechOutputCore::admit_ordinary_wake() noexcept
+{
+  return active_.id == 0U || interrupt_for_barge_in();
+}
+
+bool SpeechOutputCore::interrupt_for_stop() noexcept
+{
+  if (active_.id == 0U) {
+    return false;
+  }
+  tts_.cancel(active_.id);
+  retire(SpeechResultCode::BargedIn, "interrupted by voice STOP");
+  request_fence();
+  return true;
+}
+
 bool SpeechOutputCore::advance() noexcept
 {
   PlaybackWrite write{};

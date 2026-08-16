@@ -39,7 +39,8 @@ public:
   virtual void on_result(const SpeechResult & result) noexcept = 0;
 };
 
-class SpeechOutputNode final : public rclcpp::Node, private SpeechOutputObserver
+class SpeechOutputNode final : public rclcpp::Node, public SpeechOutputControl,
+  private SpeechOutputObserver
 {
 public:
   using Speak = voice_nav_interfaces::action::Speak;
@@ -51,6 +52,8 @@ public:
   ~SpeechOutputNode() override;
 
   void pump() noexcept;
+  [[nodiscard]] bool admit_ordinary_wake() noexcept override;
+  [[nodiscard]] bool interrupt_for_stop() noexcept override;
 
 private:
   [[nodiscard]] rclcpp_action::GoalResponse handle_goal(

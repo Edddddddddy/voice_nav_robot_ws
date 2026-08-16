@@ -54,6 +54,9 @@ struct AudioMetrics
   std::uint64_t playback_underflows{0U};
   std::uint64_t xruns{0U};
   std::uint64_t discontinuities{0U};
+  std::uint64_t last_fence_generation_before{0U};
+  std::uint64_t last_fence_generation_after{0U};
+  std::uint64_t stale_pcm_after_fence{0U};
 };
 
 struct PlaybackWrite
@@ -262,6 +265,9 @@ private:
   std::atomic<std::uint64_t> playback_underflows_{0U};
   std::atomic<std::uint64_t> xruns_{0U};
   std::atomic<std::uint64_t> discontinuities_{0U};
+  std::atomic<std::uint64_t> last_fence_generation_before_{0U};
+  std::atomic<std::uint64_t> last_fence_generation_after_{0U};
+  std::atomic<std::uint64_t> stale_pcm_after_fence_{0U};
 };
 
 }  // namespace voice_nav_audio

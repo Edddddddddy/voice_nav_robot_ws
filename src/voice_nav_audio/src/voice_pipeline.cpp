@@ -19,15 +19,19 @@
 
 namespace voice_nav_audio
 {
-
 VoicePipeline::VoicePipeline(
   std::unique_ptr<SpeechRecognizerAdapter> recognizer,
   std::unique_ptr<TtsAdapter> tts,
   FullDuplexAudioDevice & device,
-  SpeechOutputTraceSink * const trace)
+  SpeechOutputTraceSink * const trace,
+  StopMissionPort * const stop_port)
 : adapter_(engine_, device),
-  input_(std::make_shared<SpeechInputNode>(std::move(recognizer))),
-  output_(std::make_shared<SpeechOutputNode>(engine_, std::move(tts), trace))
+  output_(std::make_shared<SpeechOutputNode>(engine_, std::move(tts), trace)),
+  owned_stop_port_(stop_port == nullptr ? std::make_unique<RosStopMissionPort>(
+      std::static_pointer_cast<rclcpp::Node>(output_)) : nullptr),
+  coordination_(std::make_unique<VoicePipelineCoordination>(
+      *output_, stop_port != nullptr ? *stop_port : static_cast<StopMissionPort &>(*owned_stop_port_))),
+  input_(std::make_shared<SpeechInputNode>(std::move(recognizer), coordination_.get()))
 {
   if (adapter_.start() != AdapterStartResult::Started) {
     throw std::runtime_error("VoicePipeline could not start its AudioEngine adapter");
@@ -54,6 +58,16 @@ void VoicePipeline::remove_from_executor(rclcpp::Executor & executor)
 {
   executor.remove_node(input_);
   executor.remove_node(output_);
+}
+
+std::size_t VoicePipeline::direct_stop_request_count() const noexcept
+{
+  return owned_stop_port_ == nullptr ? 0U : owned_stop_port_->request_count();
+}
+
+AudioMetrics VoicePipeline::audio_metrics() const noexcept
+{
+  return engine_.metrics();
 }
 
 }  // namespace voice_nav_audio

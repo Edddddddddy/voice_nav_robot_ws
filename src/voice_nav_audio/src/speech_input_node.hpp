@@ -31,7 +31,9 @@ namespace voice_nav_audio
 class SpeechInputNode final : public rclcpp::Node, private VoiceTurnSink
 {
 public:
-  explicit SpeechInputNode(std::unique_ptr<SpeechRecognizerAdapter> recognizer);
+  explicit SpeechInputNode(
+    std::unique_ptr<SpeechRecognizerAdapter> recognizer,
+    SpeechInputCoordination * coordination = nullptr);
 
   void accept_cleaned_frame(const CleanedAudioFrame & frame) noexcept;
 

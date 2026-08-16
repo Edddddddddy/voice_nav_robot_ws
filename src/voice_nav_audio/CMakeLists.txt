@@ -26,7 +26,9 @@ add_library(speech_input_core STATIC src/speech_input_core.cpp)
 add_library(speech_input_node STATIC src/speech_input_node.cpp)
 add_library(speech_output_core STATIC src/speech_output_core.cpp)
 add_library(speech_output_node STATIC src/speech_output_node.cpp)
+add_library(voice_pipeline_coordination STATIC src/voice_pipeline_coordination.cpp)
 add_library(voice_pipeline STATIC src/voice_pipeline.cpp)
+add_library(ros_stop_mission_port STATIC src/ros_stop_mission_port.cpp)
 add_library(chaowen_tts_adapter STATIC src/chaowen_tts_adapter.cpp)
 add_library(
   audio_engine STATIC
@@ -48,7 +50,9 @@ foreach(target
     speech_input_node
     speech_output_core
     speech_output_node
+    voice_pipeline_coordination
     voice_pipeline
+    ros_stop_mission_port
     chaowen_tts_adapter
     portaudio_adapter
     portaudio_adapter_callback)
@@ -64,11 +68,16 @@ target_link_libraries(speech_input_node speech_input_core)
 target_link_libraries(speech_output_core audio_engine)
 ament_target_dependencies(speech_output_node rclcpp rclcpp_action voice_nav_interfaces)
 target_link_libraries(speech_output_node speech_output_core)
-ament_target_dependencies(voice_pipeline rclcpp rclcpp_action)
+target_link_libraries(voice_pipeline_coordination speech_input_core speech_output_core)
+ament_target_dependencies(voice_pipeline rclcpp rclcpp_action voice_nav_interfaces)
+ament_target_dependencies(ros_stop_mission_port rclcpp voice_nav_interfaces)
+target_link_libraries(ros_stop_mission_port voice_pipeline_coordination)
 target_link_libraries(
   voice_pipeline
   speech_input_node
   speech_output_node
+  voice_pipeline_coordination
+  ros_stop_mission_port
   portaudio_adapter
 )
 target_link_libraries(chaowen_tts_adapter speech_output_core)
@@ -209,6 +218,28 @@ if(BUILD_TESTING)
   target_compile_features(speech_output_core_test PUBLIC cxx_std_17)
   target_include_directories(speech_output_core_test PRIVATE include src)
   target_link_libraries(speech_output_core_test speech_output_core)
+
+  ament_add_gtest(
+    voice_pipeline_coordination_test
+    test/voice_pipeline_coordination_test.cpp
+  )
+  target_compile_features(voice_pipeline_coordination_test PUBLIC cxx_std_17)
+  target_include_directories(voice_pipeline_coordination_test PRIVATE include src)
+  target_link_libraries(
+    voice_pipeline_coordination_test
+    voice_pipeline_coordination
+    speech_input_core
+    speech_output_core
+  )
+
+  ament_add_gtest(
+    ros_stop_mission_port_test
+    test/ros_stop_mission_port_test.cpp
+  )
+  target_compile_features(ros_stop_mission_port_test PUBLIC cxx_std_17)
+  target_include_directories(ros_stop_mission_port_test PRIVATE include src)
+  ament_target_dependencies(ros_stop_mission_port_test rclcpp voice_nav_interfaces)
+  target_link_libraries(ros_stop_mission_port_test ros_stop_mission_port)
 
   ament_add_gtest(
     speech_output_node_test

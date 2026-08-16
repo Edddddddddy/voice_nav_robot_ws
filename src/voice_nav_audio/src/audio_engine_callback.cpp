@@ -134,6 +134,7 @@ bool AudioEngine::pop_playback_for_current_generation(
       packet = candidate;
       return true;
     }
+    stale_pcm_after_fence_.fetch_add(1U, std::memory_order_relaxed);
   }
   return false;
 }
@@ -151,7 +152,12 @@ void AudioEngine::commit_pending_discontinuities() noexcept
     return;
   }
   const auto count = requested - observed_discontinuity_requests_;
-  generation_.fetch_add(count, std::memory_order_acq_rel);
+  const auto generation_before = generation_.load(std::memory_order_acquire);
+  const auto generation_after = generation_before + count;
+  generation_.store(generation_after, std::memory_order_release);
+  last_fence_generation_before_.store(generation_before, std::memory_order_release);
+  last_fence_generation_after_.store(generation_after, std::memory_order_release);
+  stale_pcm_after_fence_.store(0U, std::memory_order_release);
   discontinuities_.fetch_add(count, std::memory_order_relaxed);
   observed_discontinuity_requests_ = requested;
 }
