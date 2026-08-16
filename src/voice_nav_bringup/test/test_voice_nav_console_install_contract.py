@@ -1,0 +1,39 @@
+# Copyright 2026 Edddddddddy
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Install-space contract for the simulation-only command console."""
+
+import os
+from pathlib import Path
+
+from ament_index_python.packages import get_package_prefix
+
+
+def test_console_is_installed_as_the_voice_nav_bringup_executable():
+    """Require the exact extensionless install-space executable name."""
+    package = Path(__file__).resolve().parents[1]
+    cmake = (package / 'CMakeLists.txt').read_text(encoding='utf-8')
+    manifest = (package / 'package.xml').read_text(encoding='utf-8')
+
+    assert 'install(\n  PROGRAMS\n    voice_nav_console.py' in cmake
+    assert '  RENAME voice_nav_console' in cmake
+    assert 'DESTINATION lib/${PROJECT_NAME}' in cmake
+    assert '<exec_depend>rclpy</exec_depend>' in manifest
+
+    prefix = Path(get_package_prefix('voice_nav_bringup'))
+    executable = prefix / 'lib' / 'voice_nav_bringup' / 'voice_nav_console'
+    suffixed_executable = executable.with_name('voice_nav_console.py')
+    assert executable.is_file()
+    assert os.access(executable, os.X_OK)
+    assert not suffixed_executable.exists()
