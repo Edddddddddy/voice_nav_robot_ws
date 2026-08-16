@@ -16,6 +16,8 @@
 
 #include <chrono>
 
+#include "rcl_interfaces/srv/set_parameters.hpp"
+
 #define main voice_nav_audio_scripted_voice_demo_main
 #include "../src/scripted_voice_demo.cpp"  // NOLINT(build/include)
 #undef main
@@ -230,6 +232,19 @@ TEST(VoiceCommandGateway, ReleasesAfterStopAtSafeBarrierOnlyAfterTwoHundredMilli
     action_msgs::msg::GoalStatusArray>(
     "/voice/speak/_action/status", rclcpp::QoS(rclcpp::KeepLast(10)));
 
+  const auto wait_for_subscriptions = [](const auto & ... publishers) {
+      for (std::size_t attempt = 0U; attempt < 10000U; ++attempt) {
+        if (((publishers->get_subscription_count() > 0U) && ...)) {
+          return true;
+        }
+        std::this_thread::yield();
+      }
+      return false;
+    };
+  ASSERT_TRUE(wait_for_subscriptions(
+      state_publisher, command_publisher, odometry_publisher,
+      turn_publisher, speak_status_publisher));
+
   voice_nav_interfaces::msg::MissionState state{};
   state.availability = voice_nav_interfaces::msg::MissionState::AVAILABLE;
   state.gate_state = voice_nav_interfaces::msg::MissionState::GATE_INHIBITED;
@@ -274,15 +289,8 @@ TEST(VoiceCommandGateway, ReleasesAfterStopAtSafeBarrierOnlyAfterTwoHundredMilli
     speak_status_publisher->publish(speak_status);
     publish_safe_sample();
   };
-  bool baseline_reply_observed = false;
-  for (std::size_t attempt = 0U; attempt < 1000U && !baseline_reply_observed; ++attempt) {
-    publish_reply();
-    const auto summary = observer.summary();
-    baseline_reply_observed = summary.turns.size() == 1U &&
-      summary.successful_speech_count == 1U;
-    std::this_thread::yield();
-  }
-  ASSERT_TRUE(baseline_reply_observed);
+  publish_reply();
+  ASSERT_TRUE(observer.wait_for_command_outcome());
 
   VoiceCommandGateway gateway(observer);
   const auto accepted = gateway.on_parameters({
@@ -393,6 +401,100 @@ TEST(CompletionObserver, CapturesStartupZeroSampleBeforeGraphWait)
   EXPECT_TRUE(accepted);
   executor.cancel();
   spin_thread.join();
+  executor.remove_node(observer.node());
+}
+
+TEST(SessionGateway, ExposesServiceOnlyAfterObserverSafeBarrier)
+{
+  RclcppContextGuard rclcpp_context;
+  PlaybackEvidenceRecorder recorder;
+  ManualDevice device(recorder);
+  auto now = std::chrono::steady_clock::time_point{};
+  CompletionObserver observer(device, [&now]() {return now;});
+  rclcpp::executors::SingleThreadedExecutor executor;
+  observer.start(executor);
+  auto probe = std::make_shared<rclcpp::Node>("session_gateway_readiness_probe");
+  auto client = probe->create_client<rcl_interfaces::srv::SetParameters>(
+    "/voice_nav_command_gateway/set_parameters");
+  executor.add_node(probe);
+  std::thread spin_thread([&executor]() {executor.spin();});
+
+  const auto state_publisher = observer.node()->create_publisher<
+    voice_nav_interfaces::msg::MissionState>(
+    "/mission/state", rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local());
+  const auto command_publisher = observer.node()->create_publisher<
+    geometry_msgs::msg::TwistStamped>("/diff_drive_controller/cmd_vel", rclcpp::QoS(1));
+  const auto odometry_publisher = observer.node()->create_publisher<nav_msgs::msg::Odometry>(
+    "/odom", rclcpp::QoS(1));
+
+  voice_nav_interfaces::msg::MissionState state{};
+  state.availability = voice_nav_interfaces::msg::MissionState::AVAILABLE;
+  state.gate_state = voice_nav_interfaces::msg::MissionState::GATE_INHIBITED;
+  state.active_step = std::numeric_limits<std::uint32_t>::max();
+  geometry_msgs::msg::TwistStamped command{};
+  nav_msgs::msg::Odometry odometry{};
+  odometry.pose.pose.orientation.w = 1.0;
+  const auto publish_safe_sample = [&]() {
+      state_publisher->publish(state);
+      command_publisher->publish(command);
+      odometry_publisher->publish(odometry);
+    };
+
+  EXPECT_FALSE(client->wait_for_service(0s));
+  for (std::size_t attempt = 0U; attempt < 1000U; ++attempt) {
+    publish_safe_sample();
+    std::this_thread::yield();
+  }
+  now += 2s;
+  bool barrier_ready = false;
+  for (std::size_t attempt = 0U; attempt < 1000U && !barrier_ready; ++attempt) {
+    publish_safe_sample();
+    barrier_ready = observer.session_can_accept_command();
+    std::this_thread::yield();
+  }
+  ASSERT_TRUE(barrier_ready);
+  ASSERT_TRUE(observer.wait_for_session_command_ready());
+  EXPECT_FALSE(client->wait_for_service(0s));
+
+  rclcpp::NodeOptions configuration_options;
+  configuration_options.arguments({
+    "--ros-args", "-r", "scripted_voice_demo_configuration:__node:=voice_nav_command_gateway"});
+  std::shared_ptr<rclcpp::Node> configuration;
+  std::unique_ptr<VoiceCommandGateway> gateway;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameter_callback;
+  expose_session_gateway(
+    "session", "", observer, configuration_options, executor,
+    configuration, gateway, parameter_callback);
+
+  bool service_ready = false;
+  for (std::size_t attempt = 0U; attempt < 1000U && !service_ready; ++attempt) {
+    service_ready = client->wait_for_service(0s);
+    std::this_thread::yield();
+  }
+  ASSERT_TRUE(service_ready);
+
+  state.gate_state = voice_nav_interfaces::msg::MissionState::GATE_ARMED;
+  command.twist.linear.x = 0.1;
+  bool observer_jittered = false;
+  for (std::size_t attempt = 0U; attempt < 1000U && !observer_jittered; ++attempt) {
+    publish_safe_sample();
+    observer_jittered = !observer.session_can_accept_command();
+    std::this_thread::yield();
+  }
+  ASSERT_TRUE(observer_jittered);
+
+  const auto accepted = gateway->on_parameters({
+      rclcpp::Parameter("command_text", "右转九十度")});
+  ASSERT_TRUE(accepted.successful) << accepted.reason;
+  const auto busy = gateway->on_parameters({
+      rclcpp::Parameter("command_text", "前进")});
+  EXPECT_FALSE(busy.successful);
+  EXPECT_EQ(busy.reason, "command_text is busy; wait for the safe stationary barrier");
+
+  executor.cancel();
+  spin_thread.join();
+  executor.remove_node(configuration);
+  executor.remove_node(probe);
   executor.remove_node(observer.node());
 }
 

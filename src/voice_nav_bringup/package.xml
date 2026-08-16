@@ -13,6 +13,7 @@
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>nav2_collision_monitor</exec_depend>
   <exec_depend>nav2_velocity_smoother</exec_depend>
+  <exec_depend>rcl_interfaces</exec_depend>
   <exec_depend>rclcpp_components</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>rmw_fastrtps_cpp</exec_depend>

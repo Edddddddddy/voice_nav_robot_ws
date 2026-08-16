@@ -52,6 +52,16 @@ if(BUILD_TESTING)
     TIMEOUT 30
   )
   ament_add_pytest_test(
+    voice_nav_app
+    test/test_voice_nav_app.py
+    TIMEOUT 30
+  )
+  ament_add_pytest_test(
+    voice_nav_app_install_contract
+    test/test_voice_nav_app_install_contract.py
+    TIMEOUT 30
+  )
+  ament_add_pytest_test(
     canonical_session_driver
     test/test_canonical_session_driver.py
     TIMEOUT 30
@@ -113,6 +123,13 @@ install(
     voice_nav_console.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME voice_nav_console
+)
+
+install(
+  PROGRAMS
+    voice_nav_app.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME voice_nav_app
 )
 
 install(
