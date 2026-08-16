@@ -22,6 +22,7 @@
 #include "rclcpp/executors/single_threaded_executor.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "rmw/types.h"
+#include "sensevoice_provider.hpp"
 #include "speech_input_node.hpp"
 #include "voice_nav_interfaces/msg/voice_turn.hpp"
 
@@ -57,15 +58,104 @@ public:
     active_scope_ = TurnScopeIdentity{};
   }
 
+  void finish_input() noexcept override
+  {
+    ++finish_input_calls;
+  }
+
+  std::size_t finish_input_calls{0U};
+
 private:
   TurnScopeIdentity active_scope_{};
 };
 
-CleanedAudioFrame frame(const std::uint64_t sequence)
+class NodeBarrierVad final : public SileroVadAdapter
+{
+public:
+  SileroVadResult process(const CleanedAudioFrame &) noexcept override
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++calls_;
+    return calls_ == 1U ?
+           SileroVadResult{SileroVadDecision::kSpeech, 0U} :
+           SileroVadResult{SileroVadDecision::kEndpoint, 2U * CleanedAudioFrame::kSamples};
+  }
+
+  SileroVadFlushResult finish_input() noexcept override
+  {
+    return SileroVadFlushResult{
+      SileroVadFlushStatus::kUnique, 2U * CleanedAudioFrame::kSamples};
+  }
+
+  void reset() noexcept override
+  {
+  }
+
+private:
+  std::mutex mutex_;
+  std::size_t calls_{0U};
+};
+
+class NodeBarrierAsr final : public SenseVoiceAsrAdapter
+{
+public:
+  bool infer(
+    const Sample *, const std::size_t, std::string & labeled_text) noexcept override
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    entered_ = true;
+    condition_.notify_all();
+    condition_.wait(lock, [this]() {return released_;});
+    labeled_text = "开放时间早上9点至下午5点。";
+    return true;
+  }
+
+  void shutdown() noexcept override
+  {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      shutdown_requested_ = true;
+    }
+    condition_.notify_all();
+  }
+
+  bool wait_until_entered()
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, std::chrono::seconds(2), [this]() {return entered_;});
+  }
+
+  bool wait_until_shutdown()
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, std::chrono::seconds(2), [this]() {
+               return shutdown_requested_;
+      });
+  }
+
+  void release() noexcept
+  {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      released_ = true;
+    }
+    condition_.notify_all();
+  }
+
+private:
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  bool entered_{false};
+  bool released_{false};
+  bool shutdown_requested_{false};
+};
+
+CleanedAudioFrame frame(const std::uint64_t sequence, const std::size_t valid_samples = 160U)
 {
   CleanedAudioFrame input{};
   input.audio_generation = 7U;
   input.audio_seq = sequence;
+  input.valid_samples = valid_samples;
   input.samples.fill(100);
   return input;
 }
@@ -80,13 +170,14 @@ TEST(SpeechInputNodeTest, HeadlessCompositionPublishesOnlyOneFinalVoiceTurn)
 
   rclcpp::init(0, nullptr);
   auto recognizer = std::make_unique<NodeHappyPathRecognizer>();
+  auto * const recognizer_probe = recognizer.get();
   auto speech = std::make_shared<SpeechInputNode>(std::move(recognizer));
   auto observer = std::make_shared<rclcpp::Node>("speech_input_observer");
   std::mutex mutex;
   std::condition_variable received;
   std::size_t publication_count = 0U;
   voice_nav_interfaces::msg::VoiceTurn latest{};
-  const auto subscription = observer->create_subscription<voice_nav_interfaces::msg::VoiceTurn>(
+  auto subscription = observer->create_subscription<voice_nav_interfaces::msg::VoiceTurn>(
     "/voice/turn", rclcpp::QoS(rclcpp::KeepLast(1)).reliable().durability_volatile(),
     [&mutex, &received, &publication_count, &latest](
       const voice_nav_interfaces::msg::VoiceTurn::SharedPtr message) {
@@ -123,7 +214,9 @@ TEST(SpeechInputNodeTest, HeadlessCompositionPublishesOnlyOneFinalVoiceTurn)
 
     speech->accept_cleaned_frame(frame(1U));
     speech->accept_cleaned_frame(frame(2U));
-    speech->accept_cleaned_frame(frame(3U));
+    speech->accept_cleaned_frame(frame(3U, 32U));
+    speech->finish_input();
+    EXPECT_EQ(recognizer_probe->finish_input_calls, 1U);
 
     std::unique_lock<std::mutex> lock(mutex);
     ASSERT_TRUE(received.wait_for(lock, std::chrono::seconds(2), [&publication_count]() {
@@ -153,6 +246,50 @@ TEST(SpeechInputNodeTest, HeadlessCompositionPublishesOnlyOneFinalVoiceTurn)
   spin_thread.join();
   rclcpp::shutdown();
   (void)subscription;
+}
+
+TEST(SpeechInputNodeTest, DestructionJoinsRecognizerBeforeCoreAndSuppressesLateFinal)
+{
+  rclcpp::init(0, nullptr);
+  auto vad = std::make_unique<NodeBarrierVad>();
+  auto asr = std::make_unique<NodeBarrierAsr>();
+  auto * const asr_probe = asr.get();
+  auto provider = std::make_unique<SenseVoiceProvider>(std::move(vad), std::move(asr));
+  ASSERT_TRUE(provider->arm_once());
+  auto speech = std::make_unique<SpeechInputNode>(std::move(provider));
+  auto observer = std::make_shared<rclcpp::Node>("speech_input_teardown_observer");
+  std::mutex count_mutex;
+  std::size_t publication_count = 0U;
+  auto subscription = observer->create_subscription<voice_nav_interfaces::msg::VoiceTurn>(
+    "/voice/turn", voice_turn_qos(),
+    [&count_mutex, &publication_count](
+      const voice_nav_interfaces::msg::VoiceTurn::SharedPtr) {
+      std::lock_guard<std::mutex> lock(count_mutex);
+      ++publication_count;
+    });
+  rclcpp::executors::SingleThreadedExecutor executor;
+  executor.add_node(observer);
+  std::thread spin_thread([&executor]() {executor.spin();});
+
+  speech->accept_cleaned_frame(frame(1U));
+  speech->accept_cleaned_frame(frame(2U));
+  speech->finish_input();
+  ASSERT_TRUE(asr_probe->wait_until_entered());
+
+  std::thread destroyer([&speech]() {speech.reset();});
+  EXPECT_TRUE(asr_probe->wait_until_shutdown());
+  asr_probe->release();
+  destroyer.join();
+
+  {
+    std::lock_guard<std::mutex> lock(count_mutex);
+    EXPECT_EQ(publication_count, 0U);
+  }
+  executor.cancel();
+  spin_thread.join();
+  subscription.reset();
+  observer.reset();
+  rclcpp::shutdown();
 }
 
 }  // namespace

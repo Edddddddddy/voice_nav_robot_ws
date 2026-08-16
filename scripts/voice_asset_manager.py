@@ -26,6 +26,8 @@ SHA256_PATTERN = re.compile(r"\A[0-9a-f]{64}\Z")
 IDENTIFIER_PATTERN = re.compile(r"\A[a-z0-9][a-z0-9-]*\Z")
 FLOATING_REFERENCE_PARTS = frozenset({"head", "latest", "main", "master"})
 PROVENANCE_STATUSES = frozenset({"resolved", "restricted", "unresolved"})
+FUNASR_MODEL_LICENSE = "FunASR Model Open Source License Agreement 1.1"
+FUNASR_SENSEVOICE_SOURCE_REVISION = "3847d57b6bdf2dd8875cb1508d2af43d80a16bf7"
 
 
 class ManifestError(ValueError):
@@ -46,6 +48,11 @@ class ModelProvenance:
     training_data_provenance: str
     training_data_url: str | None
     model_card_url: str
+    source_model: str | None = None
+    source_revision: str | None = None
+    source_license: str | None = None
+    source_license_url: str | None = None
+    attribution: str | None = None
 
 
 @dataclass(frozen=True)
@@ -167,7 +174,7 @@ def _require_build_options(value: Any, label: str) -> Mapping[str, str]:
 
 
 def _validate_model_provenance(value: Any) -> ModelProvenance:
-    expected = frozenset(
+    required = frozenset(
         {
             "status",
             "weights_license",
@@ -177,9 +184,12 @@ def _validate_model_provenance(value: Any) -> ModelProvenance:
             "model_card_url",
         }
     )
+    optional = frozenset(
+        {"source_model", "source_revision", "source_license", "source_license_url", "attribution"}
+    )
     if not isinstance(value, dict):
         raise ManifestError("asset.model_provenance must be an object")
-    _require_exact_keys(value, expected, "asset.model_provenance")
+    _require_exact_keys(value, required | (frozenset(value) & optional), "asset.model_provenance")
     status = _require_text(value["status"], "asset.model_provenance.status")
     if status not in PROVENANCE_STATUSES:
         raise ManifestError("asset.model_provenance.status is unsupported")
@@ -200,6 +210,43 @@ def _validate_model_provenance(value: Any) -> ModelProvenance:
         weights_license = _require_text(weights_license, "asset.model_provenance.weights_license")
         if weights_license_url is None or training_data_url is None:
             raise ManifestError("resolved or restricted model provenance requires source URLs")
+    source_model = value.get("source_model")
+    source_revision = value.get("source_revision")
+    source_license = value.get("source_license")
+    source_license_url = _require_optional_https_url(
+        value.get("source_license_url"), "asset.model_provenance.source_license_url"
+    )
+    attribution = value.get("attribution")
+    for field, field_value in (
+        ("source_model", source_model),
+        ("source_revision", source_revision),
+        ("source_license", source_license),
+        ("attribution", attribution),
+    ):
+        if field_value is not None:
+            _require_text(field_value, f"asset.model_provenance.{field}")
+    if source_revision is not None:
+        _require_immutable_reference(source_revision, "asset.model_provenance.source_revision")
+    if source_model is not None and source_license_url is None:
+        raise ManifestError("source model provenance requires source_license_url")
+    if weights_license == FUNASR_MODEL_LICENSE:
+        if any(
+            field_value is None
+            for field_value in (
+                source_model,
+                source_revision,
+                source_license,
+                source_license_url,
+                attribution,
+            )
+        ):
+            raise ManifestError(
+                "FunASR model provenance requires source model, revision, license, license URL, and attribution"
+            )
+        if source_revision != FUNASR_SENSEVOICE_SOURCE_REVISION:
+            raise ManifestError("FunASR SenseVoice source_revision is not the frozen immutable revision")
+        if source_license != weights_license:
+            raise ManifestError("FunASR source_license must match weights_license")
     return ModelProvenance(
         status=status,
         weights_license=weights_license,
@@ -207,6 +254,11 @@ def _validate_model_provenance(value: Any) -> ModelProvenance:
         training_data_provenance=training_data_provenance,
         training_data_url=training_data_url,
         model_card_url=_require_https_url(value["model_card_url"], "asset.model_provenance.model_card_url"),
+        source_model=source_model,
+        source_revision=source_revision,
+        source_license=source_license,
+        source_license_url=source_license_url,
+        attribution=attribution,
     )
 
 
@@ -417,22 +469,42 @@ class Provisioner:
         dependency_root: Path,
         model_root: Path,
         downloader: Callable[[Asset, Path], None] = _download,
+        selected_assets: Sequence[str] | None = None,
     ) -> None:
         if dependencies.category != "dependencies" or models.category != "models":
             raise ValueError("asset manifests must retain their category")
         self._groups = ((dependencies, dependency_root), (models, model_root))
         self._downloader = downloader
+        available = {
+            asset.identifier for manifest, _root in self._groups for asset in manifest.assets
+        }
+        if selected_assets is None:
+            self._selected_assets: frozenset[str] | None = None
+        else:
+            selected = tuple(selected_assets)
+            if not selected or len(set(selected)) != len(selected):
+                raise ProvisionError("--asset selection must contain unique asset ids")
+            unknown = sorted(set(selected) - available)
+            if unknown:
+                raise ProvisionError("unknown selected asset: " + ", ".join(unknown))
+            self._selected_assets = frozenset(selected)
+
+    def _selected(self, asset: Asset) -> bool:
+        return self._selected_assets is None or asset.identifier in self._selected_assets
+
+    def _iter_selected(self, manifest: AssetManifest):
+        return (asset for asset in manifest.assets if self._selected(asset))
 
     def _preflight_licenses(self) -> None:
         for manifest, _root in self._groups:
-            for asset in manifest.assets:
+            for asset in self._iter_selected(manifest):
                 provenance = asset.model_provenance
                 if provenance is not None and provenance.status == "unresolved":
                     raise ProvisionError(f"model license provenance unresolved: {asset.identifier}")
 
     def _verify_group(self, manifest: AssetManifest, root: Path) -> tuple[str, ...]:
         verified: list[str] = []
-        for asset in manifest.assets:
+        for asset in self._iter_selected(manifest):
             target = _safe_target(root, asset.destination)
             if not target.exists():
                 raise ProvisionError(f"missing verified asset: {asset.identifier}")
@@ -471,7 +543,7 @@ class Provisioner:
         installed: list[str] = []
         reused: list[str] = []
         for manifest, root in self._groups:
-            for asset in manifest.assets:
+            for asset in self._iter_selected(manifest):
                 target = _safe_target(root, asset.destination)
                 if target.exists():
                     _file_identity(target, asset, asset.identifier)
@@ -507,6 +579,13 @@ def _parser() -> argparse.ArgumentParser:
         "--offline",
         action="store_true",
         help="refuse downloads and require all assets to be present already",
+    )
+    parser.add_argument(
+        "--asset",
+        dest="assets",
+        action="append",
+        metavar="ID",
+        help="select one locked asset; repeat for a bounded asset set",
     )
     return parser
 
@@ -574,6 +653,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             models,
             dependency_root=dependency_root,
             model_root=model_root,
+            selected_assets=arguments.assets,
         )
         if arguments.command == "verify":
             verified = provisioner.verify()

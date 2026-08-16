@@ -1,4 +1,5 @@
 import importlib.util
+import io
 import hashlib
 import json
 import subprocess
@@ -46,6 +47,7 @@ class VoiceAssetManifestTest(unittest.TestCase):
             {asset.identifier for asset in models.assets},
             {
                 "asr-zh-int8-2025-06-30",
+                "asr-sensevoice-small-int8-2024-07-17",
                 "kws-zh-en-3m-2025-12-20",
                 "tts-chaowen-medium-int8",
                 "vad-silero-int8",
@@ -102,6 +104,43 @@ class VoiceAssetManifestTest(unittest.TestCase):
             with self.assertRaises(voice_assets.ManifestError):
                 voice_assets.load_manifest(path, "dependencies")
 
+    def test_funasr_provenance_requires_the_complete_frozen_source_identity(self) -> None:
+        document = json.loads(
+            (REPOSITORY_ROOT / "models" / "manifests" / "voice-models.yaml").read_text(
+                encoding="utf-8"
+            )
+        )
+        sensevoice_index = next(
+            index
+            for index, asset in enumerate(document["assets"])
+            if asset["id"] == "asr-sensevoice-small-int8-2024-07-17"
+        )
+        source_fields = (
+            "source_model",
+            "source_revision",
+            "source_license",
+            "source_license_url",
+            "attribution",
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / "voice-models.yaml"
+            for field in source_fields:
+                mutation = json.loads(json.dumps(document))
+                mutation["assets"][sensevoice_index]["model_provenance"].pop(field)
+                path.write_text(json.dumps(mutation), encoding="utf-8")
+                with self.subTest(mutation=f"missing {field}"), self.assertRaises(voice_assets.ManifestError):
+                    voice_assets.load_manifest(path, "models")
+
+            for field, value in (
+                ("source_revision", "deadbeef" * 8),
+                ("source_license", "MIT"),
+            ):
+                mutation = json.loads(json.dumps(document))
+                mutation["assets"][sensevoice_index]["model_provenance"][field] = value
+                path.write_text(json.dumps(mutation), encoding="utf-8")
+                with self.subTest(mutation=f"drifted {field}"), self.assertRaises(voice_assets.ManifestError):
+                    voice_assets.load_manifest(path, "models")
+
     def test_notices_and_voice_architecture_record_the_locked_offline_boundary(self) -> None:
         dependencies, models = voice_assets.load_manifests(REPOSITORY_ROOT)
         notices = (REPOSITORY_ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
@@ -121,7 +160,7 @@ class VoiceAssetManifestTest(unittest.TestCase):
         self.assertIn("运行时不得下载", architecture)
         self.assertNotIn("14M Chinese Streaming Zipformer", architecture)
         self.assertNotIn("自动选", architecture)
-        self.assertIn("ASR：唯一冻结 `2025-06-30 int8`", architecture)
+        self.assertIn("ASR：真实 Provider 只允许已解析许可的 `SenseVoiceSmall int8`", architecture)
         self.assertIn("TTS：`vits-piper-zh_CN-chaowen-medium-int8.tar.bz2`", architecture)
 
 
@@ -287,6 +326,8 @@ class VoiceAssetReviewContractTest(unittest.TestCase):
                 None if provenance is None else (
                     provenance.status, provenance.weights_license, provenance.weights_license_url,
                     provenance.training_data_provenance, provenance.training_data_url, provenance.model_card_url,
+                    provenance.source_model, provenance.source_revision, provenance.source_license,
+                    provenance.source_license_url, provenance.attribution,
                 ),
                 asset.release_asset_id,
             )
@@ -297,10 +338,11 @@ class VoiceAssetReviewContractTest(unittest.TestCase):
             "abseil-cpp": ("20240722.0", "20240722.0", "https://github.com/abseil/abseil-cpp/releases/download/20240722.0/abseil-cpp-20240722.0.tar.gz", 2242861, "f50e5ac311a81382da7fa75b97310e4b9006474f9560ac46f54a9967f07d4ae3", "abseil-cpp/abseil-cpp-20240722.0.tar.gz", {"system": "CMake", "BUILD_SHARED_LIBS": "OFF", "ABSL_BUILD_TESTING": "OFF"}, "Apache-2.0", None, None),
             "abseil-cpp-meson-patch": ("20240722.0-3", "20240722.0-3", "https://wrapdb.mesonbuild.com/v2/abseil-cpp_20240722.0-3/get_patch", 5929, "12dd8df1488a314c53e3751abd2750cf233b830651d168b6a9f15e7d0cf71f7b", "abseil-cpp/abseil-cpp_20240722.0-3_patch.zip", {"system": "Meson", "wrap": "20240722.0-3"}, "Apache-2.0", None, None),
             "sherpa-onnx": ("v1.13.4", "142807252687d81b40d6315f23470a1512a00de3", "https://codeload.github.com/k2-fsa/sherpa-onnx/tar.gz/142807252687d81b40d6315f23470a1512a00de3", 9840362, "f0dc7c9b41b8691313daee671e826eb23946fa1320559a8d37e84f8774af76b2", "sherpa-onnx/sherpa-onnx-142807252687d81b40d6315f23470a1512a00de3.tar.gz", {"system": "CMake", "BUILD_SHARED_LIBS": "OFF", "SHERPA_ONNX_ENABLE_TESTS": "OFF"}, "Apache-2.0", None, None),
-            "kws-zh-en-3m-2025-12-20": ("sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20", "2025-12-20", "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20.tar.bz2", 32885699, "68447f4fbc67e70eee3a93961f36e81e98f47aef73ce7e7ca00885c6cd3616a6", "kws/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20.tar.bz2", {"runtime": "sherpa-onnx", "provider": "cpu"}, "Apache-2.0", ("unresolved", None, None, "未找到可核验的 KWS 权重或训练数据权威许可；sherpa-onnx Apache-2.0 仅覆盖运行时框架。", None, "https://k2-fsa.github.io/sherpa/onnx/kws/pretrained_models/index.html"), None),
-            "vad-silero-int8": ("silero_vad.int8.onnx", "silero-vad-int8", "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.int8.onnx", 212860, "c36d490aff5ab924ca6c7aeec4d8f6bd3d22db6fa17611b9c5b17eae58ac3a20", "vad/silero_vad.int8.onnx", {"runtime": "sherpa-onnx", "provider": "cpu"}, "Apache-2.0", ("resolved", "MIT", "https://github.com/snakers4/silero-vad/blob/v5.1.2/LICENSE", "Silero VAD 上游 MIT 模型仓库与模型卡是权重及训练来源的可追溯出处；sherpa-onnx Apache-2.0 不替代该模型许可证。", "https://github.com/snakers4/silero-vad/tree/v5.1.2", "https://k2-fsa.github.io/sherpa/onnx/vad/silero-vad.html"), None),
-            "asr-zh-int8-2025-06-30": ("sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30", "2025-06-30", "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30.tar.bz2", 132634597, "5a2832047ea1f97dd0dc595b816c230c4bafad65cfc0341fa57517cadc50afd0", "asr/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30.tar.bz2", {"runtime": "sherpa-onnx", "provider": "cpu", "streaming": "ON"}, "Apache-2.0", ("unresolved", None, None, "未找到可核验的 ASR 权重及训练数据权威许可；sherpa-onnx Apache-2.0 仅覆盖运行时框架。", None, "https://k2-fsa.github.io/sherpa/onnx/pretrained_models/online-transducer/zipformer-transducer-models.html"), None),
-            "tts-chaowen-medium-int8": ("vits-piper-zh_CN-chaowen-medium-int8.tar.bz2", "406468505", "https://api.github.com/repos/k2-fsa/sherpa-onnx/releases/assets/406468505", 14011298, "f5f7c8628427fbb259ea4b7ec1a9a822a0c04e3f267071f0abfa0610371d9e0c", "tts/vits-piper-zh_CN-chaowen-medium-int8.tar.bz2", {"runtime": "sherpa-onnx", "provider": "cpu", "quantization": "int8"}, "Apache-2.0", ("restricted", "Xiao Ya/BZNSYP upstream data restricted to non-commercial use", "https://k2-fsa.github.io/sherpa/onnx/tts/all/Chinese/vits-piper-zh_CN-chaowen-medium.html", "Chaowen 模型卡记录 Xiao Ya 基座与 BZNSYP 训练数据链；上游限制为非商业使用。", "https://k2-fsa.github.io/sherpa/onnx/tts/all/Chinese/vits-piper-zh_CN-chaowen-medium.html", "https://k2-fsa.github.io/sherpa/onnx/tts/all/Chinese/vits-piper-zh_CN-chaowen-medium.html"), 406468505),
+            "kws-zh-en-3m-2025-12-20": ("sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20", "2025-12-20", "https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20.tar.bz2", 32885699, "68447f4fbc67e70eee3a93961f36e81e98f47aef73ce7e7ca00885c6cd3616a6", "kws/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20.tar.bz2", {"runtime": "sherpa-onnx", "provider": "cpu"}, "Apache-2.0", ("unresolved", None, None, "未找到可核验的 KWS 权重或训练数据权威许可；sherpa-onnx Apache-2.0 仅覆盖运行时框架。", None, "https://k2-fsa.github.io/sherpa/onnx/kws/pretrained_models/index.html", None, None, None, None, None), None),
+            "vad-silero-int8": ("silero_vad.int8.onnx", "silero-vad-int8", "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.int8.onnx", 212860, "c36d490aff5ab924ca6c7aeec4d8f6bd3d22db6fa17611b9c5b17eae58ac3a20", "vad/silero_vad.int8.onnx", {"runtime": "sherpa-onnx", "provider": "cpu"}, "Apache-2.0", ("resolved", "MIT", "https://github.com/snakers4/silero-vad/blob/v5.1.2/LICENSE", "Silero VAD 上游 MIT 模型仓库与模型卡是权重及训练来源的可追溯出处；sherpa-onnx Apache-2.0 不替代该模型许可证。", "https://github.com/snakers4/silero-vad/tree/v5.1.2", "https://k2-fsa.github.io/sherpa/onnx/vad/silero-vad.html", None, None, None, None, None), None),
+            "asr-sensevoice-small-int8-2024-07-17": ("sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17", "288366523", "https://api.github.com/repos/k2-fsa/sherpa-onnx/releases/assets/288366523", 163002883, "7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e", "asr/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2", {"runtime": "sherpa-onnx", "provider": "cpu", "quantization": "int8", "streaming": "OFF"}, "Apache-2.0", ("resolved", "FunASR Model Open Source License Agreement 1.1", "https://github.com/modelscope/FunASR/blob/2e4914e7f9e0950e47eeb831675d6167a51d0632/MODEL_LICENSE", "来源模型 FunAudioLLM/SenseVoiceSmall；作者 FunAudioLLM；模型名称 SenseVoiceSmall；来源 revision 3847d57b6bdf2dd8875cb1508d2af43d80a16bf7。", "https://www.modelscope.cn/models/iic/SenseVoiceSmall?revision=3847d57b6bdf2dd8875cb1508d2af43d80a16bf7", "https://www.modelscope.cn/models/iic/SenseVoiceSmall?revision=3847d57b6bdf2dd8875cb1508d2af43d80a16bf7", "FunAudioLLM/SenseVoiceSmall", "3847d57b6bdf2dd8875cb1508d2af43d80a16bf7", "FunASR Model Open Source License Agreement 1.1", "https://github.com/modelscope/FunASR/blob/2e4914e7f9e0950e47eeb831675d6167a51d0632/MODEL_LICENSE", "FunAudioLLM；SenseVoiceSmall；FunASR Model Open Source License Agreement 1.1。"), 288366523),
+            "asr-zh-int8-2025-06-30": ("sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30", "2025-06-30", "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30.tar.bz2", 132634597, "5a2832047ea1f97dd0dc595b816c230c4bafad65cfc0341fa57517cadc50afd0", "asr/sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30.tar.bz2", {"runtime": "sherpa-onnx", "provider": "cpu", "streaming": "ON"}, "Apache-2.0", ("unresolved", None, None, "未找到可核验的 ASR 权重及训练数据权威许可；sherpa-onnx Apache-2.0 仅覆盖运行时框架。", None, "https://k2-fsa.github.io/sherpa/onnx/pretrained_models/online-transducer/zipformer-transducer-models.html", None, None, None, None, None), None),
+            "tts-chaowen-medium-int8": ("vits-piper-zh_CN-chaowen-medium-int8.tar.bz2", "406468505", "https://api.github.com/repos/k2-fsa/sherpa-onnx/releases/assets/406468505", 14011298, "f5f7c8628427fbb259ea4b7ec1a9a822a0c04e3f267071f0abfa0610371d9e0c", "tts/vits-piper-zh_CN-chaowen-medium-int8.tar.bz2", {"runtime": "sherpa-onnx", "provider": "cpu", "quantization": "int8"}, "Apache-2.0", ("restricted", "Xiao Ya/BZNSYP upstream data restricted to non-commercial use", "https://k2-fsa.github.io/sherpa/onnx/tts/all/Chinese/vits-piper-zh_CN-chaowen-medium.html", "Chaowen 模型卡记录 Xiao Ya 基座与 BZNSYP 训练数据链；上游限制为非商业使用。", "https://k2-fsa.github.io/sherpa/onnx/tts/all/Chinese/vits-piper-zh_CN-chaowen-medium.html", "https://k2-fsa.github.io/sherpa/onnx/tts/all/Chinese/vits-piper-zh_CN-chaowen-medium.html", None, None, None, None, None), 406468505),
         })
         self.assertEqual(
             {
@@ -315,6 +357,7 @@ class VoiceAssetReviewContractTest(unittest.TestCase):
                 "sherpa-onnx": (None, "https://github.com/k2-fsa/sherpa-onnx/blob/142807252687d81b40d6315f23470a1512a00de3/LICENSE", None),
                 "kws-zh-en-3m-2025-12-20": (16000, "https://github.com/k2-fsa/sherpa-onnx/blob/142807252687d81b40d6315f23470a1512a00de3/LICENSE", "https://github.com/k2-fsa/sherpa-onnx/blob/142807252687d81b40d6315f23470a1512a00de3/LICENSE"),
                 "vad-silero-int8": (16000, "https://github.com/k2-fsa/sherpa-onnx/blob/142807252687d81b40d6315f23470a1512a00de3/LICENSE", "https://github.com/k2-fsa/sherpa-onnx/blob/142807252687d81b40d6315f23470a1512a00de3/LICENSE"),
+                "asr-sensevoice-small-int8-2024-07-17": (16000, "https://github.com/k2-fsa/sherpa-onnx/blob/142807252687d81b40d6315f23470a1512a00de3/LICENSE", "https://github.com/k2-fsa/sherpa-onnx/blob/142807252687d81b40d6315f23470a1512a00de3/LICENSE"),
                 "asr-zh-int8-2025-06-30": (16000, "https://github.com/k2-fsa/sherpa-onnx/blob/142807252687d81b40d6315f23470a1512a00de3/LICENSE", "https://github.com/k2-fsa/sherpa-onnx/blob/142807252687d81b40d6315f23470a1512a00de3/LICENSE"),
                 "tts-chaowen-medium-int8": (22050, "https://github.com/k2-fsa/sherpa-onnx/blob/142807252687d81b40d6315f23470a1512a00de3/LICENSE", "https://github.com/k2-fsa/sherpa-onnx/blob/142807252687d81b40d6315f23470a1512a00de3/LICENSE"),
             },
@@ -485,6 +528,177 @@ class VoiceAssetCliContractTest(unittest.TestCase):
                     opened.assert_not_called()
                     self.assertFalse(external.exists())
                     self.assertEqual(list(root.rglob("*.partial")), [])
+
+    def test_cli_asset_selection_is_closed_and_default_still_fails_on_unresolved_models(self) -> None:
+        payloads = {
+            "asr-sensevoice-small-int8-2024-07-17": b"sensevoice fixture",
+            "vad-silero-int8": b"silero fixture",
+        }
+
+        def model_asset(identifier: str, status: str = "resolved") -> dict[str, object]:
+            payload = payloads.get(identifier, b"unresolved fixture")
+            provenance = {
+                "status": status,
+                "weights_license": "MIT" if status != "unresolved" else None,
+                "weights_license_url": (
+                    "https://fixtures.invalid/model-license" if status != "unresolved" else None
+                ),
+                "training_data_provenance": "fixture provenance",
+                "training_data_url": (
+                    "https://fixtures.invalid/training-data" if status != "unresolved" else None
+                ),
+                "model_card_url": "https://fixtures.invalid/model-card",
+            }
+            return {
+                "id": identifier,
+                "version": f"{identifier}-v1",
+                "revision": f"{identifier}-r1",
+                "url": f"https://fixtures.invalid/{identifier}",
+                "size": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "destination": f"model/{identifier}.bin",
+                "build_options": {"runtime": "fixture"},
+                "sample_rate": 16000,
+                "runtime_license": "Apache-2.0",
+                "runtime_license_url": "https://fixtures.invalid/runtime-license",
+                "model_provenance": provenance,
+                "release_asset_id": None,
+            }
+
+        def write_repository(root: Path) -> None:
+            root.mkdir()
+            (root / ".gitignore").write_text("/.deps/\n/models/weights/\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            dependency = b"dependency fixture"
+            dependency_document = {
+                "schema_version": 1,
+                "assets": [{
+                    "id": "fixture-dependency",
+                    "version": "fixture-dependency-v1",
+                    "revision": "fixture-dependency-r1",
+                    "url": "https://fixtures.invalid/dependency",
+                    "size": len(dependency),
+                    "sha256": hashlib.sha256(dependency).hexdigest(),
+                    "license": "MIT",
+                    "license_url": "https://fixtures.invalid/dependency-license",
+                    "destination": "dependency/fixture.bin",
+                    "build_options": {"runtime": "fixture"},
+                }],
+            }
+            dependency_path = root / "third_party" / "locks" / "audio-dependencies.yaml"
+            model_path = root / "models" / "manifests" / "voice-models.yaml"
+            dependency_path.parent.mkdir(parents=True)
+            model_path.parent.mkdir(parents=True)
+            dependency_path.write_text(json.dumps(dependency_document), encoding="utf-8")
+            model_path.write_text(
+                json.dumps({
+                    "schema_version": 1,
+                    "assets": [
+                        model_asset("asr-sensevoice-small-int8-2024-07-17"),
+                        model_asset("vad-silero-int8"),
+                        model_asset("kws-zh-en-3m-2025-12-20", "unresolved"),
+                        model_asset("asr-zh-int8-2025-06-30", "unresolved"),
+                    ],
+                }),
+                encoding="utf-8",
+            )
+
+        class Response:
+            def __init__(self, payload: bytes):
+                self.payload = payload
+                self.sent = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _size: int) -> bytes:
+                if self.sent:
+                    return b""
+                self.sent = True
+                return self.payload
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            selected_root = Path(temporary_directory) / "selected"
+            write_repository(selected_root)
+            selected_urls: list[str] = []
+
+            def selected_urlopen(request, **_kwargs):
+                selected_urls.append(request.full_url)
+                identifier = request.full_url.rsplit("/", 1)[-1]
+                return Response(payloads[identifier])
+
+            with mock.patch.object(voice_assets, "urlopen", side_effect=selected_urlopen):
+                selected = voice_assets.main((
+                    "provision",
+                    "--repo-root",
+                    str(selected_root),
+                    "--asset",
+                    "asr-sensevoice-small-int8-2024-07-17",
+                    "--asset",
+                    "vad-silero-int8",
+                ))
+            self.assertEqual(selected, 0)
+            self.assertEqual(
+                selected_urls,
+                [
+                    "https://fixtures.invalid/asr-sensevoice-small-int8-2024-07-17",
+                    "https://fixtures.invalid/vad-silero-int8",
+                ],
+            )
+            self.assertTrue(
+                (
+                    selected_root
+                    / "models"
+                    / "weights"
+                    / "voice-assets"
+                    / "model"
+                    / "asr-sensevoice-small-int8-2024-07-17.bin"
+                ).is_file()
+            )
+            self.assertTrue(
+                (
+                    selected_root
+                    / "models"
+                    / "weights"
+                    / "voice-assets"
+                    / "model"
+                    / "vad-silero-int8.bin"
+                ).is_file()
+            )
+            self.assertFalse((selected_root / ".deps").exists())
+
+            verified = voice_assets.main((
+                "verify",
+                "--repo-root",
+                str(selected_root),
+                "--asset",
+                "asr-sensevoice-small-int8-2024-07-17",
+                "--asset",
+                "vad-silero-int8",
+            ))
+            self.assertEqual(verified, 0)
+
+            default_root = Path(temporary_directory) / "default"
+            write_repository(default_root)
+            default_urls: list[str] = []
+            with mock.patch.object(
+                voice_assets,
+                "urlopen",
+                side_effect=lambda request, **_kwargs: default_urls.append(request.full_url),
+            ), mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+                default = voice_assets.main((
+                    "provision",
+                    "--repo-root",
+                    str(default_root),
+                ))
+            self.assertEqual(default, 2)
+            self.assertIn("license provenance unresolved", output.getvalue())
+            self.assertEqual(default_urls, [])
+            self.assertFalse((default_root / ".deps").exists())
+            self.assertFalse((default_root / "models" / "weights" / "voice-assets").exists())
 
 
 if __name__ == "__main__":

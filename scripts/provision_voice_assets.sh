@@ -13,7 +13,7 @@ voice_nav_prepare_git_context "${workspace_root}"
 
 usage() {
   cat <<'EOF'
-Usage: bash scripts/provision_voice_assets.sh [--verify] [--offline]
+Usage: bash scripts/provision_voice_assets.sh [--verify] [--offline] [--asset ID]...
 
 Explicitly provision VoiceNav's locked audio dependencies and models before
 runtime. Downloads are written only to ignored .deps/ and models/weights/
@@ -22,6 +22,8 @@ directories after size and SHA-256 verification.
 Options:
   --verify   Verify the already provisioned assets without downloading.
   --offline  Refuse downloads; fail unless every asset is already verified.
+  --asset ID Select only the named locked asset; may be repeated. Without it,
+             all assets are preflighted and unresolved licenses fail closed.
   --help     Show this help.
 EOF
 }

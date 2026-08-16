@@ -23,6 +23,7 @@ add_library(audio_engine_callback OBJECT src/audio_engine_callback.cpp)
 add_library(audio_engine_core OBJECT src/audio_engine.cpp)
 add_library(dsp_pipeline STATIC src/dsp_pipeline.cpp)
 add_library(speech_input_core STATIC src/speech_input_core.cpp)
+add_library(sensevoice_provider STATIC src/sensevoice_provider.cpp)
 add_library(speech_input_node STATIC src/speech_input_node.cpp)
 add_library(speech_output_core STATIC src/speech_output_core.cpp)
 add_library(speech_output_node STATIC src/speech_output_node.cpp)
@@ -47,6 +48,7 @@ foreach(target
     audio_engine_callback
     dsp_pipeline
     speech_input_core
+    sensevoice_provider
     speech_input_node
     speech_output_core
     speech_output_node
@@ -63,6 +65,7 @@ foreach(target
       "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
   )
 endforeach()
+target_link_libraries(sensevoice_provider speech_input_core)
 ament_target_dependencies(speech_input_node rclcpp voice_nav_interfaces)
 target_link_libraries(speech_input_node speech_input_core)
 target_link_libraries(speech_output_core audio_engine)
@@ -147,6 +150,39 @@ if(VOICE_NAV_AUDIO_WITH_PORTAUDIO)
   target_link_libraries(portaudio_adapter PRIVATE "${PORTAUDIO_LIBRARY}")
 endif()
 
+option(
+  VOICE_NAV_AUDIO_WITH_SHERPA_ONNX
+  "Build the package-private SenseVoice/Silero adapter from the exact sherpa-onnx prefix"
+  OFF
+)
+if(VOICE_NAV_AUDIO_WITH_SHERPA_ONNX)
+  set(
+    VOICE_NAV_SHERPA_ONNX_PREFIX "" CACHE PATH
+    "Canonical sherpa-onnx v1.13.4 shared-ORT prefix and provenance receipt"
+  )
+  include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/sherpa_onnx_prefix_validation.cmake")
+  voice_nav_validate_sherpa_onnx_prefix(
+    "${VOICE_NAV_SHERPA_ONNX_PREFIX}"
+    SHERPA_ONNX_INCLUDE_DIR
+    SHERPA_ONNX_LIBRARIES
+    SHERPA_ONNX_RUNTIME_RPATH)
+  add_library(sensevoice_sherpa_adapter STATIC src/sensevoice_sherpa_adapter.cpp)
+  target_compile_features(sensevoice_sherpa_adapter PUBLIC cxx_std_17)
+  target_compile_definitions(
+    sensevoice_sherpa_adapter
+    PRIVATE VOICE_NAV_AUDIO_WITH_SHERPA_ONNX=1)
+  target_include_directories(
+    sensevoice_sherpa_adapter
+    PRIVATE include src "${SHERPA_ONNX_INCLUDE_DIR}")
+  target_link_libraries(
+    sensevoice_sherpa_adapter
+    PUBLIC sensevoice_provider ${SHERPA_ONNX_LIBRARIES})
+  target_link_options(
+    sensevoice_sherpa_adapter
+    INTERFACE
+      "-Wl,--disable-new-dtags,-rpath,${SHERPA_ONNX_RUNTIME_RPATH}")
+endif()
+
 if(BUILD_TESTING)
   find_package(ament_cmake_ros REQUIRED)
   find_package(ament_cmake_gtest REQUIRED)
@@ -212,6 +248,81 @@ if(BUILD_TESTING)
   add_dependencies(speech_input_core_test speech_input_identity_probe)
 
   ament_add_gtest(
+    sensevoice_provider_test
+    test/sensevoice_provider_test.cpp
+  )
+  target_compile_features(sensevoice_provider_test PUBLIC cxx_std_17)
+  target_include_directories(sensevoice_provider_test PRIVATE include src)
+  target_link_libraries(sensevoice_provider_test sensevoice_provider)
+
+  if(VOICE_NAV_AUDIO_WITH_SHERPA_ONNX)
+    set(_voice_nav_real_asset_root
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../models/weights/voice-assets")
+    ament_add_gtest(
+      sensevoice_sherpa_adapter_test
+      test/sensevoice_sherpa_adapter_test.cpp
+    )
+    target_compile_features(sensevoice_sherpa_adapter_test PUBLIC cxx_std_17)
+    target_include_directories(sensevoice_sherpa_adapter_test PRIVATE include src)
+    target_link_libraries(sensevoice_sherpa_adapter_test sensevoice_sherpa_adapter)
+    target_link_options(
+      sensevoice_sherpa_adapter_test
+      PRIVATE
+        "-Wl,--disable-new-dtags,-rpath,${SHERPA_ONNX_RUNTIME_RPATH}")
+    set_tests_properties(
+      sensevoice_sherpa_adapter_test
+      PROPERTIES
+        ENVIRONMENT
+          "VOICE_NAV_SENSEVOICE_VAD_MODEL=${_voice_nav_real_asset_root}/vad/silero_vad.int8.onnx;VOICE_NAV_SENSEVOICE_MODEL=${_voice_nav_real_asset_root}/asr/sensevoice-small-int8-2024-07-17/model.int8.onnx;VOICE_NAV_SENSEVOICE_TOKENS=${_voice_nav_real_asset_root}/asr/sensevoice-small-int8-2024-07-17/tokens.txt")
+
+    # Test-only longitudinal gate: locked WAV -> actual sherpa adapters ->
+    # existing SpeechInputNode. It is deliberately not installed or exposed
+    # as a ROS executable.
+    add_executable(
+      sensevoice_real_model_gate
+      test/sensevoice_real_model_gate.cpp
+    )
+    target_compile_features(sensevoice_real_model_gate PRIVATE cxx_std_17)
+    target_include_directories(
+      sensevoice_real_model_gate
+      PRIVATE include src "${SHERPA_ONNX_INCLUDE_DIR}"
+    )
+    ament_target_dependencies(
+      sensevoice_real_model_gate
+      rclcpp
+      voice_nav_interfaces
+    )
+    target_link_libraries(
+      sensevoice_real_model_gate
+      speech_input_node sensevoice_sherpa_adapter
+    )
+    target_link_options(
+      sensevoice_real_model_gate
+      PRIVATE
+        "-Wl,--disable-new-dtags,-rpath,${SHERPA_ONNX_RUNTIME_RPATH}")
+
+    add_launch_test(
+      test/test_real_sensevoice_agent_launch.py
+      TARGET real_sensevoice_agent_launch_test
+      TIMEOUT 120
+    )
+    set(_voice_nav_real_report "$ENV{VOICE_NAV_REAL_GATE_REPORT}")
+    if(_voice_nav_real_report STREQUAL "")
+      set(_voice_nav_real_report
+        "${CMAKE_CURRENT_BINARY_DIR}/voice_nav_real_model_gate.json")
+    endif()
+    set(_voice_nav_real_head "$ENV{VOICE_NAV_REAL_GATE_HEAD}")
+    if(_voice_nav_real_head STREQUAL "")
+      set(_voice_nav_real_head "unknown")
+    endif()
+    set_tests_properties(
+      real_sensevoice_agent_launch_test
+      PROPERTIES
+        ENVIRONMENT
+          "VOICE_NAV_REAL_MODEL_GATE=$<TARGET_FILE:sensevoice_real_model_gate>;VOICE_NAV_REAL_GATE_REPORT=${_voice_nav_real_report};VOICE_NAV_REAL_GATE_HEAD=${_voice_nav_real_head};VOICE_NAV_SENSEVOICE_VAD_MODEL=${_voice_nav_real_asset_root}/vad/silero_vad.int8.onnx;VOICE_NAV_SENSEVOICE_MODEL=${_voice_nav_real_asset_root}/asr/sensevoice-small-int8-2024-07-17/model.int8.onnx;VOICE_NAV_SENSEVOICE_TOKENS=${_voice_nav_real_asset_root}/asr/sensevoice-small-int8-2024-07-17/tokens.txt;VOICE_NAV_SENSEVOICE_WAV=${_voice_nav_real_asset_root}/asr/sensevoice-small-int8-2024-07-17/test_wavs/zh.wav")
+  endif()
+
+  ament_add_gtest(
     speech_output_core_test
     test/speech_output_core_test.cpp
   )
@@ -257,7 +368,7 @@ if(BUILD_TESTING)
   target_compile_features(speech_input_node_test PUBLIC cxx_std_17)
   target_include_directories(speech_input_node_test PRIVATE include src)
   ament_target_dependencies(speech_input_node_test rclcpp voice_nav_interfaces)
-  target_link_libraries(speech_input_node_test speech_input_node)
+  target_link_libraries(speech_input_node_test speech_input_node sensevoice_provider)
 
   ament_add_gtest(
     voice_pipeline_test

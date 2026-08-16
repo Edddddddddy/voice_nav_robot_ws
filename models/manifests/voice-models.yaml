@@ -46,6 +46,33 @@
       "release_asset_id": null
     },
     {
+      "id": "asr-sensevoice-small-int8-2024-07-17",
+      "version": "sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17",
+      "revision": "288366523",
+      "url": "https://api.github.com/repos/k2-fsa/sherpa-onnx/releases/assets/288366523",
+      "size": 163002883,
+      "sha256": "7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e",
+      "destination": "asr/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17.tar.bz2",
+      "build_options": {"runtime": "sherpa-onnx", "provider": "cpu", "quantization": "int8", "streaming": "OFF"},
+      "sample_rate": 16000,
+      "runtime_license": "Apache-2.0",
+      "runtime_license_url": "https://github.com/k2-fsa/sherpa-onnx/blob/142807252687d81b40d6315f23470a1512a00de3/LICENSE",
+      "model_provenance": {
+        "status": "resolved",
+        "weights_license": "FunASR Model Open Source License Agreement 1.1",
+        "weights_license_url": "https://github.com/modelscope/FunASR/blob/2e4914e7f9e0950e47eeb831675d6167a51d0632/MODEL_LICENSE",
+        "training_data_provenance": "来源模型 FunAudioLLM/SenseVoiceSmall；作者 FunAudioLLM；模型名称 SenseVoiceSmall；来源 revision 3847d57b6bdf2dd8875cb1508d2af43d80a16bf7。",
+        "training_data_url": "https://www.modelscope.cn/models/iic/SenseVoiceSmall?revision=3847d57b6bdf2dd8875cb1508d2af43d80a16bf7",
+        "model_card_url": "https://www.modelscope.cn/models/iic/SenseVoiceSmall?revision=3847d57b6bdf2dd8875cb1508d2af43d80a16bf7",
+        "source_model": "FunAudioLLM/SenseVoiceSmall",
+        "source_revision": "3847d57b6bdf2dd8875cb1508d2af43d80a16bf7",
+        "source_license": "FunASR Model Open Source License Agreement 1.1",
+        "source_license_url": "https://github.com/modelscope/FunASR/blob/2e4914e7f9e0950e47eeb831675d6167a51d0632/MODEL_LICENSE",
+        "attribution": "FunAudioLLM；SenseVoiceSmall；FunASR Model Open Source License Agreement 1.1。"
+      },
+      "release_asset_id": 288366523
+    },
+    {
       "id": "asr-zh-int8-2025-06-30",
       "version": "sherpa-onnx-streaming-zipformer-zh-int8-2025-06-30",
       "revision": "2025-06-30",

@@ -140,7 +140,9 @@ AudioProcessing 2.1 upstream build metadata 选择并验证；v0.1 architecture 
 runtime version 与固定 Mandarin acceptance corpus。weight 是本地 artifact，永不 commit。默认 policy：
 
 - KWS：`sherpa-onnx-kws-zipformer-zh-en-3M`；
-- ASR：唯一冻结 `2025-06-30 int8` model；其模型许可证当前为 `unresolved`，不得进入 Runtime；
+- ASR：真实 Provider 只允许已解析许可的 `SenseVoiceSmall int8`；其模型来源、作者、名称、exact source revision 与
+  `FunASR Model Open Source License Agreement 1.1` 见 manifest。原 `2025-06-30 int8` Zipformer ASR 仍为
+  `unresolved`，不得进入 Runtime；
 - TTS：`vits-piper-zh_CN-chaowen-medium-int8.tar.bz2`（GitHub release asset `406468505`）；
 - LLM：官方 `Qwen3-0.6B-GGUF` `Q8_0`。
 
@@ -164,6 +166,24 @@ Chaowen TTS 使用不可变 GitHub release asset `406468505`：
 `f5f7c8628427fbb259ea4b7ec1a9a822a0c04e3f267071f0abfa0610371d9e0c`。它通过
 `https://api.github.com/repos/k2-fsa/sherpa-onnx/releases/assets/406468505` 下载，并带
 `Accept: application/octet-stream`；下载后仍需 size/SHA-256 核验，临时、截断、损坏或错误哈希文件永不发布。
+
+SenseVoiceSmall 使用不可变 GitHub release asset `288366523`：
+`sherpa-onnx-sense-voice-zh-en-ja-ko-yue-int8-2024-07-17`、`163002883` bytes、
+`7d1efa2138a65b0b488df37f8b89e3d91a60676e416f515b952358d83dfd347e`。其 source model 为
+`FunAudioLLM/SenseVoiceSmall`，作者为 FunAudioLLM，exact source revision 为
+`3847d57b6bdf2dd8875cb1508d2af43d80a16bf7`，模型许可为 `FunASR Model Open Source License Agreement 1.1`，
+许可来源固定为 `modelscope/FunASR@2e4914e7f9e0950e47eeb831675d6167a51d0632/MODEL_LICENSE`。
+
+其 sherpa-onnx v1.13.4 runtime 只链接 canonical prefix 中的 shared ONNX Runtime 1.27.0：
+exact URL 为
+`https://github.com/csukuangfj/onnxruntime-libs/releases/download/v1.27.0/onnxruntime-linux-x64-glibc2_17-Release-1.27.0.zip`，
+ZIP size/SHA-256 为 `8509524` / `9f0c0a6998f1b94c399eeddcb443beb4a922c9a4fd431fdc9cd6de67a1935d00`，
+其中 `libonnxruntime.so` size/SHA-256 为 `26403889` /
+`026c7d5c609323fb16506dbc3cce801bcdffdd7566fdba49a50727e2e1e881ca`，SONAME 为
+`libonnxruntime.so`，`GIT_COMMIT_ID=8f0278c77bf44b0cc83c098c6c722b92a36ac4b5`，许可证为 `MIT`。
+构建 receipt 必须是 `BUILD_SHARED_LIBS=OFF`、`SHERPA_ONNX_ENABLE_BINARY=OFF`、C API only 的 exact prefix；
+consumer ELF 必须是 `DT_NEEDED=libonnxruntime.so` 且只有 approved prefix `DT_RPATH`，拒绝 system/`LD_LIBRARY_PATH` 注入、
+旧 `libonnxruntime.a` 与旧 receipt。
 
 维护者在有网络的环境显式运行 `bash scripts/provision_voice_assets.sh`；真实资产存在时使用
 `bash scripts/provision_voice_assets.sh --verify` 重验。正式 CLI 只接受仓库内且 `.gitignore` 覆盖的

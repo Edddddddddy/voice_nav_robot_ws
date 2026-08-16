@@ -41,9 +41,25 @@ SpeechInputNode::SpeechInputNode(
     default_voice_identity_generator(), coordination);
 }
 
+SpeechInputNode::~SpeechInputNode()
+{
+  // Stop and join the recognizer while Core, its sink, and the ROS publisher
+  // are still alive. Provider destruction suppresses late worker events once
+  // stopping begins, so teardown cannot publish through a dead Core.
+  recognizer_->shutdown();
+  recognizer_.reset();
+  core_.reset();
+  turn_publisher_.reset();
+}
+
 void SpeechInputNode::accept_cleaned_frame(const CleanedAudioFrame & frame) noexcept
 {
   core_->accept_cleaned_frame(frame);
+}
+
+void SpeechInputNode::finish_input() noexcept
+{
+  core_->finish_input();
 }
 
 void SpeechInputNode::publish(const VoiceTurnPublication & turn) noexcept
