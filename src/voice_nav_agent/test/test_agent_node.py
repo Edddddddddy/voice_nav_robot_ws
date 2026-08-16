@@ -159,8 +159,9 @@ class FakeResponseProvider:
 class ScriptedTimer:
     """A one-shot deadline that fires only when the test releases it."""
 
-    def __init__(self, callback):
+    def __init__(self, callback, seconds=0.0):
         self._callback = callback
+        self.seconds = seconds
         self.cancelled = False
 
     def cancel(self):
@@ -170,6 +171,10 @@ class ScriptedTimer:
         if not self.cancelled:
             self.cancelled = True
             self._callback()
+
+    def deliver_late(self):
+        """Deliver a callback already queued when its timer was canceled."""
+        self._callback()
 
 
 def _wrapped_result(code):
@@ -282,8 +287,8 @@ def _script_deadlines(monkeypatch, node):
     """Replace only the ROS clock/timer seam with explicit deadlines."""
     timers = []
 
-    def make_timer(_seconds, callback):
-        timer = ScriptedTimer(callback)
+    def make_timer(seconds, callback):
+        timer = ScriptedTimer(callback, seconds)
         timers.append(timer)
         return timer
 
@@ -1181,10 +1186,20 @@ def test_speak_late_acceptance_is_canceled_after_timeout(monkeypatch):
         node.destroy_node()
 
 
-def test_speak_rechecks_action_server_once_before_dropping(monkeypatch):
+def test_speak_rechecks_action_server_until_ready_and_sends_once(monkeypatch):
     node = _make_node(monkeypatch)
     timers = _script_deadlines(monkeypatch, node)
     node._speak_client = FakeActionClient(ready=False)
+    now = [0.0]
+    readiness = iter([False, False, False, False, True])
+    monkeypatch.setattr(
+        node, '_steady_time_seconds', lambda: now[0]
+    )
+    monkeypatch.setattr(
+        node._speak_client,
+        'server_is_ready',
+        lambda: next(readiness),
+    )
     try:
         node._speak_text(
             '请说明目标地点。',
@@ -1197,13 +1212,104 @@ def test_speak_rechecks_action_server_once_before_dropping(monkeypatch):
         assert node._speak_operation is not None
         assert len(timers) == 1
 
-        node._speak_client._ready = True
-        timers[0].timeout()
+        for _ in range(3):
+            timer = timers[-1]
+            now[0] += timer.seconds
+            timer.timeout()
+            assert node._speak_client.goals == []
+
+        timer = timers[-1]
+        now[0] += timer.seconds
+        timer.timeout()
 
         assert len(node._speak_client.goals) == 1
         assert node._speak_client.goals[0].text == '请说明目标地点。'
+
+        timers[0].deliver_late()
+        assert len(node._speak_client.goals) == 1
     finally:
         node.destroy_node()
+
+
+def test_speak_discovery_drops_once_at_response_deadline(monkeypatch):
+    node = _make_node(monkeypatch)
+    timers = _script_deadlines(monkeypatch, node)
+    node._speak_client = FakeActionClient(ready=False)
+    now = [10.0]
+    warnings = []
+    monkeypatch.setattr(
+        node, '_steady_time_seconds', lambda: now[0]
+    )
+    monkeypatch.setattr(
+        node,
+        'get_logger',
+        lambda: SimpleNamespace(warning=warnings.append),
+    )
+    try:
+        node._speak_text(
+            '请说明目标地点。',
+            Speak.Goal.NORMAL,
+            'session-a',
+            'turn-a',
+            1,
+        )
+
+        for index in range(20):
+            timer = timers[-1]
+            now[0] = 10.0 + (index + 1) * 0.05
+            if index == 19:
+                now[0] = 11.0
+            timer.timeout()
+
+        assert node._speak_client.goals == []
+        assert node._speak_operation is None
+        assert warnings == ['Speak server unavailable; dropping speech']
+        assert len(timers) == 20
+
+        timers[-1].deliver_late()
+        assert node._speak_client.goals == []
+        assert warnings == ['Speak server unavailable; dropping speech']
+    finally:
+        node.destroy_node()
+
+
+@pytest.mark.parametrize('invalidation', ['stop', 'new_turn', 'shutdown'])
+def test_speak_discovery_late_ready_after_invalidation_never_sends(
+    monkeypatch, invalidation
+):
+    node = _make_node(monkeypatch)
+    timers = _script_deadlines(monkeypatch, node)
+    node._speak_client = FakeActionClient(ready=False)
+    destroyed = False
+    try:
+        node._speak_text(
+            '请说明目标地点。',
+            Speak.Goal.NORMAL,
+            'session-a',
+            'turn-a',
+            1,
+        )
+        stale_timer = timers[0]
+        assert node._speak_operation is not None
+
+        if invalidation == 'stop':
+            node._on_turn_message(
+                _make_turn('停止', kind=VoiceTurn.STOP)
+            )
+        elif invalidation == 'new_turn':
+            node._on_turn_message(_make_turn('前进 1 米', sequence=2))
+        else:
+            node.destroy_node()
+            destroyed = True
+
+        node._speak_client._ready = True
+        stale_timer.deliver_late()
+
+        assert node._speak_client.goals == []
+        assert node._speak_operation is None
+    finally:
+        if not destroyed:
+            node.destroy_node()
 
 
 def test_speak_failure_and_barge_in_never_cancel_mission(monkeypatch):

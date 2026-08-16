@@ -62,6 +62,14 @@ private:
   std::string terminal_detail_;
 };
 
+// Selects the graph-pinned writer for a topic that may have other legitimate
+// writers.  Only complete exact type/FQN matches enter the uniqueness check;
+// the remaining endpoint policy is still validated by WriterObservationSession.
+[[nodiscard]] OpenBinding select_exact_writer(
+  const WriterObservationPolicy & policy,
+  const std::vector<WriterEndpointObservation> & endpoints,
+  std::chrono::milliseconds elapsed);
+
 }  // namespace voice_nav_mission
 
 #endif  // WRITER_OBSERVATION_HPP_

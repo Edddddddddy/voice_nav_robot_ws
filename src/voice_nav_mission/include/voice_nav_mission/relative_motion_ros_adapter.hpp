@@ -23,6 +23,7 @@
 
 #include "voice_nav_mission/mission_runtime_core.hpp"
 #include "voice_nav_mission/motion_conditioning_pipeline.hpp"
+#include "voice_nav_mission/motion_gate_core.hpp"
 #include "voice_nav_mission/relative_motion_controller.hpp"
 
 namespace voice_nav_mission
@@ -45,7 +46,9 @@ void begin_relative_motion_shutdown(
 // remains the deep policy Module; this Adapter owns only odometry ingress,
 // raw TwistStamped publication, and delegation to the #35 conditioning
 // Module. Gate/component/writer handover logic is intentionally not present.
-class RelativeMotionRosAdapter final : public RelativeMotionPort
+class RelativeMotionRosAdapter final
+  : public RelativeMotionPort,
+    public NavigationPort
 {
 public:
   RelativeMotionRosAdapter(
@@ -63,8 +66,8 @@ public:
   void start(
     const MotionToken & token,
     const MissionStep & step,
-    FeedbackCallback feedback,
-    ResultCallback result) override;
+    RelativeMotionPort::FeedbackCallback feedback,
+    RelativeMotionPort::ResultCallback result) override;
   [[nodiscard]] bool cancel(
     const MotionToken & token,
     SteadyClockPort::TimePoint deadline) override;
@@ -110,6 +113,17 @@ public:
   static bool start_raw_producer(
     RelativeMotionRosAdapter & adapter,
     const std::string & raw_topic);
+  static void prime_navigation_command(
+    RelativeMotionRosAdapter & adapter,
+    const MotionToken & token,
+    const WriterGid & expected_writer_gid,
+    const RelativeMotionCommand & command,
+    SteadyClockPort::TimePoint receipt);
+  [[nodiscard]] static RelativeMotionCommand navigation_command_at(
+    RelativeMotionRosAdapter & adapter,
+    SteadyClockPort::TimePoint now);
+  [[nodiscard]] static bool navigation_freshness_teardown_scheduled(
+    const RelativeMotionRosAdapter & adapter);
 };
 
 }  // namespace detail

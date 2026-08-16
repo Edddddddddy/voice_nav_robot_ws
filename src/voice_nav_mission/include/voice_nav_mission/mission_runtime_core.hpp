@@ -347,6 +347,39 @@ public:
   }
 };
 
+// Package-private navigation child seam.  It deliberately mirrors the
+// RelativeMotionPort callback contract so RuntimeCore can retain one mission
+// token, fence, terminal, and STOP path for both child types.  The production
+// implementation is owned by RelativeMotionRosAdapter and is not a ROS API.
+class NavigationPort
+{
+public:
+  using FeedbackCallback = std::function<void(const MotionToken &, double)>;
+  using ResultCallback = std::function<void(const MotionToken &, const ChildResult &)>;
+
+  virtual ~NavigationPort() = default;
+  [[nodiscard]] virtual bool healthy() const = 0;
+  virtual void start(
+    const MotionToken & token,
+    const MissionStep & step,
+    FeedbackCallback feedback,
+    ResultCallback result) = 0;
+  [[nodiscard]] virtual bool cancel(
+    const MotionToken & token,
+    SteadyClockPort::TimePoint deadline) = 0;
+  virtual void tick(SteadyClockPort::TimePoint now) = 0;
+
+  [[nodiscard]] virtual bool uses_external_completion_registry() const noexcept
+  {
+    return false;
+  }
+
+  [[nodiscard]] virtual bool safety_faulted() const noexcept
+  {
+    return false;
+  }
+};
+
 struct RuntimeConfig
 {
   OperatingMode operating_mode{OperatingMode::Mapping};
@@ -408,7 +441,8 @@ public:
     ChildResultDispatcher child_result_dispatcher = {},
     AdmissionFenceCheck admission_fence_check = {},
     ChildResultRegistrar child_result_registrar = {},
-    ChildResultUnregistrar child_result_unregistrar = {});
+    ChildResultUnregistrar child_result_unregistrar = {},
+    std::shared_ptr<NavigationPort> navigation = {});
 
   [[nodiscard]] AdmissionResult admit(
     const MissionGoal & goal,
@@ -513,6 +547,7 @@ private:
   std::shared_ptr<SteadyClockPort> clock_;
   std::shared_ptr<MotionAuthorityPort> authority_;
   std::shared_ptr<RelativeMotionPort> relative_motion_;
+  std::shared_ptr<NavigationPort> navigation_;
   StateCallback state_callback_;
   FeedbackCallback feedback_callback_;
   ResultCallback result_callback_;

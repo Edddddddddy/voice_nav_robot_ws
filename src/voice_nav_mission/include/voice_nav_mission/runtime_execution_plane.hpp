@@ -52,7 +52,8 @@ public:
     RuntimeCore::AdmissionFenceCheck admission_fence_check,
     NodeCompletionMailbox::TokenEnqueue token_enqueue,
     NodeCompletionMailbox::EmergencyRequest emergency_request,
-    ChildResultDeliveryDecorator delivery_decorator = {})
+    ChildResultDeliveryDecorator delivery_decorator = {},
+    std::shared_ptr<NavigationPort> navigation = {})
   : emergency_request_(std::move(emergency_request)),
     terminal_handoff_lane_(
       [this](const MotionToken & token, const ChildResult & result) {
@@ -97,7 +98,8 @@ public:
       },
         [this](const MotionToken & token) {
           completion_mailbox_.discard(token);
-      }))
+        },
+      std::move(navigation)))
   {
   }
 

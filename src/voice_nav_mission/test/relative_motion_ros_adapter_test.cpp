@@ -36,6 +36,7 @@
 #include "voice_nav_mission/runtime_emergency_fence.hpp"
 #include "voice_nav_mission/runtime_event_ingress.hpp"
 #include "voice_nav_mission/runtime_event_queue.hpp"
+#include "navigation_command_ingress.hpp"
 
 namespace voice_nav_mission
 {
@@ -698,6 +699,198 @@ TEST_F(RelativeMotionRosAdapterTest, StartupReconciliationFailureLatchesSafetyFa
   EXPECT_EQ(result_code.load(), ChildResultCode::SafetyFault);
   EXPECT_EQ(result_count.load(), 1U);
   EXPECT_FALSE(authority->prepare_entered());
+  adapter.shutdown();
+}
+
+TEST(NavigationCommandIngress, ExpirySelectsZeroAndCurrentGenerationTeardown)
+{
+  detail::NavigationCommandIngress ingress;
+  const MotionToken token{17U, 3U, 5U, 1U, 9U};
+  const auto t0 = detail::NavigationCommandIngress::TimePoint{};
+  WriterGid writer{};
+  writer.back() = 0x11U;
+
+  ingress.begin(token, t0, writer);
+  ASSERT_EQ(
+    ingress.observe(
+      token, writer, RelativeMotionCommand{0.20, 0.0}, t0),
+    detail::NavigationCommandIngress::Observation::Accepted);
+
+  const auto fresh = ingress.command(token, t0 + 124ms);
+  EXPECT_DOUBLE_EQ(fresh.command.linear_x_mps, 0.20);
+  EXPECT_FALSE(fresh.freshness_expired);
+
+  const auto expired = ingress.command(token, t0 + 126ms);
+  EXPECT_DOUBLE_EQ(expired.command.linear_x_mps, 0.0);
+  EXPECT_DOUBLE_EQ(expired.command.angular_z_rps, 0.0);
+  EXPECT_TRUE(expired.freshness_expired);
+
+  const auto expired_token = ingress.take_expired_token(t0 + 126ms);
+  ASSERT_TRUE(expired_token.has_value());
+  EXPECT_EQ(expired_token->mission_id, token.mission_id);
+  EXPECT_EQ(expired_token->admission_epoch, token.admission_epoch);
+  EXPECT_EQ(expired_token->mission_generation, token.mission_generation);
+  EXPECT_EQ(expired_token->step_generation, token.step_generation);
+  EXPECT_EQ(expired_token->admission_generation, token.admission_generation);
+  EXPECT_FALSE(ingress.take_expired_token(t0 + 127ms).has_value());
+}
+
+TEST(NavigationCommandIngress, GenerationAndWriterFencesRejectLateAndSecondWriters)
+{
+  detail::NavigationCommandIngress ingress;
+  const auto t0 = detail::NavigationCommandIngress::TimePoint{};
+  const MotionToken first{21U, 1U, 1U, 1U, 1U};
+  const MotionToken second{21U, 1U, 1U, 2U, 2U};
+  WriterGid first_writer{};
+  first_writer.back() = 0x21U;
+  WriterGid second_writer{};
+  second_writer.back() = 0x22U;
+
+  ingress.begin(first, t0, first_writer);
+  ASSERT_EQ(
+    ingress.observe(
+      first, first_writer, RelativeMotionCommand{0.2, 0.0}, t0),
+    detail::NavigationCommandIngress::Observation::Accepted);
+
+  ingress.begin(second, t0 + 1ms, second_writer);
+  EXPECT_EQ(
+    ingress.observe(
+      first, first_writer, RelativeMotionCommand{0.8, 0.0}, t0 + 2ms),
+    detail::NavigationCommandIngress::Observation::StaleGeneration);
+  EXPECT_EQ(
+    ingress.observe(
+      second, first_writer, RelativeMotionCommand{0.8, 0.0}, t0 + 2ms),
+    detail::NavigationCommandIngress::Observation::WriterMismatch);
+  EXPECT_DOUBLE_EQ(ingress.command(second, t0 + 2ms).command.linear_x_mps, 0.0);
+  ASSERT_EQ(
+    ingress.observe(
+      second, second_writer, RelativeMotionCommand{0.3, 0.0}, t0 + 3ms),
+    detail::NavigationCommandIngress::Observation::Accepted);
+  EXPECT_DOUBLE_EQ(ingress.command(second, t0 + 4ms).command.linear_x_mps, 0.3);
+}
+
+TEST(NavigationGoalLifecycle, CancelRequiresExactGoalAndMatchingTerminal)
+{
+  using Lifecycle = detail::NavigationGoalLifecycle;
+  const Lifecycle::GoalId current_goal = [] {
+      Lifecycle::GoalId goal{};
+      goal.back() = 0x41U;
+      return goal;
+    }();
+  const Lifecycle::GoalId other_goal = [] {
+      Lifecycle::GoalId goal{};
+      goal.back() = 0x42U;
+      return goal;
+    }();
+
+  Lifecycle lifecycle;
+  lifecycle.begin(current_goal);
+
+  EXPECT_FALSE(lifecycle.accept_cancel_response(0U, {other_goal}));
+  EXPECT_FALSE(lifecycle.cancel_accepted());
+  EXPECT_FALSE(lifecycle.observe_terminal(other_goal));
+  EXPECT_FALSE(lifecycle.cancel_complete());
+
+  ASSERT_TRUE(lifecycle.accept_cancel_response(0U, {current_goal}));
+  EXPECT_TRUE(lifecycle.cancel_accepted());
+  EXPECT_FALSE(lifecycle.cancel_complete());
+  EXPECT_FALSE(lifecycle.wait_for_terminal(Lifecycle::TimePoint{}));
+
+  ASSERT_TRUE(lifecycle.observe_terminal(current_goal));
+  EXPECT_TRUE(lifecycle.cancel_complete());
+  EXPECT_TRUE(lifecycle.wait_for_terminal(Lifecycle::TimePoint{}));
+}
+
+TEST(NavigationGoalLifecycle, RejectedCancelAndMissingTerminalRemainFailClosed)
+{
+  using Lifecycle = detail::NavigationGoalLifecycle;
+  Lifecycle::GoalId goal{};
+  goal.back() = 0x51U;
+
+  Lifecycle rejected;
+  rejected.begin(goal);
+  EXPECT_FALSE(rejected.accept_cancel_response(1U, {goal}));
+  EXPECT_FALSE(rejected.cancel_complete());
+
+  Lifecycle missing_terminal;
+  missing_terminal.begin(goal);
+  ASSERT_TRUE(missing_terminal.accept_cancel_response(0U, {goal}));
+  EXPECT_FALSE(missing_terminal.cancel_complete());
+  EXPECT_FALSE(missing_terminal.next_generation_allowed());
+  EXPECT_TRUE(missing_terminal.blocks_next_generation());
+  EXPECT_FALSE(missing_terminal.wait_for_terminal(Lifecycle::TimePoint{}));
+}
+
+TEST(NavigationGoalLifecycle, SameWriterLateCommandWaitsForTerminalFence)
+{
+  using Lifecycle = detail::NavigationGoalLifecycle;
+  detail::NavigationCommandIngress ingress;
+  const auto t0 = detail::NavigationCommandIngress::TimePoint{};
+  const MotionToken first{33U, 1U, 1U, 1U, 1U};
+  const MotionToken second{33U, 1U, 1U, 2U, 2U};
+  WriterGid writer{};
+  writer.back() = 0x33U;
+  Lifecycle::GoalId goal{};
+  goal.back() = 0x61U;
+
+  ingress.begin(first, t0, writer);
+  Lifecycle lifecycle;
+  lifecycle.begin(goal);
+  ASSERT_TRUE(lifecycle.accept_cancel_response(0U, {goal}));
+  ASSERT_TRUE(lifecycle.blocks_next_generation());
+
+  EXPECT_EQ(
+    ingress.observe(
+      second, writer, RelativeMotionCommand{0.4, 0.0}, t0 + 1ms),
+    detail::NavigationCommandIngress::Observation::StaleGeneration);
+
+  ASSERT_TRUE(lifecycle.observe_terminal(goal));
+  EXPECT_FALSE(lifecycle.blocks_next_generation());
+  ingress.begin(second, t0 + 2ms, writer);
+  EXPECT_EQ(
+    ingress.observe(
+      second, writer, RelativeMotionCommand{0.4, 0.0}, t0 + 3ms),
+    detail::NavigationCommandIngress::Observation::Accepted);
+}
+
+TEST_F(
+  RelativeMotionRosAdapterTest,
+  NavigationCommandExpiryUsesAdapterCommandAndSchedulesTeardown)
+{
+  auto node = std::make_shared<rclcpp::Node>(
+    "relative_motion_adapter_navigation_freshness");
+  auto authority = std::make_shared<BlockingAuthority>();
+  MotionConditioningConfig conditioning_config;
+  conditioning_config.startup_reconciliation_timeout = 100ms;
+  auto relay = install_completion_relay(conditioning_config);
+  RelativeMotionRosAdapter adapter(*node, authority, {}, conditioning_config);
+
+  const MotionToken token{22U, 1U, 2U, 1U, 7U};
+  WriterGid writer{};
+  writer.back() = 0x23U;
+  const auto receipt = detail::NavigationCommandIngress::TimePoint{};
+  detail::RelativeMotionRosAdapterTestAccess::prime_navigation_command(
+    adapter, token, writer, RelativeMotionCommand{0.4, 0.0}, receipt);
+
+  const auto fresh =
+    detail::RelativeMotionRosAdapterTestAccess::navigation_command_at(
+    adapter, receipt + 124ms);
+  EXPECT_DOUBLE_EQ(fresh.linear_x_mps, 0.4);
+  const auto stale =
+    detail::RelativeMotionRosAdapterTestAccess::navigation_command_at(
+    adapter, receipt + 126ms);
+  EXPECT_DOUBLE_EQ(stale.linear_x_mps, 0.0);
+  EXPECT_DOUBLE_EQ(stale.angular_z_rps, 0.0);
+  EXPECT_TRUE(
+    detail::RelativeMotionRosAdapterTestAccess::
+    navigation_freshness_teardown_scheduled(adapter));
+  const auto replay =
+    detail::RelativeMotionRosAdapterTestAccess::navigation_command_at(
+    adapter, receipt + 127ms);
+  EXPECT_DOUBLE_EQ(replay.linear_x_mps, 0.0);
+  EXPECT_DOUBLE_EQ(replay.angular_z_rps, 0.0);
+
+  authority->release_prepare();
   adapter.shutdown();
 }
 

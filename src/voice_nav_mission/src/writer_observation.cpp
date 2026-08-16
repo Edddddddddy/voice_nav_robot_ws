@@ -266,6 +266,33 @@ WriterObservationSession::WriterObservationSession(
   }
 }
 
+OpenBinding select_exact_writer(
+  const WriterObservationPolicy & policy,
+  const std::vector<WriterEndpointObservation> & endpoints,
+  const std::chrono::milliseconds elapsed)
+{
+  WriterObservationSession session(policy);
+  std::vector<WriterEndpointObservation> exact_endpoints;
+  exact_endpoints.reserve(endpoints.size());
+
+  const auto expected_namespace = fqn_namespace(policy.expected_writer_fqn);
+  const auto expected_name = fqn_name(policy.expected_writer_fqn);
+  for (const auto & endpoint : endpoints) {
+    if (
+      endpoint.topic_type != policy.expected_topic_type ||
+      node_name_is_unresolved(endpoint.node_name) ||
+      node_namespace_is_unresolved(endpoint.node_namespace) ||
+      endpoint.node_name != expected_name ||
+      normalized_namespace(endpoint.node_namespace) != expected_namespace)
+    {
+      continue;
+    }
+    exact_endpoints.push_back(endpoint);
+  }
+
+  return session.observe(exact_endpoints, elapsed);
+}
+
 OpenBinding WriterObservationSession::observe(
   const std::vector<WriterEndpointObservation> & endpoints,
   std::chrono::milliseconds elapsed)

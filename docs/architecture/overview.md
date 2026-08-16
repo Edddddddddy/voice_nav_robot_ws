@@ -40,6 +40,17 @@ SLAM、完整物理 Nav2 运动链、Agent 与语音仍是目标能力。Mission
 raw-stamp-age 与 TF 验收由 Issue #72 独立追踪。尚无 `map → odom` owner。controller timeout 已配置，
 却不能当作 Gate 死亡或物理停止完成；进程死亡验收是独立目标切片。
 
+## Issue #164 pre-release framework MVP
+
+Issue #164 在不改变公共 ROS IDL、MotionGate 阈值或 controller contract 的前提下，交付一个可安装的
+framework MVP：`voice_node` 只拥有真实语音输入 authority；`voice_nav_issue164_runner` 是
+`voice_nav_bringup` 内的验证编排器，串行运行真实 Voice、MOVE+STOP、Mapping MVP 与单 `study` Place
+Navigation 的既有 headless product tests。它不发布速度、不拥有 `map → odom`，也不替代这些测试中的
+Agent、Mission、Nav2 或 TF/zero observers。结果写入 task-local schema-versioned JSON，并要求 exact HEAD。
+
+该切片是 pre-release framework MVP，不宣称 v1.0、物理麦克风/KWS/TTS、真实机器人，或 Mapping→Navigation
+原子地图 artifact handoff 已完成。
+
 ## 当前独立 MotionGate 切片
 
 仓库在 exact-head 本地验证、独立审查、required CI 与 rebase 合并后，公开交付独立验证的
@@ -120,7 +131,7 @@ mission_runtime_node
 motion_gate_node
 ```
 
-上游 ROS/Gazebo 进程仍独立受管。
+上游 ROS/Gazebo 进程仍独立受管。`voice_nav_issue164_runner` 是验证编排器，不是产品运行时进程。
 
 ## 深层模块与公共接口
 
@@ -190,7 +201,7 @@ odom ingress 在 stationarity success/failure 后 drain。
 | `voice_nav_agent` | 规则、本地 LLM Adapter、对话策略 | `agent_node` |
 | `voice_nav_mission` | Runtime、Gate 与内部依赖 Adapter | `mission_runtime_node`、`motion_gate_node` |
 | `voice_nav_sim` | 机器人模型、Gazebo、ros2_control、`/clock`/`/scan` bridge | 无 |
-| `voice_nav_bringup` | launch、parameter、地图与 Named Place | 无 |
+| `voice_nav_bringup` | launch、parameter、地图、Named Place 与 headless 验证编排 | `voice_nav_issue164_runner`（仅验证） |
 
 不得创建 Guard、scheduler、Nav2 bridge、map saver 或顶层行为树进程；它们是 Mission Runtime 内部 seam。
 

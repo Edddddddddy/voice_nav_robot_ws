@@ -21,6 +21,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 import importlib.util
 import json
+import math
 from pathlib import Path
 import secrets
 import sys
@@ -403,6 +404,17 @@ def is_zero(message: TwistStamped) -> bool:
         message.twist.angular.z,
     )
     return all(value == 0.0 for value in values)
+
+
+def last_nonzero_command_after(
+    samples: tuple[tuple[int, TwistStamped], ...],
+    start_receipt_ns: int,
+) -> tuple[int, TwistStamped] | None:
+    """Select the final real non-zero command after a phase boundary."""
+    for receipt_ns, message in reversed(samples):
+        if receipt_ns >= start_receipt_ns and not is_zero(message):
+            return receipt_ns, message
+    return None
 
 
 class ConsumerTraceAmbiguous(AssertionError):
@@ -2967,12 +2979,37 @@ class CrashStopProbe:
         }
 
     @staticmethod
-    def _wheels_stationary(message: JointState) -> bool:
-        velocities = dict(zip(message.name, message.velocity))
+    def _wheel_velocities(message: JointState) -> dict[str, float]:
+        if len(message.name) != len(message.velocity):
+            raise AssertionError(
+                'joint name and velocity arrays have different lengths'
+            )
+        if len(set(message.name)) != len(message.name):
+            raise AssertionError('joint state contains duplicate names')
+        velocities = {}
+        for name, value in zip(message.name, message.velocity):
+            try:
+                velocity = float(value)
+            except (TypeError, ValueError) as error:
+                raise AssertionError('joint velocity is not numeric') from error
+            if not math.isfinite(velocity):
+                raise AssertionError('joint velocity is not finite')
+            velocities[name] = velocity
+        required = ('left_wheel_joint', 'right_wheel_joint')
+        missing = [name for name in required if name not in velocities]
+        if missing:
+            raise AssertionError(
+                'joint state is missing required wheel endpoint: '
+                + ','.join(missing)
+            )
+        return {name: velocities[name] for name in required}
+
+    @classmethod
+    def _wheels_stationary(cls, message: JointState) -> bool:
+        velocities = cls._wheel_velocities(message)
         return all(
-            name in velocities
-            and abs(velocities[name]) <= ZERO_WHEEL_TOLERANCE
-            for name in ('left_wheel_joint', 'right_wheel_joint')
+            abs(velocity) <= ZERO_WHEEL_TOLERANCE
+            for velocity in velocities.values()
         )
 
     @staticmethod
@@ -2992,44 +3029,118 @@ class CrashStopProbe:
     ):
         deadline = time.monotonic() + timeout
         hold_start = None
-        last_sim_ns = zero_sim_ns
-        last_receipt_ns = zero_receipt_ns
+        last_odom_stamp_ns = zero_sim_ns
+        last_odom_receipt_ns = zero_receipt_ns
+        last_joint_stamp_ns = zero_sim_ns
+        last_joint_receipt_ns = zero_receipt_ns
+        latest_odom = None
+        latest_joint = None
+        last_common_stamp_ns = None
         while time.monotonic() < deadline:
-            odom_samples = self._snapshot(self.odometry)
-            joint = self.latest(self.joint_states)
-            for receipt_ns, odom in odom_samples:
-                if receipt_ns <= last_receipt_ns:
-                    continue
-                stamp_ns = _stamp_ns(odom)
-                if receipt_ns < zero_receipt_ns or stamp_ns <= zero_sim_ns:
-                    continue
-                if stamp_ns < last_sim_ns:
-                    raise AssertionError('odom simulation stamp regressed')
-                if stamp_ns - zero_sim_ns > STATIONARY_DEADLINE_NS:
-                    raise AssertionError(
-                        'odom did not reach the stationary tolerance within '
-                        '1.2 s simulation time'
-                    )
-                stationary = (
-                    self._odom_stationary(odom)
-                    and joint is not None
-                    and self._wheels_stationary(joint[1])
-                )
-                if stationary:
-                    if hold_start is None:
-                        hold_start = stamp_ns
-                    if stamp_ns - hold_start >= STATIONARY_HOLD_NS:
-                        return {
-                            'zero_sim_ns': zero_sim_ns,
-                            'stationary_start_sim_ns': hold_start,
-                            'stationary_end_sim_ns': stamp_ns,
-                            'settle_ns': hold_start - zero_sim_ns,
-                            'hold_ns': stamp_ns - hold_start,
-                        }
+            samples = [
+                (receipt_ns, 'odom', message)
+                for receipt_ns, message in self._snapshot(self.odometry)
+            ]
+            samples.extend(
+                (receipt_ns, 'joint', message)
+                for receipt_ns, message in self._snapshot(self.joint_states)
+            )
+            samples.sort(key=lambda sample: sample[0])
+            for receipt_ns, stream, message in samples:
+                if stream == 'odom':
+                    if receipt_ns <= last_odom_receipt_ns:
+                        continue
+                    last_odom_receipt_ns = receipt_ns
+                    stamp_ns = _stamp_ns(message)
+                    if receipt_ns <= zero_receipt_ns or stamp_ns <= zero_sim_ns:
+                        latest_odom = None
+                        hold_start = None
+                        last_common_stamp_ns = None
+                        continue
+                    if stamp_ns < last_odom_stamp_ns:
+                        raise AssertionError('odom simulation stamp regressed')
+                    if stamp_ns == last_odom_stamp_ns:
+                        latest_odom = None
+                        hold_start = None
+                        last_common_stamp_ns = None
+                        continue
+                    if stamp_ns - zero_sim_ns > STATIONARY_DEADLINE_NS:
+                        raise AssertionError(
+                            'odom did not reach the stationary tolerance within '
+                            '1.2 s simulation time'
+                        )
+                    last_odom_stamp_ns = stamp_ns
+                    latest_odom = (receipt_ns, stamp_ns, message)
                 else:
+                    if receipt_ns <= last_joint_receipt_ns:
+                        continue
+                    last_joint_receipt_ns = receipt_ns
+                    stamp_ns = _stamp_ns(message)
+                    if receipt_ns <= zero_receipt_ns or stamp_ns <= zero_sim_ns:
+                        latest_joint = None
+                        hold_start = None
+                        last_common_stamp_ns = None
+                        continue
+                    if stamp_ns < last_joint_stamp_ns:
+                        raise AssertionError('joint simulation stamp regressed')
+                    if stamp_ns == last_joint_stamp_ns:
+                        latest_joint = None
+                        hold_start = None
+                        last_common_stamp_ns = None
+                        continue
+                    if stamp_ns - zero_sim_ns > STATIONARY_DEADLINE_NS:
+                        raise AssertionError(
+                            'joint stream did not reach the stationary tolerance '
+                            'within 1.2 s simulation time'
+                        )
+                    velocities = self._wheel_velocities(message)
+                    last_joint_stamp_ns = stamp_ns
+                    latest_joint = (receipt_ns, stamp_ns, message, velocities)
+
+                if latest_odom is None or latest_joint is None:
+                    continue
+                odom_receipt_ns, odom_stamp_ns, odom = latest_odom
+                joint_receipt_ns, joint_stamp_ns, joint, velocities = latest_joint
+                if (
+                    abs(odom_receipt_ns - joint_receipt_ns)
+                    >= DEPENDENCY_FRESHNESS_NS
+                    or abs(odom_stamp_ns - joint_stamp_ns)
+                    >= DEPENDENCY_FRESHNESS_NS
+                ):
                     hold_start = None
-                last_sim_ns = stamp_ns
-                last_receipt_ns = receipt_ns
+                    last_common_stamp_ns = None
+                    continue
+                common_stamp_ns = min(odom_stamp_ns, joint_stamp_ns)
+                if (
+                    last_common_stamp_ns is not None
+                    and common_stamp_ns < last_common_stamp_ns
+                ):
+                    hold_start = None
+                last_common_stamp_ns = common_stamp_ns
+                stationary = self._odom_stationary(odom) and all(
+                    abs(velocity) <= ZERO_WHEEL_TOLERANCE
+                    for velocity in velocities.values()
+                )
+                if not stationary:
+                    hold_start = None
+                    continue
+                if hold_start is None:
+                    hold_start = common_stamp_ns
+                if common_stamp_ns - hold_start >= STATIONARY_HOLD_NS:
+                    return {
+                        'zero_sim_ns': zero_sim_ns,
+                        'stationary_start_sim_ns': hold_start,
+                        'stationary_end_sim_ns': common_stamp_ns,
+                        'stationary_end_receipt_ns': odom_receipt_ns,
+                        'odom_receipt_ns': odom_receipt_ns,
+                        'odom_stamp_ns': odom_stamp_ns,
+                        'joint_receipt_ns': joint_receipt_ns,
+                        'joint_stamp_ns': joint_stamp_ns,
+                        'joint_left_velocity': velocities['left_wheel_joint'],
+                        'joint_right_velocity': velocities['right_wheel_joint'],
+                        'settle_ns': hold_start - zero_sim_ns,
+                        'hold_ns': common_stamp_ns - hold_start,
+                    }
             time.sleep(0.01)
         raise AssertionError(
             'stationarity watchdog expired before a 200 ms simulation hold'
