@@ -42,6 +42,16 @@ if(BUILD_TESTING)
     TIMEOUT 30
   )
   ament_add_pytest_test(
+    voice_nav_console
+    test/test_voice_nav_console.py
+    TIMEOUT 30
+  )
+  ament_add_pytest_test(
+    voice_nav_console_install_contract
+    test/test_voice_nav_console_install_contract.py
+    TIMEOUT 30
+  )
+  ament_add_pytest_test(
     canonical_session_driver
     test/test_canonical_session_driver.py
     TIMEOUT 30
@@ -97,6 +107,13 @@ if(BUILD_TESTING)
         "ROS_DOMAIN_ID=unset:;DISABLE_ROS_ISOLATION=unset:"
   )
 endif()
+
+install(
+  PROGRAMS
+    voice_nav_console.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME voice_nav_console
+)
 
 install(
   DIRECTORY
