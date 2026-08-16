@@ -6,6 +6,7 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(action_msgs REQUIRED)
 find_package(composition_interfaces REQUIRED)
 find_package(controller_manager_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
@@ -99,6 +100,7 @@ target_link_libraries(
 add_library(
   relative_motion_ros_adapter STATIC
   src/relative_motion_ros_adapter.cpp
+  src/writer_observation.cpp
 )
 target_compile_features(relative_motion_ros_adapter PUBLIC cxx_std_17)
 target_include_directories(
@@ -108,9 +110,12 @@ target_include_directories(
 )
 ament_target_dependencies(
   relative_motion_ros_adapter
+  action_msgs
   geometry_msgs
   nav_msgs
+  nav2_msgs
   rclcpp
+  rclcpp_action
   rosgraph_msgs
   sensor_msgs
 )
@@ -322,7 +327,7 @@ if(BUILD_TESTING)
   target_compile_features(relative_motion_ros_adapter_test PUBLIC cxx_std_17)
   target_include_directories(
     relative_motion_ros_adapter_test
-    PRIVATE include
+    PRIVATE include src
   )
   ament_target_dependencies(
     relative_motion_ros_adapter_test
@@ -432,7 +437,6 @@ if(BUILD_TESTING)
   ament_add_gtest(
     motion_conditioning_pipeline_integration_test
     test/motion_conditioning_pipeline_integration_test.cpp
-    src/writer_observation.cpp
   )
   target_compile_features(
     motion_conditioning_pipeline_integration_test PUBLIC cxx_std_17)

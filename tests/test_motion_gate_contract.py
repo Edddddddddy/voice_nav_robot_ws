@@ -1149,12 +1149,33 @@ if(BUILD_TESTING)
     TIMEOUT 300
     RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
   )
+  add_launch_test(
+    test/test_voice_nav_demo_stop_launch.py
+    TARGET voice_nav_demo_stop_launch_test
+    TIMEOUT 300
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
+  )
+  add_launch_test(
+    test/test_mapping_mvp_launch.py
+    TARGET mapping_mvp_launch_test
+    TIMEOUT 300
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
+  )
+  add_launch_test(
+    test/test_navigation_mvp_launch.py
+    TARGET navigation_mvp_launch_test
+    TIMEOUT 420
+    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
+  )
   set_tests_properties(
     test_test_motion_gate_product.py
     mission_runtime_crash_stop
     motion_gate_consumer_deadman
     test_test_relative_motion_product.py
     scripted_voice_demo_launch_test
+    voice_nav_demo_stop_launch_test
+    mapping_mvp_launch_test
+    navigation_mvp_launch_test
     PROPERTIES
       RUN_SERIAL TRUE
   )
@@ -1164,6 +1185,9 @@ if(BUILD_TESTING)
     motion_gate_consumer_deadman
     test_test_relative_motion_product.py
     scripted_voice_demo_launch_test
+    voice_nav_demo_stop_launch_test
+    mapping_mvp_launch_test
+    navigation_mvp_launch_test
     PROPERTIES
       ENVIRONMENT_MODIFICATION
         "ROS_DOMAIN_ID=unset:;DISABLE_ROS_ISOLATION=unset:"
@@ -2334,7 +2358,7 @@ class MotionGateContractTest(unittest.TestCase):
                 "test/test_motion_gate_product.py",
                 "180",
                 "test_test_motion_gate_product.py",
-                "exactly 5 approved add_launch_test registrations",
+                "exactly 8 approved add_launch_test registrations",
             ),
         )
         for (

@@ -417,5 +417,47 @@ TEST(WriterObservationSession, EmptySnapshotStaysUnavailableAfterPriorObservatio
   EXPECT_NE(terminal_missing.detail.find("n=0"), std::string::npos);
 }
 
+TEST(WriterObservationSelection, FiltersExactControllerWriterBeforeUniqueness)
+{
+  const auto controller_gid = writer_gid(0x81U);
+  const auto behavior_gid = writer_gid(0x82U);
+
+  const auto binding = select_exact_writer(
+    {"geometry_msgs/msg/TwistStamped", "/controller_server"},
+    {
+      endpoint(controller_gid, "controller_server"),
+      endpoint(behavior_gid, "behavior_server"),
+    }, 0ms);
+
+  ASSERT_TRUE(binding.ready);
+  EXPECT_EQ(binding.writer_gid, controller_gid);
+}
+
+TEST(WriterObservationSelection, DuplicateMissingAndZeroControllerWritersFailClosed)
+{
+  const WriterObservationPolicy policy{
+    "geometry_msgs/msg/TwistStamped", "/controller_server"};
+  const auto controller_gid = writer_gid(0x83U);
+
+  const auto duplicate = select_exact_writer(
+    policy,
+    {
+      endpoint(controller_gid, "controller_server"),
+      endpoint(writer_gid(0x84U), "controller_server"),
+    }, 0ms);
+  EXPECT_FALSE(duplicate.ready);
+  EXPECT_EQ(duplicate.reason, Reason::WriterAmbiguous);
+
+  const auto missing = select_exact_writer(
+    policy, {endpoint(writer_gid(0x85U), "behavior_server")}, 0ms);
+  EXPECT_FALSE(missing.ready);
+  EXPECT_EQ(missing.reason, Reason::WriterUnavailable);
+
+  const auto zero = select_exact_writer(
+    policy, {endpoint(WriterGid{}, "controller_server")}, 0ms);
+  EXPECT_FALSE(zero.ready);
+  EXPECT_EQ(zero.reason, Reason::WriterMismatch);
+}
+
 }  // namespace
 }  // namespace voice_nav_mission

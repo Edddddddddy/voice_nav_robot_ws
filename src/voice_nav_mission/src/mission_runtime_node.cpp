@@ -351,7 +351,9 @@ public:
       },
       [this](std::string detail) {
         request_emergency_fence(std::move(detail));
-      });
+      },
+      RuntimeExecutionPlane::ChildResultDeliveryDecorator{},
+      std::static_pointer_cast<NavigationPort>(relative_motion_));
     shutdown_coordinator_ = std::make_unique<RuntimeShutdownCoordinator>(
       [this]() {
         return admission_gate_.close_generation(action_admission_tracker_);

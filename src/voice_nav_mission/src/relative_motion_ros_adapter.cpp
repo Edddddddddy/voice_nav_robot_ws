@@ -22,17 +22,26 @@
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
+#include <vector>
 
+#include <action_msgs/srv/cancel_goal.hpp>
 #include <geometry_msgs/msg/twist_stamped.hpp>
+#include <nav2_msgs/action/navigate_to_pose.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <rmw/types.h>
 #include <rosgraph_msgs/msg/clock.hpp>
+#include <rclcpp_action/rclcpp_action.hpp>
 #include <sensor_msgs/msg/laser_scan.hpp>
+
+#include "navigation_command_ingress.hpp"
+#include "writer_observation.hpp"
 
 namespace voice_nav_mission
 {
@@ -40,10 +49,37 @@ namespace
 {
 
 using namespace std::chrono_literals;
+using CancelGoal = action_msgs::srv::CancelGoal;
 using TwistStamped = geometry_msgs::msg::TwistStamped;
+using NavigateToPose = nav2_msgs::action::NavigateToPose;
+using NavigationGoalHandle = rclcpp_action::ClientGoalHandle<NavigateToPose>;
 using Odometry = nav_msgs::msg::Odometry;
 using Clock = rosgraph_msgs::msg::Clock;
 using LaserScan = sensor_msgs::msg::LaserScan;
+
+constexpr char kNavigationCommandTopic[] = "/voice_nav/nav2_cmd_vel";
+constexpr char kStudyPlaceId[] = "study";
+constexpr double kStudyX = 0.5;
+constexpr double kStudyY = 0.0;
+constexpr double kStudyYaw = 0.0;
+constexpr char kNavigationCommandType[] = "geometry_msgs/msg/TwistStamped";
+constexpr char kNavigationWriterFqn[] = "/controller_server";
+
+WriterGid endpoint_writer_gid(const rclcpp::TopicEndpointInfo & endpoint)
+{
+  WriterGid gid{};
+  const auto & raw_gid = endpoint.endpoint_gid();
+  std::copy_n(raw_gid.cbegin(), kWriterGidSize, gid.begin());
+  return gid;
+}
+
+WriterGid message_writer_gid(const rclcpp::MessageInfo & message_info)
+{
+  WriterGid gid{};
+  const auto & raw_gid = message_info.get_rmw_message_info().publisher_gid;
+  std::copy_n(raw_gid.data, kWriterGidSize, gid.begin());
+  return gid;
+}
 
 class AdapterIngressState;
 
@@ -574,6 +610,43 @@ public:
     return producer_ && producer_->start(raw_topic);
   }
 
+  void prime_navigation_command_for_test(
+    const MotionToken & token,
+    const WriterGid & expected_writer_gid,
+    const RelativeMotionCommand & command,
+    const TimePoint receipt)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    active_ = true;
+    starting_ = false;
+    teardown_started_ = false;
+    active_token_ = token;
+    active_step_ = MissionStep{
+      static_cast<std::uint8_t>(MissionStepKind::NavigateTo), 0.0F, 0.0F, {}};
+    navigation_freshness_teardown_scheduled_ = false;
+    navigation_command_ingress_.begin(token, receipt, expected_writer_gid);
+    if (
+      navigation_command_ingress_.observe(
+        token, expected_writer_gid, command, receipt) ==
+      detail::NavigationCommandIngress::Observation::Accepted)
+    {
+      navigation_command_ = command;
+    }
+  }
+
+  [[nodiscard]] RelativeMotionCommand navigation_command_at_for_test(
+    const TimePoint now)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return command_locked(now);
+  }
+
+  [[nodiscard]] bool navigation_freshness_teardown_scheduled_for_test() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return navigation_freshness_teardown_scheduled_;
+  }
+
   ~Impl()
   {
     shutdown();
@@ -644,6 +717,7 @@ public:
 
     ingress_->disable_odom();
     clock_subscription_.reset();
+    navigation_command_subscription_.reset();
     scan_subscription_.reset();
     odom_subscription_.reset();
     if (conditioning_config_.before_adapter_ingress_wait) {
@@ -805,8 +879,8 @@ public:
   void start(
     const MotionToken & token,
     const MissionStep & step,
-    FeedbackCallback feedback,
-    ResultCallback result)
+    RelativeMotionPort::FeedbackCallback feedback,
+    RelativeMotionPort::ResultCallback result)
   {
     // Production RuntimeCore registers the delivery callback in the Node
     // registry before calling this method.  The Adapter receives an empty
@@ -828,8 +902,10 @@ public:
       const bool startup_pending = startup_state_ != StartupState::NotRequested &&
         startup_state_ != StartupState::Succeeded;
       const bool fenced = !sticky_fault && !admission_allowed();
+      const bool navigation_lifecycle_blocked =
+        navigation_goal_lifecycle_.blocks_next_generation();
       if (sticky_fault || startup_pending || fenced || shutting_down_ || active_ ||
-        transaction_kind_ != TransactionKind::Idle)
+        navigation_lifecycle_blocked || transaction_kind_ != TransactionKind::Idle)
       {
         rejected = true;
         if (sticky_fault || startup_failed) {
@@ -849,6 +925,11 @@ public:
           rejection_code = ChildResultCode::SafetyFault;
           rejection_detail =
             "relative-motion start rejected during adapter shutdown";
+        } else if (navigation_lifecycle_blocked) {
+          rejection_code = ChildResultCode::SafetyFault;
+          rejection_detail =
+            "relative-motion start rejected while the previous Nav2 goal "
+            "is still live or its cancellation was rejected";
         }
       } else {
         active_ = true;
@@ -866,6 +947,15 @@ public:
         stationarity_waiting_ = false;
         pending_teardown_.reset();
         cancel_requested_.store(false);
+        navigation_command_ingress_.end();
+        navigation_writer_gid_.reset();
+        navigation_command_subscription_.reset();
+        navigation_freshness_teardown_scheduled_ = false;
+        navigation_command_ = {};
+        navigation_goal_active_ = false;
+        navigation_goal_handle_.reset();
+        navigation_goal_lifecycle_.reset();
+        navigation_cancel_requested_ = false;
         transaction_generation_.store(
           token.admission_generation, std::memory_order_release);
         transaction_kind_ = TransactionKind::Start;
@@ -939,7 +1029,9 @@ public:
         cancel_requested_.store(true);
         if (!teardown_started_) {
           const auto now = std::chrono::steady_clock::now();
-          if (!starting_) {
+          if (!starting_ && active_step_.kind !=
+            static_cast<std::uint8_t>(MissionStepKind::NavigateTo))
+          {
             const auto event = controller_.request_safe_stop(
               RelativeMotionStopIntent::Cancel, now);
             command_ = event.command;
@@ -1029,14 +1121,19 @@ public:
   void tick(const TimePoint now)
   {
     DeliveryPlan plan;
+    bool navigation_active = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       if (!active_ || starting_ || teardown_started_) {
         return;
       }
-      const auto event = controller_.tick(now);
-      command_ = event.command;
-      plan_from_event_locked(event, now, plan);
+      navigation_active = active_step_.kind ==
+        static_cast<std::uint8_t>(MissionStepKind::NavigateTo);
+      if (!navigation_active) {
+        const auto event = controller_.tick(now);
+        command_ = event.command;
+        plan_from_event_locked(event, now, plan);
+      }
     }
     dispatch(plan);
     if (plan.teardown.has_value()) {
@@ -1054,9 +1151,14 @@ public:
       }
       const auto conditioning_result = conditioning_->last_result();
       const auto now_again = std::chrono::steady_clock::now();
-      const auto event = controller_.request_safe_stop(
-        RelativeMotionStopIntent::Failure, now_again);
-      command_ = event.command;
+      if (!navigation_active) {
+        const auto event = controller_.request_safe_stop(
+          RelativeMotionStopIntent::Failure, now_again);
+        command_ = event.command;
+      } else {
+        command_ = {};
+        navigation_command_ = {};
+      }
       teardown_started_ = true;
       failure_plan.teardown = TeardownRequest{
         TeardownKind::Failure,
@@ -1121,15 +1223,32 @@ private:
     bool feedback{false};
     MotionToken feedback_token{};
     double progress{0.0};
-    FeedbackCallback feedback_callback;
+    RelativeMotionPort::FeedbackCallback feedback_callback;
     std::optional<TeardownRequest> teardown;
   };
 
-  [[nodiscard]] RelativeMotionCommand command() const
+  [[nodiscard]] RelativeMotionCommand command()
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    return command_locked(std::chrono::steady_clock::now());
+  }
+
+  [[nodiscard]] RelativeMotionCommand command_locked(const TimePoint now)
+  {
     if (shutting_down_) {
       return {};
+    }
+    if (active_ && active_step_.kind ==
+      static_cast<std::uint8_t>(MissionStepKind::NavigateTo))
+    {
+      const auto sample = navigation_command_ingress_.command(
+        active_token_, now);
+      if (sample.freshness_expired &&
+        navigation_command_ingress_.take_expired_token(now).has_value())
+      {
+        schedule_navigation_freshness_teardown_locked(active_token_, now);
+      }
+      return sample.command;
     }
     return command_;
   }
@@ -1364,6 +1483,329 @@ private:
     }
   }
 
+  void schedule_navigation_teardown(
+    const MotionToken & token,
+    const TeardownKind kind,
+    const ChildResultCode child_code,
+    const MotionConditioningFailure conditioning_failure,
+    std::string detail,
+    const TimePoint deadline)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!active_ || !same_token(active_token_, token) || teardown_started_) {
+      return;
+    }
+    teardown_started_ = true;
+    command_ = {};
+    navigation_command_ = {};
+    pending_teardown_ = TeardownRequest{
+      kind, child_code, conditioning_failure, std::move(detail), token,
+      deadline, true};
+    transaction_kind_ = TransactionKind::Teardown;
+    condition_variable_.notify_all();
+    transaction_condition_.notify_one();
+  }
+
+  void schedule_navigation_freshness_teardown_locked(
+    const MotionToken & token,
+    const TimePoint now)
+  {
+    if (!active_ || !same_token(active_token_, token) || teardown_started_) {
+      return;
+    }
+    teardown_started_ = true;
+    navigation_freshness_teardown_scheduled_ = true;
+    command_ = {};
+    navigation_command_ = {};
+    pending_teardown_ = TeardownRequest{
+      TeardownKind::Failure,
+      ChildResultCode::Timeout,
+      MotionConditioningFailure::Timeout,
+      "Nav2 command freshness expired",
+      token,
+      now + policy_.stationarity_deadline,
+      true};
+    transaction_kind_ = TransactionKind::Teardown;
+    condition_variable_.notify_all();
+    transaction_condition_.notify_one();
+  }
+
+  [[nodiscard]] std::optional<WriterGid> expected_navigation_writer() const
+  {
+    const auto endpoints = node_.get_publishers_info_by_topic(
+      kNavigationCommandTopic);
+    std::vector<WriterEndpointObservation> observations;
+    observations.reserve(endpoints.size());
+    for (const auto & endpoint : endpoints) {
+      observations.push_back(WriterEndpointObservation{
+          endpoint.topic_type(),
+          endpoint.node_name(),
+          endpoint.node_namespace(),
+          static_cast<rmw_endpoint_type_t>(endpoint.endpoint_type()),
+          endpoint.qos_profile().get_rmw_qos_profile(),
+          endpoint_writer_gid(endpoint)});
+    }
+    const auto binding = select_exact_writer(
+      {kNavigationCommandType, kNavigationWriterFqn}, observations, 0ms);
+    if (!binding.ready) {
+      return std::nullopt;
+    }
+    return binding.writer_gid;
+  }
+
+  bool start_navigation_goal(const MotionToken & token, const MissionStep & step)
+  {
+    if (!navigation_client_) {
+      try {
+        // MissionRuntimeNode may still be inside its constructor when the
+        // adapter is created.  Use the node-interface overload so this
+        // package-private client never depends on shared_from_this().
+        navigation_client_ = rclcpp_action::create_client<NavigateToPose>(
+          node_.get_node_base_interface(),
+          node_.get_node_graph_interface(),
+          node_.get_node_logging_interface(),
+          node_.get_node_waitables_interface(),
+          "/navigate_to_pose",
+          callback_group_);
+      } catch (...) {
+        return false;
+      }
+    }
+    if (
+      step.target_id != kStudyPlaceId || !navigation_client_ ||
+      !navigation_client_->wait_for_action_server(100ms))
+    {
+      return false;
+    }
+
+    const auto expected_writer = expected_navigation_writer();
+    if (!expected_writer.has_value()) {
+      return false;
+    }
+
+    rclcpp::SubscriptionOptions subscription_options;
+    subscription_options.callback_group = callback_group_;
+    const auto weak_impl = weak_from_this();
+    const auto ingress = ingress_;
+    rclcpp::Subscription<TwistStamped>::SharedPtr navigation_subscription;
+    try {
+      navigation_subscription = node_.create_subscription<TwistStamped>(
+        kNavigationCommandTopic,
+        latest_sensor_qos(),
+        [weak_impl, ingress, token](
+          const TwistStamped::ConstSharedPtr message,
+          const rclcpp::MessageInfo & message_info) {
+          auto guard = ingress->enter_runtime();
+          if (!guard.is_active()) {
+            return;
+          }
+          if (const auto impl = weak_impl.lock()) {
+            impl->on_navigation_command(token, message, message_info);
+          }
+        },
+        subscription_options);
+    } catch (...) {
+      return false;
+    }
+
+    NavigateToPose::Goal goal;
+    goal.pose.header.frame_id = "map";
+    goal.pose.header.stamp = node_.get_clock()->now();
+    goal.pose.pose.position.x = kStudyX;
+    goal.pose.pose.position.y = kStudyY;
+    goal.pose.pose.orientation.z = std::sin(kStudyYaw * 0.5);
+    goal.pose.pose.orientation.w = std::cos(kStudyYaw * 0.5);
+
+    rclcpp_action::Client<NavigateToPose>::SendGoalOptions options;
+    options.goal_response_callback = [weak_impl, token](
+      const NavigationGoalHandle::SharedPtr handle) {
+        if (const auto impl = weak_impl.lock()) {
+          impl->on_navigation_goal_response(token, handle);
+        }
+      };
+    options.feedback_callback = [weak_impl, token](
+      const NavigationGoalHandle::SharedPtr,
+      const std::shared_ptr<const NavigateToPose::Feedback> feedback) {
+        if (const auto impl = weak_impl.lock()) {
+          impl->on_navigation_feedback(token, feedback);
+        }
+      };
+    options.result_callback = [weak_impl, token](
+      const NavigationGoalHandle::WrappedResult & result) {
+        if (const auto impl = weak_impl.lock()) {
+          impl->on_navigation_result(token, result);
+        }
+      };
+
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!active_ || !starting_ || !same_token(active_token_, token) ||
+        cancel_requested_.load() || shutting_down_)
+      {
+        return false;
+      }
+      navigation_goal_active_ = true;
+      navigation_goal_handle_.reset();
+      navigation_goal_lifecycle_.reset();
+      navigation_cancel_requested_ = false;
+      navigation_command_subscription_ = std::move(navigation_subscription);
+      navigation_writer_gid_ = *expected_writer;
+      navigation_command_ingress_.begin(
+        token, std::chrono::steady_clock::now(), *expected_writer);
+    }
+    try {
+      (void)navigation_client_->async_send_goal(goal, options);
+      return true;
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(mutex_);
+      navigation_goal_active_ = false;
+      navigation_command_subscription_.reset();
+      navigation_command_ingress_.end();
+      navigation_writer_gid_.reset();
+      navigation_goal_lifecycle_.reset();
+      condition_variable_.notify_all();
+      return false;
+    }
+  }
+
+  void on_navigation_goal_response(
+    const MotionToken & token,
+    const NavigationGoalHandle::SharedPtr & handle)
+  {
+    bool rejected = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!active_ || !same_token(active_token_, token)) {
+        return;
+      }
+      if (!handle) {
+        navigation_goal_active_ = false;
+        navigation_goal_lifecycle_.reset();
+        rejected = !teardown_started_;
+      } else {
+        navigation_goal_lifecycle_.begin(handle->get_goal_id());
+        navigation_goal_handle_ = handle;
+      }
+      condition_variable_.notify_all();
+    }
+    if (rejected) {
+      schedule_navigation_teardown(
+        token, TeardownKind::Failure, ChildResultCode::DependencyUnavailable,
+        MotionConditioningFailure::DependencyUnavailable,
+        "Nav2 rejected the study NavigateToPose goal",
+        std::chrono::steady_clock::now() + policy_.stationarity_deadline);
+    }
+  }
+
+  void on_navigation_feedback(
+    const MotionToken & token,
+    const std::shared_ptr<const NavigateToPose::Feedback> feedback)
+  {
+    RelativeMotionPort::FeedbackCallback callback;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!active_ || teardown_started_ || !same_token(active_token_, token)) {
+        return;
+      }
+      callback = feedback_callback_;
+    }
+    if (callback) {
+      const auto progress = feedback && std::isfinite(
+        static_cast<double>(feedback->distance_remaining)) ? 0.0 : 0.0;
+      callback(token, progress);
+    }
+  }
+
+  void on_navigation_result(
+    const MotionToken & token,
+    const NavigationGoalHandle::WrappedResult & wrapped)
+  {
+    ChildResultCode code = ChildResultCode::Failed;
+    std::string detail = "Nav2 NavigateToPose failed";
+    if (wrapped.code == rclcpp_action::ResultCode::SUCCEEDED) {
+      code = ChildResultCode::Succeeded;
+      detail = "Nav2 completed the study NavigateToPose goal";
+    } else if (wrapped.code == rclcpp_action::ResultCode::CANCELED) {
+      detail = "Nav2 canceled the study NavigateToPose goal";
+    }
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!same_token(active_token_, token)) {
+        return;
+      }
+      if (!navigation_goal_lifecycle_.observe_terminal(wrapped.goal_id)) {
+        return;
+      }
+      navigation_goal_active_ = false;
+      navigation_goal_handle_.reset();
+      condition_variable_.notify_all();
+      if (!active_ || teardown_started_) {
+        return;
+      }
+    }
+    schedule_navigation_teardown(
+      token,
+      code == ChildResultCode::Succeeded ? TeardownKind::Completion :
+      TeardownKind::Failure,
+      code,
+      code == ChildResultCode::Succeeded ? MotionConditioningFailure::None :
+      MotionConditioningFailure::ExecutionFailed,
+      std::move(detail),
+      std::chrono::steady_clock::now() + policy_.stationarity_deadline);
+  }
+
+  [[nodiscard]] bool cancel_navigation_goal_until(
+    const MotionToken & token,
+    const TimePoint deadline)
+  {
+    NavigationGoalHandle::SharedPtr handle;
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      if (!active_ || !same_token(active_token_, token)) {
+        return true;
+      }
+      navigation_cancel_requested_ = true;
+      navigation_goal_lifecycle_.request_cancel();
+      while (navigation_goal_active_ && !navigation_goal_handle_) {
+        if (condition_variable_.wait_until(lock, deadline) ==
+          std::cv_status::timeout)
+        {
+          return false;
+        }
+      }
+      if (!navigation_goal_active_) {
+        return true;
+      }
+      handle = navigation_goal_handle_;
+    }
+    if (!handle || !navigation_client_) {
+      return false;
+    }
+    try {
+      auto cancel_future = navigation_client_->async_cancel_goal(handle);
+      if (cancel_future.wait_until(deadline) != std::future_status::ready) {
+        return false;
+      }
+      const auto response = cancel_future.get();
+      if (!response) {
+        return false;
+      }
+      std::vector<detail::NavigationGoalLifecycle::GoalId> goals_canceling;
+      goals_canceling.reserve(response->goals_canceling.size());
+      for (const auto & goal_info : response->goals_canceling) {
+        goals_canceling.push_back(goal_info.goal_id.uuid);
+      }
+      if (!navigation_goal_lifecycle_.accept_cancel_response(
+          response->return_code, goals_canceling))
+      {
+        return false;
+      }
+      return navigation_goal_lifecycle_.wait_for_terminal(deadline);
+    } catch (...) {
+      return false;
+    }
+  }
+
   [[nodiscard]] bool start_is_current(const MotionToken & token) const
   {
     return active_ && starting_ && same_token(active_token_, token) &&
@@ -1420,6 +1862,29 @@ private:
     }
     if (!started.ok || started.state != MotionConditioningState::Running) {
       finish_start_failure(token, started);
+      return;
+    }
+
+    if (step.kind == static_cast<std::uint8_t>(MissionStepKind::NavigateTo)) {
+      if (!start_navigation_goal(token, step)) {
+        schedule_navigation_teardown(
+          token, TeardownKind::Failure, ChildResultCode::DependencyUnavailable,
+          MotionConditioningFailure::DependencyUnavailable,
+          "Nav2 NavigateToPose action server is unavailable",
+          std::chrono::steady_clock::now() + policy_.stationarity_deadline);
+        return;
+      }
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!start_is_current(token)) {
+          return;
+        }
+        conditioning_token_ = conditioning_->correlation_token();
+        starting_ = false;
+        command_ = {};
+        navigation_command_ = {};
+        condition_variable_.notify_all();
+      }
       return;
     }
 
@@ -1495,7 +1960,11 @@ private:
       if (active_ && stationarity_waiting_) {
         (void)controller_.observe_odom(sample, now);
         command_ = {};
-      } else if (active_ && !starting_ && !teardown_started_ && !shutting_down_) {
+      } else if (
+        active_ && active_step_.kind !=
+        static_cast<std::uint8_t>(MissionStepKind::NavigateTo) &&
+        !starting_ && !teardown_started_ && !shutting_down_)
+      {
         const auto event = controller_.observe_odom(sample, now);
         command_ = event.command;
         plan_from_event_locked(event, now, plan);
@@ -1550,6 +2019,35 @@ private:
     clock_seen_ = true;
     last_clock_stamp_ = stamp;
     last_clock_at_ = now;
+    condition_variable_.notify_all();
+  }
+
+  void on_navigation_command(
+    const MotionToken & token,
+    const TwistStamped::ConstSharedPtr message,
+    const rclcpp::MessageInfo & message_info)
+  {
+    if (!message) {
+      return;
+    }
+    const auto linear = message->twist.linear.x;
+    const auto angular = message->twist.angular.z;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (
+      shutting_down_ || !active_ || starting_ || teardown_started_ ||
+      active_step_.kind != static_cast<std::uint8_t>(MissionStepKind::NavigateTo))
+    {
+      return;
+    }
+    const auto observation = navigation_command_ingress_.observe(
+      token,
+      message_writer_gid(message_info),
+      RelativeMotionCommand{linear, angular},
+      std::chrono::steady_clock::now());
+    if (observation != detail::NavigationCommandIngress::Observation::Accepted) {
+      return;
+    }
+    navigation_command_ = RelativeMotionCommand{linear, angular};
     condition_variable_.notify_all();
   }
 
@@ -1767,6 +2265,16 @@ private:
   [[nodiscard]] bool run_teardown(
     const TeardownRequest & request)
   {
+    bool navigation_step = false;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      navigation_step = active_ && active_step_.kind ==
+        static_cast<std::uint8_t>(MissionStepKind::NavigateTo);
+    }
+    const bool navigation_cancel_acknowledged =
+      !navigation_step ||
+      (request.kind == TeardownKind::Completion ? true :
+      cancel_navigation_goal_until(request.token, request.deadline));
     MotionConditioningResult conditioning_result;
     try {
       if (request.kind == TeardownKind::Completion ||
@@ -1797,9 +2305,14 @@ private:
       const bool conditioning_failure_requires_stationarity =
         request.kind == TeardownKind::Failure &&
         request.conditioning_failure != MotionConditioningFailure::None;
+      const bool navigation_requires_stationarity =
+        active_ && same_token(active_token_, request.token) &&
+        active_step_.kind == static_cast<std::uint8_t>(MissionStepKind::NavigateTo);
       mission_active = active_ && same_token(active_token_, request.token) &&
-        (controller_.active() || conditioning_failure_requires_stationarity);
-      controller_can_prove_stationarity = mission_active && controller_.active();
+        (controller_.active() || conditioning_failure_requires_stationarity ||
+        navigation_requires_stationarity);
+      controller_can_prove_stationarity =
+        mission_active && controller_.active() && !navigation_requires_stationarity;
     }
     stationary = !mission_active;
     if (zero && mission_active) {
@@ -1807,16 +2320,20 @@ private:
       {
         std::lock_guard<std::mutex> lock(mutex_);
         stationarity_waiting_ = true;
-        confirmation = controller_.confirm_gate_zero(zero_proven_at);
-        if (
-          confirmation.kind != RelativeMotionEventKind::Failed &&
-          latest_odom_.has_value() && last_odom_at_ != TimePoint{} &&
-          last_odom_at_ >= zero_proven_at &&
-          std::chrono::steady_clock::now() - last_odom_at_ <=
-          policy_.dependency_liveness_timeout)
-        {
-          confirmation = controller_.observe_odom(
-            *latest_odom_, last_odom_at_);
+        if (controller_can_prove_stationarity) {
+          confirmation = controller_.confirm_gate_zero(zero_proven_at);
+          if (
+            confirmation.kind != RelativeMotionEventKind::Failed &&
+            latest_odom_.has_value() && last_odom_at_ != TimePoint{} &&
+            last_odom_at_ >= zero_proven_at &&
+            std::chrono::steady_clock::now() - last_odom_at_ <=
+            policy_.dependency_liveness_timeout)
+          {
+            confirmation = controller_.observe_odom(
+              *latest_odom_, last_odom_at_);
+          }
+        } else {
+          confirmation.kind = RelativeMotionEventKind::None;
         }
         command_ = {};
         condition_variable_.notify_all();
@@ -1833,18 +2350,24 @@ private:
     }
 
     ChildResultCode final_code = request.child_code;
+    if (!navigation_cancel_acknowledged) {
+      final_code = ChildResultCode::SafetyFault;
+    }
     if (!zero || (mission_active && !stationary) ||
       conditioning_failure_is_safety_terminal(conditioning_result.failure))
     {
       final_code = ChildResultCode::SafetyFault;
     }
-    const auto final_detail = !zero ?
+    const auto final_detail = !navigation_cancel_acknowledged ?
+      std::string{"Nav2 cancellation was not acknowledged before teardown deadline"} :
+    (!zero ?
       std::string{"Gate zero proof did not include a valid steady timestamp"} :
     ((mission_active && !stationary) ?
     std::string{"odometry did not prove stationarity after Gate zero"} :
-    (conditioning_result.detail.empty() ? request.detail : conditioning_result.detail));
+    (conditioning_result.detail.empty() ? request.detail : conditioning_result.detail)));
 
     RelativeMotionCompletionRecordPtr completion;
+    rclcpp::Subscription<TwistStamped>::SharedPtr navigation_subscription;
     bool deliver_result = false;
     {
       std::lock_guard<std::mutex> lock(mutex_);
@@ -1856,6 +2379,9 @@ private:
         active_ = false;
         starting_ = false;
         teardown_started_ = false;
+        navigation_command_ingress_.end();
+        navigation_writer_gid_.reset();
+        navigation_subscription = std::move(navigation_command_subscription_);
         command_ = {};
         zero_proven_ = zero;
         teardown_complete_ = true;
@@ -1903,7 +2429,8 @@ private:
       }
       publish_completion(std::move(completion));
     }
-    const bool safe = zero && (!mission_active || stationary) &&
+    const bool safe = navigation_cancel_acknowledged && zero &&
+      (!mission_active || stationary) &&
       !conditioning_failure_is_safety_terminal(conditioning_result.failure);
     if (!safe) {
       RCLCPP_ERROR(
@@ -1928,6 +2455,7 @@ private:
   MotionConditioningConfig conditioning_config_;
   RelativeMotionController controller_;
   rclcpp::CallbackGroup::SharedPtr callback_group_;
+  rclcpp_action::Client<NavigateToPose>::SharedPtr navigation_client_;
   std::shared_ptr<AdapterIngressState> ingress_;
   std::shared_ptr<RawMotionProducer> producer_;
   std::unique_ptr<MotionConditioningPipeline> conditioning_;
@@ -1936,6 +2464,9 @@ private:
   rclcpp::Subscription<Odometry>::SharedPtr odom_subscription_;
   rclcpp::Subscription<LaserScan>::SharedPtr scan_subscription_;
   rclcpp::Subscription<Clock>::SharedPtr clock_subscription_;
+  rclcpp::Subscription<TwistStamped>::SharedPtr navigation_command_subscription_;
+  detail::NavigationCommandIngress navigation_command_ingress_;
+  std::optional<WriterGid> navigation_writer_gid_;
 
   mutable std::mutex mutex_;
   std::condition_variable condition_variable_;
@@ -1958,6 +2489,11 @@ private:
   bool completion_record_sent_{false};
   bool emergency_stop_in_progress_{false};
   std::atomic<bool> cancel_requested_{false};
+  bool navigation_goal_active_{false};
+  bool navigation_cancel_requested_{false};
+  detail::NavigationGoalLifecycle navigation_goal_lifecycle_;
+  bool navigation_freshness_teardown_scheduled_{false};
+  NavigationGoalHandle::SharedPtr navigation_goal_handle_;
   bool active_{false};
   bool starting_{false};
   bool teardown_started_{false};
@@ -1971,8 +2507,9 @@ private:
   MissionStep active_step_{};
   MotionConditioningCorrelationToken conditioning_token_{};
   RelativeMotionCommand command_{};
+  RelativeMotionCommand navigation_command_{};
   bool zero_proven_{true};
-  FeedbackCallback feedback_callback_;
+  RelativeMotionPort::FeedbackCallback feedback_callback_;
 
   bool odom_seen_{false};
   bool scan_seen_{false};
@@ -2019,8 +2556,8 @@ bool RelativeMotionRosAdapter::uses_external_completion_registry() const noexcep
 void RelativeMotionRosAdapter::start(
   const MotionToken & token,
   const MissionStep & step,
-  FeedbackCallback feedback,
-  ResultCallback result)
+  RelativeMotionPort::FeedbackCallback feedback,
+  RelativeMotionPort::ResultCallback result)
 {
   impl_->start(token, step, std::move(feedback), std::move(result));
 }
@@ -2119,6 +2656,37 @@ bool detail::RelativeMotionRosAdapterTestAccess::start_raw_producer(
   const std::string & raw_topic)
 {
   return adapter.impl_ && adapter.impl_->start_raw_producer_for_test(raw_topic);
+}
+
+void detail::RelativeMotionRosAdapterTestAccess::prime_navigation_command(
+  RelativeMotionRosAdapter & adapter,
+  const MotionToken & token,
+  const WriterGid & expected_writer_gid,
+  const RelativeMotionCommand & command,
+  const SteadyClockPort::TimePoint receipt)
+{
+  if (adapter.impl_) {
+    adapter.impl_->prime_navigation_command_for_test(
+      token, expected_writer_gid, command, receipt);
+  }
+}
+
+RelativeMotionCommand
+detail::RelativeMotionRosAdapterTestAccess::navigation_command_at(
+  RelativeMotionRosAdapter & adapter,
+  const SteadyClockPort::TimePoint now)
+{
+  return adapter.impl_ ?
+         adapter.impl_->navigation_command_at_for_test(now) :
+         RelativeMotionCommand{};
+}
+
+bool detail::RelativeMotionRosAdapterTestAccess::
+navigation_freshness_teardown_scheduled(
+  const RelativeMotionRosAdapter & adapter)
+{
+  return adapter.impl_ &&
+         adapter.impl_->navigation_freshness_teardown_scheduled_for_test();
 }
 
 void detail::begin_relative_motion_shutdown(

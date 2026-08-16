@@ -64,6 +64,52 @@ RuntimeConfig config()
   return value;
 }
 
+class ScriptedNavigationPort final : public NavigationPort
+{
+public:
+  [[nodiscard]] bool healthy() const override {return healthy_;}
+
+  void start(
+    const MotionToken & token,
+    const MissionStep & step,
+    FeedbackCallback feedback,
+    ResultCallback result) override
+  {
+    started_tokens.push_back(token);
+    started_steps.push_back(step);
+    feedback_callback = std::move(feedback);
+    result_callback = std::move(result);
+  }
+
+  [[nodiscard]] bool cancel(
+    const MotionToken & token,
+    SteadyClockPort::TimePoint deadline) override
+  {
+    (void)deadline;
+    ++cancel_count;
+    cancel_token = token;
+    return cancel_acknowledged;
+  }
+
+  void tick(SteadyClockPort::TimePoint) override {}
+
+  void complete()
+  {
+    ASSERT_TRUE(static_cast<bool>(result_callback));
+    result_callback(started_tokens.back(), ChildResult{
+      ChildResultCode::Succeeded, "navigation complete"});
+  }
+
+  bool healthy_{true};
+  bool cancel_acknowledged{true};
+  std::size_t cancel_count{0U};
+  MotionToken cancel_token{};
+  std::vector<MotionToken> started_tokens;
+  std::vector<MissionStep> started_steps;
+  FeedbackCallback feedback_callback;
+  ResultCallback result_callback;
+};
+
 AuthorityResult converged_stale_inhibit(
   std::chrono::milliseconds elapsed,
   bool transport_unavailable = false)
@@ -393,6 +439,123 @@ TEST(RuntimeCore, UnsupportedUnionIsDistinguishedFromInvalidUnion)
             "place-a"}}));
   EXPECT_FALSE(invalid.accepted);
   EXPECT_EQ(invalid.result.code, MissionResultCode::InvalidPlan);
+}
+
+TEST(RuntimeCore, NavigationStudyUsesNavigationPort)
+{
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  auto navigation = std::make_shared<ScriptedNavigationPort>();
+  auto runtime_config = config();
+  runtime_config.operating_mode = OperatingMode::Navigation;
+  runtime_config.named_place_ids = {"study"};
+  RuntimeCore core(
+    runtime_config,
+    clock,
+    authority,
+    relative,
+    {}, {}, {}, {}, {}, {}, {}, {}, navigation);
+  core.observe_gate(authority->snapshot());
+
+  const auto admission = core.admit(goal(
+    1U,
+    {MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::NavigateTo),
+        0.0F,
+        0.0F,
+        "study"}}));
+
+  ASSERT_TRUE(admission.accepted);
+  ASSERT_EQ(navigation->started_steps.size(), 1U);
+  EXPECT_EQ(navigation->started_steps.front().target_id, "study");
+  navigation->complete();
+}
+
+TEST(RuntimeCore, NavigationRejectsUnknownPlaceBeforeNavigationStart)
+{
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  auto navigation = std::make_shared<ScriptedNavigationPort>();
+  auto runtime_config = config();
+  runtime_config.operating_mode = OperatingMode::Navigation;
+  runtime_config.named_place_ids = {"study"};
+  RuntimeCore core(runtime_config, clock, authority, relative, {}, {}, {}, {},
+    {}, {}, {}, {}, navigation);
+  core.observe_gate(authority->snapshot());
+
+  const auto admission = core.admit(goal(
+    1U,
+    {MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::NavigateTo),
+        0.0F, 0.0F, "unknown"}}));
+
+  EXPECT_FALSE(admission.accepted);
+  EXPECT_EQ(admission.result.code, MissionResultCode::UnknownTarget);
+  EXPECT_TRUE(navigation->started_tokens.empty());
+}
+
+TEST(RuntimeCore, NavigationCancelIgnoresStaleResult)
+{
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  auto navigation = std::make_shared<ScriptedNavigationPort>();
+  auto runtime_config = config();
+  runtime_config.operating_mode = OperatingMode::Navigation;
+  runtime_config.named_place_ids = {"study"};
+  std::vector<MissionResult> results;
+  RuntimeCore core(
+    runtime_config, clock, authority, relative,
+    {}, {}, [&results](std::uint64_t, const MissionResult & result) {
+      results.push_back(result);
+    }, {}, {}, {}, {}, {}, navigation);
+  core.observe_gate(authority->snapshot());
+
+  const auto admission = core.admit(goal(
+    1U,
+    {MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::NavigateTo),
+        0.0F, 0.0F, "study"}}));
+  ASSERT_TRUE(admission.accepted);
+
+  core.cancel(admission.mission_id);
+  ASSERT_EQ(navigation->cancel_count, 1U);
+  ASSERT_EQ(results.size(), 1U);
+  EXPECT_EQ(results.front().code, MissionResultCode::Canceled);
+
+  navigation->complete();
+  EXPECT_EQ(results.size(), 1U);
+  EXPECT_FALSE(core.has_active_mission());
+}
+
+TEST(RuntimeCore, NavigationStopUsesNavigationCancel)
+{
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  auto navigation = std::make_shared<ScriptedNavigationPort>();
+  auto runtime_config = config();
+  runtime_config.operating_mode = OperatingMode::Navigation;
+  runtime_config.named_place_ids = {"study"};
+  RuntimeCore core(runtime_config, clock, authority, relative, {}, {}, {}, {},
+    {}, {}, {}, {}, navigation);
+  core.observe_gate(authority->snapshot());
+
+  const auto admission = core.admit(goal(
+    1U,
+    {MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::NavigateTo),
+        0.0F, 0.0F, "study"}}));
+  ASSERT_TRUE(admission.accepted);
+
+  const auto response = core.stop(
+    StopRequest{"stop-navigation", "operator", 1U, "operator stop"});
+  EXPECT_EQ(response.code, 0U);
+  EXPECT_TRUE(response.motion_inhibited);
+  EXPECT_EQ(navigation->cancel_count, 1U);
+  EXPECT_FALSE(core.has_active_mission());
 }
 
 TEST(RuntimeCore, StartupConvergesLegacyPreparedGateToCurrentZeroProof)

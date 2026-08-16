@@ -23,6 +23,22 @@ Mission，并通过受保护的 Gazebo 差速驱动链执行。已批准的目�
   强类型状态/反馈/结果与脚本化行为替身；MotionConditioningPipeline 在受控容器中协调
   `nav2_velocity_smoother`、`nav2_collision_monitor` 与 MotionGate。
 
+Issue #164 增加了一个 pre-release framework MVP：已安装的 `voice_node` 可用锁定的 SenseVoice WAV
+组成真实 `VoiceTurn`，并提供 MOVE+STOP、Mapping MVP 与单一 `study` Named Place Navigation 的
+headless 产品检查。四阶段结果由安装入口 `voice_nav_issue164_runner` 以 schema-versioned JSON
+写入 task-local 的 `build/test-results/issue164/`，每次运行必须给出 exact HEAD：
+
+```bash
+HEAD_SHA="$(git rev-parse HEAD)"
+voice_nav_issue164_runner \
+  --workspace-root "$PWD" \
+  --exact-head "$HEAD_SHA" \
+  --output "build/test-results/issue164/manual-${HEAD_SHA}/result.json"
+```
+
+这只是 #164 的 pre-release framework MVP，不宣称 v1.0 完成，也不包含物理麦克风、KWS、真实 TTS、
+完整 Mapping→Navigation 地图 artifact handoff 或真实机器人验收。
+
 已配置的 controller timeout 是消费者侧 deadman，本身并不能单独证明实体静止。当前 main 已验证
 MotionGate、Mission Runtime、RelativeMotion、运动调节组件以及 crash-stop 的受限仿真验收；真实机器人、
 生产硬件安全功能和未列入契约的恢复场景仍不在本仓库声明范围内。当前/目标边界见

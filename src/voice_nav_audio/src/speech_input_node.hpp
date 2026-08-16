@@ -26,8 +26,9 @@ namespace voice_nav_audio
 
 [[nodiscard]] rclcpp::QoS voice_turn_qos();
 
-// Package-private ROS composition seam.  It has no executable, component
-// registration, or input endpoint: tests inject only an in-process adapter.
+// Package-private ROS composition seam.  The installed voice_node owns this
+// input root; tests may still inject an in-process adapter through the same
+// seam.
 class SpeechInputNode final : public rclcpp::Node, private VoiceTurnSink
 {
 public:

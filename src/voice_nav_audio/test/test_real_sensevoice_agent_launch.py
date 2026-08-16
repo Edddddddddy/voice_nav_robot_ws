@@ -24,7 +24,6 @@ import time
 import unittest
 
 from launch import LaunchDescription
-from launch.actions import ExecuteProcess
 from launch_ros.actions import Node
 import launch_testing
 import launch_testing.actions
@@ -63,6 +62,13 @@ _EXPECTED_ASSETS = {
         'c36d490aff5ab924ca6c7aeec4d8f6bd3d22db6fa17611b9c5b17eae58ac3a20',
     ),
 }
+
+
+def _gate_env(name):
+    return os.environ.get(
+        f'VOICE_NAV_REAL_GATE_{name}_OVERRIDE',
+        os.environ.get(f'VOICE_NAV_REAL_GATE_{name}'),
+    )
 
 
 def _voice_turn_qos():
@@ -134,12 +140,11 @@ def _agent_graph(node):
 @pytest.mark.launch_test
 @launch_testing.markers.keep_alive
 def generate_test_description():
-    """Launch only the installed Agent and the non-installed real gate runner."""
-    driver = os.environ.get('VOICE_NAV_REAL_MODEL_GATE')
-    assert driver and Path(driver).is_file(), 'missing real-model gate runner'
-    assert os.environ.get('VOICE_NAV_REAL_GATE_HEAD') not in (None, '', 'unknown')
-    _asset_paths()
-    report_path = Path(os.environ['VOICE_NAV_REAL_GATE_REPORT'])
+    """Launch the installed real voice root and the installed Agent."""
+    gate_head = _gate_env('HEAD')
+    assert gate_head not in (None, '', 'unknown')
+    assets = _asset_paths()
+    report_path = Path(_gate_env('REPORT'))
     report_path.unlink(missing_ok=True)
     agent = Node(
         package='voice_nav_agent',
@@ -147,22 +152,36 @@ def generate_test_description():
         name='agent_node',
         output='screen',
     )
-    speech_driver = ExecuteProcess(cmd=[driver], output='screen')
+    voice_node = Node(
+        package='voice_nav_audio',
+        executable='voice_node',
+        name='voice_node',
+        output='screen',
+        parameters=[{
+            'input_profile': 'sensevoice_wav',
+            'input_wav': str(assets['wav']),
+            'silero_vad_model': str(assets['silero_vad']),
+            'sensevoice_model': str(assets['sensevoice_model']),
+            'sensevoice_tokens': str(assets['tokens']),
+            'result_path': str(report_path),
+            'exact_head': gate_head,
+        }],
+    )
     return LaunchDescription([
         agent,
-        speech_driver,
+        voice_node,
         launch_testing.actions.ReadyToTest(),
     ]), {
         'agent': agent,
-        'speech_driver': speech_driver,
+        'voice_node': voice_node,
     }
 
 
 class RealSenseVoiceAgentLaunchTest(unittest.TestCase):
     """Assert the actual model path produces one safe Agent response."""
 
-    def setUp(self, agent, speech_driver):
-        del agent, speech_driver
+    def setUp(self, agent, voice_node):
+        del agent, voice_node
         rclpy.init(args=[])
         self.node = rclpy.create_node('real_sensevoice_agent_probe')
         self.executor = SingleThreadedExecutor()
@@ -262,11 +281,11 @@ class RealSenseVoiceAgentLaunchTest(unittest.TestCase):
         ):
             assert forbidden not in graph_forbidden
 
-        report_path = Path(os.environ['VOICE_NAV_REAL_GATE_REPORT'])
+        report_path = Path(_gate_env('REPORT'))
         report = _wait_for_final_report(report_path, timeout=10.0)
         assert report['schema_version'] == 'voice_nav.real_model_gate.v1'
         assert report['status'] == 'passed'
-        assert report['exact_head'] == os.environ['VOICE_NAV_REAL_GATE_HEAD']
+        assert report['exact_head'] == _gate_env('HEAD')
         assert report['provider']['voice_turn_count'] == 1
         assert report['provider']['command_count'] == 1
         assert report['turns'][0]['text'] == _EXPECTED_TEXT
@@ -323,7 +342,7 @@ class RealModelReportTransactionTest(unittest.TestCase):
 class RealSenseVoiceAgentShutdownTest(unittest.TestCase):
     """Require both the Agent and actual gate runner to exit cleanly."""
 
-    def test_processes_exit_cleanly(self, proc_info, agent, speech_driver):
+    def test_processes_exit_cleanly(self, proc_info, agent, voice_node):
         assertExitCodes(
             proc_info,
             process=agent,
@@ -331,6 +350,6 @@ class RealSenseVoiceAgentShutdownTest(unittest.TestCase):
         )
         assertExitCodes(
             proc_info,
-            process=speech_driver,
+            process=voice_node,
             allowable_exit_codes=[0, -2],
         )

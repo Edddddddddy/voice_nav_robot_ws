@@ -120,11 +120,13 @@ class _SpeakOperation:
     turn_id: str
     text: str
     priority: int
+    discovery_deadline_seconds: float = 0.0
     goal_handle: Any = None
     send_timer: Any = None
     cancel_on_accept: bool = False
     cancel_started: bool = False
     stale: bool = False
+    send_started: bool = False
 
 
 @dataclass(slots=True)
@@ -561,6 +563,7 @@ class AgentNode(Node):
 
     def destroy_node(self) -> bool:
         """Stop the bounded completion worker before destroying ROS resources."""
+        self._retire_speak_operation()
         self._seam.invoke(self._response_session.invalidate)
         self._response_provider.shutdown()
         return super().destroy_node()
@@ -1034,26 +1037,69 @@ class AgentNode(Node):
         )
         self._speak_operation = operation
         if not _action_server_ready(self._speak_client):
-            operation.send_timer = self._one_shot_timer(
-                SPEAK_DISCOVERY_RECHECK_SECONDS,
-                lambda: self._speak_discovery_recheck(operation),
+            operation.discovery_deadline_seconds = (
+                self._steady_time_seconds() + RESPONSE_DEADLINE_SECONDS
             )
+            self._schedule_speak_discovery_recheck(operation)
             return
         self._send_speak_goal(operation)
 
     def _speak_discovery_recheck(self, operation: _SpeakOperation) -> None:
-        """Make one bounded discovery recheck before dropping unsent speech."""
-        if self._speak_operation is not operation or operation.stale:
+        """Retry discovery until the existing response deadline is reached."""
+        if (
+            self._speak_operation is not operation
+            or operation.stale
+            or operation.send_started
+        ):
             return
         operation.send_timer = None
-        if not _action_server_ready(self._speak_client):
-            self.get_logger().warning('Speak server unavailable; dropping speech')
-            self._speak_operation = None
+        if self._steady_time_seconds() >= operation.discovery_deadline_seconds:
+            self._speak_discovery_timeout(operation)
             return
-        self._send_speak_goal(operation)
+        if _action_server_ready(self._speak_client):
+            self._send_speak_goal(operation)
+            return
+        self._schedule_speak_discovery_recheck(operation)
+
+    def _schedule_speak_discovery_recheck(
+        self, operation: _SpeakOperation
+    ) -> None:
+        if (
+            self._speak_operation is not operation
+            or operation.stale
+            or operation.send_started
+        ):
+            return
+        remaining = operation.discovery_deadline_seconds - (
+            self._steady_time_seconds()
+        )
+        if remaining <= 0.0:
+            self._speak_discovery_timeout(operation)
+            return
+        operation.send_timer = self._one_shot_timer(
+            min(SPEAK_DISCOVERY_RECHECK_SECONDS, remaining),
+            lambda: self._speak_discovery_recheck(operation),
+        )
+
+    def _speak_discovery_timeout(self, operation: _SpeakOperation) -> None:
+        if self._speak_operation is not operation or operation.stale:
+            return
+        self._cancel_timer(operation.send_timer)
+        operation.send_timer = None
+        operation.stale = True
+        operation.cancel_on_accept = True
+        self._speak_operation = None
+        self.get_logger().warning('Speak server unavailable; dropping speech')
 
     def _send_speak_goal(self, operation: _SpeakOperation) -> None:
         """Submit exactly one already-admitted Speak action goal."""
+        if (
+            self._speak_operation is not operation
+            or operation.stale
+            or operation.send_started
+        ):
+            return
+        operation.send_started = True
         goal = Speak.Goal()
         goal.source_instance_id = self._agent_instance_id
         goal.source_seq = operation.source_seq
@@ -1208,6 +1254,10 @@ class AgentNode(Node):
         )
         holder['timer'] = timer
         return timer
+
+    def _steady_time_seconds(self) -> float:
+        """Return the injected steady-clock time used by bounded discovery."""
+        return self._steady_clock.now().nanoseconds / 1_000_000_000.0
 
 
 def _new_agent_instance_id() -> str:

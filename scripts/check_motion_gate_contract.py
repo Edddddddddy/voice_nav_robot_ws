@@ -2306,14 +2306,20 @@ def validate_bringup_cmake(path: Path) -> None:
             "test/test_motion_gate_consumer_deadman.py",
             "test/test_relative_motion_product.py",
             "test/test_scripted_voice_demo_launch.py",
+            "test/test_voice_nav_demo_stop_launch.py",
+            "test/test_mapping_mvp_launch.py",
+            "test/test_navigation_mvp_launch.py",
         ),
-        (180, 300, 300, 300, 300),
+        (180, 300, 300, 300, 300, 300, 300, 420),
         (
             None,
             "mission_runtime_crash_stop",
             "motion_gate_consumer_deadman",
             None,
             "scripted_voice_demo_launch_test",
+            "voice_nav_demo_stop_launch_test",
+            "mapping_mvp_launch_test",
+            "navigation_mvp_launch_test",
         ),
     )
     install_match = re.search(

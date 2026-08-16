@@ -106,6 +106,13 @@ target_link_libraries(scripted_voice_demo voice_pipeline)
 
 install(TARGETS scripted_voice_demo DESTINATION lib/${PROJECT_NAME})
 
+install(
+  DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME}
+  PATTERN "__pycache__" EXCLUDE
+  PATTERN "*.pyc" EXCLUDE
+)
+
 option(
   VOICE_NAV_AUDIO_WITH_WEBRTC_APM
   "Build the WebRTC APM adapter from the explicitly provisioned #53 dependency"
@@ -181,6 +188,19 @@ if(VOICE_NAV_AUDIO_WITH_SHERPA_ONNX)
     sensevoice_sherpa_adapter
     INTERFACE
       "-Wl,--disable-new-dtags,-rpath,${SHERPA_ONNX_RUNTIME_RPATH}")
+
+  add_executable(voice_node src/voice_node.cpp)
+  target_compile_features(voice_node PRIVATE cxx_std_17)
+  target_include_directories(
+    voice_node
+    PRIVATE include src "${SHERPA_ONNX_INCLUDE_DIR}")
+  ament_target_dependencies(voice_node rclcpp voice_nav_interfaces)
+  target_link_libraries(voice_node speech_input_node sensevoice_sherpa_adapter)
+  target_link_options(
+    voice_node
+    PRIVATE
+      "-Wl,--disable-new-dtags,-rpath,${SHERPA_ONNX_RUNTIME_RPATH}")
+  install(TARGETS voice_node DESTINATION lib/${PROJECT_NAME})
 endif()
 
 if(BUILD_TESTING)
@@ -258,6 +278,26 @@ if(BUILD_TESTING)
   if(VOICE_NAV_AUDIO_WITH_SHERPA_ONNX)
     set(_voice_nav_real_asset_root
       "${CMAKE_CURRENT_SOURCE_DIR}/../../models/weights/voice-assets")
+    set(_voice_nav_real_vad "$ENV{VOICE_NAV_SENSEVOICE_VAD_MODEL}")
+    set(_voice_nav_real_model "$ENV{VOICE_NAV_SENSEVOICE_MODEL}")
+    set(_voice_nav_real_tokens "$ENV{VOICE_NAV_SENSEVOICE_TOKENS}")
+    set(_voice_nav_real_wav "$ENV{VOICE_NAV_SENSEVOICE_WAV}")
+    if(_voice_nav_real_vad STREQUAL "")
+      set(_voice_nav_real_vad
+        "${_voice_nav_real_asset_root}/vad/silero_vad.int8.onnx")
+    endif()
+    if(_voice_nav_real_model STREQUAL "")
+      set(_voice_nav_real_model
+        "${_voice_nav_real_asset_root}/asr/sensevoice-small-int8-2024-07-17/model.int8.onnx")
+    endif()
+    if(_voice_nav_real_tokens STREQUAL "")
+      set(_voice_nav_real_tokens
+        "${_voice_nav_real_asset_root}/asr/sensevoice-small-int8-2024-07-17/tokens.txt")
+    endif()
+    if(_voice_nav_real_wav STREQUAL "")
+      set(_voice_nav_real_wav
+        "${_voice_nav_real_asset_root}/asr/sensevoice-small-int8-2024-07-17/test_wavs/zh.wav")
+    endif()
     ament_add_gtest(
       sensevoice_sherpa_adapter_test
       test/sensevoice_sherpa_adapter_test.cpp
@@ -273,33 +313,7 @@ if(BUILD_TESTING)
       sensevoice_sherpa_adapter_test
       PROPERTIES
         ENVIRONMENT
-          "VOICE_NAV_SENSEVOICE_VAD_MODEL=${_voice_nav_real_asset_root}/vad/silero_vad.int8.onnx;VOICE_NAV_SENSEVOICE_MODEL=${_voice_nav_real_asset_root}/asr/sensevoice-small-int8-2024-07-17/model.int8.onnx;VOICE_NAV_SENSEVOICE_TOKENS=${_voice_nav_real_asset_root}/asr/sensevoice-small-int8-2024-07-17/tokens.txt")
-
-    # Test-only longitudinal gate: locked WAV -> actual sherpa adapters ->
-    # existing SpeechInputNode. It is deliberately not installed or exposed
-    # as a ROS executable.
-    add_executable(
-      sensevoice_real_model_gate
-      test/sensevoice_real_model_gate.cpp
-    )
-    target_compile_features(sensevoice_real_model_gate PRIVATE cxx_std_17)
-    target_include_directories(
-      sensevoice_real_model_gate
-      PRIVATE include src "${SHERPA_ONNX_INCLUDE_DIR}"
-    )
-    ament_target_dependencies(
-      sensevoice_real_model_gate
-      rclcpp
-      voice_nav_interfaces
-    )
-    target_link_libraries(
-      sensevoice_real_model_gate
-      speech_input_node sensevoice_sherpa_adapter
-    )
-    target_link_options(
-      sensevoice_real_model_gate
-      PRIVATE
-        "-Wl,--disable-new-dtags,-rpath,${SHERPA_ONNX_RUNTIME_RPATH}")
+          "VOICE_NAV_SENSEVOICE_VAD_MODEL=${_voice_nav_real_vad};VOICE_NAV_SENSEVOICE_MODEL=${_voice_nav_real_model};VOICE_NAV_SENSEVOICE_TOKENS=${_voice_nav_real_tokens}")
 
     add_launch_test(
       test/test_real_sensevoice_agent_launch.py
@@ -319,7 +333,7 @@ if(BUILD_TESTING)
       real_sensevoice_agent_launch_test
       PROPERTIES
         ENVIRONMENT
-          "VOICE_NAV_REAL_MODEL_GATE=$<TARGET_FILE:sensevoice_real_model_gate>;VOICE_NAV_REAL_GATE_REPORT=${_voice_nav_real_report};VOICE_NAV_REAL_GATE_HEAD=${_voice_nav_real_head};VOICE_NAV_SENSEVOICE_VAD_MODEL=${_voice_nav_real_asset_root}/vad/silero_vad.int8.onnx;VOICE_NAV_SENSEVOICE_MODEL=${_voice_nav_real_asset_root}/asr/sensevoice-small-int8-2024-07-17/model.int8.onnx;VOICE_NAV_SENSEVOICE_TOKENS=${_voice_nav_real_asset_root}/asr/sensevoice-small-int8-2024-07-17/tokens.txt;VOICE_NAV_SENSEVOICE_WAV=${_voice_nav_real_asset_root}/asr/sensevoice-small-int8-2024-07-17/test_wavs/zh.wav")
+          "VOICE_NAV_REAL_GATE_REPORT=${_voice_nav_real_report};VOICE_NAV_REAL_GATE_HEAD=${_voice_nav_real_head};VOICE_NAV_SENSEVOICE_VAD_MODEL=${_voice_nav_real_vad};VOICE_NAV_SENSEVOICE_MODEL=${_voice_nav_real_model};VOICE_NAV_SENSEVOICE_TOKENS=${_voice_nav_real_tokens};VOICE_NAV_SENSEVOICE_WAV=${_voice_nav_real_wav}")
   endif()
 
   ament_add_gtest(
@@ -439,6 +453,15 @@ if(BUILD_TESTING)
       "-DPACKAGE_PREFIX=${CMAKE_INSTALL_PREFIX}"
       -P "${CMAKE_CURRENT_SOURCE_DIR}/test/speech_input_install_contract.cmake"
   )
+
+  if(VOICE_NAV_AUDIO_WITH_SHERPA_ONNX)
+    add_test(
+      NAME voice_node_install_contract
+      COMMAND "${CMAKE_COMMAND}"
+        "-DPACKAGE_PREFIX=${CMAKE_INSTALL_PREFIX}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/test/voice_node_install_contract.cmake"
+    )
+  endif()
 
   if(VOICE_NAV_AUDIO_WITH_WEBRTC_APM)
     add_executable(dsp_webrtc_fixture_runner test/dsp_webrtc_fixture_runner.cpp)

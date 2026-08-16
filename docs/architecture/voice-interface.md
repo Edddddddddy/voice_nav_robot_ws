@@ -2,8 +2,9 @@
 
 **状态：**pre-1.0 稳定公共 ROS 接口。
 
-本文件冻结 Voice 对外暴露的两个 public type。当前 Task 只生成并验证契约；不实现 `voice_node`、
-`agent_node`、audio capture、ASR、TTS 或 runtime endpoint。
+本文件冻结 Voice 对外暴露的两个 public type。#164 提供一个仅用于本地锁定 SenseVoice WAV 的已安装
+`voice_node` composition root，负责真实 provider、`SpeechInputNode` 与 `VoiceTurn`；Agent、audio capture、
+KWS、真实 TTS 与 runtime endpoint 仍不属于这个最小 voice_node 实现。
 
 ## 公共 endpoint
 
