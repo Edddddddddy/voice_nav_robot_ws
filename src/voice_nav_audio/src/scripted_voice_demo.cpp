@@ -664,9 +664,14 @@ public:
   [[nodiscard]] bool session_can_accept_command() const override
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    return !session_command_active_ && runtime_ready_ && final_gate_inhibited_ &&
-           final_command_is_zero_ && final_odometry_is_stationary_ &&
-           (session_started_ || initial_safety_stability_.is_stable());
+    return session_can_accept_command_locked();
+  }
+
+  [[nodiscard]] bool wait_for_session_command_ready()
+  {
+    return wait_for([](const auto & self) {
+      return self.session_can_accept_command_locked();
+    }, 120s);
   }
 
   void begin_session_command() override
@@ -828,6 +833,13 @@ public:
   }
 
 private:
+  [[nodiscard]] bool session_can_accept_command_locked() const
+  {
+    return !session_command_active_ && runtime_ready_ && final_gate_inhibited_ &&
+           final_command_is_zero_ && final_odometry_is_stationary_ &&
+           (session_started_ || initial_safety_stability_.is_stable());
+  }
+
   void observe_session_safety_locked()
   {
     if (!session_command_active_) {
@@ -946,6 +958,12 @@ public:
   {
   }
 
+  void grant_startup_admission_permit()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    startup_admission_permit_ = true;
+  }
+
   rcl_interfaces::msg::SetParametersResult on_parameters(
     const std::vector<rclcpp::Parameter> & parameters)
   {
@@ -974,9 +992,10 @@ public:
       if (busy_ || pending_.has_value()) {
         return rejected("command_text is busy; wait for the safe stationary barrier");
       }
-      if (!observer_.session_can_accept_command()) {
+      if (!startup_admission_permit_ && !observer_.session_can_accept_command()) {
         return rejected("command_text is busy; runtime is not at the safe stationary barrier");
       }
+      startup_admission_permit_ = false;
       pending_ = text;
       busy_ = true;
     }
@@ -1025,7 +1044,32 @@ private:
   std::mutex mutex_{};
   std::optional<std::string> pending_{};
   bool busy_{false};
+  bool startup_admission_permit_{false};
 };
+
+void expose_session_gateway(
+  const std::string & configured_scenario,
+  const std::string & command_text,
+  SessionCommandAdmission & observer,
+  rclcpp::NodeOptions configuration_options,
+  rclcpp::executors::SingleThreadedExecutor & executor,
+  std::shared_ptr<rclcpp::Node> & configuration,
+  std::unique_ptr<VoiceCommandGateway> & gateway,
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr & parameter_callback)
+{
+  configuration_options.start_parameter_services(true).start_parameter_event_publisher(true);
+  configuration = std::make_shared<rclcpp::Node>(
+    "scripted_voice_demo_configuration", configuration_options);
+  (void)configuration->declare_parameter<std::string>("scenario", configured_scenario);
+  (void)configuration->declare_parameter<std::string>("command_text", command_text);
+  gateway = std::make_unique<VoiceCommandGateway>(observer);
+  gateway->grant_startup_admission_permit();
+  parameter_callback = configuration->add_on_set_parameters_callback(
+    [&gateway](const std::vector<rclcpp::Parameter> & parameters) {
+      return gateway->on_parameters(parameters);
+    });
+  executor.add_node(configuration);
+}
 
 }  // namespace
 }  // namespace voice_nav_audio
@@ -1096,32 +1140,10 @@ int main(int argc, char ** argv)
   }
 
   configuration_probe.reset();
-  configuration_options.start_parameter_services(true).start_parameter_event_publisher(true);
-  auto configuration = std::make_shared<rclcpp::Node>(
-    "scripted_voice_demo_configuration", configuration_options);
-  (void)configuration->declare_parameter<std::string>("scenario", configured_scenario);
-  (void)configuration->declare_parameter<std::string>("command_text", command_text);
-
+  std::shared_ptr<rclcpp::Node> configuration;
   std::unique_ptr<voice_nav_audio::VoiceCommandGateway> gateway;
-  if (is_session) {
-    gateway = std::make_unique<voice_nav_audio::VoiceCommandGateway>(observer);
-  }
-  auto parameter_callback = configuration->add_on_set_parameters_callback(
-    [is_session, &gateway](const std::vector<rclcpp::Parameter> & parameters) {
-      rcl_interfaces::msg::SetParametersResult result;
-      result.successful = true;
-      if (is_session) {
-        return gateway->on_parameters(parameters);
-      }
-      return result;
-    });
-  (void)parameter_callback;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr parameter_callback;
   pipeline->add_to_executor(executor);
-  if (is_session) {
-    executor.add_node(configuration);
-  } else {
-    configuration.reset();
-  }
   if (!observer.wait_for_runtime_ready()) {
     RCLCPP_ERROR(graph_probe->get_logger(), "Mission Runtime did not become available");
     executor.cancel();
@@ -1134,6 +1156,21 @@ int main(int argc, char ** argv)
   }
 
   if (is_session) {
+    if (!observer.wait_for_session_command_ready()) {
+      RCLCPP_ERROR(
+        graph_probe->get_logger(),
+        "session command gateway safe stationary barrier did not converge");
+      executor.cancel();
+      spin_thread.join();
+      pipeline->remove_from_executor(executor);
+      pipeline.reset();
+      graph_probe.reset();
+      rclcpp::shutdown();
+      return 1;
+    }
+    voice_nav_audio::expose_session_gateway(
+      configured_scenario, command_text, observer, configuration_options, executor,
+      configuration, gateway, parameter_callback);
     if (!command_text.empty()) {
       const auto initial_result = gateway->on_parameters({
           rclcpp::Parameter("command_text", command_text)});
