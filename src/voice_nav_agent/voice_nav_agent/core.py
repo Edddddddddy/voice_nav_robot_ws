@@ -1073,7 +1073,7 @@ class AgentCore:
 
         place = re.fullmatch(r'(去|前往)\s*(.*)', clause)
         if place:
-            target = place.group(2)
+            target = _resolve_named_place_target(place.group(2), state)
             if not target:
                 return _ClauseResult(
                     'missing',
@@ -1164,6 +1164,7 @@ class AgentCore:
         elif pending.parameter == 'missing_place' and target is not None:
             if not target:
                 return self._repeat_clarification(pending)
+            target = _resolve_named_place_target(target, state)
             if not _valid_logical_id(target):
                 return _ParseResult('invalid', reason='invalid_place_id')
             if target not in state.named_place_ids:
@@ -1271,6 +1272,13 @@ def _finite(value: object) -> bool:
 
 def _valid_logical_id(value: object) -> bool:
     return isinstance(value, str) and PLACE_ID_PATTERN.fullmatch(value) is not None
+
+
+def _resolve_named_place_target(target: str, state: MissionState) -> str:
+    """Resolve the one approved Chinese alias against the frozen Runtime snapshot."""
+    if target == '书房' and 'study' in state.named_place_ids:
+        return 'study'
+    return target
 
 
 def _within_signed_range(value: float, minimum: float, maximum: float) -> bool:

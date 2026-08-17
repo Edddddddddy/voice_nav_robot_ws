@@ -16,26 +16,56 @@
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.substitutions import (
+    EqualsSubstitution,
+    LaunchConfiguration,
+    PathJoinSubstitution,
+)
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
-    """Reuse the product graph and keep one parameter-driven voice session."""
+    """Select one product mode and keep one parameter-driven voice session."""
+    mode = LaunchConfiguration('mode')
     headless = LaunchConfiguration('headless')
     shutdown_on_gazebo_exit = LaunchConfiguration('shutdown_on_gazebo_exit')
-    product = IncludeLaunchDescription(
+    common_arguments = {
+        'headless': headless,
+        'shutdown_on_gazebo_exit': shutdown_on_gazebo_exit,
+    }
+
+    def mode_condition(value):
+        return IfCondition(EqualsSubstitution(mode, value))
+
+    motion = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(PathJoinSubstitution([
             FindPackageShare('voice_nav_bringup'),
             'launch',
             'product_sim.launch.py',
         ])),
-        launch_arguments={
-            'headless': headless,
-            'shutdown_on_gazebo_exit': shutdown_on_gazebo_exit,
-        }.items(),
+        launch_arguments=common_arguments.items(),
+        condition=mode_condition('motion'),
+    )
+    mapping = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(PathJoinSubstitution([
+            FindPackageShare('voice_nav_bringup'),
+            'launch',
+            'mapping_mvp.launch.py',
+        ])),
+        launch_arguments=common_arguments.items(),
+        condition=mode_condition('mapping'),
+    )
+    navigation = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(PathJoinSubstitution([
+            FindPackageShare('voice_nav_bringup'),
+            'launch',
+            'navigation_mvp.launch.py',
+        ])),
+        launch_arguments=common_arguments.items(),
+        condition=mode_condition('navigation'),
     )
     agent = Node(
         package='voice_nav_agent',
@@ -60,6 +90,12 @@ def generate_launch_description():
     )
     return LaunchDescription([
         DeclareLaunchArgument(
+            'mode',
+            default_value='motion',
+            choices=['motion', 'mapping', 'navigation'],
+            description='Select exactly one VoiceNav product mode.',
+        ),
+        DeclareLaunchArgument(
             'headless',
             default_value='true',
             choices=['true', 'false'],
@@ -71,7 +107,9 @@ def generate_launch_description():
             choices=['true', 'false'],
             description='Fail closed when the required Gazebo simulation exits.',
         ),
-        product,
+        motion,
+        mapping,
+        navigation,
         agent,
         session,
     ])

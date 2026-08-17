@@ -39,6 +39,29 @@ voice_nav_issue164_runner \
 这只是 #164 的 pre-release framework MVP，不宣称 v1.0 完成，也不包含物理麦克风、KWS、真实 TTS、
 完整 Mapping→Navigation 地图 artifact handoff 或真实机器人验收。
 
+Issue #166 将 Motion、Mapping 和 fixture Navigation 收敛到同一个已安装主程序。安装并 source 工作区后，
+在一个终端选择一次模式；程序会启动恰好一个对应组合、等待 command gateway ready，再复用同一中文控制台：
+
+```bash
+# 默认兼容 Motion + headless
+ros2 run voice_nav_bringup voice_nav_app
+
+# 显式选择模式；--display 只映射为 headless:=true/false
+ros2 run voice_nav_bringup voice_nav_app --mode motion --display headless
+ros2 run voice_nav_bringup voice_nav_app --mode mapping --display headless
+ros2 run voice_nav_bringup voice_nav_app --mode navigation --display headless
+ros2 run voice_nav_bringup voice_nav_app --mode mapping --display gui
+```
+
+`--mode` 仅接受 `motion|mapping|navigation`，`--display` 仅接受 `headless|gui`；不支持 launch 或 ROS
+参数透传，也不支持运行中热切换。Mapping 由 `slam_toolbox` 拥有 `map → odom`，Navigation 由 AMCL
+拥有它；切换模式需退出当前 app 后重新启动。`:quit`、EOF、Ctrl+C、STOP 和启动失败继续沿用已有
+有界 teardown 与退出码契约。本入口仍是仿真-only，不提供物理麦克风、通用 WAV、KWS、AEC、真实 TTS
+或真实 LLM。
+
+Navigation 规则仅在 Runtime 公布 `study` 时把 `去书房` 解析为 `NAVIGATE_TO(study)`；缺少该 Place 或遇到
+其他未知中文目标时保持 fail-closed。
+
 已配置的 controller timeout 是消费者侧 deadman，本身并不能单独证明实体静止。当前 main 已验证
 MotionGate、Mission Runtime、RelativeMotion、运动调节组件以及 crash-stop 的受限仿真验收；真实机器人、
 生产硬件安全功能和未列入契约的恢复场景仍不在本仓库声明范围内。当前/目标边界见

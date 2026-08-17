@@ -51,6 +51,12 @@ Agent、Mission、Nav2 或 TF/zero observers。结果写入 task-local schema-ve
 该切片是 pre-release framework MVP，不宣称 v1.0、物理麦克风/KWS/TTS、真实机器人，或 Mapping→Navigation
 原子地图 artifact handoff 已完成。
 
+Issue #166 的 `voice_nav_app` 是该框架的统一 installed composition root：它只接受封闭的
+`mode=motion|mapping|navigation` 与 `display=headless|gui`，由 `voice_nav_session.launch.py` 互斥选择一个
+底层模式组合，并在其外层拥有一个 Agent 与一个 command gateway。app 不发布 VoiceTurn、Mission、
+StopMission 或速度；Mapping/Navigation 的 `map → odom` ownership 仍分别属于 `slam_toolbox`/AMCL，模式
+不能在线切换。
+
 ## 当前独立 MotionGate 切片
 
 仓库在 exact-head 本地验证、独立审查、required CI 与 rebase 合并后，公开交付独立验证的
@@ -201,7 +207,7 @@ odom ingress 在 stationarity success/failure 后 drain。
 | `voice_nav_agent` | 规则、本地 LLM Adapter、对话策略 | `agent_node` |
 | `voice_nav_mission` | Runtime、Gate 与内部依赖 Adapter | `mission_runtime_node`、`motion_gate_node` |
 | `voice_nav_sim` | 机器人模型、Gazebo、ros2_control、`/clock`/`/scan` bridge | 无 |
-| `voice_nav_bringup` | launch、parameter、地图、Named Place 与 headless 验证编排 | `voice_nav_issue164_runner`（仅验证） |
+| `voice_nav_bringup` | launch、parameter、地图、Named Place、统一 app 与 headless 验证编排 | `voice_nav_app`、`voice_nav_issue164_runner`（后者仅验证） |
 
 不得创建 Guard、scheduler、Nav2 bridge、map saver 或顶层行为树进程；它们是 Mission Runtime 内部 seam。
 
