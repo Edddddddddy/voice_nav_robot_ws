@@ -39,6 +39,7 @@ public:
 
   void accept_cleaned_frame(const CleanedAudioFrame & frame) noexcept;
   void finish_input() noexcept;
+  void shutdown_input() noexcept;
 
 private:
   void publish(const VoiceTurnPublication & turn) noexcept override;

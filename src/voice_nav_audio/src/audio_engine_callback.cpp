@@ -58,12 +58,15 @@ void AudioEngine::process_callback(
     }
 
     const auto callback_generation = generation();
+    const auto callback_phase = static_cast<AudioEnginePhase>(
+      phase_.load(std::memory_order_acquire));
 #ifdef VOICE_NAV_AUDIO_TEST_CALLBACK_BOUNDARY
     test_support::invoke_callback_boundary_hook();
 #endif
     AudioFrame rendered{};
     rendered.generation = callback_generation;
-    if (!reference_ring_.can_push()) {
+    if (callback_phase == AudioEnginePhase::kCapture && !reference_ring_.can_push())
+    {
       reference_overflows_.fetch_add(1U, std::memory_order_relaxed);
       mark_discontinuity();
       commit_pending_discontinuities();
@@ -102,6 +105,10 @@ void AudioEngine::process_callback(
         // a subsequent callback can expose more scope-owned audio.
         mark_discontinuity();
       }
+    }
+
+    if (callback_phase == AudioEnginePhase::kPlaybackOnly) {
+      return;
     }
 
     (void)reference_ring_.push(rendered);

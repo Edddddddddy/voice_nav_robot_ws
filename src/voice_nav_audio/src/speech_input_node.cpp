@@ -62,6 +62,11 @@ void SpeechInputNode::finish_input() noexcept
   core_->finish_input();
 }
 
+void SpeechInputNode::shutdown_input() noexcept
+{
+  recognizer_->shutdown();
+}
+
 void SpeechInputNode::publish(const VoiceTurnPublication & turn) noexcept
 {
   voice_nav_interfaces::msg::VoiceTurn message{};

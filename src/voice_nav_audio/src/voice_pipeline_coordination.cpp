@@ -18,8 +18,9 @@ namespace voice_nav_audio
 {
 
 VoicePipelineCoordination::VoicePipelineCoordination(
-  SpeechOutputControl & output, StopMissionPort & stop_port) noexcept
-: output_(output), stop_port_(stop_port)
+  SpeechOutputControl & output, StopMissionPort & stop_port,
+  VoiceTurnBoundary * const turn_boundary) noexcept
+: output_(output), stop_port_(stop_port), turn_boundary_(turn_boundary)
 {
 }
 
@@ -30,6 +31,11 @@ bool VoicePipelineCoordination::on_wake_accepted() noexcept
 
 void VoicePipelineCoordination::before_turn_published(VoiceTurnPublication & turn) noexcept
 {
+  if (turn_boundary_ != nullptr) {
+    // The boundary owns capture/playback ordering. It must complete before
+    // this publication reaches the ROS graph.
+    turn_boundary_->on_voice_turn_published();
+  }
   if (turn.kind != VoiceTurnKind::kStop || turn.turn_id == last_stop_turn_id_) {
     return;
   }

@@ -751,6 +751,63 @@ def test_input_matrix_keeps_console_default_and_selects_one_wav_frontend(
     )
 
 
+def test_microphone_once_uses_one_closed_voice_composition_without_forwarding(
+):
+    """Stage one bounded microphone frontend without child tuning arguments."""
+    app = _load_app_module()
+    session_process = _FakeProcess()
+    frontend_process = _FakeProcess()
+    starts = []
+
+    def process_factory(command, **kwargs):
+        starts.append((tuple(command), kwargs))
+        return session_process
+
+    def frontend_factory(command, **kwargs):
+        starts.append((tuple(command), kwargs))
+        return frontend_process
+
+    result = app.main(
+        [
+            '--mode', 'motion', '--display', 'headless',
+            '--input', 'microphone-once',
+        ],
+        process_factory=process_factory,
+        frontend_factory=frontend_factory,
+        readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        mode_readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        clock=lambda: 0.0,
+        stdout=StringIO(),
+        stderr=StringIO(),
+    )
+
+    assert result == 0
+    assert starts[0][0] == (
+        'ros2', 'launch', 'voice_nav_bringup',
+        'voice_nav_session.launch.py',
+        'mode:=motion', 'headless:=true',
+        'shutdown_on_gazebo_exit:=true', 'input:=none',
+    )
+    assert starts[1][0] == (
+        'ros2', 'launch', 'voice_nav_audio', 'voice_node.launch.py',
+        'input_profile:=microphone_once',
+        'include_agent:=false',
+    )
+    assert starts[1][0].count('include_agent:=false') == 1
+    assert not any(
+        any(
+            token.startswith(prefix)
+            for prefix in (
+                'input_wav:=', 'output_wav:=', 'silero_vad_model:=',
+                'sensevoice_model:=', 'sensevoice_tokens:=',
+                'threshold:=', 'device:=', 'ros__parameters:=',
+            )
+        )
+        for command, _kwargs in starts
+        for token in command
+    )
+
+
 def test_sensevoice_output_wav_forwards_only_output_and_locked_tts_root(
     monkeypatch, tmp_path,
 ):

@@ -67,13 +67,23 @@ public:
     StopMissionResponseSink & response_sink) noexcept = 0;
 };
 
+class VoiceTurnBoundary
+{
+public:
+  virtual ~VoiceTurnBoundary() = default;
+
+  virtual void on_voice_turn_published() noexcept = 0;
+};
+
 // Deep package-private coordinator: wake admission, PlaybackScope fencing,
 // and the direct typed STOP request share one bounded Voice identity path.
 class VoicePipelineCoordination final : public SpeechInputCoordination,
   private StopMissionResponseSink
 {
 public:
-  VoicePipelineCoordination(SpeechOutputControl & output, StopMissionPort & stop_port) noexcept;
+  VoicePipelineCoordination(
+    SpeechOutputControl & output, StopMissionPort & stop_port,
+    VoiceTurnBoundary * turn_boundary = nullptr) noexcept;
 
   [[nodiscard]] bool on_wake_accepted() noexcept override;
   void before_turn_published(VoiceTurnPublication & turn) noexcept override;
@@ -83,6 +93,7 @@ private:
 
   SpeechOutputControl & output_;
   StopMissionPort & stop_port_;
+  VoiceTurnBoundary * turn_boundary_{nullptr};
   StopMissionResponse last_response_{};
   bool have_response_{false};
   std::string last_stop_turn_id_{};
