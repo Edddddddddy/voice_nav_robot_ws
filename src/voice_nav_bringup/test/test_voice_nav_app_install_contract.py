@@ -28,10 +28,13 @@ def test_app_is_installed_as_the_voice_nav_bringup_executable():
     assert 'install(\n  PROGRAMS\n    voice_nav_app.py' in cmake
     assert '  RENAME voice_nav_app' in cmake
     assert 'DESTINATION lib/${PROJECT_NAME}' in cmake
+    assert 'install(\n  FILES\n    _mode_readiness.py' in cmake
 
     prefix = Path(get_package_prefix('voice_nav_bringup'))
     executable = prefix / 'lib' / 'voice_nav_bringup' / 'voice_nav_app'
+    helper = prefix / 'lib' / 'voice_nav_bringup' / '_mode_readiness.py'
     suffixed_executable = executable.with_name('voice_nav_app.py')
     assert executable.is_file()
     assert os.access(executable, os.X_OK)
     assert not suffixed_executable.exists()
+    assert helper.is_file()

@@ -184,6 +184,12 @@ install(
 )
 
 install(
+  FILES
+    _mode_readiness.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(
   PROGRAMS
     voice_nav_app.py
   DESTINATION lib/${PROJECT_NAME}

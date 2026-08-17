@@ -152,6 +152,40 @@ def test_rule_mission_preserves_one_to_three_step_order_and_place_id():
     assert decision.mission.steps[2].target_id == 'lobby'
 
 
+def test_rule_mission_maps_study_alias_only_when_study_is_configured():
+    core = make_core()
+
+    decision = core.handle_turn(
+        make_turn('去书房'),
+        make_state(named_place_ids=('study',)),
+    )
+
+    assert decision.kind is DecisionKind.MISSION
+    assert decision.mission.steps == (
+        MissionStep(MissionStep.NAVIGATE_TO, target_id='study'),
+    )
+
+
+@pytest.mark.parametrize(
+    ('text', 'reason'),
+    [
+        ('去书房', 'invalid_place_id'),
+        ('去客厅', 'invalid_place_id'),
+        ('去 unknown', 'unknown_place'),
+    ],
+)
+def test_rule_mission_keeps_unconfigured_or_unknown_place_fail_closed(
+    text, reason
+):
+    decision = make_core().handle_turn(
+        make_turn(text),
+        make_state(named_place_ids=('lobby',)),
+    )
+
+    assert decision.kind is DecisionKind.REPLY
+    assert decision.reason == reason
+
+
 def test_rule_mission_accepts_the_scripted_route_without_llm_fallback():
     core = make_core()
 

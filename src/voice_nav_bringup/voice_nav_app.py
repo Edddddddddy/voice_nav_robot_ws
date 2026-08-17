@@ -28,14 +28,64 @@ import time
 from typing import Literal
 
 
-SESSION_COMMAND = (
-    'ros2',
-    'launch',
-    'voice_nav_bringup',
-    'voice_nav_session.launch.py',
-    'headless:=true',
-    'shutdown_on_gazebo_exit:=true',
-)
+Mode = Literal['motion', 'mapping', 'navigation']
+Display = Literal['headless', 'gui']
+SESSION_LAUNCH_FILE = 'voice_nav_session.launch.py'
+
+
+class _SessionSpec:
+    """One closed product composition selected before process creation."""
+
+    __slots__ = ('mode', 'display', 'launch_file', 'command', '_frozen')
+
+    def __init__(
+        self,
+        *,
+        mode: Mode,
+        display: Display,
+        launch_file: str,
+        command: tuple[str, ...],
+    ) -> None:
+        object.__setattr__(self, 'mode', mode)
+        object.__setattr__(self, 'display', display)
+        object.__setattr__(self, 'launch_file', launch_file)
+        object.__setattr__(self, 'command', command)
+        object.__setattr__(self, '_frozen', True)
+
+    def __setattr__(self, name, value) -> None:
+        if getattr(self, '_frozen', False):
+            raise AttributeError('session spec is immutable')
+        object.__setattr__(self, name, value)
+
+
+def _session_command(mode: Mode, display: Display) -> tuple[str, ...]:
+    headless = 'true' if display == 'headless' else 'false'
+    return (
+        'ros2',
+        'launch',
+        'voice_nav_bringup',
+        SESSION_LAUNCH_FILE,
+        f'mode:={mode}',
+        f'headless:={headless}',
+        'shutdown_on_gazebo_exit:=true',
+    )
+
+
+_SESSION_SPECS = {
+    (mode, display): _SessionSpec(
+        mode=mode,
+        display=display,
+        launch_file=launch_file,
+        command=_session_command(mode, display),
+    )
+    for mode, launch_file in (
+        ('motion', SESSION_LAUNCH_FILE),
+        ('mapping', 'mapping_mvp.launch.py'),
+        ('navigation', 'navigation_mvp.launch.py'),
+    )
+    for display in ('headless', 'gui')
+}
+SESSION_COMMAND = _SESSION_SPECS[('motion', 'headless')].command
 READINESS_TIMEOUT_S = 60.0
 GRACEFUL_SHUTDOWN_TIMEOUT_S = 10.0
 TERMINATE_SHUTDOWN_TIMEOUT_S = 5.0
@@ -146,6 +196,22 @@ def _wait_for_command_gateway_readiness(
             if owns_context and not keep_context and rclpy.ok():
                 rclpy.shutdown()
                 _OWNED_RCLPY_CONTEXT = False
+
+
+_MODE_READINESS = None
+
+
+def _wait_for_mode_readiness(session_spec, deadline, clock):
+    """Wait for the selected mode after the shared gateway deadline phase."""
+    global _MODE_READINESS
+
+    if _MODE_READINESS is None:
+        helper_path = os.path.join(
+            os.path.dirname(__file__), '_mode_readiness.py',
+        )
+        namespace = runpy.run_path(helper_path)
+        _MODE_READINESS = namespace['wait_for_mode_readiness']
+    return _MODE_READINESS(session_spec, deadline, clock)
 
 
 def _shutdown_owned_rclpy_context() -> None:
@@ -279,7 +345,9 @@ def _readiness_is_ready(result) -> bool:
 
 def _run_started_session(
     process,
+    session_spec,
     readiness,
+    mode_readiness,
     console_main,
     clock,
     stdin,
@@ -294,7 +362,10 @@ def _run_started_session(
         return 1
 
     try:
-        readiness_result = readiness(READINESS_TIMEOUT_S, clock)
+        deadline = _clock_now(clock) + READINESS_TIMEOUT_S
+        readiness_result = readiness(
+            max(0.0, deadline - _clock_now(clock)), clock,
+        )
     except KeyboardInterrupt:
         return 130
     except Exception as error:
@@ -312,6 +383,31 @@ def _run_started_session(
             else 'command_gateway_not_ready'
         )
         _write_result(stdout, _stable_result('unavailable', reason))
+        return 1
+    try:
+        mode_result = mode_readiness(session_spec, deadline, clock)
+    except KeyboardInterrupt:
+        return 130
+    except Exception:
+        mode_result = {
+            **_stable_result('unavailable', 'mode_readiness_failed'),
+            'mode': session_spec.mode,
+            'stage': 'setup',
+        }
+    if not _readiness_is_ready(mode_result):
+        if isinstance(mode_result, dict):
+            mode_result = {
+                **mode_result,
+                'mode': mode_result.get('mode', session_spec.mode),
+                'stage': mode_result.get('stage', 'unknown'),
+            }
+        else:
+            mode_result = {
+                **_stable_result('unavailable', 'mode_readiness_failed'),
+                'mode': session_spec.mode,
+                'stage': 'unknown',
+            }
+        _write_result(stdout, mode_result)
         return 1
     if _poll(process) is not None:
         _write_result(
@@ -349,15 +445,21 @@ def run_app(
     stdout,
     stderr,
     stdin=None,
+    session_spec: _SessionSpec | None = None,
+    mode_readiness=None,
 ) -> int:
-    """Run one fixed session and then the existing console."""
+    """Run one closed session spec and then the existing console."""
     process = None
     exit_code = 1
     try:
         if stdin is None:
             stdin = sys.stdin
+        if session_spec is None:
+            session_spec = _SESSION_SPECS[('motion', 'headless')]
+        if mode_readiness is None:
+            mode_readiness = _wait_for_mode_readiness
         process = process_factory(
-            SESSION_COMMAND,
+            session_spec.command,
             stdout=stderr,
             stderr=stderr,
         )
@@ -365,7 +467,9 @@ def run_app(
             raise RuntimeError('process_factory returned no process')
         exit_code = _run_started_session(
             process,
+            session_spec,
             readiness,
+            mode_readiness,
             console_main,
             clock,
             stdin,
@@ -412,18 +516,30 @@ def main(
     stdin=None,
     stdout=None,
     stderr=None,
+    mode_readiness=None,
 ) -> int:
-    """Run the fixed simulation session; no child arguments are accepted."""
-    parser = argparse.ArgumentParser()
-    try:
-        parser.parse_args(argv)
-    except SystemExit as error:
-        return int(error.code)
-
+    """Run one closed simulation session; no child arguments are accepted."""
     if stdout is None:
         stdout = sys.stdout
     if stderr is None:
         stderr = sys.stderr
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '--mode',
+        choices=('motion', 'mapping', 'navigation'),
+        default='motion',
+    )
+    parser.add_argument(
+        '--display',
+        choices=('headless', 'gui'),
+        default='headless',
+    )
+    try:
+        arguments = parser.parse_args(argv)
+    except SystemExit as error:
+        return int(error.code)
+
+    session_spec = _SESSION_SPECS[(arguments.mode, arguments.display)]
     if process_factory is None:
         process_factory = _spawn_session
     if readiness is None:
@@ -438,6 +554,8 @@ def main(
         stdout,
         stderr,
         stdin,
+        session_spec,
+        mode_readiness,
     )
 
 

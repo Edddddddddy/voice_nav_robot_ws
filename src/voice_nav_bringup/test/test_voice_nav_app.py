@@ -22,12 +22,24 @@ import importlib.util
 from io import StringIO
 from pathlib import Path
 import signal
+from types import SimpleNamespace
 
 
 def _load_app_module():
     source = Path(__file__).resolve().parents[1] / 'voice_nav_app.py'
     specification = importlib.util.spec_from_file_location(
         'voice_nav_app', source,
+    )
+    assert specification is not None and specification.loader is not None
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
+def _load_mode_readiness_module():
+    source = Path(__file__).resolve().parents[1] / '_mode_readiness.py'
+    specification = importlib.util.spec_from_file_location(
+        'voice_nav_mode_readiness', source,
     )
     assert specification is not None and specification.loader is not None
     module = importlib.util.module_from_spec(specification)
@@ -51,6 +63,109 @@ class _FakeProcess:
 
     def send_group_signal(self, signum):
         self.group_signals.append(signum)
+
+
+def test_mapping_state_requires_active_slam_valid_map_and_unique_map_odom_tf():
+    """Keep typed mode evidence behind a small callback state interface."""
+    readiness = _load_mode_readiness_module()
+    state = readiness._ModeReadinessState('mapping')
+
+    assert state.failure_stage() == 'slam_toolbox_lifecycle'
+    state.observe_lifecycle('slam_toolbox', readiness.PRIMARY_STATE_ACTIVE)
+    assert state.failure_stage() == 'map'
+
+    invalid_map = SimpleNamespace(
+        info=SimpleNamespace(width=2, height=2), data=[-1, 0],
+    )
+    state.observe_map(invalid_map)
+    assert state.failure_stage() == 'map'
+
+    non_matching_tf = SimpleNamespace(
+        transforms=[SimpleNamespace(
+            header=SimpleNamespace(frame_id='odom'),
+            child_frame_id='base_footprint',
+        )],
+    )
+    state.observe_tf(non_matching_tf)
+    assert state.failure_stage() == 'map'
+
+    valid_map = SimpleNamespace(
+        info=SimpleNamespace(width=2, height=1), data=[-1, 0],
+    )
+    state.observe_map(valid_map)
+    assert state.failure_stage() == 'map_odom_tf'
+
+    duplicate_tf = SimpleNamespace(
+        transforms=[
+            SimpleNamespace(
+                header=SimpleNamespace(frame_id='map'),
+                child_frame_id='odom',
+            ),
+            SimpleNamespace(
+                header=SimpleNamespace(frame_id='map'),
+                child_frame_id='odom',
+            ),
+        ],
+    )
+    state.observe_tf(duplicate_tf)
+    assert state.failure_stage() == 'map_odom_tf'
+
+    unique_tf = SimpleNamespace(
+        transforms=[SimpleNamespace(
+            header=SimpleNamespace(frame_id='map'),
+            child_frame_id='odom',
+        )],
+    )
+    state.observe_tf(unique_tf)
+    assert state.is_ready()
+
+
+def test_navigation_state_requires_all_lifecycle_nodes_before_map_and_tf():
+    """Require every approved Navigation lifecycle dependency."""
+    readiness = _load_mode_readiness_module()
+    state = readiness._ModeReadinessState('navigation')
+
+    for node_name in readiness._MODE_LIFECYCLE_NODES['navigation']:
+        assert state.failure_stage() == f'{node_name}_lifecycle'
+        state.observe_lifecycle(node_name, readiness.PRIMARY_STATE_ACTIVE)
+
+    assert state.failure_stage() == 'map'
+    state.observe_map(SimpleNamespace(
+        info=SimpleNamespace(width=1, height=1), data=[0],
+    ))
+    assert state.failure_stage() == 'map_odom_tf'
+    state.observe_tf(SimpleNamespace(
+        transforms=[SimpleNamespace(
+            header=SimpleNamespace(frame_id='map'),
+            child_frame_id='odom',
+        )],
+    ))
+    assert state.is_ready()
+
+
+def test_motion_mode_readiness_has_no_mode_specific_ros_dependency():
+    """Keep Motion on the existing gateway-only readiness contract."""
+    readiness = _load_mode_readiness_module()
+    result = readiness.wait_for_mode_readiness(
+        SimpleNamespace(mode='motion'), 60.0, lambda: 0.0,
+    )
+
+    assert result == {'status': 'ready', 'reason': ''}
+
+
+def test_mode_readiness_timeout_is_bounded_with_mode_and_stage():
+    """Expose only stable mode/stage diagnostics when the budget is gone."""
+    readiness = _load_mode_readiness_module()
+    result = readiness.wait_for_mode_readiness(
+        SimpleNamespace(mode='mapping'), 0.0, lambda: 0.0,
+    )
+
+    assert result == {
+        'status': 'unavailable',
+        'reason': 'mode_readiness_timeout',
+        'mode': 'mapping',
+        'stage': 'deadline',
+    }
 
 
 class _SlowFakeProcess(_FakeProcess):
@@ -116,6 +231,7 @@ def test_app_starts_fixed_session_waits_ready_then_enters_existing_console():
         (
             'ros2', 'launch', 'voice_nav_bringup',
             'voice_nav_session.launch.py',
+            'mode:=motion',
             'headless:=true',
             'shutdown_on_gazebo_exit:=true',
         ),
@@ -125,6 +241,222 @@ def test_app_starts_fixed_session_waits_ready_then_enters_existing_console():
     assert len(console_calls) == 1
     assert console_calls[0][0].getvalue() == ''
     assert console_calls[0][1] is stdout
+
+
+def test_navigation_headless_uses_one_closed_session_spec_before_console():
+    """Map navigation CLI input to one fixed launch command before spawn."""
+    app = _load_app_module()
+    process = _FakeProcess()
+    starts = []
+
+    def process_factory(command, **kwargs):
+        starts.append((tuple(command), kwargs))
+        return process
+
+    result = app.main(
+        ['--mode', 'navigation', '--display', 'headless'],
+        process_factory=process_factory,
+        readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        mode_readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        console_main=lambda **_kwargs: 0,
+        clock=lambda: 0.0,
+        stdout=StringIO(),
+        stderr=StringIO(),
+    )
+
+    assert result == 0
+    assert [command for command, _kwargs in starts] == [
+        (
+            'ros2', 'launch', 'voice_nav_bringup',
+            'voice_nav_session.launch.py',
+            'mode:=navigation',
+            'headless:=true',
+            'shutdown_on_gazebo_exit:=true',
+        ),
+    ]
+
+
+def test_mapping_headless_uses_the_same_session_composition_root():
+    """Select Mapping through the closed session mode, not a raw launch."""
+    app = _load_app_module()
+    process = _FakeProcess()
+    starts = []
+
+    def process_factory(command, **kwargs):
+        starts.append((tuple(command), kwargs))
+        return process
+
+    result = app.main(
+        ['--mode', 'mapping', '--display', 'headless'],
+        process_factory=process_factory,
+        readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        mode_readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        console_main=lambda **_kwargs: 0,
+        clock=lambda: 0.0,
+        stdout=StringIO(),
+        stderr=StringIO(),
+    )
+
+    assert result == 0
+    assert [command for command, _kwargs in starts] == [
+        (
+            'ros2', 'launch', 'voice_nav_bringup',
+            'voice_nav_session.launch.py',
+            'mode:=mapping',
+            'headless:=true',
+            'shutdown_on_gazebo_exit:=true',
+        ),
+    ]
+
+
+def test_mapping_dependency_failure_is_bounded_without_ready_or_console():
+    """Do not enter Mapping console when gateway alone is ready."""
+    app = _load_app_module()
+    process = _FakeProcess()
+    console_calls = []
+    stdout = StringIO()
+
+    result = app.main(
+        ['--mode', 'mapping'],
+        process_factory=lambda _command, **_kwargs: process,
+        readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        mode_readiness=lambda spec, _deadline, _clock: {
+            'status': 'unavailable',
+            'reason': 'mode_readiness_timeout',
+            'mode': spec.mode,
+            'stage': 'map',
+        },
+        console_main=lambda **_kwargs: console_calls.append(True),
+        clock=lambda: 0.0,
+        stdout=stdout,
+        stderr=StringIO(),
+    )
+
+    assert result == 1
+    assert console_calls == []
+    assert process.group_signals == [signal.SIGINT]
+    assert stdout.getvalue() == (
+        '{"mode":"mapping","reason":"mode_readiness_timeout",'
+        '"stage":"map","status":"unavailable"}\n'
+    )
+
+
+def test_navigation_dependency_failure_is_bounded_without_ready_or_console():
+    """Do not enter Navigation console when gateway alone is ready."""
+    app = _load_app_module()
+    process = _FakeProcess()
+    console_calls = []
+    stdout = StringIO()
+
+    result = app.main(
+        ['--mode', 'navigation'],
+        process_factory=lambda _command, **_kwargs: process,
+        readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        mode_readiness=lambda spec, _deadline, _clock: {
+            'status': 'unavailable',
+            'reason': 'mode_readiness_timeout',
+            'mode': spec.mode,
+            'stage': 'controller_server_lifecycle',
+        },
+        console_main=lambda **_kwargs: console_calls.append(True),
+        clock=lambda: 0.0,
+        stdout=stdout,
+        stderr=StringIO(),
+    )
+
+    assert result == 1
+    assert console_calls == []
+    assert process.group_signals == [signal.SIGINT]
+    assert stdout.getvalue() == (
+        '{"mode":"navigation","reason":"mode_readiness_timeout",'
+        '"stage":"controller_server_lifecycle",'
+        '"status":"unavailable"}\n'
+    )
+
+
+def test_gateway_and_mode_readiness_share_one_total_deadline():
+    """Pass one bounded budget through both readiness stages."""
+    app = _load_app_module()
+    process = _FakeProcess()
+    gateway_deadlines = []
+    mode_deadlines = []
+
+    def gateway_readiness(timeout_s, _clock):
+        gateway_deadlines.append(timeout_s)
+        return {'status': 'ready', 'reason': ''}
+
+    def mode_readiness(spec, deadline, _clock):
+        assert spec.mode == 'navigation'
+        mode_deadlines.append(deadline)
+        return {'status': 'ready', 'reason': ''}
+
+    result = app.main(
+        ['--mode', 'navigation'],
+        process_factory=lambda _command, **_kwargs: process,
+        readiness=gateway_readiness,
+        mode_readiness=mode_readiness,
+        console_main=lambda **_kwargs: 0,
+        clock=lambda: 0.0,
+        stdout=StringIO(),
+        stderr=StringIO(),
+    )
+
+    assert result == 0
+    assert gateway_deadlines == [60.0]
+    assert mode_deadlines == [60.0]
+
+
+def test_gui_display_maps_to_one_fixed_non_headless_session_argument():
+    """Map GUI only to the approved launch display argument."""
+    app = _load_app_module()
+    process = _FakeProcess()
+    starts = []
+
+    def process_factory(command, **kwargs):
+        starts.append((tuple(command), kwargs))
+        return process
+
+    result = app.main(
+        ['--mode', 'mapping', '--display', 'gui'],
+        process_factory=process_factory,
+        readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        mode_readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        console_main=lambda **_kwargs: 0,
+        clock=lambda: 0.0,
+        stdout=StringIO(),
+        stderr=StringIO(),
+    )
+
+    assert result == 0
+    assert [command for command, _kwargs in starts] == [
+        (
+            'ros2', 'launch', 'voice_nav_bringup',
+            'voice_nav_session.launch.py',
+            'mode:=mapping',
+            'headless:=false',
+            'shutdown_on_gazebo_exit:=true',
+        ),
+    ]
+
+
+def test_invalid_mode_or_display_is_rejected_before_process_spawn():
+    """Keep the CLI enums closed before creating an owned process group."""
+    app = _load_app_module()
+
+    for argv in (
+        ['--mode', 'teleoperation'],
+        ['--display', 'tui'],
+    ):
+        starts = []
+        result = app.main(
+            argv,
+            process_factory=lambda *args, **kwargs: starts.append((args, kwargs)),
+            stdout=StringIO(),
+            stderr=StringIO(),
+        )
+
+        assert result == 2
+        assert starts == []
 
 
 def test_installed_console_fallback_loads_extensionless_existing_console(
