@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ast
 import builtins
+import hashlib
 import importlib.util
 import signal
 import wave
@@ -52,6 +53,19 @@ def _load_sensevoice_input_module():
     source = Path(__file__).resolve().parents[1] / '_sensevoice_input.py'
     specification = importlib.util.spec_from_file_location(
         'voice_nav_sensevoice_input', source,
+    )
+    assert specification is not None and specification.loader is not None
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
+def _load_chaowen_asset_verifier_module():
+    source = (
+        Path(__file__).resolve().parents[1] / '_chaowen_asset_verifier.py'
+    )
+    specification = importlib.util.spec_from_file_location(
+        'voice_nav_chaowen_asset_verifier', source,
     )
     assert specification is not None and specification.loader is not None
     module = importlib.util.module_from_spec(specification)
@@ -735,6 +749,134 @@ def test_input_matrix_keeps_console_default_and_selects_one_wav_frontend(
         for command, _kwargs in starts[-2:]
         for argument in command
     )
+
+
+def test_sensevoice_output_wav_forwards_only_output_and_locked_tts_root(
+    monkeypatch, tmp_path,
+):
+    """Pass the output contract and locked TTS root without audio details."""
+    app = _load_app_module()
+    wav = tmp_path / 'input.wav'
+    output = tmp_path / 'reply.wav'
+    tts_root = tmp_path / 'chaowen'
+    tts_root.mkdir()
+    _write_pcm_wav(wav)
+    monkeypatch.setenv('VOICE_NAV_CHAOWEN_TTS_ROOT', str(tts_root.resolve()))
+    monkeypatch.setattr(
+        app,
+        '_chaowen_asset_verifier_module',
+        lambda: {
+            'verify_chaowen_root': lambda _root: {
+                'status': 'ready', 'reason': '',
+            },
+        },
+    )
+    starts = []
+
+    def process_factory(command, **kwargs):
+        starts.append((tuple(command), kwargs))
+        return _FakeProcess()
+
+    assert app.main(
+        [
+            '--input', 'sensevoice-wav', '--input-wav', str(wav.resolve()),
+            '--output-wav', str(output.resolve()),
+        ],
+        process_factory=process_factory,
+        readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        mode_readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        frontend_factory=lambda command, **kwargs: process_factory(command, **kwargs),
+        clock=lambda: 0.0,
+        stdout=StringIO(),
+        stderr=StringIO(),
+    ) == 0
+
+    assert starts[-1][0] == (
+        'ros2', 'launch', 'voice_nav_audio', 'voice_node.launch.py',
+        'input_profile:=sensevoice_wav', f'input_wav:={wav.resolve()}',
+        f'output_wav:={output.resolve()}',
+        f'chaowen_tts_root:={tts_root.resolve()}', 'include_agent:=false',
+    )
+
+
+def test_tampered_chaowen_asset_is_rejected_before_process_spawn(
+    monkeypatch, tmp_path,
+):
+    """Reject a same-sized changed runtime file before creating a child."""
+    verifier = _load_chaowen_asset_verifier_module()
+    tts_root = tmp_path / 'chaowen'
+    tts_root.mkdir()
+    asset_names = (
+        'model.onnx', 'lexicon.txt', 'tokens.txt', 'phone.fst', 'date.fst',
+        'number.fst',
+    )
+    for name in asset_names:
+        (tts_root / name).write_bytes(b'safe')
+    monkeypatch.setattr(
+        verifier,
+        '_EXPECTED_FILES',
+        tuple(
+            (name, 4, hashlib.sha256(b'safe').hexdigest())
+            for name in asset_names
+        ),
+    )
+    asset = tts_root / 'model.onnx'
+    asset.write_bytes(b'tamp')
+
+    app = _load_app_module()
+    monkeypatch.setenv('VOICE_NAV_CHAOWEN_TTS_ROOT', str(tts_root.resolve()))
+    wav = tmp_path / 'input.wav'
+    _write_pcm_wav(wav)
+    monkeypatch.setattr(
+        app,
+        '_chaowen_asset_verifier_module',
+        lambda: verifier.__dict__,
+    )
+    starts = []
+    stdout = StringIO()
+
+    result = app.main(
+        [
+            '--input', 'sensevoice-wav', '--input-wav', str(wav.resolve()),
+            '--output-wav', str((tmp_path / 'reply.wav').resolve()),
+        ],
+        process_factory=lambda *args, **kwargs: starts.append((args, kwargs)),
+        stdout=stdout,
+        stderr=StringIO(),
+    )
+
+    assert result == 2
+    assert starts == []
+    assert 'chaowen_tts_asset_sha256_mismatch:model.onnx' in stdout.getvalue()
+
+
+def test_output_wav_path_is_rejected_before_process_spawn(tmp_path):
+    """Reject output paths that could create partial or ambiguous artifacts."""
+    app = _load_app_module()
+    wav = tmp_path / 'input.wav'
+    _write_pcm_wav(wav)
+    existing = tmp_path / 'existing.wav'
+    existing.write_bytes(b'keep')
+    starts = []
+
+    for output in (
+        'relative.wav',
+        str(existing.resolve()),
+        str((tmp_path / 'missing-parent' / 'reply.wav').resolve()),
+    ):
+        result = app.main(
+            [
+                '--input', 'sensevoice-wav', '--input-wav', str(wav.resolve()),
+                '--output-wav', output,
+            ],
+            process_factory=lambda *args, **kwargs: starts.append((args, kwargs)),
+            stdout=StringIO(),
+            stderr=StringIO(),
+        )
+        assert result == 2
+
+    assert starts == []
+    assert existing.read_bytes() == b'keep'
 
 
 def test_sensevoice_provider_is_not_started_when_mode_readiness_is_blocked(

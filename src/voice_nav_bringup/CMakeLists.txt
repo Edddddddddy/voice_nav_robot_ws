@@ -187,6 +187,13 @@ install(
   FILES
     _mode_readiness.py
     _sensevoice_input.py
+    _chaowen_asset_verifier.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(
+  FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/../voice_nav_audio/src/chaowen_tts_asset_manifest.def"
   DESTINATION lib/${PROJECT_NAME}
 )
 

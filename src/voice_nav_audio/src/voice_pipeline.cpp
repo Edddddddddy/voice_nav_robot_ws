@@ -48,6 +48,11 @@ void VoicePipeline::accept_cleaned_frame(const CleanedAudioFrame & frame) noexce
   input_->accept_cleaned_frame(frame);
 }
 
+void VoicePipeline::finish_input() noexcept
+{
+  input_->finish_input();
+}
+
 void VoicePipeline::add_to_executor(rclcpp::Executor & executor)
 {
   executor.add_node(input_);

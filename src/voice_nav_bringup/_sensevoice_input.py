@@ -92,17 +92,25 @@ def validate_input_wav(input_wav: str) -> dict[str, str]:
     return {'status': 'ready', 'reason': ''}
 
 
-def build_frontend_command(input_wav: str) -> tuple[str, ...]:
-    """Build the frontend-only command with trusted asset arguments."""
-    return (
+def build_frontend_command(
+    input_wav: str,
+    output_wav: str | None = None,
+    chaowen_tts_root: str | None = None,
+) -> tuple[str, ...]:
+    """Build the frontend command with only trusted path parameters."""
+    command = (
         'ros2',
         'launch',
         'voice_nav_audio',
         'voice_node.launch.py',
         'input_profile:=sensevoice_wav',
         f'input_wav:={input_wav}',
-        'include_agent:=false',
     )
+    if output_wav is not None:
+        command += (f'output_wav:={output_wav}',)
+        if chaowen_tts_root is not None:
+            command += (f'chaowen_tts_root:={chaowen_tts_root}',)
+    return command + ('include_agent:=false',)
 
 
 def wait_for_input_sink_readiness(

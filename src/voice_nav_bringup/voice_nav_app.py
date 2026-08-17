@@ -39,6 +39,8 @@ class _InputSpec:
 
     profile: InputProfile
     input_wav: str | None = None
+    output_wav: str | None = None
+    chaowen_tts_root: str | None = None
     explicit: bool = False
 
 
@@ -173,6 +175,80 @@ def _reason(error) -> str:
     return str(error) if error else ''
 
 
+def _validated_output_input_spec(
+    input_spec: _InputSpec,
+    stdout,
+) -> _InputSpec | None:
+    """Validate the optional WAV sink and its locked Chaowen root."""
+    output_wav = input_spec.output_wav
+    if output_wav is None:
+        return input_spec
+
+    output_parent = os.path.dirname(output_wav)
+    if (
+        not os.path.isabs(output_wav)
+        or os.path.islink(output_wav)
+        or os.path.exists(output_wav)
+    ):
+        _write_result(
+            stdout,
+            _stable_result(
+                'unavailable',
+                'output_wav_must_be_absolute_new_regular_file',
+            ),
+        )
+        return None
+    if (
+        not output_parent
+        or not os.path.isdir(output_parent)
+        or not os.access(output_parent, os.W_OK)
+    ):
+        _write_result(
+            stdout,
+            _stable_result('unavailable', 'output_wav_parent_unwritable'),
+        )
+        return None
+
+    chaowen_tts_root = os.environ.get('VOICE_NAV_CHAOWEN_TTS_ROOT')
+    if (
+        chaowen_tts_root is None
+        or not os.path.isabs(chaowen_tts_root)
+        or os.path.islink(chaowen_tts_root)
+        or not os.path.isdir(chaowen_tts_root)
+    ):
+        _write_result(
+            stdout,
+            _stable_result(
+                'unavailable',
+                'chaowen_tts_root_must_be_absolute_regular_directory',
+            ),
+        )
+        return None
+    try:
+        asset_result = _chaowen_asset_verifier_module()['verify_chaowen_root'](
+            chaowen_tts_root,
+        )
+    except Exception:
+        asset_result = _stable_result(
+            'unavailable', 'chaowen_tts_assets_unavailable',
+        )
+    if not isinstance(asset_result, dict) or asset_result.get('status') != 'ready':
+        _write_result(
+            stdout,
+            asset_result
+            if isinstance(asset_result, dict)
+            else _stable_result('unavailable', 'chaowen_tts_assets_unavailable'),
+        )
+        return None
+    return _InputSpec(
+        profile=input_spec.profile,
+        input_wav=input_spec.input_wav,
+        output_wav=output_wav,
+        chaowen_tts_root=chaowen_tts_root,
+        explicit=input_spec.explicit,
+    )
+
+
 def _ensure_rclpy_context() -> None:
     """Provide the shared readiness context before mode observation begins."""
     global _OWNED_RCLPY_CONTEXT
@@ -269,6 +345,7 @@ def _wait_for_command_gateway_readiness(
 
 _MODE_READINESS = None
 _SENSEVOICE_INPUT = None
+_CHAOWEN_ASSET_VERIFIER = None
 
 
 def _sensevoice_input_module():
@@ -281,6 +358,18 @@ def _sensevoice_input_module():
         )
         _SENSEVOICE_INPUT = runpy.run_path(helper_path)
     return _SENSEVOICE_INPUT
+
+
+def _chaowen_asset_verifier_module():
+    """Load the installed package-private Chaowen asset verifier."""
+    global _CHAOWEN_ASSET_VERIFIER
+
+    if _CHAOWEN_ASSET_VERIFIER is None:
+        helper_path = os.path.join(
+            os.path.dirname(__file__), '_chaowen_asset_verifier.py',
+        )
+        _CHAOWEN_ASSET_VERIFIER = runpy.run_path(helper_path)
+    return _CHAOWEN_ASSET_VERIFIER
 
 
 def _wait_for_voice_input_sink_readiness(
@@ -564,6 +653,8 @@ def _run_started_session(
             input_process = run.frontend_factory(
                 _sensevoice_input_module()['build_frontend_command'](
                     input_spec.input_wav,
+                    input_spec.output_wav,
+                    input_spec.chaowen_tts_root,
                 ),
                 stdout=run.stderr,
                 stderr=run.stderr,
@@ -727,6 +818,7 @@ def main(
         default=None,
     )
     parser.add_argument('--input-wav', default=None)
+    parser.add_argument('--output-wav', default=None)
     try:
         arguments = parser.parse_args(argv)
     except SystemExit as error:
@@ -736,12 +828,19 @@ def main(
     input_spec = _InputSpec(
         profile=input_profile,
         input_wav=arguments.input_wav,
+        output_wav=arguments.output_wav,
         explicit=arguments.input is not None,
     )
     if input_profile == 'console' and input_spec.input_wav is not None:
         _write_result(
             stdout,
             _stable_result('unavailable', 'input_wav_only_for_sensevoice_wav'),
+        )
+        return 2
+    if input_profile == 'console' and input_spec.output_wav is not None:
+        _write_result(
+            stdout,
+            _stable_result('unavailable', 'output_wav_only_for_sensevoice_wav'),
         )
         return 2
     if input_profile == 'sensevoice-wav':
@@ -768,6 +867,9 @@ def main(
         )
         if not _readiness_is_ready(wav_result):
             _write_result(stdout, wav_result)
+            return 2
+        input_spec = _validated_output_input_spec(input_spec, stdout)
+        if input_spec is None:
             return 2
 
     base_session_spec = _SESSION_SPECS[(arguments.mode, arguments.display)]

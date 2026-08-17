@@ -59,7 +59,7 @@
       "license": "Apache-2.0",
       "license_url": "https://github.com/k2-fsa/sherpa-onnx/blob/142807252687d81b40d6315f23470a1512a00de3/LICENSE",
       "destination": "sherpa-onnx/sherpa-onnx-142807252687d81b40d6315f23470a1512a00de3.tar.gz",
-      "build_options": {"system": "CMake", "BUILD_SHARED_LIBS": "OFF", "SHERPA_ONNX_ENABLE_TESTS": "OFF"}
+      "build_options": {"system": "CMake", "BUILD_SHARED_LIBS": "OFF", "SHERPA_ONNX_ENABLE_TESTS": "OFF", "SHERPA_ONNX_ENABLE_TTS": "ON"}
     }
   ]
 }

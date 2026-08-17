@@ -16,9 +16,13 @@
 #include <array>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <set>
+#include <string>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -27,6 +31,7 @@
 #include "gtest/gtest.h"
 #include "rclcpp/executors/multi_threaded_executor.hpp"
 #include "rclcpp_action/rclcpp_action.hpp"
+#include "file_audio_device.hpp"
 #include "voice_pipeline.hpp"
 
 namespace voice_nav_audio
@@ -237,6 +242,20 @@ CleanedAudioFrame frame(const std::uint64_t sequence)
   return input;
 }
 
+std::uint16_t read_u16(const std::array<char, 44> & header, const std::size_t offset)
+{
+  return static_cast<std::uint16_t>(static_cast<unsigned char>(header[offset])) |
+         (static_cast<std::uint16_t>(static_cast<unsigned char>(header[offset + 1U])) << 8U);
+}
+
+std::uint32_t read_u32(const std::array<char, 44> & header, const std::size_t offset)
+{
+  return static_cast<std::uint32_t>(static_cast<unsigned char>(header[offset])) |
+         (static_cast<std::uint32_t>(static_cast<unsigned char>(header[offset + 1U])) << 8U) |
+         (static_cast<std::uint32_t>(static_cast<unsigned char>(header[offset + 2U])) << 16U) |
+         (static_cast<std::uint32_t>(static_cast<unsigned char>(header[offset + 3U])) << 24U);
+}
+
 TEST(VoicePipelineTest, SharesOneEngineForVoiceTurnAndActualSpeakPlayback)
 {
   RclcppContextGuard rclcpp_context;
@@ -340,6 +359,100 @@ TEST(VoicePipelineTest, SharesOneEngineForVoiceTurnAndActualSpeakPlayback)
     pipeline->remove_from_executor(executor);
     (void)turn_subscription;
   }
+}
+
+TEST(VoicePipelineTest, CommitsSafeReplyAsPcmWavAfterAudioEngineCallback)
+{
+  RclcppContextGuard rclcpp_context;
+  const auto output_path = std::filesystem::temp_directory_path() /
+    "voice_nav_pipeline_file_device_test.wav";
+  std::filesystem::remove(output_path);
+  {
+    FileAudioDevice device(output_path);
+    auto pipeline = std::make_unique<VoicePipeline>(
+      std::make_unique<ScriptedRecognizer>(), std::make_unique<DeterministicFakeTts>(), device);
+    auto observer = std::make_shared<rclcpp::Node>("voice_pipeline_file_observer");
+    auto client = rclcpp_action::create_client<VoicePipeline::Speak>(observer, "/voice/speak");
+    std::mutex mutex;
+    std::condition_variable condition;
+    voice_nav_interfaces::msg::VoiceTurn turn{};
+    bool turn_received = false;
+    bool result_received = false;
+    rclcpp_action::ClientGoalHandle<VoicePipeline::Speak>::WrappedResult result{};
+    const auto turn_subscription = observer->create_subscription<
+      voice_nav_interfaces::msg::VoiceTurn>(
+      "/voice/turn", voice_turn_qos(),
+      [&mutex, &condition, &turn, &turn_received](
+        const voice_nav_interfaces::msg::VoiceTurn::SharedPtr received) {
+        std::lock_guard<std::mutex> lock(mutex);
+        turn = *received;
+        turn_received = true;
+        condition.notify_all();
+        });
+
+    rclcpp::executors::MultiThreadedExecutor executor;
+    pipeline->add_to_executor(executor);
+    executor.add_node(observer);
+    ExecutorRunner runner(executor);
+    ASSERT_TRUE(client->wait_for_action_server(2s));
+
+    pipeline->accept_cleaned_frame(frame(1U));
+    pipeline->accept_cleaned_frame(frame(2U));
+    pipeline->accept_cleaned_frame(frame(3U));
+    {
+      std::unique_lock<std::mutex> lock(mutex);
+      ASSERT_TRUE(condition.wait_for(lock, 2s, [&turn_received]() {return turn_received;}));
+    }
+
+    VoicePipeline::Speak::Goal goal{};
+    goal.source_instance_id = turn.voice_instance_id;
+    goal.source_seq = turn.voice_seq;
+    goal.session_id = turn.session_id;
+    goal.turn_id = turn.turn_id;
+    goal.priority = VoicePipeline::Speak::Goal::NORMAL;
+    goal.text = "已完成";
+    rclcpp_action::Client<VoicePipeline::Speak>::SendGoalOptions options{};
+    options.result_callback = [&mutex, &condition, &result_received, &result](
+      const rclcpp_action::ClientGoalHandle<VoicePipeline::Speak>::WrappedResult & received) {
+        std::lock_guard<std::mutex> lock(mutex);
+        result = received;
+        result_received = true;
+        condition.notify_all();
+      };
+    client->async_send_goal(goal, options);
+    {
+      std::unique_lock<std::mutex> lock(mutex);
+      ASSERT_TRUE(condition.wait_for(lock, 2s, [&result_received]() {return result_received;}));
+    }
+    ASSERT_NE(result.result, nullptr);
+    EXPECT_EQ(result.code, rclcpp_action::ResultCode::SUCCEEDED);
+    EXPECT_EQ(result.result->code, VoicePipeline::Speak::Result::COMPLETED);
+
+    executor.remove_node(observer);
+    pipeline->remove_from_executor(executor);
+    executor.cancel();
+    pipeline.reset();
+    ASSERT_TRUE(device.commit());
+    (void)turn_subscription;
+  }
+
+  std::ifstream input(output_path, std::ios::binary);
+  ASSERT_TRUE(input.good());
+  std::array<char, 44> header{};
+  ASSERT_TRUE(input.read(header.data(), static_cast<std::streamsize>(header.size())));
+  EXPECT_EQ(std::string(header.data(), 4), "RIFF");
+  EXPECT_EQ(std::string(header.data() + 8, 4), "WAVE");
+  EXPECT_EQ(read_u16(header, 20U), 1U);
+  EXPECT_EQ(read_u16(header, 22U), 1U);
+  EXPECT_EQ(read_u32(header, 24U), 48000U);
+  EXPECT_EQ(read_u16(header, 34U), 16U);
+  const auto data_bytes = read_u32(header, 40U);
+  ASSERT_GT(data_bytes, 0U);
+  std::vector<char> payload(data_bytes);
+  ASSERT_TRUE(input.read(payload.data(), static_cast<std::streamsize>(payload.size())));
+  EXPECT_TRUE(
+    std::any_of(payload.cbegin(), payload.cend(), [](const char sample) {return sample != 0;}));
+  std::filesystem::remove(output_path);
 }
 
 TEST(VoicePipelineTest, DefaultPipelineReusesExistingVoiceNodeForStopClient)

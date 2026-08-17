@@ -47,6 +47,7 @@ public:
   VoicePipeline & operator=(const VoicePipeline &) = delete;
 
   void accept_cleaned_frame(const CleanedAudioFrame & frame) noexcept;
+  void finish_input() noexcept;
   void add_to_executor(rclcpp::Executor & executor);
   void remove_from_executor(rclcpp::Executor & executor);
   [[nodiscard]] std::size_t direct_stop_request_count() const noexcept;
