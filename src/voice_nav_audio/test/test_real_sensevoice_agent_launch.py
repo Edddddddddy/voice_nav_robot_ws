@@ -158,7 +158,7 @@ def generate_test_description():
         name='voice_node',
         output='screen',
         parameters=[{
-            'input_profile': 'sensevoice_wav',
+            'input_profile': 'real_model_gate',
             'input_wav': str(assets['wav']),
             'silero_vad_model': str(assets['silero_vad']),
             'sensevoice_model': str(assets['sensevoice_model']),

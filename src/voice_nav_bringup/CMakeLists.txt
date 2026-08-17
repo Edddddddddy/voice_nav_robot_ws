@@ -186,6 +186,7 @@ install(
 install(
   FILES
     _mode_readiness.py
+    _sensevoice_input.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

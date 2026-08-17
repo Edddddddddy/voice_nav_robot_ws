@@ -18,6 +18,12 @@ from __future__ import annotations
 
 
 PRIMARY_STATE_ACTIVE = 3
+RUNTIME_AVAILABLE = 1
+GATE_INHIBITED = 0
+MOTION_GATE_INHIBITED = 0
+NO_ACTIVE_STEP = 0xFFFFFFFF
+MOTION_SAFE_STATIONARY_HOLD_S = 2.0
+_MOTION_ODOMETRY_FRESHNESS_S = 0.1
 
 _MODE_LIFECYCLE_NODES = {
     'mapping': ('slam_toolbox',),
@@ -138,6 +144,125 @@ def _clock_now(clock) -> float:
     return clock() if callable(clock) else clock.monotonic()
 
 
+def _is_stationary_odometry(message) -> bool:
+    try:
+        twist = message.twist.twist
+        return (
+            abs(twist.linear.x) <= 0.01
+            and abs(twist.angular.z) <= 0.02
+        )
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+class _MotionReadinessState:
+    """Observe the typed Motion safe-stationary barrier without sleeping."""
+
+    def __init__(self, clock, hold_s: float = MOTION_SAFE_STATIONARY_HOLD_S):
+        if hold_s <= 0:
+            raise ValueError('motion readiness hold must be positive')
+        self._clock = clock
+        self._hold_s = hold_s
+        self._runtime_available = False
+        self._runtime_gate_inhibited = False
+        self._motion_gate_inhibited = False
+        self._no_active_step = False
+        self._controller_active = False
+        self._controller_observed = False
+        self._controller_zero = False
+        self._odometry_received_at = None
+        self._odometry_stationary = False
+        self._safe_since = None
+
+    def observe_runtime(self, message) -> None:
+        self._runtime_available = message.availability == RUNTIME_AVAILABLE
+        self._runtime_gate_inhibited = message.gate_state == GATE_INHIBITED
+        self._no_active_step = message.active_step == NO_ACTIVE_STEP
+        self._refresh_barrier()
+
+    def observe_motion_gate(self, message) -> None:
+        self._motion_gate_inhibited = (
+            message.state == MOTION_GATE_INHIBITED
+            and message.motion_inhibited
+        )
+        self._controller_observed = message.zero_publish_seq > 0
+        self._controller_zero = (
+            message.zero_selected and message.zero_publish_seq > 0
+        )
+        self._refresh_barrier()
+
+    def observe_controller_active(self, active: bool) -> None:
+        self._controller_active = bool(active)
+        self._refresh_barrier()
+
+    def observe_odometry(self, message) -> None:
+        received_at = _clock_now(self._clock)
+        if (
+            self._odometry_received_at is not None
+            and received_at - self._odometry_received_at
+            > _MOTION_ODOMETRY_FRESHNESS_S
+        ):
+            self._safe_since = received_at
+        self._odometry_received_at = received_at
+        self._odometry_stationary = _is_stationary_odometry(message)
+        self._refresh_barrier()
+
+    def _odometry_is_fresh(self) -> bool:
+        return (
+            self._odometry_received_at is not None
+            and _clock_now(self._clock) - self._odometry_received_at
+            <= _MOTION_ODOMETRY_FRESHNESS_S
+        )
+
+    def _safe(self) -> bool:
+        return (
+            self._runtime_available
+            and self._runtime_gate_inhibited
+            and self._motion_gate_inhibited
+            and self._no_active_step
+            and self._controller_active
+            and self._controller_observed
+            and self._controller_zero
+            and self._odometry_received_at is not None
+            and self._odometry_stationary
+            and self._odometry_is_fresh()
+        )
+
+    def _refresh_barrier(self) -> None:
+        if not self._safe():
+            self._safe_since = None
+        elif self._safe_since is None:
+            self._safe_since = _clock_now(self._clock)
+
+    def is_ready(self) -> bool:
+        self._refresh_barrier()
+        return (
+            self._safe_since is not None
+            and _clock_now(self._clock) - self._safe_since >= self._hold_s
+        )
+
+    def failure_stage(self) -> str:
+        if not self._runtime_available:
+            return 'runtime_available'
+        if not self._runtime_gate_inhibited:
+            return 'gate_inhibited'
+        if not self._motion_gate_inhibited:
+            return 'gate_inhibited'
+        if not self._no_active_step:
+            return 'runtime_safe_stationary'
+        if not self._controller_active:
+            return 'controller_lifecycle'
+        if not self._controller_observed:
+            return 'controller_zero'
+        if not self._controller_zero:
+            return 'controller_zero'
+        if self._odometry_received_at is None:
+            return 'odometry_stationary'
+        if not self._odometry_stationary:
+            return 'odometry_stationary'
+        return 'safe_stationary_hold'
+
+
 def _ready_result() -> dict[str, str]:
     return {'status': 'ready', 'reason': ''}
 
@@ -155,11 +280,111 @@ def _unavailable_result(
     }
 
 
+def _wait_for_motion_readiness(session_spec, deadline, clock):
+    """Wait for Runtime, Gate, controller, and stationary odometry evidence."""
+    del session_spec
+    if _clock_now(clock) >= deadline:
+        return _unavailable_result('motion', 'deadline')
+
+    try:
+        import rclpy
+        from controller_manager_msgs.srv import ListControllers
+        from nav_msgs.msg import Odometry
+        from rclpy.qos import (
+            DurabilityPolicy,
+            HistoryPolicy,
+            qos_profile_sensor_data,
+            QoSProfile,
+            ReliabilityPolicy,
+        )
+        from voice_nav_interfaces.msg import MissionState
+        from voice_nav_mission.msg import InternalMotionGateState
+    except Exception:
+        return _unavailable_result('motion', 'setup', 'mode_readiness_failed')
+
+    if not rclpy.ok():
+        return _unavailable_result(
+            'motion', 'context', 'mode_readiness_failed',
+        )
+
+    state = _MotionReadinessState(clock)
+    node = None
+    pending_controller = None
+    try:
+        node = rclpy.create_node('voice_nav_app_motion_readiness')
+        runtime_qos = QoSProfile(
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        node.create_subscription(
+            MissionState,
+            '/mission/state',
+            state.observe_runtime,
+            runtime_qos,
+        )
+        node.create_subscription(
+            InternalMotionGateState,
+            '/motion_gate/internal/state',
+            state.observe_motion_gate,
+            runtime_qos,
+        )
+        node.create_subscription(
+            Odometry,
+            '/odom',
+            state.observe_odometry,
+            qos_profile_sensor_data,
+        )
+        controller_client = node.create_client(
+            ListControllers, '/controller_manager/list_controllers',
+        )
+
+        while True:
+            if state.is_ready():
+                return _ready_result()
+            remaining = deadline - _clock_now(clock)
+            if remaining <= 0:
+                return _unavailable_result('motion', state.failure_stage())
+            if pending_controller is None:
+                try:
+                    if controller_client.service_is_ready():
+                        pending_controller = controller_client.call_async(
+                            ListControllers.Request(),
+                        )
+                except Exception:
+                    pending_controller = None
+            rclpy.spin_once(
+                node, timeout_sec=min(0.1, max(0.0, remaining)),
+            )
+            if pending_controller is not None and pending_controller.done():
+                try:
+                    response = pending_controller.result()
+                    state.observe_controller_active(
+                        any(
+                            controller.name == 'diff_drive_controller'
+                            and controller.state == 'active'
+                            for controller in response.controller
+                        ),
+                    )
+                except Exception:
+                    pass
+                pending_controller = None
+    except Exception:
+        return _unavailable_result('motion', 'setup', 'mode_readiness_failed')
+    finally:
+        if node is not None:
+            try:
+                node.destroy_node()
+            except Exception:
+                pass
+
+
 def wait_for_mode_readiness(session_spec, deadline, clock):
     """Wait for typed lifecycle, map, and TF evidence for one mode."""
     mode = getattr(session_spec, 'mode', '')
     if mode == 'motion':
-        return _ready_result()
+        return _wait_for_motion_readiness(session_spec, deadline, clock)
     if mode not in _LIFECYCLE_SERVICES:
         return _unavailable_result(mode or 'unknown', 'setup')
     if _clock_now(clock) >= deadline:

@@ -24,6 +24,7 @@
   <exec_depend>nav2_planner</exec_depend>
   <exec_depend>nav2_regulated_pure_pursuit_controller</exec_depend>
   <exec_depend>nav2_velocity_smoother</exec_depend>
+  <exec_depend>controller_manager_msgs</exec_depend>
   <exec_depend>nav_msgs</exec_depend>
   <exec_depend>rcl_interfaces</exec_depend>
   <exec_depend>rclcpp_components</exec_depend>

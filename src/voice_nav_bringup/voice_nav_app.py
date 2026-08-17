@@ -15,8 +15,6 @@
 
 """Installed simulation-only app wrapper for the existing command console."""
 
-from __future__ import annotations
-
 import argparse
 import json
 import os
@@ -25,12 +23,23 @@ import signal
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from typing import Literal
 
 
 Mode = Literal['motion', 'mapping', 'navigation']
 Display = Literal['headless', 'gui']
+InputProfile = Literal['console', 'sensevoice-wav']
 SESSION_LAUNCH_FILE = 'voice_nav_session.launch.py'
+
+
+@dataclass(frozen=True)
+class _InputSpec:
+    """One immutable input frontend selected before process creation."""
+
+    profile: InputProfile
+    input_wav: str | None = None
+    explicit: bool = False
 
 
 class _SessionSpec:
@@ -58,9 +67,28 @@ class _SessionSpec:
         object.__setattr__(self, name, value)
 
 
-def _session_command(mode: Mode, display: Display) -> tuple[str, ...]:
+@dataclass(frozen=True)
+class _AppRun:
+    """Dependencies and owned processes for one app invocation."""
+
+    readiness: object
+    mode_readiness: object
+    frontend_factory: object
+    console_main: object
+    clock: object
+    stdin: object
+    stdout: object
+    stderr: object
+    owned_processes: list
+
+
+def _session_command(
+    mode: Mode,
+    display: Display,
+    input_spec: _InputSpec | None = None,
+) -> tuple[str, ...]:
     headless = 'true' if display == 'headless' else 'false'
-    return (
+    command = (
         'ros2',
         'launch',
         'voice_nav_bringup',
@@ -69,6 +97,16 @@ def _session_command(mode: Mode, display: Display) -> tuple[str, ...]:
         f'headless:={headless}',
         'shutdown_on_gazebo_exit:=true',
     )
+    if input_spec is None:
+        return command
+    session_input = (
+        'console'
+        if input_spec.profile == 'console'
+        else 'none'
+    )
+    if input_spec.explicit or session_input == 'none':
+        return command + (f'input:={session_input}',)
+    return command
 
 
 _SESSION_SPECS = {
@@ -92,6 +130,21 @@ TERMINATE_SHUTDOWN_TIMEOUT_S = 5.0
 COMMAND_GATEWAY_SERVICE = '/voice_nav_command_gateway/set_parameters'
 _OWNED_RCLPY_CONTEXT = False
 _CleanupStage = Literal['graceful', 'terminated', 'killed', 'failed']
+
+
+def _selected_session_spec(
+    session_spec: _SessionSpec,
+    input_spec: _InputSpec,
+) -> _SessionSpec:
+    """Bind one input frontend to the existing immutable mode selection."""
+    return _SessionSpec(
+        mode=session_spec.mode,
+        display=session_spec.display,
+        launch_file=session_spec.launch_file,
+        command=_session_command(
+            session_spec.mode, session_spec.display, input_spec,
+        ),
+    )
 
 
 def _clock_now(clock) -> float:
@@ -120,6 +173,17 @@ def _reason(error) -> str:
     return str(error) if error else ''
 
 
+def _ensure_rclpy_context() -> None:
+    """Provide the shared readiness context before mode observation begins."""
+    global _OWNED_RCLPY_CONTEXT
+
+    import rclpy
+
+    if not rclpy.ok():
+        rclpy.init(args=None)
+        _OWNED_RCLPY_CONTEXT = True
+
+
 def _spawn_session(command, *, stdout, stderr):
     """Start exactly one new process group for the fixed session command."""
     options = {
@@ -137,6 +201,11 @@ def _spawn_session(command, *, stdout, stderr):
     # process group.
     process.process_group_id = process.pid
     return process
+
+
+def _spawn_voice_frontend(command, *, stdout, stderr):
+    """Start the staged provider frontend in its own process group."""
+    return _spawn_session(command, stdout=stdout, stderr=stderr)
 
 
 def _wait_for_command_gateway_readiness(
@@ -199,12 +268,42 @@ def _wait_for_command_gateway_readiness(
 
 
 _MODE_READINESS = None
+_SENSEVOICE_INPUT = None
+
+
+def _sensevoice_input_module():
+    """Load the installed package-private SenseVoice deep module."""
+    global _SENSEVOICE_INPUT
+
+    if _SENSEVOICE_INPUT is None:
+        helper_path = os.path.join(
+            os.path.dirname(__file__), '_sensevoice_input.py',
+        )
+        _SENSEVOICE_INPUT = runpy.run_path(helper_path)
+    return _SENSEVOICE_INPUT
+
+
+def _wait_for_voice_input_sink_readiness(
+    timeout_s: float,
+    clock=time.monotonic,
+) -> dict[str, str]:
+    """Wait for the long-lived Agent input sink through its deep module."""
+    return _sensevoice_input_module()['wait_for_input_sink_readiness'](
+        timeout_s, clock, _stable_result,
+    )
 
 
 def _wait_for_mode_readiness(session_spec, deadline, clock):
     """Wait for the selected mode after the shared gateway deadline phase."""
     global _MODE_READINESS
 
+    try:
+        _ensure_rclpy_context()
+    except Exception as error:
+        return _stable_result(
+            'unavailable',
+            f'mode_readiness_context_failed:{_reason(error)}',
+        )
     if _MODE_READINESS is None:
         helper_path = os.path.join(
             os.path.dirname(__file__), '_mode_readiness.py',
@@ -343,57 +442,64 @@ def _readiness_is_ready(result) -> bool:
     )
 
 
-def _run_started_session(
+def _run_selected_input(
     process,
-    session_spec,
-    readiness,
-    mode_readiness,
+    input_spec,
     console_main,
     clock,
+    deadline,
     stdin,
     stdout,
 ) -> int:
-    """Run readiness and console after the child has started."""
-    if _poll(process) is not None:
-        _write_result(
-            stdout,
-            _stable_result('unavailable', 'session_exited_on_start'),
+    """Run exactly the chosen frontend after shared readiness succeeds."""
+    if input_spec.profile == 'sensevoice-wav':
+        exit_code, reason = _sensevoice_input_module()['wait_for_completion'](
+            process, deadline, clock, _poll,
         )
-        return 1
-
+        if reason:
+            _write_result(stdout, _stable_result('unavailable', reason))
+        return exit_code
     try:
-        deadline = _clock_now(clock) + READINESS_TIMEOUT_S
-        readiness_result = readiness(
-            max(0.0, deadline - _clock_now(clock)), clock,
-        )
+        console_result = console_main(stdin=stdin, stdout=stdout)
     except KeyboardInterrupt:
         return 130
     except Exception as error:
         _write_result(
             stdout,
-            _stable_result(
-                'unavailable', f'readiness_failed:{_reason(error)}',
-            ),
+            _stable_result('unavailable', f'console_failed:{_reason(error)}'),
         )
         return 1
-    if not _readiness_is_ready(readiness_result):
-        reason = (
-            readiness_result.get('reason', 'command_gateway_not_ready')
-            if isinstance(readiness_result, dict)
-            else 'command_gateway_not_ready'
+    return 0 if console_result is None else int(console_result)
+
+
+def _run_started_session(
+    process,
+    session_spec,
+    input_spec,
+    run: _AppRun,
+) -> int:
+    """Run one mode, then stage exactly the selected input frontend."""
+    if _poll(process) is not None:
+        _write_result(
+            run.stdout,
+            _stable_result('unavailable', 'session_exited_on_start'),
         )
-        _write_result(stdout, _stable_result('unavailable', reason))
         return 1
-    try:
-        mode_result = mode_readiness(session_spec, deadline, clock)
-    except KeyboardInterrupt:
-        return 130
-    except Exception:
-        mode_result = {
-            **_stable_result('unavailable', 'mode_readiness_failed'),
-            'mode': session_spec.mode,
-            'stage': 'setup',
-        }
+
+    deadline = _clock_now(run.clock) + READINESS_TIMEOUT_S
+    if input_spec.profile == 'sensevoice-wav' or session_spec.mode != 'motion':
+        try:
+            mode_result = run.mode_readiness(session_spec, deadline, run.clock)
+        except KeyboardInterrupt:
+            return 130
+        except Exception:
+            mode_result = {
+                **_stable_result('unavailable', 'mode_readiness_failed'),
+                'mode': session_spec.mode,
+                'stage': 'setup',
+            }
+    else:
+        mode_result = _stable_result('ready')
     if not _readiness_is_ready(mode_result):
         if isinstance(mode_result, dict):
             mode_result = {
@@ -407,34 +513,100 @@ def _run_started_session(
                 'mode': session_spec.mode,
                 'stage': 'unknown',
             }
-        _write_result(stdout, mode_result)
+        _write_result(run.stdout, mode_result)
         return 1
     if _poll(process) is not None:
         _write_result(
-            stdout,
+            run.stdout,
             _stable_result('unavailable', 'session_exited_before_ready'),
         )
         return 1
 
-    _write_result(stdout, _stable_result('ready'))
     try:
-        console_result = console_main(stdin=stdin, stdout=stdout)
+        readiness_result = run.readiness(
+            max(0.0, deadline - _clock_now(run.clock)), run.clock,
+        )
     except KeyboardInterrupt:
         return 130
     except Exception as error:
         _write_result(
-            stdout,
-            _stable_result('unavailable', f'console_failed:{_reason(error)}'),
+            run.stdout,
+            _stable_result(
+                'unavailable', f'readiness_failed:{_reason(error)}',
+            ),
         )
         return 1
-
+    if not _readiness_is_ready(readiness_result):
+        default_reason = (
+            'command_gateway_not_ready'
+            if input_spec.profile == 'console'
+            else 'input_sink_not_ready'
+        )
+        reason = (
+            readiness_result.get('reason', default_reason)
+            if isinstance(readiness_result, dict)
+            else default_reason
+        )
+        _write_result(run.stdout, _stable_result('unavailable', reason))
+        return 1
     if _poll(process) is not None:
+        reason = (
+            'session_exited_before_ready'
+            if input_spec.profile == 'console'
+            else 'session_exited_before_input'
+        )
+        _write_result(run.stdout, _stable_result('unavailable', reason))
+        return 1
+
+    input_process = process
+    if input_spec.profile == 'sensevoice-wav':
+        try:
+            input_process = run.frontend_factory(
+                _sensevoice_input_module()['build_frontend_command'](
+                    input_spec.input_wav,
+                ),
+                stdout=run.stderr,
+                stderr=run.stderr,
+            )
+            if input_process is None:
+                raise RuntimeError('frontend_factory returned no process')
+            run.owned_processes.append(input_process)
+        except Exception as error:
+            _write_result(
+                run.stdout,
+                _stable_result(
+                    'unavailable',
+                    f'input_provider_start_failed:{_reason(error)}',
+                ),
+            )
+            return 1
+
+    if _poll(input_process) is not None:
+        if input_spec.profile == 'console':
+            _write_result(
+                run.stdout,
+                _stable_result('unavailable', 'session_exited_before_ready'),
+            )
+            return 1
+
+    _write_result(run.stdout, _stable_result('ready'))
+    input_result = _run_selected_input(
+        input_process,
+        input_spec,
+        run.console_main,
+        run.clock,
+        deadline,
+        run.stdin,
+        run.stdout,
+    )
+
+    if input_spec.profile == 'console' and _poll(process) is not None:
         _write_result(
-            stdout,
+            run.stdout,
             _stable_result('unavailable', 'session_exited_during_console'),
         )
         return 1
-    return 0 if console_result is None else int(console_result)
+    return input_result
 
 
 def run_app(
@@ -447,17 +619,34 @@ def run_app(
     stdin=None,
     session_spec: _SessionSpec | None = None,
     mode_readiness=None,
+    input_spec: _InputSpec | None = None,
+    frontend_factory=None,
 ) -> int:
-    """Run one closed session spec and then the existing console."""
-    process = None
+    """Run one closed session spec and exactly one selected frontend."""
+    owned_processes = []
     exit_code = 1
     try:
         if stdin is None:
             stdin = sys.stdin
         if session_spec is None:
             session_spec = _SESSION_SPECS[('motion', 'headless')]
+        if input_spec is None:
+            input_spec = _InputSpec(profile='console')
         if mode_readiness is None:
             mode_readiness = _wait_for_mode_readiness
+        if frontend_factory is None:
+            frontend_factory = _spawn_voice_frontend
+        run = _AppRun(
+            readiness=readiness,
+            mode_readiness=mode_readiness,
+            frontend_factory=frontend_factory,
+            console_main=console_main,
+            clock=clock,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            owned_processes=owned_processes,
+        )
         process = process_factory(
             session_spec.command,
             stdout=stderr,
@@ -465,15 +654,9 @@ def run_app(
         )
         if process is None:
             raise RuntimeError('process_factory returned no process')
+        owned_processes.append(process)
         exit_code = _run_started_session(
-            process,
-            session_spec,
-            readiness,
-            mode_readiness,
-            console_main,
-            clock,
-            stdin,
-            stdout,
+            process, session_spec, input_spec, run,
         )
     except KeyboardInterrupt:
         exit_code = 130
@@ -486,22 +669,25 @@ def run_app(
         )
         exit_code = 1
     finally:
-        if process is not None:
+        cleanup_stage = 'graceful'
+        for process in reversed(owned_processes):
             try:
-                cleanup_stage = _cleanup_owned_session(process, clock)
+                process_stage = _cleanup_owned_session(process, clock)
             except Exception:
-                cleanup_stage = 'failed'
-            if exit_code == 0 and cleanup_stage != 'graceful':
-                _write_result(
-                    stdout,
-                    {
-                        **_stable_result(
-                            'unavailable', f'cleanup_{cleanup_stage}',
-                        ),
-                        'stage': cleanup_stage,
-                    },
-                )
-                exit_code = 1
+                process_stage = 'failed'
+            if cleanup_stage == 'graceful' and process_stage != 'graceful':
+                cleanup_stage = process_stage
+        if exit_code == 0 and cleanup_stage != 'graceful':
+            _write_result(
+                stdout,
+                {
+                    **_stable_result(
+                        'unavailable', f'cleanup_{cleanup_stage}',
+                    ),
+                    'stage': cleanup_stage,
+                },
+            )
+            exit_code = 1
         _shutdown_owned_rclpy_context()
     return exit_code
 
@@ -517,6 +703,7 @@ def main(
     stdout=None,
     stderr=None,
     mode_readiness=None,
+    frontend_factory=None,
 ) -> int:
     """Run one closed simulation session; no child arguments are accepted."""
     if stdout is None:
@@ -534,16 +721,65 @@ def main(
         choices=('headless', 'gui'),
         default='headless',
     )
+    parser.add_argument(
+        '--input',
+        choices=('console', 'sensevoice-wav'),
+        default=None,
+    )
+    parser.add_argument('--input-wav', default=None)
     try:
         arguments = parser.parse_args(argv)
     except SystemExit as error:
         return int(error.code)
 
-    session_spec = _SESSION_SPECS[(arguments.mode, arguments.display)]
+    input_profile = arguments.input or 'console'
+    input_spec = _InputSpec(
+        profile=input_profile,
+        input_wav=arguments.input_wav,
+        explicit=arguments.input is not None,
+    )
+    if input_profile == 'console' and input_spec.input_wav is not None:
+        _write_result(
+            stdout,
+            _stable_result('unavailable', 'input_wav_only_for_sensevoice_wav'),
+        )
+        return 2
+    if input_profile == 'sensevoice-wav':
+        if input_spec.input_wav is None:
+            _write_result(
+                stdout,
+                _stable_result('unavailable', 'input_wav_required'),
+            )
+            return 2
+        if (
+            not os.path.isabs(input_spec.input_wav)
+            or not os.path.isfile(input_spec.input_wav)
+        ):
+            _write_result(
+                stdout,
+                _stable_result(
+                    'unavailable',
+                    'input_wav_must_be_absolute_regular_file',
+                ),
+            )
+            return 2
+        wav_result = _sensevoice_input_module()['validate_input_wav'](
+            input_spec.input_wav,
+        )
+        if not _readiness_is_ready(wav_result):
+            _write_result(stdout, wav_result)
+            return 2
+
+    base_session_spec = _SESSION_SPECS[(arguments.mode, arguments.display)]
+    session_spec = _selected_session_spec(base_session_spec, input_spec)
     if process_factory is None:
         process_factory = _spawn_session
     if readiness is None:
-        readiness = _wait_for_command_gateway_readiness
+        readiness = (
+            _wait_for_command_gateway_readiness
+            if input_profile == 'console'
+            else _wait_for_voice_input_sink_readiness
+        )
     if console_main is None:
         console_main = _run_existing_console
     return run_app(
@@ -556,6 +792,8 @@ def main(
         stdin,
         session_spec,
         mode_readiness,
+        input_spec,
+        frontend_factory,
     )
 
 

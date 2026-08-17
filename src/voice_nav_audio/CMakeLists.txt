@@ -25,6 +25,7 @@ add_library(dsp_pipeline STATIC src/dsp_pipeline.cpp)
 add_library(speech_input_core STATIC src/speech_input_core.cpp)
 add_library(sensevoice_provider STATIC src/sensevoice_provider.cpp)
 add_library(speech_input_node STATIC src/speech_input_node.cpp)
+add_library(voice_input_policy STATIC src/voice_input_policy.cpp)
 add_library(speech_output_core STATIC src/speech_output_core.cpp)
 add_library(speech_output_node STATIC src/speech_output_node.cpp)
 add_library(voice_pipeline_coordination STATIC src/voice_pipeline_coordination.cpp)
@@ -50,6 +51,7 @@ foreach(target
     speech_input_core
     sensevoice_provider
     speech_input_node
+    voice_input_policy
     speech_output_core
     speech_output_node
     voice_pipeline_coordination
@@ -196,6 +198,7 @@ if(VOICE_NAV_AUDIO_WITH_SHERPA_ONNX)
     PRIVATE include src "${SHERPA_ONNX_INCLUDE_DIR}")
   ament_target_dependencies(voice_node rclcpp voice_nav_interfaces)
   target_link_libraries(voice_node speech_input_node sensevoice_sherpa_adapter)
+  target_link_libraries(voice_node voice_input_policy)
   target_link_options(
     voice_node
     PRIVATE
@@ -274,6 +277,14 @@ if(BUILD_TESTING)
   target_compile_features(sensevoice_provider_test PUBLIC cxx_std_17)
   target_include_directories(sensevoice_provider_test PRIVATE include src)
   target_link_libraries(sensevoice_provider_test sensevoice_provider)
+
+  ament_add_gtest(
+    voice_input_policy_test
+    test/voice_input_policy_test.cpp
+  )
+  target_compile_features(voice_input_policy_test PUBLIC cxx_std_17)
+  target_include_directories(voice_input_policy_test PRIVATE include src)
+  target_link_libraries(voice_input_policy_test voice_input_policy)
 
   if(VOICE_NAV_AUDIO_WITH_SHERPA_ONNX)
     set(_voice_nav_real_asset_root

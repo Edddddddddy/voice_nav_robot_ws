@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Installed, headless VoiceNav composition root for the locked SenseVoice WAV
-// profile. This process owns only the real provider and SpeechInputNode. The
-// launch/test composition supplies Agent and observes its Speak behavior.
+// Installed, headless VoiceNav composition root for bounded SenseVoice WAV
+// input. The explicit real_model_gate profile retains the locked fixture
+// evidence; this process owns only the real provider and SpeechInputNode.
 
 #include <algorithm>
 #include <chrono>
@@ -42,6 +42,7 @@
 #include "sensevoice_sherpa_adapter.hpp"
 #include "sherpa-onnx/c-api/c-api.h"
 #include "speech_input_node.hpp"
+#include "voice_input_policy.hpp"
 #include "voice_nav_interfaces/msg/voice_turn.hpp"
 
 namespace voice_nav_audio
@@ -51,6 +52,12 @@ namespace
 
 using Clock = std::chrono::steady_clock;
 using VoiceTurn = voice_nav_interfaces::msg::VoiceTurn;
+
+enum class InputProfile
+{
+  kSenseVoiceWav,
+  kRealModelGate,
+};
 
 constexpr std::size_t kExpectedWaveBytes = 178988U;
 constexpr std::size_t kExpectedSenseVoiceModelBytes = 239233841U;
@@ -78,6 +85,34 @@ struct WaveDeleter
 };
 
 using WavePtr = std::unique_ptr<const SherpaOnnxWave, WaveDeleter>;
+
+InputProfile parse_input_profile(const std::string & value)
+{
+  if (value == "sensevoice_wav") {
+    return InputProfile::kSenseVoiceWav;
+  }
+  if (value == "real_model_gate") {
+    return InputProfile::kRealModelGate;
+  }
+  throw std::invalid_argument("unsupported voice_node input profile");
+}
+
+WavePtr read_input_wave(const std::string & path)
+{
+  const auto validation = validate_input_wav(path);
+  if (!validation.accepted) {
+    throw std::invalid_argument(validation.reason);
+  }
+  WavePtr wave{SherpaOnnxReadWave(path.c_str())};
+  const auto maximum_samples =
+    SenseVoiceProviderConfig::kDefaultMaximumUtteranceFrames * CleanedAudioFrame::kSamples;
+  if (!wave || wave->sample_rate != static_cast<int32_t>(CleanedAudioFrame::kSampleRateHz) ||
+    wave->num_samples <= 0 || static_cast<std::size_t>(wave->num_samples) > maximum_samples)
+  {
+    throw std::invalid_argument("input_wav_unsupported_format");
+  }
+  return wave;
+}
 
 struct ObservedTurn
 {
@@ -299,7 +334,7 @@ void write_report(
 
 int main(int argc, char ** argv)
 {
-  std::string report_path = "voice_node.json";
+  std::string report_path{};
   std::string wav_path{};
   std::string vad_path{};
   std::string model_path{};
@@ -315,27 +350,32 @@ int main(int argc, char ** argv)
     };
   std::shared_ptr<voice_nav_audio::VoiceNode> node;
   std::shared_ptr<voice_nav_audio::SpeechInputNode> speech;
+  bool real_model_gate = false;
 
   try {
     rclcpp::init(argc, argv);
     node = std::make_shared<voice_nav_audio::VoiceNode>();
     std::string profile{};
     node->get_parameter("input_profile", profile);
-    if (profile != "sensevoice_wav") {
-      throw std::invalid_argument("installed voice_node only accepts sensevoice_wav");
-    }
-    node->get_parameter("result_path", report_path);
-    if (report_path.empty()) {
-      const auto environment_report = std::getenv("VOICE_NAV_REAL_GATE_REPORT");
-      if (environment_report != nullptr && environment_report[0] != '\0') {
-        report_path = environment_report;
+    const auto input_profile = voice_nav_audio::parse_input_profile(profile);
+    real_model_gate = input_profile == voice_nav_audio::InputProfile::kRealModelGate;
+    if (real_model_gate) {
+      node->get_parameter("result_path", report_path);
+      if (report_path.empty()) {
+        const auto environment_report = std::getenv("VOICE_NAV_REAL_GATE_REPORT");
+        if (environment_report != nullptr && environment_report[0] != '\0') {
+          report_path = environment_report;
+        }
       }
-    }
-    node->get_parameter("exact_head", exact_head);
-    if (exact_head.empty() || exact_head == "unknown") {
-      const auto environment_head = std::getenv("VOICE_NAV_REAL_GATE_HEAD");
-      if (environment_head != nullptr && environment_head[0] != '\0') {
-        exact_head = environment_head;
+      node->get_parameter("exact_head", exact_head);
+      if (exact_head.empty() || exact_head == "unknown") {
+        const auto environment_head = std::getenv("VOICE_NAV_REAL_GATE_HEAD");
+        if (environment_head != nullptr && environment_head[0] != '\0') {
+          exact_head = environment_head;
+        }
+      }
+      if (report_path.empty() || exact_head.empty() || exact_head == "unknown") {
+        throw std::invalid_argument("real_model_gate evidence parameters are incomplete");
       }
     }
     wav_path = voice_nav_audio::parameter_or_environment(
@@ -349,14 +389,14 @@ int main(int argc, char ** argv)
     if (wav_path.empty() || vad_path.empty() || model_path.empty() || tokens_path.empty()) {
       throw std::invalid_argument("SenseVoice asset parameters are incomplete");
     }
-    if (std::filesystem::file_size(wav_path) != voice_nav_audio::kExpectedWaveBytes) {
-      throw std::invalid_argument("locked zh.wav size mismatch");
-    }
-    voice_nav_audio::WavePtr wave{SherpaOnnxReadWave(wav_path.c_str())};
-    if (!wave || wave->sample_rate != 16000 || wave->num_samples !=
-      static_cast<int32_t>(voice_nav_audio::kExpectedWaveSamples))
-    {
-      throw std::invalid_argument("locked zh.wav format mismatch");
+    auto wave = voice_nav_audio::read_input_wave(wav_path);
+    if (real_model_gate) {
+      if (std::filesystem::file_size(wav_path) != voice_nav_audio::kExpectedWaveBytes) {
+        throw std::invalid_argument("locked zh.wav size mismatch");
+      }
+      if (wave->num_samples != static_cast<int32_t>(voice_nav_audio::kExpectedWaveSamples)) {
+        throw std::invalid_argument("locked zh.wav format mismatch");
+      }
     }
 
     auto provider = voice_nav_audio::make_sherpa_sensevoice_provider(
@@ -376,7 +416,8 @@ int main(int argc, char ** argv)
       throw std::runtime_error("agent_node did not subscribe to /voice/turn");
     }
     std::uint64_t sequence = 1U;
-    for (std::size_t offset = 0U; offset < voice_nav_audio::kExpectedWaveSamples;
+    for (std::size_t offset = 0U;
+      offset < static_cast<std::size_t>(wave->num_samples);
       offset += voice_nav_audio::CleanedAudioFrame::kSamples)
     {
       voice_nav_audio::feed_frame(*speech, *wave, sequence++, offset);
@@ -388,15 +429,23 @@ int main(int argc, char ** argv)
     spin_thread.join();
     if (!got_turn || turns.size() != 1U ||
       turns.front().kind != voice_nav_interfaces::msg::VoiceTurn::COMMAND ||
-      turns.front().voice_seq != 1U || turns.front().text != voice_nav_audio::kExpectedText)
+      turns.front().voice_seq != 1U)
     {
-      throw std::runtime_error("installed voice_node did not produce the exact one VoiceTurn");
+      throw std::runtime_error("installed voice_node did not produce one VoiceTurn");
+    }
+    if (real_model_gate && turns.front().text != voice_nav_audio::kExpectedText) {
+      throw std::runtime_error("real-model gate did not produce the exact VoiceTurn");
     }
     status = "passed";
-    detail = "installed real SenseVoiceProvider produced one exact COMMAND VoiceTurn";
-    voice_nav_audio::write_report(
-      report_path, exact_head, wav_path, vad_path, model_path, tokens_path, turns, status, detail,
-      elapsed_ms());
+    detail = "installed real SenseVoiceProvider produced one COMMAND VoiceTurn";
+    if (real_model_gate) {
+      detail = "installed real SenseVoiceProvider produced one exact COMMAND VoiceTurn";
+    }
+    if (real_model_gate) {
+      voice_nav_audio::write_report(
+        report_path, exact_head, wav_path, vad_path, model_path, tokens_path, turns, status, detail,
+        elapsed_ms());
+    }
     speech.reset();
     node.reset();
     rclcpp::shutdown();
@@ -412,12 +461,14 @@ int main(int argc, char ** argv)
     }
   }
 
-  try {
-    voice_nav_audio::write_report(
-      report_path, exact_head, wav_path, vad_path, model_path, tokens_path, turns, status, detail,
-      elapsed_ms());
-  } catch (...) {
-    // Preserve the original product failure when evidence publication fails.
+  if (real_model_gate) {
+    try {
+      voice_nav_audio::write_report(
+        report_path, exact_head, wav_path, vad_path, model_path, tokens_path, turns, status, detail,
+        elapsed_ms());
+    } catch (...) {
+      // Preserve the original gate failure when evidence publication fails.
+    }
   }
   return 1;
 }
