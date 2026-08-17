@@ -113,6 +113,18 @@ def build_frontend_command(
     return command + ('include_agent:=false',)
 
 
+def build_microphone_once_command() -> tuple[str, ...]:
+    """Build the fixed full-duplex one-shot voice composition command."""
+    return (
+        'ros2',
+        'launch',
+        'voice_nav_audio',
+        'voice_node.launch.py',
+        'input_profile:=microphone_once',
+        'include_agent:=false',
+    )
+
+
 def wait_for_input_sink_readiness(
     timeout_s: float,
     clock,

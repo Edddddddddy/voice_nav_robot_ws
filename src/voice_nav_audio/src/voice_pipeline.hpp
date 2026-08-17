@@ -17,6 +17,7 @@
 
 #include <memory>
 #include <cstddef>
+#include <atomic>
 
 #include "rclcpp/executor.hpp"
 #include "speech_input_node.hpp"
@@ -28,9 +29,15 @@
 namespace voice_nav_audio
 {
 
+enum class VoicePipelineCaptureMode
+{
+  kKeepCapture,
+  kStopBeforeTurnPublication
+};
+
 // Package-private composition root. It is the one owner of AudioEngine and
 // places both stable ROS seams behind injected input, output, and device adapters.
-class VoicePipeline final
+class VoicePipeline final : private VoiceTurnBoundary
 {
 public:
   using Speak = SpeechOutputNode::Speak;
@@ -40,7 +47,21 @@ public:
     std::unique_ptr<TtsAdapter> tts,
     FullDuplexAudioDevice & device,
     SpeechOutputTraceSink * trace = nullptr,
-    StopMissionPort * stop_port = nullptr);
+    StopMissionPort * stop_port = nullptr,
+    VoicePipelineCaptureMode capture_mode = VoicePipelineCaptureMode::kKeepCapture);
+  VoicePipeline(
+    std::unique_ptr<SpeechRecognizerAdapter> recognizer,
+    std::unique_ptr<TtsAdapter> tts,
+    FullDuplexAudioDevice * device,
+    SpeechOutputTraceSink * trace = nullptr,
+    StopMissionPort * stop_port = nullptr,
+    VoicePipelineCaptureMode capture_mode = VoicePipelineCaptureMode::kKeepCapture);
+  VoicePipeline(
+    std::unique_ptr<SpeechRecognizerAdapter> recognizer,
+    std::unique_ptr<TtsAdapter> tts,
+    SpeechOutputTraceSink * trace = nullptr,
+    StopMissionPort * stop_port = nullptr,
+    VoicePipelineCaptureMode capture_mode = VoicePipelineCaptureMode::kKeepCapture);
   ~VoicePipeline();
 
   VoicePipeline(const VoicePipeline &) = delete;
@@ -48,18 +69,28 @@ public:
 
   void accept_cleaned_frame(const CleanedAudioFrame & frame) noexcept;
   void finish_input() noexcept;
+  [[nodiscard]] bool try_pop_capture(AudioFrame & frame) noexcept;
+  [[nodiscard]] bool try_pop_reference(AudioFrame & frame) noexcept;
+  [[nodiscard]] bool stop_capture() noexcept;
+  void abort_capture() noexcept;
+  [[nodiscard]] bool allow_playback() noexcept;
+  [[nodiscard]] bool capture_finished() const noexcept;
   void add_to_executor(rclcpp::Executor & executor);
   void remove_from_executor(rclcpp::Executor & executor);
   [[nodiscard]] std::size_t direct_stop_request_count() const noexcept;
   [[nodiscard]] AudioMetrics audio_metrics() const noexcept;
 
 private:
+  void on_voice_turn_published() noexcept override;
+
   AudioEngine engine_{};
   PortAudioAdapter adapter_;
+  VoicePipelineCaptureMode capture_mode_{VoicePipelineCaptureMode::kKeepCapture};
   std::shared_ptr<SpeechOutputNode> output_;
   std::unique_ptr<RosStopMissionPort> owned_stop_port_;
   std::unique_ptr<VoicePipelineCoordination> coordination_;
   std::shared_ptr<SpeechInputNode> input_;
+  std::atomic<bool> capture_finished_{false};
 };
 
 }  // namespace voice_nav_audio

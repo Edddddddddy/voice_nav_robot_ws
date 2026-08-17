@@ -76,6 +76,12 @@ public:
     return opened_condition_.wait_for(lock, 2s, [this]() {return opened_;});
   }
 
+  [[nodiscard]] bool is_open()
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return opened_;
+  }
+
   [[nodiscard]] std::array<Sample, AudioEngine::kFrameSamples> render_once()
   {
     DeviceCallback callback{};
@@ -307,6 +313,7 @@ TEST(VoicePipelineTest, SharesOneEngineForVoiceTurnAndActualSpeakPlayback)
         }));
     }
     EXPECT_EQ(turn.text, "前进半米");
+    EXPECT_TRUE(device.is_open());
 
     VoicePipeline::Speak::Goal goal{};
     goal.source_instance_id = turn.voice_instance_id;
@@ -467,7 +474,9 @@ TEST(VoicePipelineTest, DefaultPipelineReusesExistingVoiceNodeForStopClient)
   executor.add_node(graph_observer);
 
   std::set<std::string> voice_nodes;
-  for (const auto & node : graph_observer->get_node_graph_interface()->get_node_names_and_namespaces()) {
+  for (const auto & node :
+    graph_observer->get_node_graph_interface()->get_node_names_and_namespaces())
+  {
     if (node.second == "/" && node.first.rfind("voice_speech", 0U) == 0U) {
       voice_nodes.insert(node.first);
     }

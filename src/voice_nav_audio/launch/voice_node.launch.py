@@ -82,9 +82,9 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument(
             'input_profile',
             default_value='sensevoice_wav',
-            choices=['sensevoice_wav', 'real_model_gate'],
+            choices=['sensevoice_wav', 'microphone_once', 'real_model_gate'],
             description=(
-                'Use the product WAV frontend or the explicit real-model gate.'
+                'Use the product WAV, one-shot microphone, or explicit real-model gate.'
             ),
         ),
         DeclareLaunchArgument(

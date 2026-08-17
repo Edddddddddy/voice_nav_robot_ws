@@ -31,6 +31,7 @@ add_library(speech_output_core STATIC src/speech_output_core.cpp)
 add_library(speech_output_node STATIC src/speech_output_node.cpp)
 add_library(voice_pipeline_coordination STATIC src/voice_pipeline_coordination.cpp)
 add_library(voice_pipeline STATIC src/voice_pipeline.cpp)
+add_library(microphone_once_runner STATIC src/microphone_once_runner.cpp)
 add_library(ros_stop_mission_port STATIC src/ros_stop_mission_port.cpp)
 add_library(chaowen_tts_asset_verifier STATIC src/chaowen_tts_asset_verifier.cpp)
 add_library(chaowen_tts_adapter STATIC src/chaowen_tts_adapter.cpp)
@@ -59,6 +60,7 @@ foreach(target
     speech_output_node
     voice_pipeline_coordination
     voice_pipeline
+    microphone_once_runner
     ros_stop_mission_port
     chaowen_tts_asset_verifier
     chaowen_tts_adapter
@@ -91,6 +93,8 @@ target_link_libraries(
   ros_stop_mission_port
   portaudio_adapter
 )
+ament_target_dependencies(microphone_once_runner rclcpp rclcpp_action voice_nav_interfaces)
+target_link_libraries(microphone_once_runner voice_pipeline dsp_pipeline)
 target_link_libraries(chaowen_tts_adapter speech_output_core chaowen_tts_asset_verifier)
 target_link_libraries(portaudio_adapter PUBLIC audio_engine)
 
@@ -221,8 +225,8 @@ if(VOICE_NAV_AUDIO_WITH_SHERPA_ONNX)
     PRIVATE include src "${SHERPA_ONNX_INCLUDE_DIR}")
   ament_target_dependencies(voice_node rclcpp voice_nav_interfaces)
   target_link_libraries(
-    voice_node speech_input_node sensevoice_sherpa_adapter voice_pipeline chaowen_tts_adapter
-    file_audio_device)
+    voice_node speech_input_node sensevoice_sherpa_adapter voice_pipeline microphone_once_runner
+    chaowen_tts_adapter file_audio_device)
   target_link_libraries(voice_node voice_input_policy)
   target_link_options(
     voice_node
@@ -456,6 +460,19 @@ if(BUILD_TESTING)
     voice_pipeline_test
     voice_pipeline
     file_audio_device
+  )
+
+  ament_add_gtest(
+    microphone_once_runner_test
+    test/microphone_once_runner_test.cpp
+  )
+  target_compile_features(microphone_once_runner_test PUBLIC cxx_std_17)
+  target_include_directories(microphone_once_runner_test PRIVATE include src)
+  ament_target_dependencies(microphone_once_runner_test rclcpp rclcpp_action voice_nav_interfaces)
+  target_link_libraries(
+    microphone_once_runner_test
+    microphone_once_runner
+    sensevoice_provider
   )
 
   ament_add_gtest(

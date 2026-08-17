@@ -120,6 +120,11 @@ void AudioEngine::mark_discontinuity() noexcept
   discontinuity_requests_.fetch_add(1U, std::memory_order_release);
 }
 
+void AudioEngine::set_phase(const AudioEnginePhase phase) noexcept
+{
+  phase_.store(static_cast<std::uint8_t>(phase), std::memory_order_release);
+}
+
 std::uint64_t AudioEngine::generation() const noexcept
 {
   return generation_.load(std::memory_order_acquire);

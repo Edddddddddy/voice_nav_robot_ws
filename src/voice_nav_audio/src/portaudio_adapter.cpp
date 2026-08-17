@@ -99,13 +99,20 @@ private:
 }  // namespace
 
 PortAudioAdapter::PortAudioAdapter(AudioEngine & engine)
+: PortAudioAdapter(engine, static_cast<FullDuplexAudioDevice *>(nullptr))
+{
+}
+
+PortAudioAdapter::PortAudioAdapter(
+  AudioEngine & engine,
+  FullDuplexAudioDevice * const device) noexcept
 : engine_(engine),
 #ifdef VOICE_NAV_AUDIO_WITH_PORTAUDIO
-  owned_device_(std::make_unique<NativePortAudioDevice>()),
+  owned_device_(device == nullptr ? std::make_unique<NativePortAudioDevice>() : nullptr),
 #else
-  owned_device_(std::make_unique<UnavailablePortAudioDevice>()),
+  owned_device_(device == nullptr ? std::make_unique<UnavailablePortAudioDevice>() : nullptr),
 #endif
-  device_(owned_device_.get())
+  device_(device == nullptr ? owned_device_.get() : device)
 {
 }
 
@@ -128,6 +135,7 @@ AdapterStartResult PortAudioAdapter::start() noexcept
     return AdapterStartResult::AlreadyStarted;
   }
 
+  engine_.set_phase(AudioEnginePhase::kCapture);
   // A successful start has a fresh generation.  A failed start fences any
   // queued playback just as strictly, so a later recovery cannot leak it.
   engine_.mark_discontinuity();
@@ -150,11 +158,45 @@ bool PortAudioAdapter::restart() noexcept
 
 void PortAudioAdapter::stop() noexcept
 {
-  if (running_ && device_ != nullptr) {
+  if (!running_) {
+    return;
+  }
+  engine_.set_phase(AudioEnginePhase::kCapture);
+  if (device_ != nullptr) {
     device_->close();
   }
   running_ = false;
   engine_.mark_discontinuity();
+}
+
+bool PortAudioAdapter::pause_for_playback() noexcept
+{
+  engine_.set_phase(AudioEnginePhase::kPlaybackOnly);
+  if (!running_) {
+    return true;
+  }
+  if (device_ != nullptr) {
+    device_->close();
+  }
+  running_ = false;
+  return true;
+}
+
+AdapterStartResult PortAudioAdapter::resume_playback() noexcept
+{
+  if (running_) {
+    return AdapterStartResult::AlreadyStarted;
+  }
+  engine_.set_phase(AudioEnginePhase::kPlaybackOnly);
+  if (device_ == nullptr) {
+    return AdapterStartResult::NoDevice;
+  }
+  if (!device_->open(FullDuplexStreamSpec{}, &PortAudioAdapter::callback, &engine_)) {
+    device_->close();
+    return AdapterStartResult::NoDevice;
+  }
+  running_ = true;
+  return AdapterStartResult::Started;
 }
 
 bool PortAudioAdapter::running() const noexcept

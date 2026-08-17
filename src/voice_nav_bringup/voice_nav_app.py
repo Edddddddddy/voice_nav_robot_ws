@@ -29,7 +29,7 @@ from typing import Literal
 
 Mode = Literal['motion', 'mapping', 'navigation']
 Display = Literal['headless', 'gui']
-InputProfile = Literal['console', 'sensevoice-wav']
+InputProfile = Literal['console', 'sensevoice-wav', 'microphone-once']
 SESSION_LAUNCH_FILE = 'voice_nav_session.launch.py'
 
 
@@ -541,7 +541,7 @@ def _run_selected_input(
     stdout,
 ) -> int:
     """Run exactly the chosen frontend after shared readiness succeeds."""
-    if input_spec.profile == 'sensevoice-wav':
+    if input_spec.profile in ('sensevoice-wav', 'microphone-once'):
         exit_code, reason = _sensevoice_input_module()['wait_for_completion'](
             process, deadline, clock, _poll,
         )
@@ -576,7 +576,7 @@ def _run_started_session(
         return 1
 
     deadline = _clock_now(run.clock) + READINESS_TIMEOUT_S
-    if input_spec.profile == 'sensevoice-wav' or session_spec.mode != 'motion':
+    if input_spec.profile != 'console' or session_spec.mode != 'motion':
         try:
             mode_result = run.mode_readiness(session_spec, deadline, run.clock)
         except KeyboardInterrupt:
@@ -648,16 +648,20 @@ def _run_started_session(
         return 1
 
     input_process = process
-    if input_spec.profile == 'sensevoice-wav':
+    if input_spec.profile in ('sensevoice-wav', 'microphone-once'):
         try:
+            if input_spec.profile == 'microphone-once':
+                frontend_command = _sensevoice_input_module()[
+                    'build_microphone_once_command']()
+            else:
+                frontend_command = _sensevoice_input_module()[
+                    'build_frontend_command'](
+                        input_spec.input_wav,
+                        input_spec.output_wav,
+                        input_spec.chaowen_tts_root,
+                    )
             input_process = run.frontend_factory(
-                _sensevoice_input_module()['build_frontend_command'](
-                    input_spec.input_wav,
-                    input_spec.output_wav,
-                    input_spec.chaowen_tts_root,
-                ),
-                stdout=run.stderr,
-                stderr=run.stderr,
+                frontend_command, stdout=run.stderr, stderr=run.stderr,
             )
             if input_process is None:
                 raise RuntimeError('frontend_factory returned no process')
@@ -814,7 +818,7 @@ def main(
     )
     parser.add_argument(
         '--input',
-        choices=('console', 'sensevoice-wav'),
+        choices=('console', 'sensevoice-wav', 'microphone-once'),
         default=None,
     )
     parser.add_argument('--input-wav', default=None)
@@ -841,6 +845,17 @@ def main(
         _write_result(
             stdout,
             _stable_result('unavailable', 'output_wav_only_for_sensevoice_wav'),
+        )
+        return 2
+    if input_profile == 'microphone-once' and (
+        input_spec.input_wav is not None or input_spec.output_wav is not None
+    ):
+        _write_result(
+            stdout,
+            _stable_result(
+                'unavailable',
+                'microphone_once_does_not_accept_wav_paths',
+            ),
         )
         return 2
     if input_profile == 'sensevoice-wav':

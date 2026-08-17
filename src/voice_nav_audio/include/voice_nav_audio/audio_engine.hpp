@@ -26,6 +26,7 @@ namespace voice_nav_audio
 static_assert(std::atomic<std::size_t>::is_always_lock_free);
 static_assert(std::atomic<std::uint32_t>::is_always_lock_free);
 static_assert(std::atomic<std::uint64_t>::is_always_lock_free);
+static_assert(std::atomic<std::uint8_t>::is_always_lock_free);
 
 using Sample = std::int16_t;
 
@@ -41,6 +42,12 @@ struct CallbackStatus
 {
   bool input_overflow{false};
   bool output_underflow{false};
+};
+
+enum class AudioEnginePhase : std::uint8_t
+{
+  kCapture,
+  kPlaybackOnly,
 };
 
 struct AudioMetrics
@@ -89,6 +96,8 @@ public:
   // May be called by a control/producer thread.  It only publishes a
   // lock-free request; the audio callback commits the generation fence.
   void mark_discontinuity() noexcept;
+  // Capture phase publishes input/reference; playback-only phase publishes output only.
+  void set_phase(AudioEnginePhase phase) noexcept;
 
   void process_callback(
     const Sample * capture,
@@ -248,6 +257,7 @@ private:
   SpscRing<AudioFrame, kRingCapacity> reference_ring_;
   SpscRing<PlaybackWrite, kRingCapacity> playback_write_ring_;
   std::atomic<std::uint64_t> generation_{1U};
+  std::atomic<std::uint8_t> phase_{static_cast<std::uint8_t>(AudioEnginePhase::kCapture)};
   std::atomic<std::uint64_t> discontinuity_requests_{0U};
   std::uint64_t observed_discontinuity_requests_{0U};
   std::atomic<std::uint32_t> gain_q15_{32768U};
