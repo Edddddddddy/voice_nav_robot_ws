@@ -19,11 +19,17 @@ from pathlib import Path
 
 from launch import LaunchContext
 from launch.actions import IncludeLaunchDescription
+from launch.conditions import IfCondition
+
 from launch_ros.actions import Node
 
 
 def _load_session_launch():
-    launch = Path(__file__).resolve().parents[1] / 'launch' / 'voice_nav_session.launch.py'
+    launch = (
+        Path(__file__).resolve().parents[1]
+        / 'launch'
+        / 'voice_nav_session.launch.py'
+    )
     specification = importlib.util.spec_from_file_location(
         'voice_nav_session_launch', launch,
     )
@@ -35,7 +41,11 @@ def _load_session_launch():
 
 def test_voice_nav_session_launch_source_is_installed():
     """The session launch must be present in the package share launch tree."""
-    launch = Path(__file__).resolve().parents[1] / 'launch' / 'voice_nav_session.launch.py'
+    launch = (
+        Path(__file__).resolve().parents[1]
+        / 'launch'
+        / 'voice_nav_session.launch.py'
+    )
     assert launch.is_file()
 
 
@@ -46,7 +56,23 @@ def test_session_selects_one_mode_composition_and_one_agent_gateway():
         entity for entity in description.entities
         if isinstance(entity, IncludeLaunchDescription)
     ]
-    assert len(includes) == 3
+    mode_includes = [
+        include for include in includes
+        if any(
+            launch_file in str(
+                getattr(
+                    include.launch_description_source,
+                    '_LaunchDescriptionSource__location',
+                )
+            )
+            for launch_file in (
+                'product_sim.launch.py',
+                'mapping_mvp.launch.py',
+                'navigation_mvp.launch.py',
+            )
+        )
+    ]
+    assert len(mode_includes) == 3
 
     expected = {
         'motion': 'product_sim.launch.py',
@@ -57,7 +83,7 @@ def test_session_selects_one_mode_composition_and_one_agent_gateway():
         context = LaunchContext()
         context.launch_configurations['mode'] = mode
         selected = [
-            include for include in includes
+            include for include in mode_includes
             if include.condition.evaluate(context)
         ]
         assert len(selected) == 1
@@ -68,7 +94,9 @@ def test_session_selects_one_mode_composition_and_one_agent_gateway():
             )
         )
 
-    nodes = [entity for entity in description.entities if isinstance(entity, Node)]
+    nodes = [
+        entity for entity in description.entities if isinstance(entity, Node)
+    ]
     assert [
         (getattr(node, '_Node__package', None),
          getattr(node, '_Node__node_executable', None))
@@ -77,3 +105,48 @@ def test_session_selects_one_mode_composition_and_one_agent_gateway():
         ('voice_nav_agent', 'agent_node'),
         ('voice_nav_audio', 'scripted_voice_demo'),
     ]
+
+
+def test_session_selects_one_command_gateway_and_one_agent():
+    """Only the internal console gateway belongs in the session launch."""
+    description = _load_session_launch().generate_launch_description()
+    command_gateways = [
+        entity for entity in description.entities
+        if isinstance(entity, Node)
+        and getattr(entity, '_Node__package', None) == 'voice_nav_audio'
+        and getattr(
+            entity, '_Node__node_executable', None,
+        ) == 'scripted_voice_demo'
+    ]
+    assert len(command_gateways) == 1
+    assert not any(
+        'voice_node.launch.py' in str(
+            getattr(
+                entity.launch_description_source,
+                '_LaunchDescriptionSource__location',
+            )
+        )
+        for entity in description.entities
+        if isinstance(entity, IncludeLaunchDescription)
+    )
+    assert sum(
+        isinstance(entity, Node)
+        and getattr(entity, '_Node__package', None) == 'voice_nav_agent'
+        and getattr(entity, '_Node__node_executable', None) == 'agent_node'
+        for entity in description.entities
+    ) == 1
+    assert isinstance(command_gateways[0].condition, IfCondition)
+
+    def active_gateways(context):
+        return [
+            entity for entity in command_gateways
+            if entity.condition.evaluate(context)
+        ]
+
+    console_context = LaunchContext()
+    console_context.launch_configurations['input'] = 'console'
+    assert active_gateways(console_context) == command_gateways
+
+    none_context = LaunchContext()
+    none_context.launch_configurations['input'] = 'none'
+    assert active_gateways(none_context) == []

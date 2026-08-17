@@ -23,6 +23,7 @@ from launch.substitutions import (
     LaunchConfiguration,
     PathJoinSubstitution,
 )
+
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
@@ -30,6 +31,7 @@ from launch_ros.substitutions import FindPackageShare
 def generate_launch_description():
     """Select one product mode and keep one parameter-driven voice session."""
     mode = LaunchConfiguration('mode')
+    command_input = LaunchConfiguration('input')
     headless = LaunchConfiguration('headless')
     shutdown_on_gazebo_exit = LaunchConfiguration('shutdown_on_gazebo_exit')
     common_arguments = {
@@ -39,6 +41,9 @@ def generate_launch_description():
 
     def mode_condition(value):
         return IfCondition(EqualsSubstitution(mode, value))
+
+    def input_condition(value):
+        return IfCondition(EqualsSubstitution(command_input, value))
 
     motion = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(PathJoinSubstitution([
@@ -85,8 +90,12 @@ def generate_launch_description():
         arguments=[
             '--ros-args',
             '-r',
-            'scripted_voice_demo_configuration:__node:=voice_nav_command_gateway',
+            (
+                'scripted_voice_demo_configuration:__node:='
+                'voice_nav_command_gateway'
+            ),
         ],
+        condition=input_condition('console'),
     )
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -105,7 +114,15 @@ def generate_launch_description():
             'shutdown_on_gazebo_exit',
             default_value='true',
             choices=['true', 'false'],
-            description='Fail closed when the required Gazebo simulation exits.',
+            description=(
+                'Fail closed when the required Gazebo simulation exits.'
+            ),
+        ),
+        DeclareLaunchArgument(
+            'input',
+            default_value='console',
+            choices=['console', 'none'],
+            description='Select the internal command gateway input or none.',
         ),
         motion,
         mapping,

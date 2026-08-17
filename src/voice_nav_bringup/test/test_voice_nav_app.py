@@ -19,9 +19,10 @@ from __future__ import annotations
 import ast
 import builtins
 import importlib.util
+import signal
+import wave
 from io import StringIO
 from pathlib import Path
-import signal
 from types import SimpleNamespace
 
 
@@ -45,6 +46,53 @@ def _load_mode_readiness_module():
     module = importlib.util.module_from_spec(specification)
     specification.loader.exec_module(module)
     return module
+
+
+def _load_sensevoice_input_module():
+    source = Path(__file__).resolve().parents[1] / '_sensevoice_input.py'
+    specification = importlib.util.spec_from_file_location(
+        'voice_nav_sensevoice_input', source,
+    )
+    assert specification is not None and specification.loader is not None
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    return module
+
+
+def _write_pcm_wav(path: Path, *, frames: int = 1600) -> None:
+    with wave.open(str(path), 'wb') as stream:
+        stream.setnchannels(1)
+        stream.setsampwidth(2)
+        stream.setframerate(16000)
+        stream.writeframes(b'\x00\x00' * frames)
+
+
+def _configured_motion_readiness(readiness, now):
+    state = readiness._MotionReadinessState(lambda: now[0])
+    state.observe_runtime(SimpleNamespace(
+        availability=readiness.RUNTIME_AVAILABLE,
+        gate_state=readiness.GATE_INHIBITED,
+        active_step=readiness.NO_ACTIVE_STEP,
+    ))
+    state.observe_motion_gate(SimpleNamespace(
+        state=readiness.MOTION_GATE_INHIBITED,
+        motion_inhibited=True,
+        zero_selected=True,
+        zero_publish_seq=1,
+    ))
+    state.observe_controller_active(True)
+    return state
+
+
+def _odometry_sample(linear_x=0.0):
+    return SimpleNamespace(
+        twist=SimpleNamespace(
+            twist=SimpleNamespace(
+                linear=SimpleNamespace(x=linear_x),
+                angular=SimpleNamespace(z=0.0),
+            ),
+        ),
+    )
 
 
 class _FakeProcess:
@@ -143,14 +191,118 @@ def test_navigation_state_requires_all_lifecycle_nodes_before_map_and_tf():
     assert state.is_ready()
 
 
-def test_motion_mode_readiness_has_no_mode_specific_ros_dependency():
-    """Keep Motion on the existing gateway-only readiness contract."""
+def test_motion_mode_readiness_respects_an_expired_shared_deadline():
+    """Fail closed before creating a readiness observer after the deadline."""
     readiness = _load_mode_readiness_module()
     result = readiness.wait_for_mode_readiness(
-        SimpleNamespace(mode='motion'), 60.0, lambda: 0.0,
+        SimpleNamespace(mode='motion'), 0.0, lambda: 0.0,
     )
 
-    assert result == {'status': 'ready', 'reason': ''}
+    assert result == {
+        'status': 'unavailable',
+        'reason': 'mode_readiness_timeout',
+        'mode': 'motion',
+        'stage': 'deadline',
+    }
+
+
+def test_product_frontend_accepts_a_bounded_noncanonical_pcm_wav(tmp_path):
+    """Accept a supported bounded WAV without requiring the locked fixture."""
+    sensevoice_input = _load_sensevoice_input_module()
+    wav = tmp_path / 'noncanonical.wav'
+    _write_pcm_wav(wav, frames=1600)
+
+    assert sensevoice_input.validate_input_wav(str(wav)) == {
+        'status': 'ready',
+        'reason': '',
+    }
+
+
+def test_product_frontend_rejects_empty_malformed_and_oversized_wav(tmp_path):
+    """Reject invalid WAVs before any session or provider process starts."""
+    sensevoice_input = _load_sensevoice_input_module()
+
+    empty = tmp_path / 'empty.wav'
+    empty.write_bytes(b'')
+    assert sensevoice_input.validate_input_wav(str(empty))['reason'] == (
+        'input_wav_empty'
+    )
+
+    malformed = tmp_path / 'malformed.wav'
+    _write_pcm_wav(malformed, frames=1600)
+    malformed.write_bytes(malformed.read_bytes()[:-2])
+    assert sensevoice_input.validate_input_wav(str(malformed))['reason'] == (
+        'input_wav_unsupported_format'
+    )
+
+    oversized = tmp_path / 'oversized.wav'
+    _write_pcm_wav(oversized, frames=240001)
+    assert sensevoice_input.validate_input_wav(str(oversized))['reason'] == (
+        'input_wav_too_large'
+    )
+
+
+def test_motion_readiness_requires_typed_safe_stationary_barrier():
+    """Require all motion evidence and the existing safe hold window."""
+    readiness = _load_mode_readiness_module()
+    now = [0.0]
+    state = _configured_motion_readiness(readiness, now)
+    state.observe_odometry(_odometry_sample())
+
+    assert not state.is_ready()
+    now[0] = readiness.MOTION_SAFE_STATIONARY_HOLD_S
+    assert not state.is_ready()
+
+
+def test_motion_readiness_accepts_continuous_fresh_stationary_odometry():
+    """Require fresh stationary odometry throughout the hold window."""
+    readiness = _load_mode_readiness_module()
+    now = [0.0]
+    state = _configured_motion_readiness(readiness, now)
+    stationary = _odometry_sample()
+    state.observe_odometry(stationary)
+
+    for sample_index in range(1, 101):
+        now[0] = sample_index * 0.02
+        state.observe_odometry(stationary)
+
+    assert state.is_ready()
+
+
+def test_motion_readiness_resets_after_stale_odometry_gap():
+    """Do not carry a stationary window across a stale odometry gap."""
+    readiness = _load_mode_readiness_module()
+    now = [0.0]
+    state = _configured_motion_readiness(readiness, now)
+    stationary = _odometry_sample()
+    state.observe_odometry(stationary)
+
+    now[0] = readiness.MOTION_SAFE_STATIONARY_HOLD_S + (
+        readiness._MOTION_ODOMETRY_FRESHNESS_S + 0.01
+    )
+    state.observe_odometry(stationary)
+
+    assert not state.is_ready()
+
+
+def test_motion_readiness_resets_after_nonstationary_odometry_sample():
+    """Reset the hold window when a fresh odometry sample is moving."""
+    readiness = _load_mode_readiness_module()
+    now = [0.0]
+    state = _configured_motion_readiness(readiness, now)
+    stationary = _odometry_sample()
+    state.observe_odometry(stationary)
+    for sample_index in range(1, 51):
+        now[0] = sample_index * 0.02
+        state.observe_odometry(stationary)
+
+    moving = _odometry_sample(0.2)
+    state.observe_odometry(moving)
+    for sample_index in range(51, 150):
+        now[0] = sample_index * 0.02
+        state.observe_odometry(stationary)
+
+    assert not state.is_ready()
 
 
 def test_mode_readiness_timeout_is_bounded_with_mode_and_stage():
@@ -241,6 +393,28 @@ def test_app_starts_fixed_session_waits_ready_then_enters_existing_console():
     assert len(console_calls) == 1
     assert console_calls[0][0].getvalue() == ''
     assert console_calls[0][1] is stdout
+
+
+def test_motion_console_keeps_existing_gateway_only_startup_path():
+    """Do not put the SenseVoice motion barrier in front of console input."""
+    app = _load_app_module()
+    process = _FakeProcess()
+
+    def unexpected_mode_readiness(*_args):
+        raise AssertionError(
+            'motion console must not use SenseVoice readiness'
+        )
+
+    assert app.main(
+        [],
+        process_factory=lambda *_args, **_kwargs: process,
+        readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        mode_readiness=unexpected_mode_readiness,
+        console_main=lambda **_kwargs: 0,
+        clock=lambda: 0.0,
+        stdout=StringIO(),
+        stderr=StringIO(),
+    ) == 0
 
 
 def test_navigation_headless_uses_one_closed_session_spec_before_console():
@@ -450,13 +624,240 @@ def test_invalid_mode_or_display_is_rejected_before_process_spawn():
         starts = []
         result = app.main(
             argv,
-            process_factory=lambda *args, **kwargs: starts.append((args, kwargs)),
+            process_factory=(
+                lambda *args, **kwargs: starts.append((args, kwargs))
+            ),
             stdout=StringIO(),
             stderr=StringIO(),
         )
 
         assert result == 2
         assert starts == []
+
+
+def test_input_matrix_rejects_invalid_values_before_process_spawn(tmp_path):
+    """Reject the closed input/path matrix before creating an owned process."""
+    app = _load_app_module()
+    wav = tmp_path / 'input.wav'
+    _write_pcm_wav(wav)
+    directory = tmp_path / 'wav-directory'
+    directory.mkdir()
+    invalid_argv = (
+        ['--input', 'microphone'],
+        ['--input', 'none'],
+        ['--input', 'console', '--input-wav', str(wav.resolve())],
+        ['--input', 'sensevoice-wav'],
+        ['--input', 'sensevoice-wav', '--input-wav', 'relative.wav'],
+        ['--input', 'sensevoice-wav', '--input-wav', str(directory.resolve())],
+        [
+            '--input', 'sensevoice-wav',
+            '--input-wav', str(tmp_path / 'missing.wav'),
+        ],
+    )
+
+    for argv in invalid_argv:
+        starts = []
+        result = app.main(
+            argv,
+            process_factory=(
+                lambda *args, **kwargs: starts.append((args, kwargs))
+            ),
+            stdout=StringIO(),
+            stderr=StringIO(),
+        )
+
+        assert result != 0
+        assert starts == []
+
+
+def test_input_matrix_keeps_console_default_and_selects_one_wav_frontend(
+    tmp_path,
+):
+    """Select console by default or one bounded WAV frontend."""
+    app = _load_app_module()
+    wav = tmp_path / 'input.wav'
+    _write_pcm_wav(wav)
+    starts = []
+
+    def process_factory(command, **kwargs):
+        starts.append((tuple(command), kwargs))
+        return _FakeProcess()
+
+    def readiness(*_args):
+        return {'status': 'ready', 'reason': ''}
+
+    assert app.main(
+        [],
+        process_factory=process_factory,
+        readiness=readiness,
+        mode_readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        console_main=lambda **_kwargs: 0,
+        clock=lambda: 0.0,
+        stdout=StringIO(),
+        stderr=StringIO(),
+    ) == 0
+    assert starts[-1][0] == (
+        'ros2', 'launch', 'voice_nav_bringup',
+        'voice_nav_session.launch.py',
+        'mode:=motion', 'headless:=true',
+        'shutdown_on_gazebo_exit:=true',
+    )
+
+    assert app.main(
+        [
+            '--mode', 'motion', '--display', 'headless',
+            '--input', 'sensevoice-wav', '--input-wav', str(wav.resolve()),
+        ],
+        process_factory=process_factory,
+        readiness=readiness,
+        mode_readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        frontend_factory=(
+            lambda command, **kwargs: process_factory(command, **kwargs)
+        ),
+        clock=lambda: 0.0,
+        stdout=StringIO(),
+        stderr=StringIO(),
+    ) == 0
+    assert starts[-2][0] == (
+        'ros2', 'launch', 'voice_nav_bringup',
+        'voice_nav_session.launch.py',
+        'mode:=motion', 'headless:=true',
+        'shutdown_on_gazebo_exit:=true',
+        'input:=none',
+    )
+    assert starts[-1][0] == (
+        'ros2', 'launch', 'voice_nav_audio', 'voice_node.launch.py',
+        'input_profile:=sensevoice_wav',
+        f'input_wav:={wav.resolve()}', 'include_agent:=false',
+    )
+    assert not any(
+        'model' in argument or 'vad' in argument
+        for command, _kwargs in starts[-2:]
+        for argument in command
+    )
+
+
+def test_sensevoice_provider_is_not_started_when_mode_readiness_is_blocked(
+    tmp_path,
+):
+    """Stage the provider behind mode readiness and clean the session."""
+    app = _load_app_module()
+    wav = tmp_path / 'input.wav'
+    _write_pcm_wav(wav)
+    session_process = _FakeProcess()
+    frontend_starts = []
+
+    def frontend_factory(*args, **kwargs):
+        frontend_starts.append((args, kwargs))
+        return _FakeProcess()
+
+    result = app.main(
+        [
+            '--input', 'sensevoice-wav', '--input-wav', str(wav.resolve()),
+        ],
+        process_factory=lambda *_args, **_kwargs: session_process,
+        frontend_factory=frontend_factory,
+        readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        mode_readiness=lambda *_args: {
+            'status': 'unavailable',
+            'reason': 'mode_readiness_timeout',
+            'mode': 'motion',
+            'stage': 'deadline',
+        },
+        clock=lambda: 0.0,
+        stdout=StringIO(),
+        stderr=StringIO(),
+    )
+
+    assert result == 1
+    assert frontend_starts == []
+    assert session_process.group_signals == [signal.SIGINT]
+
+
+def test_sensevoice_provider_is_not_started_until_agent_input_sink_is_ready(
+    tmp_path,
+):
+    """Block the one-shot provider until the long-lived Agent sink is ready."""
+    app = _load_app_module()
+    wav = tmp_path / 'input.wav'
+    _write_pcm_wav(wav)
+    session_process = _FakeProcess()
+    frontend_starts = []
+    events = []
+
+    def mode_readiness(*_args):
+        events.append('mode-ready')
+        return {'status': 'ready', 'reason': ''}
+
+    def input_sink_readiness(timeout_s, _clock):
+        assert timeout_s == 60.0
+        events.append('input-sink-check')
+        return {
+            'status': 'unavailable',
+            'reason': 'sensevoice_wav_input_sink_timeout',
+        }
+
+    result = app.main(
+        [
+            '--input', 'sensevoice-wav', '--input-wav', str(wav.resolve()),
+        ],
+        process_factory=lambda *_args, **_kwargs: session_process,
+        frontend_factory=lambda *args, **kwargs: frontend_starts.append(
+            (args, kwargs)
+        ),
+        readiness=input_sink_readiness,
+        mode_readiness=mode_readiness,
+        clock=lambda: 0.0,
+        stdout=StringIO(),
+        stderr=StringIO(),
+    )
+
+    assert result == 1
+    assert events == ['mode-ready', 'input-sink-check']
+    assert frontend_starts == []
+    assert session_process.group_signals == [signal.SIGINT]
+
+
+def test_sensevoice_provider_starts_once_only_after_input_sink_readiness(
+    tmp_path,
+):
+    """Wait for the Agent sink before starting one provider."""
+    app = _load_app_module()
+    wav = tmp_path / 'input.wav'
+    _write_pcm_wav(wav)
+    session_process = _FakeProcess()
+    frontend_process = _FakeProcess()
+    events = []
+
+    def mode_readiness(*_args):
+        events.append('mode-ready')
+        return {'status': 'ready', 'reason': ''}
+
+    def frontend_factory(command, **kwargs):
+        events.append(('frontend-start', tuple(command)))
+        return frontend_process
+
+    def input_sink_readiness(*_args):
+        events.append('input-sink-ready')
+        return {'status': 'ready', 'reason': ''}
+
+    result = app.main(
+        [
+            '--input', 'sensevoice-wav', '--input-wav', str(wav.resolve()),
+        ],
+        process_factory=lambda *_args, **_kwargs: session_process,
+        frontend_factory=frontend_factory,
+        readiness=input_sink_readiness,
+        mode_readiness=mode_readiness,
+        clock=lambda: 0.0,
+        stdout=StringIO(),
+        stderr=StringIO(),
+    )
+
+    assert result == 0
+    assert events[0] == 'mode-ready'
+    assert events[1] == 'input-sink-ready'
+    assert events[2][0] == 'frontend-start'
 
 
 def test_installed_console_fallback_loads_extensionless_existing_console(
@@ -786,7 +1187,8 @@ def test_app_static_authority_is_limited_to_process_and_gateway_readiness():
     source_text = source.read_text(encoding='utf-8')
     tree = ast.parse(source_text)
     allowed_roots = {
-        '__future__', 'argparse', 'json', 'os', 'rcl_interfaces', 'rclpy',
+        '__future__', 'argparse', 'dataclasses', 'json', 'os',
+        'rcl_interfaces', 'rclpy',
         'runpy', 'signal', 'subprocess', 'sys', 'time', 'typing',
         'voice_nav_console',
     }
