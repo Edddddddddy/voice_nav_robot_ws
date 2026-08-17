@@ -172,6 +172,9 @@ if(VOICE_NAV_AUDIO_WITH_PORTAUDIO)
   target_compile_definitions(portaudio_adapter PRIVATE VOICE_NAV_AUDIO_WITH_PORTAUDIO=1)
   target_include_directories(portaudio_adapter PRIVATE "${PORTAUDIO_INCLUDE_DIR}")
   target_link_libraries(portaudio_adapter PRIVATE "${PORTAUDIO_LIBRARY}")
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_libraries(portaudio_adapter PRIVATE m)
+  endif()
 endif()
 
 option(

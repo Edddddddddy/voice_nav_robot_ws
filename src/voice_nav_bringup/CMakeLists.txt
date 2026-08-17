@@ -72,6 +72,26 @@ if(BUILD_TESTING)
     TIMEOUT 30
   )
   ament_add_pytest_test(
+    real_audio_motion_smoke_contract
+    test/test_real_audio_motion_smoke_contract.py
+    TIMEOUT 30
+  )
+  ament_add_pytest_test(
+    prepare_sherpa_tts_prefix_contract
+    test/test_prepare_sherpa_tts_prefix_contract.py
+    TIMEOUT 30
+  )
+  ament_add_pytest_test(
+    real_audio_motion_smoke_entry
+    test/test_real_audio_motion_smoke_entry.py
+    TIMEOUT 30
+  )
+  ament_add_pytest_test(
+    real_audio_motion_smoke_replay
+    test/test_real_audio_motion_smoke_replay.py
+    TIMEOUT 30
+  )
+  ament_add_pytest_test(
     canonical_session_driver
     test/test_canonical_session_driver.py
     TIMEOUT 30
@@ -187,8 +207,18 @@ install(
   FILES
     _mode_readiness.py
     _sensevoice_input.py
+    _sensevoice_asset_verifier.py
     _chaowen_asset_verifier.py
+    _real_audio_motion_smoke.py
+    _motion_smoke_observer.py
   DESTINATION lib/${PROJECT_NAME}
+)
+
+install(
+  FILES
+    test/canonical_session_driver.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME _canonical_session_driver.py
 )
 
 install(
@@ -198,10 +228,24 @@ install(
 )
 
 install(
+  FILES
+    "${CMAKE_CURRENT_SOURCE_DIR}/../voice_nav_audio/src/sensevoice_runtime_asset_manifest.def"
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME _sensevoice_runtime_asset_manifest.def
+)
+
+install(
   PROGRAMS
     voice_nav_app.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME voice_nav_app
+)
+
+install(
+  PROGRAMS
+    voice_nav_motion_smoke.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME voice_nav_motion_smoke
 )
 
 install(

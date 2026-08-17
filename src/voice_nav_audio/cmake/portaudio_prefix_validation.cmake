@@ -60,7 +60,11 @@ function(voice_nav_validate_portaudio_prefix prefix include_variable library_var
   endif()
   include(CheckCSourceCompiles)
   set(CMAKE_REQUIRED_INCLUDES "${portaudio_include_dir}")
-  set(CMAKE_REQUIRED_LIBRARIES "${portaudio_real_library}")
+  set(portaudio_probe_libraries "${portaudio_real_library}")
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    list(APPEND portaudio_probe_libraries m)
+  endif()
+  set(CMAKE_REQUIRED_LIBRARIES "${portaudio_probe_libraries}")
   unset(VOICE_NAV_PORTAUDIO_ARCHIVE_LINKS CACHE)
   check_c_source_compiles(
     "#include <portaudio.h>\nint main(void) { return Pa_GetVersion(); }"

@@ -43,6 +43,9 @@ endforeach()
 target_compile_definitions(portaudio_adapter PRIVATE VOICE_NAV_AUDIO_WITH_PORTAUDIO=1)
 target_include_directories(portaudio_adapter PRIVATE "${PORTAUDIO_INCLUDE_DIR}")
 target_link_libraries(portaudio_adapter PRIVATE "${PORTAUDIO_LIBRARY}")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_link_libraries(portaudio_adapter PRIVATE m)
+endif()
 target_link_libraries(portaudio_adapter PUBLIC audio_engine)
 add_executable(portaudio_adapter_backend_fixture portaudio_adapter_backend_fixture.cpp)
 target_compile_features(portaudio_adapter_backend_fixture PRIVATE cxx_std_17)
@@ -52,6 +55,9 @@ target_include_directories(portaudio_adapter_backend_fixture PRIVATE
 target_link_libraries(portaudio_adapter_backend_fixture PRIVATE
   portaudio_adapter
   "${PORTAUDIO_LIBRARY}")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_link_libraries(portaudio_adapter_backend_fixture PRIVATE m)
+endif()
 ]=])
 else()
 file(WRITE "${fixture_source_dir}/CMakeLists.txt" [=[
@@ -63,6 +69,9 @@ voice_nav_validate_portaudio_prefix(
 add_library(portaudio_adapter STATIC portaudio_adapter_probe.c)
 target_include_directories(portaudio_adapter PRIVATE "${PORTAUDIO_INCLUDE_DIR}")
 target_link_libraries(portaudio_adapter PRIVATE "${PORTAUDIO_LIBRARY}")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_link_libraries(portaudio_adapter PRIVATE m)
+endif()
 ]=])
 file(WRITE "${fixture_source_dir}/portaudio_adapter_probe.c" [=[
 #include <portaudio.h>
@@ -157,6 +166,7 @@ function(write_prefix prefix receipt)
   set(archive_source "${prefix}/portaudio_fixture.c")
   set(archive_object "${prefix}/portaudio_fixture.o")
   file(WRITE "${archive_source}" [=[
+#include <math.h>
 #include <portaudio.h>
 
 struct PaStream
@@ -183,7 +193,8 @@ static short callback_output[480];
 
 int Pa_GetVersion(void)
 {
-  return 0;
+  volatile double fixture_version = 1.25;
+  return (int)floor(fixture_version);
 }
 
 int Pa_Initialize(void)

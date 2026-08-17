@@ -66,19 +66,16 @@ enum class InputProfile
 };
 
 constexpr std::size_t kExpectedWaveBytes = 178988U;
-constexpr std::size_t kExpectedSenseVoiceModelBytes = 239233841U;
-constexpr std::size_t kExpectedTokensBytes = 315894U;
-constexpr std::size_t kExpectedVadBytes = 212860U;
 constexpr std::size_t kExpectedWaveSamples = 89472U;
 constexpr char kExpectedText[] = "开放时间早上9点至下午5点。";
 constexpr char kExpectedWaveSha256[] =
   "b77f1794fe374a0ba1ee1dc458bfaf9349496cbbfc32780c50ba3c5a7ad8e373";
-constexpr char kExpectedSenseVoiceModelSha256[] =
-  "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51";
-constexpr char kExpectedTokensSha256[] =
-  "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc";
-constexpr char kExpectedVadSha256[] =
-  "c36d490aff5ab924ca6c7aeec4d8f6bd3d22db6fa17611b9c5b17eae58ac3a20";
+
+#define VOICE_NAV_SENSEVOICE_ASSET(name, bytes, sha256) \
+  constexpr std::size_t kExpected##name##Bytes = bytes; \
+  constexpr char kExpected##name##Sha256[] = sha256;
+#include "sensevoice_runtime_asset_manifest.def"
+#undef VOICE_NAV_SENSEVOICE_ASSET
 
 struct WaveDeleter
 {
