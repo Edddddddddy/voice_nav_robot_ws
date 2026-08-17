@@ -37,6 +37,8 @@ def generate_launch_description() -> LaunchDescription:
     """Run one bounded SenseVoice WAV turn and stop when the root exits."""
     input_wav = LaunchConfiguration('input_wav')
     input_profile = LaunchConfiguration('input_profile')
+    output_wav = LaunchConfiguration('output_wav')
+    chaowen_tts_root = LaunchConfiguration('chaowen_tts_root')
     result_path = LaunchConfiguration('result_path')
     silero_vad_model = LaunchConfiguration('silero_vad_model')
     sensevoice_model = LaunchConfiguration('sensevoice_model')
@@ -52,6 +54,8 @@ def generate_launch_description() -> LaunchDescription:
         parameters=[{
             'input_profile': input_profile,
             'input_wav': input_wav,
+            'output_wav': output_wav,
+            'chaowen_tts_root': chaowen_tts_root,
             'silero_vad_model': silero_vad_model,
             'sensevoice_model': sensevoice_model,
             'sensevoice_tokens': sensevoice_tokens,
@@ -86,6 +90,11 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument(
             'input_wav',
             default_value=_environment('VOICE_NAV_SENSEVOICE_WAV'),
+        ),
+        DeclareLaunchArgument('output_wav', default_value=''),
+        DeclareLaunchArgument(
+            'chaowen_tts_root',
+            default_value=_environment('VOICE_NAV_CHAOWEN_TTS_ROOT'),
         ),
         DeclareLaunchArgument(
             'silero_vad_model',

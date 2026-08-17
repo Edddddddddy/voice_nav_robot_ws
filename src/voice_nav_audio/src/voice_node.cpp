@@ -39,10 +39,13 @@
 #include <vector>
 
 #include "rclcpp/rclcpp.hpp"
+#include "chaowen_tts_adapter.hpp"
+#include "file_audio_device.hpp"
 #include "sensevoice_sherpa_adapter.hpp"
 #include "sherpa-onnx/c-api/c-api.h"
 #include "speech_input_node.hpp"
 #include "voice_input_policy.hpp"
+#include "voice_pipeline.hpp"
 #include "voice_nav_interfaces/msg/voice_turn.hpp"
 
 namespace voice_nav_audio
@@ -158,7 +161,7 @@ std::string parameter_or_environment(
   return from_environment == nullptr ? std::string{} : std::string(from_environment);
 }
 
-class VoiceNode final : public rclcpp::Node
+class VoiceNode final : public rclcpp::Node, public SpeechOutputTraceSink
 {
 public:
   VoiceNode()
@@ -166,6 +169,8 @@ public:
   {
     declare_parameter("input_profile", "sensevoice_wav");
     declare_parameter("input_wav", "");
+    declare_parameter("output_wav", "");
+    declare_parameter("chaowen_tts_root", "");
     declare_parameter("silero_vad_model", "");
     declare_parameter("sensevoice_model", "");
     declare_parameter("sensevoice_tokens", "");
@@ -205,6 +210,32 @@ public:
     return turns_;
   }
 
+  [[nodiscard]] bool wait_for_speak(const std::chrono::seconds timeout)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, timeout, [this]() {return !speak_results_.empty();});
+  }
+
+  [[nodiscard]] std::vector<SpeechResult> speak_results() const
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return speak_results_;
+  }
+
+  void on_played(const std::uint64_t, const std::uint64_t) noexcept override
+  {
+  }
+
+  void on_result(const SpeechResult & result) noexcept override
+  {
+    try {
+      std::lock_guard<std::mutex> lock(mutex_);
+      speak_results_.push_back(result);
+      condition_.notify_all();
+    } catch (...) {
+    }
+  }
+
 private:
   [[nodiscard]] bool has_agent_subscription() const
   {
@@ -218,6 +249,7 @@ private:
   mutable std::mutex mutex_{};
   std::condition_variable condition_{};
   std::vector<ObservedTurn> turns_{};
+  std::vector<SpeechResult> speak_results_{};
 };
 
 Sample sample_from_float(const float value) noexcept
@@ -230,8 +262,7 @@ Sample sample_from_float(const float value) noexcept
   return static_cast<Sample>(clamped);
 }
 
-void feed_frame(
-  SpeechInputNode & speech,
+CleanedAudioFrame make_frame(
   const SherpaOnnxWave & wave,
   const std::uint64_t sequence,
   const std::size_t offset)
@@ -246,7 +277,25 @@ void feed_frame(
     frame.samples[index] = sample_index < static_cast<std::size_t>(wave.num_samples) ?
       sample_from_float(wave.samples[sample_index]) : Sample{0};
   }
-  speech.accept_cleaned_frame(frame);
+  return frame;
+}
+
+void feed_frame(
+  SpeechInputNode & speech,
+  const SherpaOnnxWave & wave,
+  const std::uint64_t sequence,
+  const std::size_t offset)
+{
+  speech.accept_cleaned_frame(make_frame(wave, sequence, offset));
+}
+
+void feed_frame(
+  VoicePipeline & pipeline,
+  const SherpaOnnxWave & wave,
+  const std::uint64_t sequence,
+  const std::size_t offset)
+{
+  pipeline.accept_cleaned_frame(make_frame(wave, sequence, offset));
 }
 
 void write_report(
@@ -336,6 +385,8 @@ int main(int argc, char ** argv)
 {
   std::string report_path{};
   std::string wav_path{};
+  std::string output_wav_path{};
+  std::string chaowen_tts_root{};
   std::string vad_path{};
   std::string model_path{};
   std::string tokens_path{};
@@ -350,6 +401,8 @@ int main(int argc, char ** argv)
     };
   std::shared_ptr<voice_nav_audio::VoiceNode> node;
   std::shared_ptr<voice_nav_audio::SpeechInputNode> speech;
+  std::unique_ptr<voice_nav_audio::VoicePipeline> pipeline;
+  std::unique_ptr<voice_nav_audio::FileAudioDevice> file_device;
   bool real_model_gate = false;
 
   try {
@@ -359,6 +412,13 @@ int main(int argc, char ** argv)
     node->get_parameter("input_profile", profile);
     const auto input_profile = voice_nav_audio::parse_input_profile(profile);
     real_model_gate = input_profile == voice_nav_audio::InputProfile::kRealModelGate;
+    output_wav_path = voice_nav_audio::parameter_or_environment(
+      *node, "output_wav", "VOICE_NAV_OUTPUT_WAV");
+    chaowen_tts_root = voice_nav_audio::parameter_or_environment(
+      *node, "chaowen_tts_root", "VOICE_NAV_CHAOWEN_TTS_ROOT");
+    if (real_model_gate && !output_wav_path.empty()) {
+      throw std::invalid_argument("output_wav requires the sensevoice_wav input profile");
+    }
     if (real_model_gate) {
       node->get_parameter("result_path", report_path);
       if (report_path.empty()) {
@@ -399,15 +459,48 @@ int main(int argc, char ** argv)
       }
     }
 
+    if (!output_wav_path.empty()) {
+      const std::filesystem::path output_path(output_wav_path);
+      if (!output_path.is_absolute() || std::filesystem::is_symlink(output_path) ||
+        std::filesystem::exists(output_path))
+      {
+        throw std::invalid_argument("output_wav must be an absolute new path");
+      }
+      const auto parent = output_path.parent_path();
+      if (parent.empty() || !std::filesystem::is_directory(parent) ||
+        ::access(parent.c_str(), W_OK) != 0)
+      {
+        throw std::invalid_argument("output_wav parent is not writable");
+      }
+      const std::filesystem::path tts_root(chaowen_tts_root);
+      if (chaowen_tts_root.empty() || !tts_root.is_absolute() ||
+        std::filesystem::is_symlink(tts_root) || !std::filesystem::is_directory(tts_root))
+      {
+        throw std::invalid_argument("Chaowen TTS root is not a verified directory");
+      }
+    }
+
     auto provider = voice_nav_audio::make_sherpa_sensevoice_provider(
       voice_nav_audio::SherpaSenseVoiceAssetPaths{vad_path, model_path, tokens_path});
     if (!provider->arm_once()) {
       throw std::runtime_error("SenseVoice provider could not arm once");
     }
-    speech = std::make_shared<voice_nav_audio::SpeechInputNode>(std::move(provider));
+    if (output_wav_path.empty()) {
+      speech = std::make_shared<voice_nav_audio::SpeechInputNode>(std::move(provider));
+    } else {
+      file_device = std::make_unique<voice_nav_audio::FileAudioDevice>(output_wav_path);
+      pipeline = std::make_unique<voice_nav_audio::VoicePipeline>(
+        std::move(provider),
+        std::make_unique<voice_nav_audio::ChaowenTtsAdapter>(chaowen_tts_root),
+        *file_device, node.get());
+    }
     rclcpp::executors::SingleThreadedExecutor executor;
     executor.add_node(node);
-    executor.add_node(speech);
+    if (pipeline) {
+      pipeline->add_to_executor(executor);
+    } else {
+      executor.add_node(speech);
+    }
     std::thread spin_thread([&executor]() {executor.spin();});
 
     if (!node->wait_for_agent(std::chrono::seconds(20))) {
@@ -420,11 +513,21 @@ int main(int argc, char ** argv)
       offset < static_cast<std::size_t>(wave->num_samples);
       offset += voice_nav_audio::CleanedAudioFrame::kSamples)
     {
-      voice_nav_audio::feed_frame(*speech, *wave, sequence++, offset);
+      if (pipeline) {
+        voice_nav_audio::feed_frame(*pipeline, *wave, sequence++, offset);
+      } else {
+        voice_nav_audio::feed_frame(*speech, *wave, sequence++, offset);
+      }
     }
-    speech->finish_input();
+    if (pipeline) {
+      pipeline->finish_input();
+    } else {
+      speech->finish_input();
+    }
     const bool got_turn = node->wait_for_turn(std::chrono::seconds(45));
     turns = node->turns();
+    const bool got_speak = !pipeline || (got_turn &&
+      node->wait_for_speak(std::chrono::seconds(45)));
     executor.cancel();
     spin_thread.join();
     if (!got_turn || turns.size() != 1U ||
@@ -432,6 +535,15 @@ int main(int argc, char ** argv)
       turns.front().voice_seq != 1U)
     {
       throw std::runtime_error("installed voice_node did not produce one VoiceTurn");
+    }
+    if (pipeline) {
+      const auto speak_results = node->speak_results();
+      if (!got_speak || speak_results.size() != 1U ||
+        speak_results.front().code != voice_nav_audio::SpeechResultCode::Completed ||
+        speak_results.front().played_samples == 0U)
+      {
+        throw std::runtime_error("installed voice_node did not complete one Speak output");
+      }
     }
     if (real_model_gate && turns.front().text != voice_nav_audio::kExpectedText) {
       throw std::runtime_error("real-model gate did not produce the exact VoiceTurn");
@@ -446,15 +558,22 @@ int main(int argc, char ** argv)
         report_path, exact_head, wav_path, vad_path, model_path, tokens_path, turns, status, detail,
         elapsed_ms());
     }
+    pipeline.reset();
+    if (file_device && !file_device->commit()) {
+      throw std::runtime_error("file-backed Speak output could not be committed");
+    }
+    file_device.reset();
     speech.reset();
     node.reset();
     rclcpp::shutdown();
     return 0;
   } catch (const std::exception & error) {
     detail = error.what();
+    pipeline.reset();
     if (speech) {
       speech.reset();
     }
+    file_device.reset();
     node.reset();
     if (rclcpp::ok()) {
       rclcpp::shutdown();

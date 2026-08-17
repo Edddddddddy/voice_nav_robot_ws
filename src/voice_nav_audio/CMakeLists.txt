@@ -15,6 +15,7 @@ find_package(rclcpp_action REQUIRED)
 find_package(rcl_interfaces REQUIRED)
 find_package(rosgraph_msgs REQUIRED)
 find_package(voice_nav_interfaces REQUIRED)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 # uncomment the following section in order to fill in
 # further dependencies manually.
 # find_package(<dependency> REQUIRED)
@@ -31,7 +32,9 @@ add_library(speech_output_node STATIC src/speech_output_node.cpp)
 add_library(voice_pipeline_coordination STATIC src/voice_pipeline_coordination.cpp)
 add_library(voice_pipeline STATIC src/voice_pipeline.cpp)
 add_library(ros_stop_mission_port STATIC src/ros_stop_mission_port.cpp)
+add_library(chaowen_tts_asset_verifier STATIC src/chaowen_tts_asset_verifier.cpp)
 add_library(chaowen_tts_adapter STATIC src/chaowen_tts_adapter.cpp)
+add_library(file_audio_device STATIC src/file_audio_device.cpp)
 add_library(
   audio_engine STATIC
   $<TARGET_OBJECTS:audio_engine_core>
@@ -57,7 +60,9 @@ foreach(target
     voice_pipeline_coordination
     voice_pipeline
     ros_stop_mission_port
+    chaowen_tts_asset_verifier
     chaowen_tts_adapter
+    file_audio_device
     portaudio_adapter
     portaudio_adapter_callback)
   target_compile_features(${target} PUBLIC cxx_std_17)
@@ -77,6 +82,7 @@ target_link_libraries(voice_pipeline_coordination speech_input_core speech_outpu
 ament_target_dependencies(voice_pipeline rclcpp rclcpp_action voice_nav_interfaces)
 ament_target_dependencies(ros_stop_mission_port rclcpp voice_nav_interfaces)
 target_link_libraries(ros_stop_mission_port voice_pipeline_coordination)
+target_link_libraries(chaowen_tts_asset_verifier PUBLIC OpenSSL::Crypto)
 target_link_libraries(
   voice_pipeline
   speech_input_node
@@ -85,7 +91,7 @@ target_link_libraries(
   ros_stop_mission_port
   portaudio_adapter
 )
-target_link_libraries(chaowen_tts_adapter speech_output_core)
+target_link_libraries(chaowen_tts_adapter speech_output_core chaowen_tts_asset_verifier)
 target_link_libraries(portaudio_adapter PUBLIC audio_engine)
 
 # This executable is deliberately limited to the installed, simulation-only
@@ -113,6 +119,11 @@ install(
   DESTINATION share/${PROJECT_NAME}
   PATTERN "__pycache__" EXCLUDE
   PATTERN "*.pyc" EXCLUDE
+)
+
+install(
+  FILES src/chaowen_tts_asset_manifest.def
+  DESTINATION share/${PROJECT_NAME}
 )
 
 option(
@@ -191,13 +202,27 @@ if(VOICE_NAV_AUDIO_WITH_SHERPA_ONNX)
     INTERFACE
       "-Wl,--disable-new-dtags,-rpath,${SHERPA_ONNX_RUNTIME_RPATH}")
 
+  target_compile_definitions(
+    chaowen_tts_adapter
+    PRIVATE VOICE_NAV_AUDIO_WITH_SHERPA_ONNX=1)
+  target_include_directories(
+    chaowen_tts_adapter
+    PRIVATE include src "${SHERPA_ONNX_INCLUDE_DIR}")
+  target_link_libraries(chaowen_tts_adapter ${SHERPA_ONNX_LIBRARIES})
+  target_link_options(
+    chaowen_tts_adapter
+    INTERFACE
+      "-Wl,--disable-new-dtags,-rpath,${SHERPA_ONNX_RUNTIME_RPATH}")
+
   add_executable(voice_node src/voice_node.cpp)
   target_compile_features(voice_node PRIVATE cxx_std_17)
   target_include_directories(
     voice_node
     PRIVATE include src "${SHERPA_ONNX_INCLUDE_DIR}")
   ament_target_dependencies(voice_node rclcpp voice_nav_interfaces)
-  target_link_libraries(voice_node speech_input_node sensevoice_sherpa_adapter)
+  target_link_libraries(
+    voice_node speech_input_node sensevoice_sherpa_adapter voice_pipeline chaowen_tts_adapter
+    file_audio_device)
   target_link_libraries(voice_node voice_input_policy)
   target_link_options(
     voice_node
@@ -356,6 +381,31 @@ if(BUILD_TESTING)
   target_link_libraries(speech_output_core_test speech_output_core)
 
   ament_add_gtest(
+    chaowen_tts_adapter_test
+    test/chaowen_tts_adapter_test.cpp
+  )
+  target_compile_features(chaowen_tts_adapter_test PUBLIC cxx_std_17)
+  target_include_directories(chaowen_tts_adapter_test PRIVATE include src)
+  target_link_libraries(chaowen_tts_adapter_test chaowen_tts_adapter)
+
+  if(VOICE_NAV_AUDIO_WITH_SHERPA_ONNX AND NOT "$ENV{VOICE_NAV_CHAOWEN_TTS_ROOT}" STREQUAL "")
+    ament_add_gtest(
+      chaowen_tts_real_gate
+      test/chaowen_tts_real_gate.cpp
+    )
+    target_compile_features(chaowen_tts_real_gate PUBLIC cxx_std_17)
+    target_include_directories(chaowen_tts_real_gate PRIVATE include src)
+    target_link_libraries(chaowen_tts_real_gate chaowen_tts_adapter)
+    target_link_options(
+      chaowen_tts_real_gate
+      PRIVATE
+        "-Wl,--disable-new-dtags,-rpath,${SHERPA_ONNX_RUNTIME_RPATH}")
+    set_tests_properties(
+      chaowen_tts_real_gate
+      PROPERTIES ENVIRONMENT "VOICE_NAV_CHAOWEN_TTS_ROOT=$ENV{VOICE_NAV_CHAOWEN_TTS_ROOT}")
+  endif()
+
+  ament_add_gtest(
     voice_pipeline_coordination_test
     test/voice_pipeline_coordination_test.cpp
   )
@@ -405,6 +455,7 @@ if(BUILD_TESTING)
   target_link_libraries(
     voice_pipeline_test
     voice_pipeline
+    file_audio_device
   )
 
   ament_add_gtest(
@@ -535,6 +586,14 @@ if(BUILD_TESTING)
   endforeach()
   target_link_libraries(portaudio_adapter_test_support PUBLIC audio_engine_test_support)
   target_link_libraries(portaudio_adapter_test portaudio_adapter_test_support)
+
+  ament_add_gtest(
+    file_audio_device_test
+    test/file_audio_device_test.cpp
+  )
+  target_compile_features(file_audio_device_test PUBLIC cxx_std_17)
+  target_include_directories(file_audio_device_test PRIVATE include src)
+  target_link_libraries(file_audio_device_test file_audio_device portaudio_adapter_test_support)
 
   ament_add_gtest(
     audio_callback_contract_test

@@ -181,7 +181,8 @@ ZIP size/SHA-256 为 `8509524` / `9f0c0a6998f1b94c399eeddcb443beb4a922c9a4fd431f
 其中 `libonnxruntime.so` size/SHA-256 为 `26403889` /
 `026c7d5c609323fb16506dbc3cce801bcdffdd7566fdba49a50727e2e1e881ca`，SONAME 为
 `libonnxruntime.so`，`GIT_COMMIT_ID=8f0278c77bf44b0cc83c098c6c722b92a36ac4b5`，许可证为 `MIT`。
-构建 receipt 必须是 `BUILD_SHARED_LIBS=OFF`、`SHERPA_ONNX_ENABLE_BINARY=OFF`、C API only 的 exact prefix；
+构建 receipt 必须是 `BUILD_SHARED_LIBS=OFF`、`SHERPA_ONNX_ENABLE_BINARY=OFF`、`SHERPA_ONNX_ENABLE_C_API=ON`、
+`SHERPA_ONNX_ENABLE_TTS=ON` 的 exact prefix；
 consumer ELF 必须是 `DT_NEEDED=libonnxruntime.so` 且只有 approved prefix `DT_RPATH`，拒绝 system/`LD_LIBRARY_PATH` 注入、
 旧 `libonnxruntime.a` 与旧 receipt。
 

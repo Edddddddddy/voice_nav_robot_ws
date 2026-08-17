@@ -56,11 +56,30 @@ ros2 run voice_nav_bringup voice_nav_app --mode mapping --display gui
 `--mode` 仅接受 `motion|mapping|navigation`，`--display` 仅接受 `headless|gui`；不支持 launch 或 ROS
 参数透传，也不支持运行中热切换。Mapping 由 `slam_toolbox` 拥有 `map → odom`，Navigation 由 AMCL
 拥有它；切换模式需退出当前 app 后重新启动。`:quit`、EOF、Ctrl+C、STOP 和启动失败继续沿用已有
-有界 teardown 与退出码契约。本入口仍是仿真-only，不提供物理麦克风、通用 WAV、KWS、AEC、真实 TTS
-或真实 LLM。
+有界 teardown 与退出码契约。默认 console path 仍是仿真-only，不提供物理麦克风、KWS、AEC 或真实 LLM；
+SenseVoice WAV safe-reply 输出见下文。
 
 Navigation 规则仅在 Runtime 公布 `study` 时把 `去书房` 解析为 `NAVIGATE_TO(study)`；缺少该 Place 或遇到
 其他未知中文目标时保持 fail-closed。
+
+### SenseVoice WAV safe-reply 输出
+
+Issue #170 支持在保留默认 console 行为的前提下，把一个已存在的 SenseVoice WAV 输入经过既有
+`VoiceTurn → Agent → Speak` 链路写成 48 kHz、mono、16-bit WAV：
+
+```bash
+export VOICE_NAV_CHAOWEN_TTS_ROOT="$PWD/models/weights/voice-assets/tts/vits-piper-zh_CN-chaowen-medium-int8"
+ros2 run voice_nav_bringup voice_nav_app \
+  --input sensevoice-wav \
+  --input-wav "$PWD/input.wav" \
+  --output-wav "$PWD/safe-reply.wav"
+```
+
+`VOICE_NAV_CHAOWEN_TTS_ROOT` 必须是绝对、已验证的 Chaowen 目录；运行时不会下载模型。先按
+`models/manifests/voice-models.yaml` 的 `tts-chaowen-medium-int8` manifest provision 并执行
+`bash scripts/provision_voice_assets.sh --verify --asset tts-chaowen-medium-int8`。该权重的模型卡
+记录 Xiao Ya/BZNSYP 来源链并限制为非商业使用，详见
+<https://k2-fsa.github.io/sherpa/onnx/tts/all/Chinese/vits-piper-zh_CN-chaowen-medium.html>。
 
 已配置的 controller timeout 是消费者侧 deadman，本身并不能单独证明实体静止。当前 main 已验证
 MotionGate、Mission Runtime、RelativeMotion、运动调节组件以及 crash-stop 的受限仿真验收；真实机器人、
