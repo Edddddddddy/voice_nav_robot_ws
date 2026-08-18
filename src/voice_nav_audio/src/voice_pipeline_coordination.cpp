@@ -29,13 +29,16 @@ bool VoicePipelineCoordination::on_wake_accepted() noexcept
   return output_.admit_ordinary_wake();
 }
 
-void VoicePipelineCoordination::before_turn_published(VoiceTurnPublication & turn) noexcept
+void VoicePipelineCoordination::on_recognizer_terminal(
+  const SpeechEventKind kind, const bool published) noexcept
 {
   if (turn_boundary_ != nullptr) {
-    // The boundary owns capture/playback ordering. It must complete before
-    // this publication reaches the ROS graph.
-    turn_boundary_->on_voice_turn_published();
+    turn_boundary_->on_recognizer_terminal(kind, published);
   }
+}
+
+void VoicePipelineCoordination::before_turn_published(VoiceTurnPublication & turn) noexcept
+{
   if (turn.kind != VoiceTurnKind::kStop || turn.turn_id == last_stop_turn_id_) {
     return;
   }

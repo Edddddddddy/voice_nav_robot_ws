@@ -24,6 +24,8 @@ add_library(audio_engine_callback OBJECT src/audio_engine_callback.cpp)
 add_library(audio_engine_core OBJECT src/audio_engine.cpp)
 add_library(dsp_pipeline STATIC src/dsp_pipeline.cpp)
 add_library(speech_input_core STATIC src/speech_input_core.cpp)
+add_library(one_shot_recognizer_proxy STATIC src/one_shot_recognizer_proxy.cpp)
+add_library(continuous_vad_session STATIC src/continuous_vad_session.cpp)
 add_library(sensevoice_provider STATIC src/sensevoice_provider.cpp)
 add_library(speech_input_node STATIC src/speech_input_node.cpp)
 add_library(voice_input_policy STATIC src/voice_input_policy.cpp)
@@ -53,6 +55,8 @@ foreach(target
     audio_engine_callback
     dsp_pipeline
     speech_input_core
+    one_shot_recognizer_proxy
+    continuous_vad_session
     sensevoice_provider
     speech_input_node
     voice_input_policy
@@ -75,6 +79,8 @@ foreach(target
   )
 endforeach()
 target_link_libraries(sensevoice_provider speech_input_core)
+target_link_libraries(one_shot_recognizer_proxy speech_input_core)
+target_link_libraries(continuous_vad_session one_shot_recognizer_proxy dsp_pipeline voice_pipeline)
 ament_target_dependencies(speech_input_node rclcpp voice_nav_interfaces)
 target_link_libraries(speech_input_node speech_input_core)
 target_link_libraries(speech_output_core audio_engine)
@@ -156,6 +162,15 @@ if(VOICE_NAV_AUDIO_WITH_WEBRTC_APM)
   )
 endif()
 
+add_library(vad_auto_dsp_adapter STATIC src/vad_auto_dsp_adapter.cpp)
+target_compile_features(vad_auto_dsp_adapter PUBLIC cxx_std_17)
+target_include_directories(vad_auto_dsp_adapter PUBLIC include src)
+if(VOICE_NAV_AUDIO_WITH_WEBRTC_APM)
+  target_compile_definitions(vad_auto_dsp_adapter PRIVATE VOICE_NAV_AUDIO_WITH_WEBRTC_APM=1)
+  target_include_directories(vad_auto_dsp_adapter PRIVATE "${WEBRTC_APM_INCLUDE_DIR}")
+  target_link_libraries(vad_auto_dsp_adapter PUBLIC webrtc_apm_adapter)
+endif()
+
 option(
   VOICE_NAV_AUDIO_WITH_PORTAUDIO
   "Build the PortAudio device backend from an explicitly provisioned dependency"
@@ -229,7 +244,7 @@ if(VOICE_NAV_AUDIO_WITH_SHERPA_ONNX)
   ament_target_dependencies(voice_node rclcpp voice_nav_interfaces)
   target_link_libraries(
     voice_node speech_input_node sensevoice_sherpa_adapter voice_pipeline microphone_once_runner
-    chaowen_tts_adapter file_audio_device)
+    continuous_vad_session chaowen_tts_adapter file_audio_device vad_auto_dsp_adapter)
   target_link_libraries(voice_node voice_input_policy)
   target_link_options(
     voice_node
@@ -301,6 +316,32 @@ if(BUILD_TESTING)
     speech_input_core_test PRIVATE
     "SPEECH_INPUT_IDENTITY_PROBE=\"$<TARGET_FILE:speech_input_identity_probe>\"")
   add_dependencies(speech_input_core_test speech_input_identity_probe)
+
+  ament_add_gtest(
+    one_shot_recognizer_proxy_test
+    test/one_shot_recognizer_proxy_test.cpp
+  )
+  target_compile_features(one_shot_recognizer_proxy_test PUBLIC cxx_std_17)
+  target_include_directories(one_shot_recognizer_proxy_test PRIVATE include src)
+  target_link_libraries(one_shot_recognizer_proxy_test one_shot_recognizer_proxy)
+
+  ament_add_gtest(
+    continuous_vad_session_test
+    test/continuous_vad_session_test.cpp
+  )
+  target_compile_features(continuous_vad_session_test PUBLIC cxx_std_17)
+  target_include_directories(continuous_vad_session_test PRIVATE include src)
+  ament_target_dependencies(
+    continuous_vad_session_test rclcpp rclcpp_action voice_nav_interfaces)
+  target_link_libraries(continuous_vad_session_test continuous_vad_session)
+
+  ament_add_gtest(
+    voice_node_executor_guard_test
+    test/voice_node_executor_guard_test.cpp
+  )
+  target_compile_features(voice_node_executor_guard_test PUBLIC cxx_std_17)
+  target_include_directories(voice_node_executor_guard_test PRIVATE include src)
+  ament_target_dependencies(voice_node_executor_guard_test rclcpp)
 
   ament_add_gtest(
     sensevoice_provider_test
@@ -546,6 +587,17 @@ if(BUILD_TESTING)
   endif()
 
   if(VOICE_NAV_AUDIO_WITH_WEBRTC_APM)
+    ament_add_gtest(
+      vad_auto_dsp_adapter_test
+      test/vad_auto_dsp_adapter_test.cpp
+    )
+    target_compile_features(vad_auto_dsp_adapter_test PUBLIC cxx_std_17)
+    target_include_directories(
+      vad_auto_dsp_adapter_test
+      PRIVATE include src "${WEBRTC_APM_INCLUDE_DIR}"
+    )
+    target_link_libraries(vad_auto_dsp_adapter_test vad_auto_dsp_adapter dsp_pipeline)
+
     add_executable(dsp_webrtc_fixture_runner test/dsp_webrtc_fixture_runner.cpp)
     target_compile_features(dsp_webrtc_fixture_runner PRIVATE cxx_std_17)
     target_include_directories(

@@ -38,7 +38,7 @@ bool AudioEngine::enqueue_playback(
   }
 
   PlaybackPacket packet{};
-  packet.generation = generation();
+  packet.generation = playback_generation();
   packet.scope_id = scope_id;
   packet.sample_count = sample_count;
   std::copy_n(samples, sample_count, packet.samples.begin());
@@ -47,7 +47,7 @@ bool AudioEngine::enqueue_playback(
   }
 
   playback_overflows_.fetch_add(1U, std::memory_order_relaxed);
-  mark_discontinuity();
+  request_playback_fence();
   return false;
 }
 
@@ -64,6 +64,11 @@ bool AudioEngine::try_pop_capture(AudioFrame & frame) noexcept
   }
   const auto expected_generation = generation();
   if (candidate.generation != expected_generation || generation() != expected_generation) {
+    // The callback publishes one reference immediately before each capture.
+    // Retire the paired stale reference with its stale capture so a startup
+    // backlog cannot leave the reference ring permanently full.
+    AudioFrame stale_reference{};
+    (void)reference_ring_.pop(stale_reference);
     capture_overflows_.fetch_add(1U, std::memory_order_relaxed);
     capture_reported_drops_.fetch_add(1U, std::memory_order_relaxed);
     return false;
@@ -115,6 +120,11 @@ void AudioEngine::request_fade_to_silence(const std::size_t sample_count) noexce
   fade_request_.fetch_add(1U, std::memory_order_release);
 }
 
+void AudioEngine::request_playback_fence() noexcept
+{
+  playback_fence_requests_.fetch_add(1U, std::memory_order_release);
+}
+
 void AudioEngine::mark_discontinuity() noexcept
 {
   discontinuity_requests_.fetch_add(1U, std::memory_order_release);
@@ -128,6 +138,11 @@ void AudioEngine::set_phase(const AudioEnginePhase phase) noexcept
 std::uint64_t AudioEngine::generation() const noexcept
 {
   return generation_.load(std::memory_order_acquire);
+}
+
+std::uint64_t AudioEngine::playback_generation() const noexcept
+{
+  return playback_generation_.load(std::memory_order_acquire);
 }
 
 AudioMetrics AudioEngine::metrics() const noexcept

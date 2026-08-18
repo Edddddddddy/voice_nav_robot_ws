@@ -34,12 +34,14 @@ class SpeechInputNode final : public rclcpp::Node, private VoiceTurnSink
 public:
   explicit SpeechInputNode(
     std::unique_ptr<SpeechRecognizerAdapter> recognizer,
-    SpeechInputCoordination * coordination = nullptr);
+    SpeechInputCoordination * coordination = nullptr,
+    bool defer_publisher = false);
   ~SpeechInputNode() override;
 
   void accept_cleaned_frame(const CleanedAudioFrame & frame) noexcept;
   void finish_input() noexcept;
   void shutdown_input() noexcept;
+  [[nodiscard]] bool activate_publisher() noexcept;
 
 private:
   void publish(const VoiceTurnPublication & turn) noexcept override;

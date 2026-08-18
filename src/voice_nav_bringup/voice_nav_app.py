@@ -29,7 +29,9 @@ from typing import Literal
 
 Mode = Literal['motion', 'mapping', 'navigation']
 Display = Literal['headless', 'gui']
-InputProfile = Literal['console', 'sensevoice-wav', 'microphone-once']
+InputProfile = Literal[
+    'console', 'sensevoice-wav', 'microphone-once', 'vad-auto',
+]
 SESSION_LAUNCH_FILE = 'voice_nav_session.launch.py'
 
 
@@ -76,6 +78,7 @@ class _AppRun:
     readiness: object
     mode_readiness: object
     frontend_factory: object
+    frontend_readiness: object
     console_main: object
     clock: object
     stdin: object
@@ -260,10 +263,10 @@ def _ensure_rclpy_context() -> None:
         _OWNED_RCLPY_CONTEXT = True
 
 
-def _spawn_session(command, *, stdout, stderr):
+def _spawn_session(command, *, stdin=subprocess.DEVNULL, stdout, stderr):
     """Start exactly one new process group for the fixed session command."""
     options = {
-        'stdin': subprocess.DEVNULL,
+        'stdin': stdin,
         'stdout': stdout,
         'stderr': stderr,
     }
@@ -279,9 +282,13 @@ def _spawn_session(command, *, stdout, stderr):
     return process
 
 
-def _spawn_voice_frontend(command, *, stdout, stderr):
+def _spawn_voice_frontend(
+    command, *, stdin=subprocess.DEVNULL, stdout, stderr,
+):
     """Start the staged provider frontend in its own process group."""
-    return _spawn_session(command, stdout=stdout, stderr=stderr)
+    return _spawn_session(
+        command, stdin=stdin, stdout=stdout, stderr=stderr,
+    )
 
 
 def _wait_for_command_gateway_readiness(
@@ -541,7 +548,24 @@ def _run_selected_input(
     stdout,
 ) -> int:
     """Run exactly the chosen frontend after shared readiness succeeds."""
-    if input_spec.profile in ('sensevoice-wav', 'microphone-once'):
+    if input_spec.profile == 'vad-auto':
+        try:
+            process.wait()
+        except KeyboardInterrupt:
+            return 130
+        except Exception as error:
+            _write_result(
+                stdout,
+                _stable_result(
+                    'unavailable',
+                    f'vad_auto_failed:{_reason(error)}',
+                ),
+            )
+            return 1
+        return 0 if _poll(process) == 0 else 1
+    if input_spec.profile in (
+        'sensevoice-wav', 'microphone-once',
+    ):
         exit_code, reason = _sensevoice_input_module()['wait_for_completion'](
             process, deadline, clock, _poll,
         )
@@ -648,11 +672,16 @@ def _run_started_session(
         return 1
 
     input_process = process
-    if input_spec.profile in ('sensevoice-wav', 'microphone-once'):
+    if input_spec.profile in (
+        'sensevoice-wav', 'microphone-once', 'vad-auto',
+    ):
         try:
             if input_spec.profile == 'microphone-once':
                 frontend_command = _sensevoice_input_module()[
                     'build_microphone_once_command']()
+            elif input_spec.profile == 'vad-auto':
+                frontend_command = _sensevoice_input_module()[
+                    'build_vad_auto_command']()
             else:
                 frontend_command = _sensevoice_input_module()[
                     'build_frontend_command'](
@@ -660,8 +689,12 @@ def _run_started_session(
                         input_spec.output_wav,
                         input_spec.chaowen_tts_root,
                     )
+            frontend_kwargs = {
+                'stdout': run.stderr,
+                'stderr': run.stderr,
+            }
             input_process = run.frontend_factory(
-                frontend_command, stdout=run.stderr, stderr=run.stderr,
+                frontend_command, **frontend_kwargs,
             )
             if input_process is None:
                 raise RuntimeError('frontend_factory returned no process')
@@ -675,6 +708,27 @@ def _run_started_session(
                 ),
             )
             return 1
+
+        if input_spec.profile == 'vad-auto':
+            frontend_result = run.frontend_readiness(
+                input_process,
+                max(0.0, deadline - _clock_now(run.clock)),
+                run.clock,
+                _poll,
+                _stable_result,
+            )
+            if not _readiness_is_ready(frontend_result):
+                reason = (
+                    frontend_result.get(
+                        'reason', 'vad_auto_frontend_not_ready',
+                    )
+                    if isinstance(frontend_result, dict)
+                    else 'vad_auto_frontend_not_ready'
+                )
+                _write_result(
+                    run.stdout, _stable_result('unavailable', reason),
+                )
+                return 1
 
     if _poll(input_process) is not None:
         if input_spec.profile == 'console':
@@ -716,6 +770,7 @@ def run_app(
     mode_readiness=None,
     input_spec: _InputSpec | None = None,
     frontend_factory=None,
+    frontend_readiness=None,
 ) -> int:
     """Run one closed session spec and exactly one selected frontend."""
     owned_processes = []
@@ -731,10 +786,17 @@ def run_app(
             mode_readiness = _wait_for_mode_readiness
         if frontend_factory is None:
             frontend_factory = _spawn_voice_frontend
+        if frontend_readiness is None:
+            frontend_readiness = (
+                _sensevoice_input_module()['wait_for_frontend_readiness']
+                if frontend_factory is _spawn_voice_frontend
+                else lambda *_args: _stable_result('ready')
+            )
         run = _AppRun(
             readiness=readiness,
             mode_readiness=mode_readiness,
             frontend_factory=frontend_factory,
+            frontend_readiness=frontend_readiness,
             console_main=console_main,
             clock=clock,
             stdin=stdin,
@@ -799,6 +861,7 @@ def main(
     stderr=None,
     mode_readiness=None,
     frontend_factory=None,
+    frontend_readiness=None,
 ) -> int:
     """Run one closed simulation session; no child arguments are accepted."""
     if stdout is None:
@@ -818,7 +881,9 @@ def main(
     )
     parser.add_argument(
         '--input',
-        choices=('console', 'sensevoice-wav', 'microphone-once'),
+        choices=(
+            'console', 'sensevoice-wav', 'microphone-once', 'vad-auto',
+        ),
         default=None,
     )
     parser.add_argument('--input-wav', default=None)
@@ -847,14 +912,18 @@ def main(
             _stable_result('unavailable', 'output_wav_only_for_sensevoice_wav'),
         )
         return 2
-    if input_profile == 'microphone-once' and (
+    if input_profile in ('microphone-once', 'vad-auto') and (
         input_spec.input_wav is not None or input_spec.output_wav is not None
     ):
         _write_result(
             stdout,
             _stable_result(
                 'unavailable',
-                'microphone_once_does_not_accept_wav_paths',
+                (
+                    'microphone_once_does_not_accept_wav_paths'
+                    if input_profile == 'microphone-once'
+                    else 'vad_auto_does_not_accept_wav_paths'
+                ),
             ),
         )
         return 2
@@ -911,6 +980,7 @@ def main(
         mode_readiness,
         input_spec,
         frontend_factory,
+        frontend_readiness,
     )
 
 

@@ -127,6 +127,33 @@ class _FakeProcess:
         self.group_signals.append(signum)
 
 
+class _InteractiveFakeProcess(_FakeProcess):
+    """Model a frontend that owns stdin until the user exits it."""
+
+    def wait(self, timeout=None):
+        self.wait_timeouts.append(timeout)
+        if timeout is not None:
+            raise TimeoutError('interactive frontend must not be timed')
+        self.returncode = 0
+        return self.returncode
+
+
+class _InterruptingInteractiveFakeProcess(_FakeProcess):
+    """Raise Ctrl+C only from the interactive wait, then cleanly exit."""
+
+    def __init__(self):
+        super().__init__()
+        self.interrupted = False
+
+    def wait(self, timeout=None):
+        self.wait_timeouts.append(timeout)
+        if not self.interrupted:
+            self.interrupted = True
+            raise KeyboardInterrupt
+        self.returncode = 0
+        return self.returncode
+
+
 def test_mapping_state_requires_active_slam_valid_map_and_unique_map_odom_tf():
     """Keep typed mode evidence behind a small callback state interface."""
     readiness = _load_mode_readiness_module()
@@ -230,6 +257,72 @@ def test_product_frontend_accepts_a_bounded_noncanonical_pcm_wav(tmp_path):
         'status': 'ready',
         'reason': '',
     }
+
+
+def test_vad_auto_frontend_readiness_uses_existing_publisher_identity():
+    """Recognize the real SpeechInputNode and no look-alike graph owner."""
+    sensevoice_input = _load_sensevoice_input_module()
+
+    assert sensevoice_input._has_voice_frontend_publisher([
+        SimpleNamespace(
+            node_name='voice_speech_input', node_namespace='/',
+        ),
+    ])
+    assert not sensevoice_input._has_voice_frontend_publisher([
+        SimpleNamespace(node_name='speech_input_node', node_namespace='/'),
+    ])
+
+
+def test_frontend_readiness_accepts_a_publisher_seen_on_the_first_poll(monkeypatch):
+    """Do not require a second poll when the frontend is already ready."""
+    sensevoice_input = _load_sensevoice_input_module()
+    events = []
+
+    class FakeNode:
+        def get_publishers_info_by_topic(self, topic):
+            assert topic == '/voice/turn'
+            return [SimpleNamespace(
+                node_name='voice_speech_input', node_namespace='/',
+            )]
+
+        def destroy_node(self):
+            events.append('destroy')
+
+    class FakeRclpy:
+        def __init__(self):
+            self._ok = False
+
+        def ok(self):
+            return self._ok
+
+        def init(self, args=None):
+            del args
+            self._ok = True
+            events.append('init')
+
+        def create_node(self, name):
+            assert name == 'voice_nav_app_frontend_readiness'
+            return FakeNode()
+
+        def spin_once(self, *args, **kwargs):
+            del args, kwargs
+            events.append('spin')
+
+        def shutdown(self):
+            self._ok = False
+            events.append('shutdown')
+
+    monkeypatch.setitem(__import__('sys').modules, 'rclpy', FakeRclpy())
+    result = sensevoice_input.wait_for_frontend_readiness(
+        SimpleNamespace(poll=lambda: None),
+        1.0,
+        lambda: 0.0,
+        lambda process: process.poll(),
+        lambda status, reason='': {'status': status, 'reason': reason},
+    )
+
+    assert result == {'status': 'ready', 'reason': ''}
+    assert events == ['init', 'spin', 'destroy', 'shutdown']
 
 
 def test_product_frontend_rejects_empty_malformed_and_oversized_wav(tmp_path):
@@ -806,6 +899,145 @@ def test_microphone_once_uses_one_closed_voice_composition_without_forwarding(
         for command, _kwargs in starts
         for token in command
     )
+
+
+def test_vad_auto_uses_dedicated_frontend_and_never_console():
+    """Keep continuous VAD closed and prevent stdin text passthrough."""
+    app = _load_app_module()
+    session_process = _FakeProcess()
+    frontend_process = _FakeProcess()
+    starts = []
+    readiness_checks = []
+    console_calls = []
+    stdin = StringIO('\n普通文本\n:quit\n')
+
+    def process_factory(command, **kwargs):
+        starts.append((tuple(command), kwargs))
+        return session_process
+
+    def frontend_factory(command, **kwargs):
+        starts.append((tuple(command), kwargs))
+        return frontend_process
+
+    result = app.main(
+        [
+            '--mode', 'motion', '--display', 'headless',
+            '--input', 'vad-auto',
+        ],
+        process_factory=process_factory,
+        frontend_factory=frontend_factory,
+        readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        frontend_readiness=lambda process, *_args: (
+            readiness_checks.append(process)
+            or {'status': 'ready', 'reason': ''}
+        ),
+        mode_readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        console_main=lambda **_kwargs: console_calls.append(True),
+        stdin=stdin,
+        clock=lambda: 0.0,
+        stdout=StringIO(),
+        stderr=StringIO(),
+    )
+
+    assert result == 0
+    assert console_calls == []
+    assert readiness_checks == [frontend_process]
+    assert starts[0][0][-1] == 'input:=none'
+    assert starts[1][0] == (
+        'ros2', 'run', 'voice_nav_audio', 'voice_node',
+        '--ros-args', '-p', 'input_profile:=vad_auto',
+    )
+    assert 'stdin' not in starts[1][1]
+
+
+def test_vad_auto_frontend_failure_is_unavailable_before_ready():
+    """Do not invite speech until the continuous publisher is observable."""
+    app = _load_app_module()
+    session_process = _FakeProcess()
+    frontend_process = _FakeProcess()
+    stdout = StringIO()
+
+    result = app.main(
+        [
+            '--mode', 'motion', '--display', 'headless',
+            '--input', 'vad-auto',
+        ],
+        process_factory=lambda *_args, **_kwargs: session_process,
+        frontend_factory=lambda *_args, **_kwargs: frontend_process,
+        readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        frontend_readiness=lambda *_args: {
+            'status': 'unavailable',
+            'reason': 'vad_auto_frontend_readiness_timeout',
+        },
+        mode_readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        console_main=lambda **_kwargs: 0,
+        clock=lambda: 0.0,
+        stdout=stdout,
+        stderr=StringIO(),
+    )
+
+    assert result == 1
+    assert '"status":"ready"' not in stdout.getvalue()
+    assert stdout.getvalue() == (
+        '{"reason":"vad_auto_frontend_readiness_timeout",'
+        '"status":"unavailable"}\n'
+    )
+    assert frontend_process.group_signals == [signal.SIGINT]
+    assert session_process.group_signals == [signal.SIGINT]
+
+
+def test_vad_auto_waits_for_child_after_startup_deadline():
+    """Do not apply the readiness deadline to the continuous VAD child."""
+    app = _load_app_module()
+    session_process = _FakeProcess()
+    frontend_process = _InteractiveFakeProcess()
+    now = [0.0]
+
+    def readiness(*_args):
+        now[0] = 61.0
+        return {'status': 'ready', 'reason': ''}
+
+    result = app.main(
+        [
+            '--mode', 'motion', '--display', 'headless',
+            '--input', 'vad-auto',
+        ],
+        process_factory=lambda *_args, **_kwargs: session_process,
+        frontend_factory=lambda *_args, **_kwargs: frontend_process,
+        readiness=readiness,
+        mode_readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        clock=lambda: now[0],
+        stdout=StringIO(),
+        stderr=StringIO(),
+    )
+
+    assert result == 0
+    assert frontend_process.wait_timeouts == [None]
+
+
+def test_vad_auto_ctrl_c_returns_130_from_child_wait():
+    """Propagate Ctrl+C while retaining bounded owned-process cleanup."""
+    app = _load_app_module()
+    session_process = _FakeProcess()
+    frontend_process = _InterruptingInteractiveFakeProcess()
+
+    result = app.main(
+        [
+            '--mode', 'motion', '--display', 'headless',
+            '--input', 'vad-auto',
+        ],
+        process_factory=lambda *_args, **_kwargs: session_process,
+        frontend_factory=lambda *_args, **_kwargs: frontend_process,
+        readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        mode_readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        clock=lambda: 0.0,
+        stdout=StringIO(),
+        stderr=StringIO(),
+    )
+
+    assert result == 130
+    assert frontend_process.wait_timeouts[0] is None
+    assert frontend_process.group_signals == [signal.SIGINT]
 
 
 def test_sensevoice_output_wav_forwards_only_output_and_locked_tts_root(

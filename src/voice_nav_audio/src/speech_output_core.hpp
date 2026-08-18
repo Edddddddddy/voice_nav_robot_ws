@@ -157,6 +157,7 @@ private:
   SpeechOutputObserver & observer_;
   Scope active_{};
   std::uint64_t next_scope_id_{1U};
+  std::uint64_t pending_fence_generation_{0U};
 };
 
 }  // namespace voice_nav_audio

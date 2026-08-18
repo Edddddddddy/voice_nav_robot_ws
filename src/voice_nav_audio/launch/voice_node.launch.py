@@ -34,7 +34,7 @@ def _environment(name: str) -> str:
 
 
 def generate_launch_description() -> LaunchDescription:
-    """Run one bounded SenseVoice WAV turn and stop when the root exits."""
+    """Run the selected bounded or continuous voice_node profile."""
     input_wav = LaunchConfiguration('input_wav')
     input_profile = LaunchConfiguration('input_profile')
     output_wav = LaunchConfiguration('output_wav')
@@ -82,9 +82,14 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument(
             'input_profile',
             default_value='sensevoice_wav',
-            choices=['sensevoice_wav', 'microphone_once', 'real_model_gate'],
+            choices=[
+                'sensevoice_wav',
+                'microphone_once',
+                'real_model_gate',
+                'vad_auto',
+            ],
             description=(
-                'Use the product WAV, one-shot microphone, or explicit real-model gate.'
+                'Use product WAV, one-shot microphone, continuous VAD, or real-model gate.'
             ),
         ),
         DeclareLaunchArgument(

@@ -158,6 +158,10 @@ public:
   virtual ~SpeechInputCoordination() = default;
 
   [[nodiscard]] virtual bool on_wake_accepted() noexcept = 0;
+  // Called once for each accepted endpoint/timeout/failure boundary. The
+  // published bit distinguishes a valid final from a fail-closed terminal.
+  virtual void on_recognizer_terminal(
+    SpeechEventKind, bool) noexcept {}
   virtual void before_turn_published(VoiceTurnPublication & turn) noexcept = 0;
 };
 
@@ -179,6 +183,8 @@ private:
   void on_speech_event(const SpeechRecognitionEvent & event) noexcept override;
   [[nodiscard]] bool accepts_event_frame(const SpeechRecognitionEvent & event) const noexcept;
   [[nodiscard]] bool matches_active_scope(const SpeechRecognitionEvent & event) const noexcept;
+  void notify_recognizer_terminal(
+    const SpeechRecognitionEvent & event, bool published) noexcept;
   [[nodiscard]] bool is_duplicate_privileged_stop(
     const SpeechRecognitionEvent & event) const noexcept;
   void open_turn_scope() noexcept;
@@ -204,6 +210,9 @@ private:
   bool has_accepted_stop_frame_{false};
   std::uint64_t accepted_stop_generation_{0U};
   std::uint64_t accepted_stop_seq_{0U};
+  bool has_terminal_event_{false};
+  std::uint64_t terminal_event_generation_{0U};
+  std::uint64_t terminal_event_seq_{0U};
   mutable std::recursive_mutex delivery_mutex_{};
 };
 

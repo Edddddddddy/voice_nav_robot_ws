@@ -27,18 +27,20 @@ rclcpp::QoS voice_turn_qos()
 
 SpeechInputNode::SpeechInputNode(
   std::unique_ptr<SpeechRecognizerAdapter> recognizer,
-  SpeechInputCoordination * const coordination)
+  SpeechInputCoordination * const coordination,
+  const bool defer_publisher)
 : Node("voice_speech_input"),
   recognizer_(std::move(recognizer))
 {
   if (!recognizer_) {
     throw std::invalid_argument("SpeechInputNode requires a SpeechRecognizerAdapter");
   }
-  turn_publisher_ = create_publisher<voice_nav_interfaces::msg::VoiceTurn>(
-    "/voice/turn", voice_turn_qos());
   core_ = std::make_unique<SpeechInputCore>(
     *recognizer_, static_cast<VoiceTurnSink &>(*this),
     default_voice_identity_generator(), coordination);
+  if (!defer_publisher && !activate_publisher()) {
+    throw std::runtime_error("SpeechInputNode could not create its VoiceTurn publisher");
+  }
 }
 
 SpeechInputNode::~SpeechInputNode()
@@ -67,8 +69,25 @@ void SpeechInputNode::shutdown_input() noexcept
   recognizer_->shutdown();
 }
 
+bool SpeechInputNode::activate_publisher() noexcept
+{
+  if (turn_publisher_ != nullptr) {
+    return true;
+  }
+  try {
+    turn_publisher_ = create_publisher<voice_nav_interfaces::msg::VoiceTurn>(
+      "/voice/turn", voice_turn_qos());
+    return turn_publisher_ != nullptr;
+  } catch (...) {
+    return false;
+  }
+}
+
 void SpeechInputNode::publish(const VoiceTurnPublication & turn) noexcept
 {
+  if (turn_publisher_ == nullptr) {
+    return;
+  }
   voice_nav_interfaces::msg::VoiceTurn message{};
   message.voice_instance_id = turn.voice_instance_id;
   message.voice_seq = turn.voice_seq;

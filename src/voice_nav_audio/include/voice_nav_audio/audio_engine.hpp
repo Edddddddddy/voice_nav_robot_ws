@@ -82,6 +82,10 @@ public:
   static constexpr std::size_t kChannels = 1U;
   static constexpr std::size_t kFrameSamples = 480U;
   static constexpr std::size_t kRingCapacity = 8U;
+  // TTS inference produces bounded PCM bursts faster than the real-time
+  // callback consumes them. Keep that bounded queue separate from the small
+  // capture/reference rings so continuous input latency stays low.
+  static constexpr std::size_t kPlaybackRingCapacity = 1024U;
 
   AudioEngine() = default;
 
@@ -93,6 +97,8 @@ public:
 
   void set_playback_gain(float gain) noexcept;
   void request_fade_to_silence(std::size_t sample_count) noexcept;
+  // Retire queued playback without changing the continuous capture timeline.
+  void request_playback_fence() noexcept;
   // May be called by a control/producer thread.  It only publishes a
   // lock-free request; the audio callback commits the generation fence.
   void mark_discontinuity() noexcept;
@@ -106,6 +112,7 @@ public:
     CallbackStatus status) noexcept;
 
   [[nodiscard]] std::uint64_t generation() const noexcept;
+  [[nodiscard]] std::uint64_t playback_generation() const noexcept;
   [[nodiscard]] AudioMetrics metrics() const noexcept;
 
 private:
@@ -246,20 +253,25 @@ private:
   [[nodiscard]] bool pop_playback_for_current_generation(
     PlaybackPacket & packet, std::uint64_t expected_generation) noexcept;
   [[nodiscard]] bool has_pending_discontinuities() const noexcept;
+  [[nodiscard]] bool has_pending_playback_fences() const noexcept;
   void commit_pending_discontinuities() noexcept;
+  void commit_pending_playback_fences() noexcept;
   [[nodiscard]] bool render_playback(
     AudioFrame & rendered, std::uint64_t callback_generation,
     PlaybackPacket & rendered_packet) noexcept;
   static Sample saturate(std::int64_t value) noexcept;
 
   OverwriteAudioFrameRing capture_ring_;
-  SpscRing<PlaybackPacket, kRingCapacity> playback_ring_;
+  SpscRing<PlaybackPacket, kPlaybackRingCapacity> playback_ring_;
   SpscRing<AudioFrame, kRingCapacity> reference_ring_;
   SpscRing<PlaybackWrite, kRingCapacity> playback_write_ring_;
   std::atomic<std::uint64_t> generation_{1U};
+  std::atomic<std::uint64_t> playback_generation_{1U};
   std::atomic<std::uint8_t> phase_{static_cast<std::uint8_t>(AudioEnginePhase::kCapture)};
   std::atomic<std::uint64_t> discontinuity_requests_{0U};
   std::uint64_t observed_discontinuity_requests_{0U};
+  std::atomic<std::uint64_t> playback_fence_requests_{0U};
+  std::uint64_t observed_playback_fence_requests_{0U};
   std::atomic<std::uint32_t> gain_q15_{32768U};
   std::atomic<std::uint32_t> fade_sample_count_{0U};
   std::atomic<std::uint64_t> fade_request_{0U};

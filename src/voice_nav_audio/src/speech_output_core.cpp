@@ -63,7 +63,7 @@ SpeechAdmission SpeechOutputCore::start(const SpeechGoal & goal) noexcept
     active_.priority = goal.priority;
     active_.text = goal.text;
     active_.allow_barge_in = goal.allow_barge_in;
-    active_.wait_generation = engine_.generation() + 1U;
+    active_.wait_generation = pending_fence_generation_;
     active_.waiting_for_generation = true;
     admission.waits_for_generation = true;
     return admission;
@@ -74,8 +74,16 @@ SpeechAdmission SpeechOutputCore::start(const SpeechGoal & goal) noexcept
   active_.priority = goal.priority;
   active_.text = goal.text;
   active_.allow_barge_in = goal.allow_barge_in;
-  active_.audio_generation = engine_.generation();
-  admission.start_synthesis = true;
+  const auto generation = engine_.playback_generation();
+  if (generation < pending_fence_generation_) {
+    active_.wait_generation = pending_fence_generation_;
+    active_.waiting_for_generation = true;
+    admission.waits_for_generation = true;
+  } else {
+    pending_fence_generation_ = 0U;
+    active_.audio_generation = generation;
+    admission.start_synthesis = true;
+  }
   return admission;
 }
 
@@ -142,13 +150,16 @@ bool SpeechOutputCore::advance() noexcept
   if (active_.id == 0U) {
     return false;
   }
-  const auto generation = engine_.generation();
+  const auto generation = engine_.playback_generation();
   if (active_.waiting_for_generation) {
     if (generation < active_.wait_generation) {
       return false;
     }
     active_.waiting_for_generation = false;
     active_.audio_generation = generation;
+    if (generation >= pending_fence_generation_) {
+      pending_fence_generation_ = 0U;
+    }
     return true;
   }
   if (generation != active_.audio_generation) {
@@ -175,7 +186,7 @@ bool SpeechOutputCore::on_pcm(
   const std::size_t sample_count) noexcept
 {
   if (active_.id != scope_id || active_.waiting_for_generation || !active_.synthesis_started ||
-    engine_.generation() != active_.audio_generation || samples == nullptr ||
+    engine_.playback_generation() != active_.audio_generation || samples == nullptr ||
     sample_rate_hz != kChaowenSampleRateHz || channels != kMono || sample_count == 0U ||
     sample_count > kMaximumTtsChunkSamples)
   {
@@ -237,8 +248,12 @@ void SpeechOutputCore::retire(
 
 void SpeechOutputCore::request_fence() noexcept
 {
+  const auto requested_generation = engine_.playback_generation() + 1U;
+  if (requested_generation > pending_fence_generation_) {
+    pending_fence_generation_ = requested_generation;
+  }
   engine_.request_fade_to_silence(kFadeSamples);
-  engine_.mark_discontinuity();
+  engine_.request_playback_fence();
 }
 
 }  // namespace voice_nav_audio
