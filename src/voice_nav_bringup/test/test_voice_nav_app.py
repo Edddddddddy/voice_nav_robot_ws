@@ -232,6 +232,38 @@ def test_navigation_state_requires_all_lifecycle_nodes_before_map_and_tf():
     assert state.is_ready()
 
 
+def test_mode_readiness_can_require_a_matching_runtime_mode_snapshot():
+    """Do not release a voice frontend before Runtime exposes its mode."""
+    readiness = _load_mode_readiness_module()
+    state = readiness._ModeReadinessState('navigation', require_runtime=True)
+
+    for node_name in readiness._MODE_LIFECYCLE_NODES['navigation']:
+        state.observe_lifecycle(node_name, readiness.PRIMARY_STATE_ACTIVE)
+    state.observe_map(SimpleNamespace(
+        info=SimpleNamespace(width=1, height=1), data=[0],
+    ))
+    state.observe_tf(SimpleNamespace(
+        transforms=[SimpleNamespace(
+            header=SimpleNamespace(frame_id='map'),
+            child_frame_id='odom',
+        )],
+    ))
+
+    assert not state.is_ready()
+    state.observe_runtime(SimpleNamespace(
+        operating_mode=readiness.RUNTIME_MODE_MAPPING,
+        availability=readiness.RUNTIME_AVAILABLE,
+        gate_state=readiness.GATE_INHIBITED,
+    ))
+    assert not state.is_ready()
+    state.observe_runtime(SimpleNamespace(
+        operating_mode=readiness.RUNTIME_MODE_NAVIGATION,
+        availability=readiness.RUNTIME_AVAILABLE,
+        gate_state=readiness.GATE_INHIBITED,
+    ))
+    assert state.is_ready()
+
+
 def test_motion_mode_readiness_respects_an_expired_shared_deadline():
     """Fail closed before creating a readiness observer after the deadline."""
     readiness = _load_mode_readiness_module()
@@ -948,6 +980,51 @@ def test_vad_auto_uses_dedicated_frontend_and_never_console():
         '--ros-args', '-p', 'input_profile:=vad_auto',
     )
     assert 'stdin' not in starts[1][1]
+
+
+def test_vad_auto_selects_the_same_frontend_after_each_product_mode_is_ready():
+    """Keep Mapping and Navigation on one ordered VAD composition path."""
+    app = _load_app_module()
+
+    for mode in ('mapping', 'navigation'):
+        with_mode_starts = []
+        session_process = _FakeProcess()
+        frontend_process = _FakeProcess()
+
+        def process_factory(command, **kwargs):
+            with_mode_starts.append((tuple(command), kwargs))
+            return session_process
+
+        def frontend_factory(command, **kwargs):
+            with_mode_starts.append((tuple(command), kwargs))
+            return frontend_process
+
+        assert app.main(
+            ['--mode', mode, '--display', 'headless', '--input', 'vad-auto'],
+            process_factory=process_factory,
+            frontend_factory=frontend_factory,
+            readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+            frontend_readiness=lambda *_args: {
+                'status': 'ready', 'reason': '',
+            },
+            mode_readiness=lambda spec, *_args: (
+                {'status': 'ready', 'reason': ''}
+                if spec.mode == mode else {'status': 'unavailable'}
+            ),
+            clock=lambda: 0.0,
+            stdout=StringIO(),
+            stderr=StringIO(),
+        ) == 0
+
+        assert with_mode_starts[0][0] == (
+            'ros2', 'launch', 'voice_nav_bringup',
+            'voice_nav_session.launch.py', f'mode:={mode}',
+            'headless:=true', 'shutdown_on_gazebo_exit:=true', 'input:=none',
+        )
+        assert with_mode_starts[1][0] == (
+            'ros2', 'run', 'voice_nav_audio', 'voice_node',
+            '--ros-args', '-p', 'input_profile:=vad_auto',
+        )
 
 
 def test_vad_auto_frontend_failure_is_unavailable_before_ready():

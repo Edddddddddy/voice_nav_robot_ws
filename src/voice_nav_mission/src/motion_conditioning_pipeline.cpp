@@ -3842,6 +3842,7 @@ private:
 
   void reset_generation(bool ready_for_new_generation = false)
   {
+    reset_controller_observation();
     if (collision_writer_bound_ && !gid_is_zero(collision_writer_gid_)) {
       retired_collision_writer_gids_.push_back(collision_writer_gid_);
     }
@@ -4004,7 +4005,7 @@ private:
       }
       const auto health = runtime_graph_health(
         std::chrono::steady_clock::now() + config_.health_rpc_timeout,
-        {}, false);
+        {}, false, false);
       if (!health.healthy()) {
         if (!renew_lease->current() ||
           !running_generation_current(callback_token.generation))
@@ -4118,15 +4119,153 @@ private:
         return false;
       }
       const auto response = future.get();
-      return response && std::any_of(
+      const bool active = response && std::any_of(
         response->controller.cbegin(), response->controller.cend(),
         [this](const auto & controller) {
           return controller.name == config_.controller_name &&
                  controller.state == "active";
         });
+      record_controller_observation(active);
+      return active;
     } catch (...) {
       return false;
     }
+  }
+
+  void record_controller_observation(const bool active)
+  {
+    std::uint64_t generation = 0U;
+    {
+      std::lock_guard<std::recursive_mutex> state_lock(mutex_);
+      generation = generation_;
+    }
+    std::lock_guard<std::mutex> lock(controller_health_mutex_);
+    controller_observation_seen_ = true;
+    controller_observation_active_ = active;
+    controller_observation_at_ = std::chrono::steady_clock::now();
+    controller_observation_generation_ = generation;
+  }
+
+  void reset_controller_observation()
+  {
+    std::lock_guard<std::mutex> lock(controller_health_mutex_);
+    controller_observation_seen_ = false;
+    controller_observation_active_ = false;
+    controller_observation_at_ = {};
+    controller_observation_generation_ = 0U;
+    controller_request_pending_ = false;
+    controller_request_at_ = {};
+    controller_request_id_ = 0U;
+    controller_request_generation_ = 0U;
+    controller_observation_response_id_ = 0U;
+  }
+
+  void request_controller_observation()
+  {
+    if (!controller_client_ || !controller_client_->service_is_ready()) {
+      return;
+    }
+
+    // callback_state_ survives a stop/start handover, so request ids alone
+    // cannot prevent a late response from an older conditioning generation
+    // from refreshing the running cache.
+    std::uint64_t request_generation = 0U;
+    {
+      std::lock_guard<std::recursive_mutex> state_lock(mutex_);
+      if (destroying_.load() || state_ != MotionConditioningState::Running ||
+        !timer_enabled_.load())
+      {
+        return;
+      }
+      request_generation = generation_;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    std::uint64_t request_id = 0U;
+    {
+      std::lock_guard<std::mutex> lock(controller_health_mutex_);
+      if (controller_request_pending_ &&
+        now - controller_request_at_ <= config_.dependency_liveness_timeout)
+      {
+        return;
+      }
+      controller_request_pending_ = true;
+      controller_request_at_ = now;
+      request_id = ++controller_request_id_;
+      controller_request_generation_ = request_generation;
+    }
+
+    const auto weak_callback_state =
+      std::weak_ptr<IngressCallbackState>(callback_state_);
+    try {
+      (void)controller_client_->async_send_request(
+        std::make_shared<ListControllers::Request>(),
+        [this, weak_callback_state, request_id, request_generation](
+          rclcpp::Client<ListControllers>::SharedFuture future) {
+          auto state = weak_callback_state.lock();
+          IngressCallbackGuard guard(state);
+          if (!guard.is_active()) {
+            return;
+          }
+          std::shared_ptr<ListControllers::Response> response;
+          try {
+            response = future.get();
+          } catch (...) {
+            response.reset();
+          }
+          const bool active = response && std::any_of(
+            response->controller.cbegin(), response->controller.cend(),
+            [this](const auto & controller) {
+              return controller.name == config_.controller_name &&
+                     controller.state == "active";
+            });
+          const auto observed_at = std::chrono::steady_clock::now();
+          bool current_generation = false;
+          {
+            std::lock_guard<std::recursive_mutex> state_lock(mutex_);
+            current_generation = !destroying_.load() &&
+              state_ == MotionConditioningState::Running &&
+              timer_enabled_.load() && generation_ == request_generation;
+          }
+          std::lock_guard<std::mutex> lock(controller_health_mutex_);
+          if (current_generation &&
+            request_generation == controller_request_generation_ &&
+            request_id >= controller_observation_response_id_)
+          {
+            controller_observation_response_id_ = request_id;
+            controller_observation_seen_ = true;
+            controller_observation_active_ = active;
+            controller_observation_at_ = observed_at;
+            controller_observation_generation_ = request_generation;
+          }
+          if (current_generation &&
+            request_generation == controller_request_generation_ &&
+            request_id == controller_request_id_)
+          {
+            controller_request_pending_ = false;
+          }
+        });
+    } catch (...) {
+      std::lock_guard<std::mutex> lock(controller_health_mutex_);
+      if (request_generation == controller_request_generation_ &&
+        request_id == controller_request_id_)
+      {
+        controller_request_pending_ = false;
+      }
+    }
+  }
+
+  [[nodiscard]] bool controller_observation_is_active() const
+  {
+    std::uint64_t generation = 0U;
+    {
+      std::lock_guard<std::recursive_mutex> state_lock(mutex_);
+      generation = generation_;
+    }
+    std::lock_guard<std::mutex> lock(controller_health_mutex_);
+    return controller_observation_seen_ && controller_observation_active_ &&
+           controller_observation_generation_ == generation &&
+           std::chrono::steady_clock::now() - controller_observation_at_ <=
+           config_.dependency_liveness_timeout;
   }
 
   [[nodiscard]] bool candidate_writer_is_visible(
@@ -4214,7 +4353,8 @@ private:
   [[nodiscard]] RuntimeHealthAssessment runtime_graph_health(
     std::chrono::steady_clock::time_point overall_deadline,
     const std::string & expected_candidate = {},
-    bool check_component_states = true)
+    bool check_component_states = true,
+    bool check_controller = true)
   {
     bool components_loaded = false;
     std::string candidate_topic = expected_candidate;
@@ -4260,10 +4400,10 @@ private:
       odom_fresh ? 1 : 0);
     // OPEN performs the full lifecycle graph check.  During the running
     // renew path, the 100 ms health budget must also leave time for the
-    // authority RPC; the candidate writer, dependency freshness, and
-    // controller state below are the bounded live indicators.  A second
-    // sequential lifecycle-state RPC here could consume the whole lease
-    // renewal window before Gate RENEW is sent.
+    // authority RPC; the candidate writer, dependency freshness, and the
+    // asynchronously refreshed controller observation are the bounded live
+    // indicators.  Sequential lifecycle and controller RPCs here could
+    // consume the whole lease renewal window before Gate RENEW is sent.
     if (check_component_states &&
       (component_state(kCollisionMonitorFqn, overall_deadline) !=
       lifecycle_msgs::msg::State::PRIMARY_STATE_ACTIVE ||
@@ -4327,7 +4467,21 @@ private:
         RuntimeHealthReason::Deadline,
         "conditioning health step exceeded its deadline"};
     }
-    if (!controller_is_active(overall_deadline)) {
+    if (check_controller) {
+      if (!controller_is_active(overall_deadline)) {
+        if (std::chrono::steady_clock::now() >= overall_deadline) {
+          return {
+            RuntimeHealthReason::Deadline,
+            "controller health step exceeded its deadline"};
+        }
+        return {
+          RuntimeHealthReason::ControllerUnavailable,
+          "diff_drive_controller is not active"};
+      }
+      return {RuntimeHealthReason::Healthy, {}};
+    }
+    request_controller_observation();
+    if (!controller_observation_is_active()) {
       if (std::chrono::steady_clock::now() >= overall_deadline) {
         return {
           RuntimeHealthReason::Deadline,
@@ -4335,7 +4489,7 @@ private:
       }
       return {
         RuntimeHealthReason::ControllerUnavailable,
-        "diff_drive_controller is not active"};
+        "controller active observation is not fresh"};
     }
     return {RuntimeHealthReason::Healthy, {}};
   }
@@ -4407,6 +4561,16 @@ private:
   rclcpp::Client<UnloadNode>::SharedPtr unload_client_;
   rclcpp::Client<ListNodes>::SharedPtr list_nodes_client_;
   rclcpp::Client<ListControllers>::SharedPtr controller_client_;
+  mutable std::mutex controller_health_mutex_;
+  bool controller_observation_seen_{false};
+  bool controller_observation_active_{false};
+  std::chrono::steady_clock::time_point controller_observation_at_{};
+  bool controller_request_pending_{false};
+  std::chrono::steady_clock::time_point controller_request_at_{};
+  std::uint64_t controller_request_id_{0U};
+  std::uint64_t controller_request_generation_{0U};
+  std::uint64_t controller_observation_response_id_{0U};
+  std::uint64_t controller_observation_generation_{0U};
   rclcpp::Subscription<CollisionState>::SharedPtr collision_subscription_;
   rclcpp::Subscription<LaserScan>::SharedPtr scan_subscription_;
   rclcpp::Subscription<Odometry>::SharedPtr odom_subscription_;
