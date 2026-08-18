@@ -58,8 +58,9 @@ int native_portaudio_callback(
     return kPortAudioAbort;
   }
   const CallbackStatus status{
-    (status_flags & (kPortAudioInputUnderflow | kPortAudioInputOverflow)) != 0U,
-    (status_flags & (kPortAudioOutputUnderflow | kPortAudioOutputOverflow)) != 0U};
+    (status_flags & kPortAudioInputOverflow) != 0U,
+    (status_flags & (kPortAudioOutputUnderflow | kPortAudioOutputOverflow)) != 0U,
+    (status_flags & kPortAudioInputUnderflow) != 0U};
   callback_context->callback(
     callback_context->context, static_cast<const Sample *>(input), static_cast<Sample *>(output),
     static_cast<std::size_t>(frame_count), status);

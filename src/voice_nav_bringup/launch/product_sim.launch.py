@@ -32,6 +32,8 @@ def generate_launch_description():
         'shutdown_on_gazebo_exit'
     )
     runtime_config = LaunchConfiguration('runtime_config')
+    map_id = LaunchConfiguration('map_id')
+    trusted_named_places_file = LaunchConfiguration('trusted_named_places_file')
     simulation = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution(
@@ -74,7 +76,10 @@ def generate_launch_description():
         executable='mission_runtime_node',
         name='mission_runtime_node',
         output='screen',
-        parameters=[runtime_config],
+        parameters=[runtime_config, {
+            'map_id': map_id,
+            'trusted_named_places_file': trusted_named_places_file,
+        }],
     )
 
     return LaunchDescription(
@@ -118,6 +123,20 @@ def generate_launch_description():
                     'mission_runtime.yaml',
                 ]),
                 description='Trusted Mission Runtime configuration.',
+            ),
+            DeclareLaunchArgument(
+                'map_id',
+                default_value='voice_mvp',
+                description='Trusted map package ID used by Runtime.',
+            ),
+            DeclareLaunchArgument(
+                'trusted_named_places_file',
+                default_value=PathJoinSubstitution([
+                    FindPackageShare('voice_nav_bringup'),
+                    'config',
+                    'named_places.yaml',
+                ]),
+                description='Trusted house named-place fixture.',
             ),
             simulation,
             motion_conditioning_container,

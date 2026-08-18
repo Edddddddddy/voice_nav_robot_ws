@@ -21,6 +21,7 @@
 
 #include "gtest/gtest.h"
 #include "audio_engine_callback_test_support.hpp"
+#include "portaudio_native_callback.hpp"
 #include "voice_nav_audio/portaudio_adapter.hpp"
 
 namespace voice_nav_audio
@@ -119,6 +120,17 @@ private:
   bool entered_{false};
   bool released_{false};
 };
+
+void forward_native_callback(
+  void * const context,
+  const Sample * const capture,
+  Sample * const device_output,
+  const std::size_t frame_count,
+  const CallbackStatus status) noexcept
+{
+  static_cast<AudioEngine *>(context)->process_callback(
+    capture, device_output, frame_count, status);
+}
 
 TEST(PortAudioAdapterTest, OpensOneFixedStreamAndRestartFencesOldPlayback)
 {
@@ -249,6 +261,81 @@ TEST(PortAudioAdapterTest, PlaybackOverflowQuarantinesAnAlreadyEnteredCallback)
   EXPECT_EQ(final_reference.generation, engine.generation());
   EXPECT_TRUE(std::all_of(final_reference.samples.begin(), final_reference.samples.end(),
     [](const Sample sample) {return sample == 0;}));
+}
+
+TEST(PortAudioAdapterTest, InputUnderflowDoesNotFenceCurrentPlaybackGeneration)
+{
+  AudioEngine engine;
+  std::array<Sample, AudioEngine::kFrameSamples> playback{};
+  std::array<Sample, AudioEngine::kFrameSamples> output{};
+  playback.fill(1200);
+  ASSERT_TRUE(engine.enqueue_playback(playback.data(), playback.size(), 9U));
+  const auto playback_generation = engine.playback_generation();
+  NativePortAudioCallbackContext context{&forward_native_callback, &engine};
+
+  ASSERT_EQ(
+    native_portaudio_callback(
+      nullptr, output.data(), output.size(), nullptr, 0x00000001U, &context),
+    0);
+
+  EXPECT_EQ(engine.playback_generation(), playback_generation);
+  EXPECT_TRUE(std::any_of(output.begin(), output.end(), [](const Sample sample) {
+      return sample != 0;
+    }));
+}
+
+TEST(PortAudioAdapterTest, InputOverflowOnlyFencesCaptureAndPreservesPlaybackScope)
+{
+  AudioEngine engine;
+  std::array<Sample, AudioEngine::kFrameSamples> capture{};
+  std::array<Sample, AudioEngine::kFrameSamples> playback{};
+  std::array<Sample, AudioEngine::kFrameSamples> output{};
+  playback.fill(1200);
+  ASSERT_TRUE(engine.enqueue_playback(playback.data(), playback.size(), 9U));
+  NativePortAudioCallbackContext context{&forward_native_callback, &engine};
+
+  capture.fill(11);
+  ASSERT_EQ(
+    native_portaudio_callback(
+      capture.data(), output.data(), output.size(), nullptr, 0U, &context),
+    0);
+  ASSERT_TRUE(std::any_of(output.begin(), output.end(), [](const Sample sample) {
+      return sample != 0;
+    }));
+
+  ASSERT_TRUE(engine.enqueue_playback(playback.data(), playback.size(), 9U));
+  const auto capture_generation = engine.generation();
+  const auto playback_generation = engine.playback_generation();
+  const auto metrics_before = engine.metrics();
+  capture.fill(22);
+  output.fill(900);
+
+  ASSERT_EQ(
+    native_portaudio_callback(
+      capture.data(), output.data(), output.size(), nullptr, 0x00000002U, &context),
+    0);
+
+  EXPECT_EQ(engine.generation(), capture_generation + 1U);
+  EXPECT_EQ(engine.playback_generation(), playback_generation);
+  EXPECT_EQ(engine.metrics().stale_pcm_after_fence, metrics_before.stale_pcm_after_fence);
+  EXPECT_EQ(engine.metrics().xruns, metrics_before.xruns + 1U);
+  EXPECT_EQ(engine.metrics().discontinuities, metrics_before.discontinuities + 1U);
+  EXPECT_TRUE(std::all_of(output.begin(), output.end(), [](const Sample sample) {
+      return sample == 0;
+    }));
+
+  AudioFrame stale_capture{};
+  EXPECT_FALSE(engine.try_pop_capture(stale_capture));
+
+  output.fill(900);
+  ASSERT_EQ(
+    native_portaudio_callback(
+      nullptr, output.data(), output.size(), nullptr, 0x00000004U, &context),
+    0);
+  EXPECT_EQ(engine.playback_generation(), playback_generation + 1U);
+  EXPECT_TRUE(std::all_of(output.begin(), output.end(), [](const Sample sample) {
+      return sample == 0;
+    }));
 }
 
 TEST(PortAudioAdapterTest, UnavailableDeviceFailsClosedWithoutInstallingCallback)

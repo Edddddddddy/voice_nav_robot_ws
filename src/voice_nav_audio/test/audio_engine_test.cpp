@@ -76,11 +76,63 @@ TEST(AudioEngineTest, ReferenceEqualsFinalGainFadeSaturatedAndShortDeviceOutput)
   EXPECT_EQ(reference.samples, output);
 }
 
-TEST(AudioEngineTest, XrunAndNonFrameCallbackRotateGenerationAndRenderSilence)
+TEST(AudioEngineTest, IdleOutputUnderflowDoesNotRotatePlaybackGeneration)
+{
+  AudioEngine engine;
+  std::array<Sample, AudioEngine::kFrameSamples> output{};
+  const auto capture_generation = engine.generation();
+  const auto playback_generation = engine.playback_generation();
+
+  for (std::size_t callback = 0U; callback < 2U; ++callback) {
+    engine.process_callback(
+      nullptr, output.data(), output.size(), CallbackStatus{false, true});
+  }
+
+  EXPECT_EQ(engine.generation(), capture_generation);
+  EXPECT_EQ(engine.playback_generation(), playback_generation);
+  EXPECT_EQ(engine.metrics().xruns, 2U);
+  EXPECT_EQ(engine.metrics().discontinuities, 0U);
+  EXPECT_TRUE(std::all_of(output.begin(), output.end(), [](const Sample sample) {
+      return sample == 0;
+  }));
+}
+
+TEST(AudioEngineTest, QueuedPlaybackUnderflowWaitsForRenderBeforeRotatingGeneration)
+{
+  AudioEngine engine;
+  std::array<Sample, AudioEngine::kFrameSamples> playback{};
+  std::array<Sample, AudioEngine::kFrameSamples> output{};
+  playback.fill(900);
+  ASSERT_TRUE(engine.enqueue_playback(playback.data(), playback.size(), 17U));
+  const auto capture_generation = engine.generation();
+  const auto playback_generation = engine.playback_generation();
+
+  engine.process_callback(
+    nullptr, output.data(), output.size(), CallbackStatus{false, true});
+
+  EXPECT_EQ(engine.generation(), capture_generation);
+  EXPECT_EQ(engine.playback_generation(), playback_generation);
+  EXPECT_TRUE(std::all_of(output.begin(), output.end(), [](const Sample sample) {
+      return sample == 0;
+    }));
+
+  engine.process_callback(nullptr, output.data(), output.size(), CallbackStatus{});
+  EXPECT_TRUE(std::any_of(output.begin(), output.end(), [](const Sample sample) {
+      return sample != 0;
+    }));
+}
+
+TEST(AudioEngineTest, ActivePlaybackXrunAndNonFrameCallbackRotateGenerationAndRenderSilence)
 {
   AudioEngine engine;
   std::array<Sample, AudioEngine::kFrameSamples> samples{};
   samples.fill(900);
+  ASSERT_TRUE(engine.enqueue_playback(samples.data(), samples.size()));
+
+  engine.process_callback(nullptr, samples.data(), samples.size(), CallbackStatus{});
+  EXPECT_TRUE(std::any_of(samples.begin(), samples.end(), [](const Sample sample) {
+      return sample != 0;
+    }));
   const auto first_generation = engine.generation();
 
   engine.process_callback(
@@ -184,7 +236,7 @@ TEST(AudioEngineTest, PlaybackRingLossFencesPlaybackWithoutRotatingCapture)
   EXPECT_EQ(reference.samples, output);
 }
 
-TEST(AudioEngineTest, FullReferenceRingRendersSilenceBeforePublishingUnreferencedAudio)
+TEST(AudioEngineTest, FullReferenceRingSkipsCapturePairButKeepsPlaybackLive)
 {
   AudioEngine engine;
   std::array<Sample, AudioEngine::kFrameSamples> playback{};
@@ -193,15 +245,37 @@ TEST(AudioEngineTest, FullReferenceRingRendersSilenceBeforePublishingUnreference
   for (std::size_t index = 0U; index < AudioEngine::kRingCapacity - 1U; ++index) {
     engine.process_callback(nullptr, output.data(), output.size(), CallbackStatus{});
   }
+  AudioFrame captured{};
+  while (engine.try_pop_capture(captured)) {
+  }
   ASSERT_TRUE(engine.enqueue_playback(playback.data(), playback.size()));
+  const auto capture_generation = engine.generation();
+  const auto playback_generation = engine.playback_generation();
 
   engine.process_callback(nullptr, output.data(), output.size(), CallbackStatus{});
 
   EXPECT_EQ(engine.metrics().reference_overflows, 1U);
-  EXPECT_TRUE(std::all_of(output.begin(), output.end(), [](const Sample sample) {
-      return sample == 0;
+  EXPECT_EQ(engine.metrics().reference_overflow_fences, 1U);
+  EXPECT_TRUE(std::any_of(output.begin(), output.end(), [](const Sample sample) {
+      return sample != 0;
     }));
-  EXPECT_GT(engine.generation(), 1U);
+  EXPECT_EQ(engine.generation(), capture_generation + 1U);
+  EXPECT_EQ(engine.playback_generation(), playback_generation);
+  EXPECT_FALSE(engine.try_pop_capture(captured));
+
+  AudioFrame reference{};
+  std::size_t references = 0U;
+  while (engine.try_pop_reference(reference)) {
+    ++references;
+  }
+  // The capture-only generation retires the seven old reference frames; no
+  // reference was published for the skipped capture.
+  EXPECT_EQ(references, 0U);
+
+  engine.process_callback(nullptr, output.data(), output.size(), CallbackStatus{});
+  ASSERT_TRUE(engine.try_pop_capture(captured));
+  ASSERT_TRUE(engine.try_pop_reference(reference));
+  EXPECT_EQ(captured.generation, reference.generation);
 }
 
 TEST(AudioEngineTest, CaptureOverflowDropsOldestCompleteFrameWithoutRotatingGeneration)

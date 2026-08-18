@@ -101,12 +101,14 @@ RuntimeCore::RuntimeCore(
   AdmissionFenceCheck admission_fence_check,
   ChildResultRegistrar child_result_registrar,
   ChildResultUnregistrar child_result_unregistrar,
-  std::shared_ptr<NavigationPort> navigation)
+  std::shared_ptr<NavigationPort> navigation,
+  std::shared_ptr<MapStorePort> map_store)
 : config_(std::move(config)),
   clock_(std::move(clock)),
   authority_(std::move(authority)),
   relative_motion_(std::move(relative_motion)),
   navigation_(std::move(navigation)),
+  map_store_(std::move(map_store)),
   state_callback_(std::move(state_callback)),
   feedback_callback_(std::move(feedback_callback)),
   result_callback_(std::move(result_callback)),
@@ -152,7 +154,8 @@ RuntimeCore::RuntimeCore(
   state_.supported_step_mask = config_.operating_mode == OperatingMode::Navigation ?
     (kSupportedMissionStepMask | (1U <<
     (static_cast<unsigned int>(MissionStepKind::NavigateTo) - 1U))) :
-    kSupportedMissionStepMask;
+    (kSupportedMissionStepMask | (1U <<
+    (static_cast<unsigned int>(MissionStepKind::SaveMap) - 1U)));
   state_.max_steps = config_.max_steps;
   state_.named_place_ids = config_.named_place_ids;
   state_.runtime_instance_id = config_.runtime_instance_id.empty() ?
@@ -206,6 +209,10 @@ AdmissionResult RuntimeCore::admit(
   if (!validate_goal(goal, result)) {
     return AdmissionResult{0U, false, result};
   }
+  const bool map_only_goal = std::all_of(
+    goal.steps.begin(), goal.steps.end(), [](const MissionStep & step) {
+      return step.kind == kSaveMapKind;
+    });
   if (active_.has_value()) {
     return AdmissionResult{0U, false, reject(
       MissionResultCode::Busy,
@@ -252,6 +259,14 @@ AdmissionResult RuntimeCore::admit(
       "RelativeMotionPort is unavailable")};
   }
   gate_snapshot_ = authority_->snapshot();
+  if (map_only_goal &&
+    (gate_snapshot_.state != GateState::Inhibited ||
+    !zero_is_proven(gate_snapshot_)))
+  {
+    return AdmissionResult{0U, false, reject(
+      MissionResultCode::DependencyUnavailable,
+      "SAVE_MAP requires MotionGate to remain inhibited with a proven zero")};
+  }
   if (gate_snapshot_.state == GateState::Faulted &&
     gate_snapshot_.endpoint_available)
   {
@@ -290,6 +305,8 @@ AdmissionResult RuntimeCore::admit(
   if (start_permit_check && !start_permit_check()) {
     return AdmissionResult{0U, false, reject(
       MissionResultCode::SafetyFault,
+      map_only_goal ?
+      "Runtime start permit was revoked before map-only admission" :
       "Runtime start permit was revoked before MotionGate PREPARE")};
   }
 
@@ -302,7 +319,7 @@ AdmissionResult RuntimeCore::admit(
       "Mission generation exhausted")};
   }
 
-  if (!relative_motion_->owns_authority_lifecycle()) {
+  if (!map_only_goal && !relative_motion_->owns_authority_lifecycle()) {
     const auto prepare = authority_->prepare(make_operation());
     if (!prepare.applied) {
       return AdmissionResult{0U, false, reject(
@@ -749,6 +766,18 @@ bool RuntimeCore::validate_goal(
       "Mission must contain between one and three steps");
     return false;
   }
+  const auto save_map_count = static_cast<std::size_t>(std::count_if(
+    goal.steps.begin(), goal.steps.end(), [](const MissionStep & step) {
+      return step.kind == kSaveMapKind;
+    }));
+  if (save_map_count != 0U &&
+    (save_map_count != 1U || goal.steps.size() != 1U))
+  {
+    result = reject(
+      MissionResultCode::InvalidPlan,
+      "SAVE_MAP must be the only step in its Mission");
+    return false;
+  }
   for (std::size_t index = 0U; index < goal.steps.size(); ++index) {
     if (!validate_step(goal.steps[index], result)) {
       result.failed_step = -1;
@@ -756,10 +785,12 @@ bool RuntimeCore::validate_goal(
     }
     const auto kind = goal.steps[index].kind;
     if (kind == kSaveMapKind) {
-      result = reject(
-        MissionResultCode::UnsupportedStep,
-        "SAVE_MAP is not implemented in this Runtime slice");
-      return false;
+      if (config_.operating_mode != OperatingMode::Mapping) {
+        result = reject(
+          MissionResultCode::UnsupportedStep,
+          "SAVE_MAP requires mapping operating mode");
+        return false;
+      }
     }
     if (kind == kNavigateToKind) {
       if (config_.operating_mode != OperatingMode::Navigation) {
@@ -1039,6 +1070,14 @@ void RuntimeCore::start_step()
   if (!active_.has_value()) {
     return;
   }
+  const bool map_step =
+    active_->steps[active_->step_index].kind == kSaveMapKind;
+  if (map_step && !map_store_) {
+    select_terminal_and_stop(
+      MissionResultCode::DependencyUnavailable,
+      "MapStorePort is unavailable before map save");
+    return;
+  }
   const bool navigation_step =
     active_->steps[active_->step_index].kind == kNavigateToKind;
   if (navigation_step && !navigation_) {
@@ -1071,6 +1110,26 @@ void RuntimeCore::start_step()
     select_terminal_and_stop(
       MissionResultCode::SafetyFault,
       "Runtime admission fence raised before child start");
+    return;
+  }
+  if (map_step) {
+    active_->child_started = true;
+    publish_feedback(FeedbackPhase::Executing, active_->step_index, 0.0);
+    try {
+      const auto result = map_store_->save(
+        active_->steps[active_->step_index].target_id);
+      on_child_result(token, result);
+    } catch (const std::exception & error) {
+      active_->child_started = false;
+      select_terminal_and_stop(
+        MissionResultCode::InternalError,
+        std::string{"map save threw: "} + error.what());
+    } catch (...) {
+      active_->child_started = false;
+      select_terminal_and_stop(
+        MissionResultCode::InternalError,
+        "map save threw an unknown exception");
+    }
     return;
   }
   const bool uses_external_completion_registry = navigation_step ?

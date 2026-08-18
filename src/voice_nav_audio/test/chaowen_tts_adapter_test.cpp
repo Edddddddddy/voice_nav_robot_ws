@@ -66,6 +66,25 @@ public:
   std::vector<std::string> failure_details;
 };
 
+class CoreObserver final : public SpeechOutputObserver
+{
+public:
+  void on_played(const std::uint64_t scope_id, const std::uint64_t samples) noexcept override
+  {
+    played_scope_ids.push_back(scope_id);
+    played_samples.push_back(samples);
+  }
+
+  void on_result(const SpeechResult & result) noexcept override
+  {
+    results.push_back(result);
+  }
+
+  std::vector<std::uint64_t> played_scope_ids;
+  std::vector<std::uint64_t> played_samples;
+  std::vector<SpeechResult> results;
+};
+
 class FakeInference final : public ChaowenTtsInference
 {
 public:
@@ -78,6 +97,11 @@ public:
       detail = failure_detail;
       return false;
     }
+    if (xrun_engine != nullptr) {
+      std::array<Sample, AudioEngine::kFrameSamples> output{};
+      xrun_engine->process_callback(
+        nullptr, output.data(), output.size(), CallbackStatus{false, true});
+    }
     samples = generated_samples;
     sample_rate_hz = generated_sample_rate_hz;
     return true;
@@ -87,6 +111,7 @@ public:
   std::string failure_detail{"fake inference failed"};
   std::vector<float> generated_samples{};
   std::uint32_t generated_sample_rate_hz{22050U};
+  AudioEngine * xrun_engine{nullptr};
   std::size_t calls{0U};
 };
 
@@ -155,6 +180,78 @@ TEST_F(ChaowenTtsAdapterTest, EmitsBoundedMonoPcmAndCompletes)
   EXPECT_LE(sink.chunks[2].size(), 220U);
   EXPECT_EQ(sink.chunks[0].size() + sink.chunks[1].size() + sink.chunks[2].size(), 441U);
   EXPECT_EQ(sink.chunks[0][0], 16384);
+}
+
+TEST_F(ChaowenTtsAdapterTest, FastGeneratedBurstReachesAudioEngineAndCompletes)
+{
+  constexpr std::size_t packet_count = 1100U;
+  auto inference = std::make_unique<FakeInference>();
+  inference->generated_samples.assign(packet_count * 220U, 0.5F);
+  ChaowenTtsAdapter adapter(paths_, std::move(inference), fixture_manifest());
+  AudioEngine engine;
+  CoreObserver observer;
+  SpeechOutputCore core(engine, adapter, observer);
+
+  const SpeechGoal goal{
+    "voice-instance", 7U, "session", "turn", SpeechPriority::Normal, "安全回复", false};
+  const auto admission = core.start(goal);
+  ASSERT_TRUE(admission.start_synthesis);
+  ASSERT_TRUE(core.begin_synthesis(admission.scope_id));
+
+  std::array<Sample, AudioEngine::kFrameSamples> output{};
+  bool saw_nonzero_output = false;
+  for (std::size_t packet = 0U; packet < packet_count; ++packet) {
+    engine.process_callback(nullptr, output.data(), output.size(), CallbackStatus{});
+    saw_nonzero_output = saw_nonzero_output || std::any_of(
+      output.begin(), output.end(), [](const Sample sample) {return sample != 0;});
+    AudioFrame capture{};
+    AudioFrame reference{};
+    (void)engine.try_pop_capture(capture);
+    (void)engine.try_pop_reference(reference);
+    (void)core.advance();
+  }
+
+  EXPECT_TRUE(saw_nonzero_output);
+  ASSERT_EQ(observer.results.size(), 1U);
+  EXPECT_EQ(observer.results.front().code, SpeechResultCode::Completed);
+  EXPECT_EQ(observer.results.front().played_samples, packet_count * 478U);
+}
+
+TEST_F(ChaowenTtsAdapterTest, RecoversAfterFullDuplexXrunDuringInference)
+{
+  constexpr std::size_t generated_sample_count = 30522U;
+  constexpr std::size_t packet_count = (generated_sample_count + 219U) / 220U;
+  AudioEngine engine;
+  auto inference = std::make_unique<FakeInference>();
+  inference->generated_samples.assign(generated_sample_count, 0.5F);
+  inference->xrun_engine = &engine;
+  ChaowenTtsAdapter adapter(paths_, std::move(inference), fixture_manifest());
+  CoreObserver observer;
+  SpeechOutputCore core(engine, adapter, observer);
+
+  const SpeechGoal goal{
+    "voice-instance", 7U, "session", "turn", SpeechPriority::Normal, "任务已完成。", false};
+  const auto admission = core.start(goal);
+  ASSERT_TRUE(admission.start_synthesis);
+  ASSERT_TRUE(core.begin_synthesis(admission.scope_id));
+
+  std::array<Sample, AudioEngine::kFrameSamples> output{};
+  bool saw_nonzero_output = false;
+  for (std::size_t packet = 0U; packet < packet_count; ++packet) {
+    engine.process_callback(nullptr, output.data(), output.size(), CallbackStatus{});
+    saw_nonzero_output = saw_nonzero_output || std::any_of(
+      output.begin(), output.end(), [](const Sample sample) {return sample != 0;});
+    AudioFrame capture{};
+    AudioFrame reference{};
+    (void)engine.try_pop_capture(capture);
+    (void)engine.try_pop_reference(reference);
+    (void)core.advance();
+  }
+
+  EXPECT_TRUE(saw_nonzero_output);
+  ASSERT_EQ(observer.results.size(), 1U);
+  EXPECT_EQ(observer.results.front().code, SpeechResultCode::Completed);
+  EXPECT_GT(observer.results.front().played_samples, 0U);
 }
 
 TEST_F(ChaowenTtsAdapterTest, RejectsSameSizeTamperedAssetBeforeInference)

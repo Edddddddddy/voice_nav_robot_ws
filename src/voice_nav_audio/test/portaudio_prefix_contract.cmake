@@ -135,10 +135,13 @@ int main()
   }
 
   const auto generation_before_xrun = engine.generation();
+  const auto playback_generation_before_xrun = engine.playback_generation();
   if(voice_nav_portaudio_fixture_fire_callback(paOutputUnderflow) != paContinue) {
     return 9;
   }
-  if(engine.metrics().xruns != 1U || engine.generation() <= generation_before_xrun) {
+  if(engine.metrics().xruns != 1U || engine.generation() != generation_before_xrun ||
+    engine.playback_generation() != playback_generation_before_xrun)
+  {
     return 10;
   }
   for(std::size_t index = 0U; index < reference.samples.size(); ++index) {

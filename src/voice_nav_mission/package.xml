@@ -16,6 +16,7 @@
   <depend>geometry_msgs</depend>
   <depend>lifecycle_msgs</depend>
   <depend>nav_msgs</depend>
+  <depend>nav2_map_server</depend>
   <depend>nav2_msgs</depend>
   <depend>rcl_interfaces</depend>
   <depend>rclcpp</depend>
@@ -23,6 +24,7 @@
   <depend>rmw</depend>
   <depend>rosgraph_msgs</depend>
   <depend>sensor_msgs</depend>
+  <depend>slam_toolbox</depend>
   <depend>voice_nav_interfaces</depend>
 
   <exec_depend>rosidl_default_runtime</exec_depend>

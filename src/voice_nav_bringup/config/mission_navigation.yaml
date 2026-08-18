@@ -2,6 +2,8 @@ mission_runtime_node:
   ros__parameters:
     use_sim_time: true
     operating_mode: navigation
+    map_id: voice_mvp
+    trusted_named_places_file: ''
     named_place_ids: [study]
     mission_deadline_ms: 30000
     gate_discovery_deadline_ms: 2000

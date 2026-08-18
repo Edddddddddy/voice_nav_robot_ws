@@ -3,7 +3,7 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 
-"""Source contract for the one-place Navigation MVP composition."""
+"""Source contract for the package-backed one-place Navigation MVP."""
 
 import importlib.util
 from collections import deque
@@ -16,6 +16,7 @@ from nav_msgs.msg import Odometry
 import pytest
 from sensor_msgs.msg import JointState
 import yaml
+from launch_ros.actions import Node
 
 
 _TEST_DIRECTORY = str(Path(__file__).resolve().parent)
@@ -55,8 +56,8 @@ def test_navigation_mvp_contract_is_one_place_and_single_nav2_writer():
             encoding='utf-8'
         )
     )
-    map_yaml = yaml.safe_load(
-        (package_root / 'config' / 'voice_nav_study_map.yaml').read_text(
+    named_places = yaml.safe_load(
+        (package_root / 'config' / 'named_places.yaml').read_text(
             encoding='utf-8'
         )
     )
@@ -65,13 +66,31 @@ def test_navigation_mvp_contract_is_one_place_and_single_nav2_writer():
     assert "'node_names': ['map_server', 'amcl']" in launch_source
     runtime_parameters = runtime['mission_runtime_node']['ros__parameters']
     assert runtime_parameters['operating_mode'] == 'navigation'
+    assert runtime_parameters['map_id'] == 'voice_mvp'
     assert runtime_parameters['named_place_ids'] == ['study']
     assert nav2['amcl']['ros__parameters']['base_frame_id'] == 'base_footprint'
-    assert map_yaml['image'] == 'voice_nav_study_map.pgm'
-    assert (package_root / 'config' / map_yaml['image']).is_file()
+    assert named_places['schema_version'] == 1
+    assert named_places['map_id'] == 'voice_mvp'
+    assert named_places['places']['study']['frame'] == 'map'
+    assert all(
+        isinstance(named_places['places']['study'][field], (int, float))
+        for field in ('x', 'y', 'yaw')
+    )
 
     description = _load_launch_module().generate_launch_description()
     assert description.entities
+    map_server = next(
+        entity for entity in description.entities
+        if isinstance(entity, Node)
+        and getattr(entity, '_Node__node_name', None) == 'map_server'
+    )
+    map_server_parameters = getattr(map_server, '_Node__parameters', ())
+    assert any(
+        'map.yaml' in repr(value)
+        for parameters in map_server_parameters
+        if isinstance(parameters, dict)
+        for value in parameters.values()
+    )
 
 
 def test_navigation_observation_selects_last_nonzero_without_sleep():

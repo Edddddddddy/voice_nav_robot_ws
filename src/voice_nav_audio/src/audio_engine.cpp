@@ -47,7 +47,7 @@ bool AudioEngine::enqueue_playback(
   }
 
   playback_overflows_.fetch_add(1U, std::memory_order_relaxed);
-  request_playback_fence();
+  request_playback_fence(PlaybackFenceReason::kPlaybackRingOverflow);
   return false;
 }
 
@@ -120,13 +120,52 @@ void AudioEngine::request_fade_to_silence(const std::size_t sample_count) noexce
   fade_request_.fetch_add(1U, std::memory_order_release);
 }
 
-void AudioEngine::request_playback_fence() noexcept
+void AudioEngine::mark_playback_inactive() noexcept
 {
+  playback_active_.store(0U, std::memory_order_release);
+}
+
+void AudioEngine::request_playback_fence(const PlaybackFenceReason reason) noexcept
+{
+  switch (reason) {
+    case PlaybackFenceReason::kExternal:
+      external_playback_fence_requests_.fetch_add(1U, std::memory_order_relaxed);
+      break;
+    case PlaybackFenceReason::kSpeechScope:
+      speech_playback_fence_requests_.fetch_add(1U, std::memory_order_relaxed);
+      break;
+    case PlaybackFenceReason::kPlaybackRingOverflow:
+      playback_ring_overflow_fences_.fetch_add(1U, std::memory_order_relaxed);
+      break;
+    case PlaybackFenceReason::kPlaybackWriteOverflow:
+      playback_write_overflow_fences_.fetch_add(1U, std::memory_order_relaxed);
+      break;
+  }
   playback_fence_requests_.fetch_add(1U, std::memory_order_release);
 }
 
-void AudioEngine::mark_discontinuity() noexcept
+void AudioEngine::mark_discontinuity(const DiscontinuityReason reason) noexcept
 {
+  switch (reason) {
+    case DiscontinuityReason::kExternal:
+      external_discontinuity_fences_.fetch_add(1U, std::memory_order_relaxed);
+      break;
+    case DiscontinuityReason::kStreamLifecycle:
+      stream_lifecycle_fences_.fetch_add(1U, std::memory_order_relaxed);
+      break;
+    case DiscontinuityReason::kActiveOutputXrun:
+      active_output_xrun_fences_.fetch_add(1U, std::memory_order_relaxed);
+      break;
+    case DiscontinuityReason::kFrameSize:
+      frame_size_fences_.fetch_add(1U, std::memory_order_relaxed);
+      break;
+    case DiscontinuityReason::kReferenceOverflow:
+      reference_overflow_fences_.fetch_add(1U, std::memory_order_relaxed);
+      break;
+    case DiscontinuityReason::kCallbackException:
+      callback_exception_fences_.fetch_add(1U, std::memory_order_relaxed);
+      break;
+  }
   discontinuity_requests_.fetch_add(1U, std::memory_order_release);
 }
 
@@ -159,7 +198,18 @@ AudioMetrics AudioEngine::metrics() const noexcept
     discontinuities_.load(std::memory_order_relaxed),
     last_fence_generation_before_.load(std::memory_order_acquire),
     last_fence_generation_after_.load(std::memory_order_acquire),
-    stale_pcm_after_fence_.load(std::memory_order_acquire)};
+    stale_pcm_after_fence_.load(std::memory_order_acquire),
+    capture_input_overflow_fences_.load(std::memory_order_relaxed),
+    external_discontinuity_fences_.load(std::memory_order_relaxed),
+    stream_lifecycle_fences_.load(std::memory_order_relaxed),
+    active_output_xrun_fences_.load(std::memory_order_relaxed),
+    frame_size_fences_.load(std::memory_order_relaxed),
+    reference_overflow_fences_.load(std::memory_order_relaxed),
+    callback_exception_fences_.load(std::memory_order_relaxed),
+    external_playback_fence_requests_.load(std::memory_order_relaxed),
+    speech_playback_fence_requests_.load(std::memory_order_relaxed),
+    playback_ring_overflow_fences_.load(std::memory_order_relaxed),
+    playback_write_overflow_fences_.load(std::memory_order_relaxed)};
 }
 
 }  // namespace voice_nav_audio

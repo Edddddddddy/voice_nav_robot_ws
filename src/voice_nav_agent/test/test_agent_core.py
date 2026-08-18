@@ -454,6 +454,89 @@ def test_save_map_is_mapping_only_and_uses_a_logical_map_id():
 
 
 @pytest.mark.parametrize(
+    'text',
+    [
+        '保存地图为 voice_mvp',
+        '保存地图为 voice mvp',
+        '保存地图为  voice   m  v p  ',
+        '保存地图为 voice 下划线 mvp',
+        '保存地图为  voice  下划线   mvp  ',
+    ],
+)
+def test_save_map_voice_mvp_spoken_aliases_normalize_only_target(text):
+    decision = make_core().handle_turn(
+        make_turn(text),
+        make_state(
+            operating_mode=OperatingMode.MAPPING,
+            supported_step_mask=0b1111,
+        ),
+    )
+
+    assert decision.kind is DecisionKind.MISSION
+    assert decision.steps == (
+        MissionStep(MissionStep.SAVE_MAP, target_id='voice_mvp'),
+    )
+
+
+@pytest.mark.parametrize(
+    'text',
+    [
+        '保存地图为voice下划线MVP。',
+        '保存地图为voiceMVP。',
+    ],
+)
+def test_save_map_exact_product_transcripts_normalize_compact_target(text):
+    decision = make_core().handle_turn(
+        make_turn(text),
+        make_state(
+            operating_mode=OperatingMode.MAPPING,
+            supported_step_mask=0b1111,
+        ),
+    )
+
+    assert decision.kind is DecisionKind.MISSION
+    assert decision.steps == (
+        MissionStep(MissionStep.SAVE_MAP, target_id='voice_mvp'),
+    )
+
+
+@pytest.mark.parametrize(
+    'text',
+    [
+        '保存地图为 voice mvp2',
+        '保存地图为 voice 下划线 map',
+        '保存地图为 voice/mvp',
+        '保存地图为 ../voice_mvp',
+    ],
+)
+def test_save_map_unknown_aliases_and_paths_fail_closed(text):
+    decision = make_core().handle_turn(
+        make_turn(text),
+        make_state(operating_mode=OperatingMode.MAPPING),
+    )
+
+    assert decision.kind is DecisionKind.REPLY
+    assert decision.reason == 'invalid_map_id'
+
+
+def test_pending_save_map_voice_mvp_spoken_alias_normalizes_target():
+    core = make_core()
+    state = make_state(operating_mode=OperatingMode.MAPPING)
+
+    clarification = core.handle_turn(make_turn('保存地图'), state)
+    decision = core.handle_turn(
+        make_turn('voice m v p', sequence=2),
+        state,
+    )
+
+    assert clarification.kind is DecisionKind.CLARIFY
+    assert decision.kind is DecisionKind.MISSION
+    assert decision.steps == (
+        MissionStep(MissionStep.SAVE_MAP, target_id='voice_mvp'),
+    )
+
+
+@pytest.mark.parametrize(
     'changes',
     [
         {'runtime_instance_id': ''},

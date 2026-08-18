@@ -6,12 +6,14 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 find_package(action_msgs REQUIRED)
 find_package(composition_interfaces REQUIRED)
 find_package(controller_manager_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(lifecycle_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(nav2_map_server REQUIRED)
 find_package(nav2_msgs REQUIRED)
 find_package(rcl_interfaces REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -19,6 +21,7 @@ find_package(rclcpp_action REQUIRED)
 find_package(rmw REQUIRED)
 find_package(rosgraph_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(slam_toolbox REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(voice_nav_interfaces REQUIRED)
 
@@ -53,6 +56,44 @@ target_include_directories(
   mission_runtime_core
   PUBLIC
     "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+)
+
+add_library(
+  map_package STATIC
+  src/map_package.cpp
+)
+target_compile_features(map_package PUBLIC cxx_std_17)
+target_include_directories(
+  map_package
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+)
+target_link_libraries(
+  map_package
+  mission_runtime_core
+  OpenSSL::Crypto
+)
+
+add_library(
+  map_store_ros_adapter STATIC
+  src/map_store_ros_adapter.cpp
+)
+target_compile_features(map_store_ros_adapter PUBLIC cxx_std_17)
+target_include_directories(
+  map_store_ros_adapter
+  PUBLIC
+    "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+)
+ament_target_dependencies(
+  map_store_ros_adapter
+  nav2_map_server
+  nav_msgs
+  rclcpp
+  slam_toolbox
+)
+target_link_libraries(
+  map_store_ros_adapter
+  mission_runtime_core
 )
 
 add_library(
@@ -173,6 +214,8 @@ target_link_libraries(
 target_link_libraries(
   mission_runtime_node
   mission_runtime_core
+  map_package
+  map_store_ros_adapter
   relative_motion_ros_adapter
   "${motion_gate_typesupport}"
 )
@@ -212,6 +255,47 @@ if(BUILD_TESTING)
   target_link_libraries(
     mission_runtime_core_test
     mission_runtime_core
+  )
+
+  ament_add_gtest(
+    map_package_test
+    test/map_package_test.cpp
+  )
+  target_compile_features(map_package_test PUBLIC cxx_std_17)
+  target_include_directories(
+    map_package_test
+    PRIVATE include
+  )
+  target_link_libraries(
+    map_package_test
+    map_package
+  )
+
+  ament_add_gtest(
+    map_store_ros_adapter_test
+    test/map_store_ros_adapter_test.cpp
+  )
+  target_compile_features(map_store_ros_adapter_test PUBLIC cxx_std_17)
+  target_include_directories(
+    map_store_ros_adapter_test
+    PRIVATE include
+  )
+  ament_target_dependencies(
+    map_store_ros_adapter_test
+    nav_msgs
+    rclcpp
+    slam_toolbox
+  )
+  target_link_libraries(
+    map_store_ros_adapter_test
+    map_store_ros_adapter
+  )
+  set_tests_properties(
+    map_store_ros_adapter_test
+    PROPERTIES
+      ENVIRONMENT
+        "RMW_IMPLEMENTATION=rmw_fastrtps_cpp;ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST"
+      RUN_SERIAL TRUE
   )
 
   ament_add_gtest(

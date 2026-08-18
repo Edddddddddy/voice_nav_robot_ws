@@ -116,6 +116,16 @@ if(BUILD_TESTING)
     test/test_issue164_headless_runner.py
     TIMEOUT 30
   )
+  ament_add_pytest_test(
+    map_roundtrip
+    test/test_map_roundtrip.py
+    TIMEOUT 30
+  )
+  ament_add_pytest_test(
+    map_roundtrip_install_contract
+    test/test_map_roundtrip_install_contract.py
+    TIMEOUT 30
+  )
 
   add_launch_test(
     test/test_motion_gate_product.py
@@ -258,6 +268,13 @@ install(
     voice_nav_issue164_runner.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME voice_nav_issue164_runner
+)
+
+install(
+  PROGRAMS
+    voice_nav_map_roundtrip.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME voice_nav_map_roundtrip
 )
 
 install(

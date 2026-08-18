@@ -1,0 +1,8 @@
+schema_version: 1
+map_id: voice_mvp
+places:
+  study:
+    frame: map
+    x: 0.5
+    y: 0.0
+    yaw: 0.0

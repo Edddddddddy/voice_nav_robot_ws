@@ -46,6 +46,14 @@ public:
       samples.data(), samples.size());
   }
 
+  [[nodiscard]] bool emit_with_format(
+    const std::uint32_t sample_rate_hz, const std::uint32_t channels,
+    const Sample * const samples, const std::size_t sample_count) const noexcept
+  {
+    return sink_ != nullptr && sink_->on_pcm(
+      request_.scope_id, sample_rate_hz, channels, samples, sample_count);
+  }
+
   void complete() const noexcept
   {
     if (sink_ != nullptr) {
@@ -124,6 +132,93 @@ TEST(SpeechOutputCoreTest, CompletesOneNormalGoalOnlyAfterAudioEngineWritesPcm)
   EXPECT_EQ(observer.results.front().played_samples, 320U);
 }
 
+TEST(SpeechOutputCoreTest, CompletesNewScopeAfterPlaybackOnlyFence)
+{
+  AudioEngine engine;
+  ManualTts tts;
+  CollectingObserver observer;
+  SpeechOutputCore core(engine, tts, observer);
+
+  const auto capture_generation = engine.generation();
+  engine.request_playback_fence();
+  std::array<Sample, AudioEngine::kFrameSamples> output{};
+  engine.process_callback(nullptr, output.data(), output.size(), CallbackStatus{});
+  ASSERT_EQ(engine.generation(), capture_generation);
+  ASSERT_GT(engine.playback_generation(), capture_generation);
+
+  const auto admission = core.start(normal_goal());
+  ASSERT_TRUE(admission.start_synthesis);
+  ASSERT_TRUE(core.begin_synthesis(admission.scope_id));
+
+  std::array<Sample, 147U> source{};
+  source.fill(1200);
+  ASSERT_TRUE(tts.emit(source));
+  tts.complete();
+
+  engine.process_callback(nullptr, output.data(), output.size(), CallbackStatus{});
+  EXPECT_TRUE(std::any_of(output.begin(), output.end(), [](const Sample sample) {
+      return sample != 0;
+    }));
+  (void)core.advance();
+
+  ASSERT_EQ(observer.played_samples.size(), 1U);
+  EXPECT_EQ(observer.played_samples.front(), 320U);
+  ASSERT_EQ(observer.results.size(), 1U);
+  EXPECT_EQ(observer.results.front().code, SpeechResultCode::Completed);
+}
+
+TEST(SpeechOutputCoreTest, RejectsPcmAfterGenerationFenceOnceAudioWasEnqueued)
+{
+  AudioEngine engine;
+  ManualTts tts;
+  CollectingObserver observer;
+  SpeechOutputCore core(engine, tts, observer);
+  const auto admission = core.start(normal_goal());
+  ASSERT_TRUE(admission.start_synthesis);
+  ASSERT_TRUE(core.begin_synthesis(admission.scope_id));
+
+  std::array<Sample, 147U> source{};
+  source.fill(1200);
+  ASSERT_TRUE(tts.emit(source));
+
+  engine.request_playback_fence();
+  std::array<Sample, AudioEngine::kFrameSamples> output{};
+  engine.process_callback(nullptr, output.data(), output.size(), CallbackStatus{});
+
+  EXPECT_FALSE(tts.emit(source));
+  EXPECT_TRUE(observer.results.empty());
+}
+
+TEST(SpeechOutputCoreTest, RejectsWrongFormatAfterGenerationChangeThenAcceptsCurrentPcm)
+{
+  AudioEngine engine;
+  ManualTts tts;
+  CollectingObserver observer;
+  SpeechOutputCore core(engine, tts, observer);
+  const auto admission = core.start(normal_goal());
+  ASSERT_TRUE(admission.start_synthesis);
+  ASSERT_TRUE(core.begin_synthesis(admission.scope_id));
+
+  std::array<Sample, 147U> source{};
+  source.fill(1200);
+  std::array<Sample, AudioEngine::kFrameSamples> output{};
+  engine.process_callback(nullptr, output.data(), output.size(), CallbackStatus{false, true});
+
+  EXPECT_FALSE(tts.emit_with_format(16000U, 1U, source.data(), source.size()));
+  EXPECT_FALSE(tts.emit_with_format(22050U, 2U, source.data(), source.size()));
+  EXPECT_TRUE(observer.results.empty());
+  EXPECT_TRUE(tts.emit(source));
+  tts.complete();
+  engine.process_callback(nullptr, output.data(), output.size(), CallbackStatus{});
+  (void)core.advance();
+
+  EXPECT_TRUE(std::any_of(output.begin(), output.end(), [](const Sample sample) {
+      return sample != 0;
+    }));
+  ASSERT_EQ(observer.results.size(), 1U);
+  EXPECT_EQ(observer.results.front().code, SpeechResultCode::Completed);
+}
+
 TEST(SpeechOutputCoreTest, BuffersOneBoundedTtsBurstBeforeTheFirstAudioCallback)
 {
   AudioEngine engine;
@@ -154,6 +249,172 @@ TEST(SpeechOutputCoreTest, BuffersOneBoundedTtsBurstBeforeTheFirstAudioCallback)
   ASSERT_EQ(observer.results.size(), 1U);
   EXPECT_EQ(observer.results.front().code, SpeechResultCode::Completed);
   EXPECT_EQ(observer.results.front().played_samples, packet_count * 320U);
+}
+
+TEST(SpeechOutputCoreTest, RejectsRealPlaybackOverflowFailClosed)
+{
+  AudioEngine engine;
+  ManualTts tts;
+  CollectingObserver observer;
+  SpeechOutputCore core(engine, tts, observer);
+  const auto admission = core.start(normal_goal());
+  ASSERT_TRUE(admission.start_synthesis);
+  ASSERT_TRUE(core.begin_synthesis(admission.scope_id));
+
+  std::array<Sample, 147U> source{};
+  source.fill(1200);
+  for (std::size_t packet = 0U; packet < AudioEngine::kPlaybackRingCapacity; ++packet) {
+    const auto accepted = tts.emit(source);
+    if (packet + 1U == AudioEngine::kPlaybackRingCapacity) {
+      EXPECT_FALSE(accepted);
+    } else {
+      ASSERT_TRUE(accepted) << "packet=" << packet;
+    }
+  }
+
+  ASSERT_EQ(observer.results.size(), 1U);
+  EXPECT_EQ(observer.results.front().code, SpeechResultCode::Failed);
+  EXPECT_EQ(observer.results.front().detail, "AudioEngine playback ring rejected PCM");
+}
+
+TEST(SpeechOutputCoreTest, RestartsCompletedUnplayedScopeOnceAfterGenerationChange)
+{
+  AudioEngine engine;
+  ManualTts tts;
+  CollectingObserver observer;
+  SpeechOutputCore core(engine, tts, observer);
+  const auto admission = core.start(normal_goal());
+  ASSERT_TRUE(admission.start_synthesis);
+  ASSERT_TRUE(core.begin_synthesis(admission.scope_id));
+
+  std::array<Sample, 147U> source{};
+  source.fill(1200);
+  ASSERT_TRUE(tts.emit(source));
+  tts.complete();
+
+  std::array<Sample, AudioEngine::kFrameSamples> output{};
+  engine.mark_discontinuity();
+  engine.process_callback(nullptr, output.data(), output.size(), CallbackStatus{});
+  (void)core.advance();
+  EXPECT_TRUE(observer.results.empty());
+
+  engine.process_callback(nullptr, output.data(), output.size(), CallbackStatus{});
+  ASSERT_TRUE(core.advance());
+  ASSERT_EQ(core.ready_scope_id(), admission.scope_id);
+  ASSERT_TRUE(core.begin_synthesis(admission.scope_id));
+  ASSERT_EQ(tts.starts, 2U);
+  ASSERT_TRUE(tts.emit(source));
+  tts.complete();
+  const auto retry_generation = engine.playback_generation();
+  engine.process_callback(nullptr, output.data(), output.size(), CallbackStatus{false, true});
+  EXPECT_EQ(engine.playback_generation(), retry_generation);
+
+  engine.process_callback(nullptr, output.data(), output.size(), CallbackStatus{});
+  EXPECT_TRUE(std::any_of(output.begin(), output.end(), [](const Sample sample) {
+      return sample != 0;
+    }));
+  (void)core.advance();
+
+  ASSERT_EQ(observer.results.size(), 1U);
+  EXPECT_EQ(observer.results.front().code, SpeechResultCode::Completed);
+  EXPECT_EQ(observer.results.front().played_samples, 320U);
+}
+
+TEST(SpeechOutputCoreTest, FailsClosedWhenGenerationChangesDuringTheSingleRetry)
+{
+  AudioEngine engine;
+  ManualTts tts;
+  CollectingObserver observer;
+  SpeechOutputCore core(engine, tts, observer);
+  const auto admission = core.start(normal_goal());
+  ASSERT_TRUE(admission.start_synthesis);
+  ASSERT_TRUE(core.begin_synthesis(admission.scope_id));
+
+  std::array<Sample, 147U> source{};
+  source.fill(1200);
+  ASSERT_TRUE(tts.emit(source));
+  tts.complete();
+
+  std::array<Sample, AudioEngine::kFrameSamples> output{};
+  engine.mark_discontinuity();
+  engine.process_callback(nullptr, output.data(), output.size(), CallbackStatus{});
+  (void)core.advance();
+  engine.process_callback(nullptr, output.data(), output.size(), CallbackStatus{});
+  ASSERT_TRUE(core.advance());
+  ASSERT_EQ(core.ready_scope_id(), admission.scope_id);
+  ASSERT_TRUE(core.begin_synthesis(admission.scope_id));
+  ASSERT_EQ(tts.starts, 2U);
+
+  engine.mark_discontinuity();
+  engine.process_callback(nullptr, output.data(), output.size(), CallbackStatus{});
+  EXPECT_FALSE(tts.emit(source));
+  tts.complete();
+  (void)core.advance();
+
+  ASSERT_EQ(observer.results.size(), 1U);
+  EXPECT_EQ(observer.results.front().code, SpeechResultCode::Failed);
+  EXPECT_EQ(observer.results.front().detail, "AudioEngine generation changed");
+}
+
+TEST(SpeechOutputCoreTest, ReportsBoundedGenerationReasonsWhenRetryFenceChanges)
+{
+  AudioEngine engine;
+  ManualTts tts;
+  CollectingObserver observer;
+  SpeechOutputCore core(engine, tts, observer);
+  const auto admission = core.start(normal_goal());
+  ASSERT_TRUE(admission.start_synthesis);
+  ASSERT_TRUE(core.begin_synthesis(admission.scope_id));
+
+  std::array<Sample, 147U> source{};
+  source.fill(1200);
+  ASSERT_TRUE(tts.emit(source));
+  tts.complete();
+
+  std::array<Sample, AudioEngine::kFrameSamples> output{};
+  engine.mark_discontinuity();
+  engine.process_callback(nullptr, output.data(), output.size(), CallbackStatus{});
+  (void)core.advance();
+
+  ASSERT_TRUE(core.advance() == false);
+  ASSERT_TRUE(core.ready_scope_id() == 0U);
+
+  engine.process_callback(nullptr, output.data(), output.size() - 1U, CallbackStatus{});
+  (void)core.advance();
+
+  ASSERT_EQ(observer.results.size(), 1U);
+  EXPECT_EQ(observer.results.front().code, SpeechResultCode::Failed);
+  EXPECT_NE(observer.results.front().detail.find("frame=1"), std::string::npos);
+  EXPECT_NE(observer.results.front().detail.find("playback=1"), std::string::npos);
+  EXPECT_LE(observer.results.front().detail.size(), 192U);
+}
+
+TEST(SpeechOutputCoreTest, FailsClosedWhenGenerationChangesAfterPlaybackStarted)
+{
+  AudioEngine engine;
+  ManualTts tts;
+  CollectingObserver observer;
+  SpeechOutputCore core(engine, tts, observer);
+  const auto admission = core.start(normal_goal());
+  ASSERT_TRUE(admission.start_synthesis);
+  ASSERT_TRUE(core.begin_synthesis(admission.scope_id));
+
+  std::array<Sample, 147U> source{};
+  source.fill(1200);
+  ASSERT_TRUE(tts.emit(source));
+
+  std::array<Sample, AudioEngine::kFrameSamples> output{};
+  engine.process_callback(nullptr, output.data(), output.size(), CallbackStatus{});
+  (void)core.advance();
+  ASSERT_EQ(observer.played_samples.back(), 320U);
+
+  engine.process_callback(nullptr, output.data(), output.size(), CallbackStatus{false, true});
+  tts.complete();
+  (void)core.advance();
+
+  ASSERT_EQ(observer.results.size(), 1U);
+  EXPECT_EQ(observer.results.front().code, SpeechResultCode::Failed);
+  EXPECT_EQ(observer.results.front().played_samples, 320U);
 }
 
 TEST(SpeechOutputCoreTest, RejectsConcurrentNormalAndLetsUrgentPreemptOnlyNormal)
