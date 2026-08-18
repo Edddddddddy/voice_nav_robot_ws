@@ -125,6 +125,19 @@ def build_microphone_once_command() -> tuple[str, ...]:
     )
 
 
+def build_vad_auto_command() -> tuple[str, ...]:
+    """Build the fixed continuous-VAD frontend command."""
+    return (
+        'ros2',
+        'run',
+        'voice_nav_audio',
+        'voice_node',
+        '--ros-args',
+        '-p',
+        'input_profile:=vad_auto',
+    )
+
+
 def wait_for_input_sink_readiness(
     timeout_s: float,
     clock,
@@ -158,6 +171,7 @@ def wait_for_input_sink_readiness(
         )
 
     deadline = _clock_now(clock) + timeout_s
+    publisher_observed = False
     try:
         while True:
             subscribers = node.get_subscriptions_info_by_topic('/voice/turn')
@@ -187,6 +201,83 @@ def wait_for_input_sink_readiness(
         finally:
             if owns_context and rclpy.ok():
                 rclpy.shutdown()
+
+
+def wait_for_frontend_readiness(
+    process,
+    timeout_s: float,
+    clock,
+    poll,
+    stable_result,
+) -> dict[str, str]:
+    """Wait until the continuous frontend owns the VoiceTurn publisher."""
+    if timeout_s <= 0:
+        return stable_result('unavailable', 'invalid_frontend_readiness_timeout')
+
+    rclpy = None
+    node = None
+    owns_context = False
+    try:
+        import rclpy
+
+        owns_context = not rclpy.ok()
+        if owns_context:
+            rclpy.init(args=None)
+        node = rclpy.create_node('voice_nav_app_frontend_readiness')
+    except Exception as error:
+        if node is not None:
+            try:
+                node.destroy_node()
+            except Exception:
+                pass
+        if rclpy is not None and owns_context and rclpy.ok():
+            rclpy.shutdown()
+        return stable_result(
+            'unavailable',
+            f'frontend_readiness_start_failed:{_bounded_reason(error)}',
+        )
+
+    deadline = _clock_now(clock) + timeout_s
+    publisher_observed = False
+    try:
+        while True:
+            if poll(process) is not None:
+                return stable_result(
+                    'unavailable', 'vad_auto_exited_before_ready',
+                )
+            publishers = node.get_publishers_info_by_topic('/voice/turn')
+            publisher_ready = _has_voice_frontend_publisher(publishers)
+            if publisher_ready and publisher_observed:
+                return stable_result('ready')
+            publisher_observed = publisher_ready
+            remaining = deadline - _clock_now(clock)
+            if remaining <= 0:
+                return stable_result(
+                    'unavailable', 'vad_auto_frontend_readiness_timeout',
+                )
+            rclpy.spin_once(
+                node, timeout_sec=min(0.1, max(0.0, remaining)),
+            )
+    except Exception as error:
+        return stable_result(
+            'unavailable',
+            f'frontend_readiness_wait_failed:{_bounded_reason(error)}',
+        )
+    finally:
+        try:
+            node.destroy_node()
+        finally:
+            if owns_context and rclpy.ok():
+                rclpy.shutdown()
+
+
+def _has_voice_frontend_publisher(publishers) -> bool:
+    """Match the existing SpeechInputNode graph identity exactly."""
+    return any(
+        endpoint.node_name == 'voice_speech_input'
+        and endpoint.node_namespace in ('', '/')
+        for endpoint in publishers
+    )
 
 
 def wait_for_completion(process, deadline, clock, poll) -> tuple[int, str]:

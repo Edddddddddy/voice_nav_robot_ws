@@ -206,6 +206,7 @@ TEST(PortAudioAdapterTest, PlaybackOverflowQuarantinesAnAlreadyEnteredCallback)
   ASSERT_TRUE(engine.try_pop_reference(discarded_reference));
 
   const auto old_generation = engine.generation();
+  const auto old_playback_generation = engine.playback_generation();
   ASSERT_TRUE(engine.enqueue_playback(playback.data(), playback.size()));
   CallbackBoundaryBarrier barrier;
   barrier.install();
@@ -215,7 +216,7 @@ TEST(PortAudioAdapterTest, PlaybackOverflowQuarantinesAnAlreadyEnteredCallback)
     });
   barrier.wait_until_entered();
 
-  for (std::size_t index = 0U; index < AudioEngine::kRingCapacity - 1U; ++index) {
+  for (std::size_t index = 0U; index < AudioEngine::kPlaybackRingCapacity - 1U; ++index) {
     (void)engine.enqueue_playback(playback.data(), playback.size());
   }
   EXPECT_EQ(engine.metrics().playback_overflows, 1U);
@@ -238,7 +239,8 @@ TEST(PortAudioAdapterTest, PlaybackOverflowQuarantinesAnAlreadyEnteredCallback)
   EXPECT_EQ(quarantined_reference.samples, old_output);
 
   device.fire(input, output);
-  EXPECT_EQ(engine.generation(), old_generation + 1U);
+  EXPECT_EQ(engine.generation(), old_generation);
+  EXPECT_EQ(engine.playback_generation(), old_playback_generation + 1U);
   EXPECT_TRUE(std::all_of(output.begin(), output.end(), [](const Sample sample) {
       return sample == 0;
     }));

@@ -25,9 +25,11 @@ VoicePipeline::VoicePipeline(
   FullDuplexAudioDevice & device,
   SpeechOutputTraceSink * const trace,
   StopMissionPort * const stop_port,
-  const VoicePipelineCaptureMode capture_mode)
+  const VoicePipelineCaptureMode capture_mode,
+  const bool defer_input_publisher)
 : VoicePipeline(
-    std::move(recognizer), std::move(tts), &device, trace, stop_port, capture_mode)
+    std::move(recognizer), std::move(tts), &device, trace, stop_port, capture_mode,
+    defer_input_publisher)
 {
 }
 
@@ -37,7 +39,8 @@ VoicePipeline::VoicePipeline(
   FullDuplexAudioDevice * const device,
   SpeechOutputTraceSink * const trace,
   StopMissionPort * const stop_port,
-  const VoicePipelineCaptureMode capture_mode)
+  const VoicePipelineCaptureMode capture_mode,
+  const bool defer_input_publisher)
 : adapter_(engine_, device),
   capture_mode_(capture_mode),
   output_(std::make_shared<SpeechOutputNode>(engine_, std::move(tts), trace)),
@@ -47,7 +50,8 @@ VoicePipeline::VoicePipeline(
       *output_,
     stop_port != nullptr ? *stop_port : static_cast<StopMissionPort &>(*owned_stop_port_),
       static_cast<VoiceTurnBoundary *>(this))),
-  input_(std::make_shared<SpeechInputNode>(std::move(recognizer), coordination_.get()))
+  input_(std::make_shared<SpeechInputNode>(
+      std::move(recognizer), coordination_.get(), defer_input_publisher))
 {
   if (adapter_.start() != AdapterStartResult::Started) {
     throw std::runtime_error("VoicePipeline could not start its AudioEngine adapter");
@@ -59,10 +63,11 @@ VoicePipeline::VoicePipeline(
   std::unique_ptr<TtsAdapter> tts,
   SpeechOutputTraceSink * const trace,
   StopMissionPort * const stop_port,
-  const VoicePipelineCaptureMode capture_mode)
+  const VoicePipelineCaptureMode capture_mode,
+  const bool defer_input_publisher)
 : VoicePipeline(
     std::move(recognizer), std::move(tts), static_cast<FullDuplexAudioDevice *>(nullptr),
-    trace, stop_port, capture_mode)
+    trace, stop_port, capture_mode, defer_input_publisher)
 {
 }
 
@@ -79,6 +84,12 @@ void VoicePipeline::accept_cleaned_frame(const CleanedAudioFrame & frame) noexce
 void VoicePipeline::finish_input() noexcept
 {
   input_->finish_input();
+}
+
+bool VoicePipeline::start_capture() noexcept
+{
+  capture_finished_.store(false, std::memory_order_release);
+  return adapter_.restart();
 }
 
 bool VoicePipeline::try_pop_capture(AudioFrame & frame) noexcept
@@ -122,6 +133,16 @@ bool VoicePipeline::capture_finished() const noexcept
   return capture_finished_.load(std::memory_order_acquire);
 }
 
+bool VoicePipeline::consume_turn_completed_event() noexcept
+{
+  return turn_completed_event_.exchange(false, std::memory_order_acq_rel);
+}
+
+bool VoicePipeline::activate_input_publisher() noexcept
+{
+  return input_->activate_publisher();
+}
+
 void VoicePipeline::add_to_executor(rclcpp::Executor & executor)
 {
   executor.add_node(input_);
@@ -144,14 +165,27 @@ AudioMetrics VoicePipeline::audio_metrics() const noexcept
   return engine_.metrics();
 }
 
-void VoicePipeline::on_voice_turn_published() noexcept
+void VoicePipeline::on_recognizer_terminal(
+  const SpeechEventKind kind, const bool published) noexcept
 {
-  if (capture_mode_ != VoicePipelineCaptureMode::kStopBeforeTurnPublication) {
+  if (capture_mode_ == VoicePipelineCaptureMode::kKeepCapture) {
+    // The provider callback may be running on its worker. Only publish a
+    // control event here; the owner consumes it on the next pump, where the
+    // old child can be retired without a self-join.
+    turn_completed_event_.store(true, std::memory_order_release);
     return;
   }
-  // Publication is the linearization point for the one-shot boundary.  Pause
-  // the shared full-duplex adapter before the turn can reach Agent, then let
-  // the runner observe the completed boundary on its next pump.
+  // microphone_once only stops capture for a valid final. Invalid finals,
+  // timeout, and failure remain fail-closed capture outcomes for that
+  // compatibility profile.
+  if (capture_mode_ != VoicePipelineCaptureMode::kStopBeforeTurnPublication || !published ||
+    kind != SpeechEventKind::kEndpointFinal)
+  {
+    return;
+  }
+  // Pause the shared full-duplex adapter before the valid turn can reach the
+  // ROS graph, then let the runner observe the completed boundary on its next
+  // pump.
   (void)adapter_.pause_for_playback();
   capture_finished_.store(true, std::memory_order_release);
 }

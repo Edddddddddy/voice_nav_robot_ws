@@ -72,7 +72,8 @@ class VoiceTurnBoundary
 public:
   virtual ~VoiceTurnBoundary() = default;
 
-  virtual void on_voice_turn_published() noexcept = 0;
+  virtual void on_recognizer_terminal(
+    SpeechEventKind kind, bool published) noexcept = 0;
 };
 
 // Deep package-private coordinator: wake admission, PlaybackScope fencing,
@@ -86,6 +87,8 @@ public:
     VoiceTurnBoundary * turn_boundary = nullptr) noexcept;
 
   [[nodiscard]] bool on_wake_accepted() noexcept override;
+  void on_recognizer_terminal(
+    SpeechEventKind kind, bool published) noexcept override;
   void before_turn_published(VoiceTurnPublication & turn) noexcept override;
 
 private:

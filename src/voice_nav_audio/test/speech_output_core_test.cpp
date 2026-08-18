@@ -124,6 +124,38 @@ TEST(SpeechOutputCoreTest, CompletesOneNormalGoalOnlyAfterAudioEngineWritesPcm)
   EXPECT_EQ(observer.results.front().played_samples, 320U);
 }
 
+TEST(SpeechOutputCoreTest, BuffersOneBoundedTtsBurstBeforeTheFirstAudioCallback)
+{
+  AudioEngine engine;
+  ManualTts tts;
+  CollectingObserver observer;
+  SpeechOutputCore core(engine, tts, observer);
+  const auto admission = core.start(normal_goal());
+  ASSERT_TRUE(core.begin_synthesis(admission.scope_id));
+
+  std::array<Sample, 147U> source{};
+  source.fill(1200);
+  constexpr std::size_t packet_count = 300U;
+  for (std::size_t packet = 0U; packet < packet_count; ++packet) {
+    ASSERT_TRUE(tts.emit(source)) << "packet=" << packet;
+  }
+  tts.complete();
+
+  std::array<Sample, AudioEngine::kFrameSamples> output{};
+  for (std::size_t packet = 0U; packet < packet_count; ++packet) {
+    engine.process_callback(nullptr, output.data(), output.size(), CallbackStatus{});
+    AudioFrame capture{};
+    AudioFrame reference{};
+    (void)engine.try_pop_capture(capture);
+    (void)engine.try_pop_reference(reference);
+    (void)core.advance();
+  }
+
+  ASSERT_EQ(observer.results.size(), 1U);
+  EXPECT_EQ(observer.results.front().code, SpeechResultCode::Completed);
+  EXPECT_EQ(observer.results.front().played_samples, packet_count * 320U);
+}
+
 TEST(SpeechOutputCoreTest, RejectsConcurrentNormalAndLetsUrgentPreemptOnlyNormal)
 {
   AudioEngine engine;
@@ -243,6 +275,44 @@ TEST(SpeechOutputCoreTest, CancelLetsReplacementScopeWriteNonSilentPcmAndComplet
   EXPECT_EQ(observer.played_scope_ids.front(), replacement.scope_id);
   ASSERT_EQ(observer.results.size(), 2U);
   EXPECT_EQ(observer.results.front().code, SpeechResultCode::Canceled);
+  EXPECT_EQ(observer.results.back().scope_id, replacement.scope_id);
+  EXPECT_EQ(observer.results.back().code, SpeechResultCode::Completed);
+}
+
+TEST(SpeechOutputCoreTest, BargeInWaitsForItsPlaybackFenceBeforeStartingReplacementTts)
+{
+  AudioEngine engine;
+  ManualTts tts;
+  CollectingObserver observer;
+  SpeechOutputCore core(engine, tts, observer);
+  auto barged_goal = normal_goal();
+  barged_goal.allow_barge_in = true;
+  const auto barged = core.start(barged_goal);
+  ASSERT_TRUE(core.begin_synthesis(barged.scope_id));
+
+  std::array<Sample, 147U> pcm{};
+  pcm.fill(800);
+  ASSERT_TRUE(tts.emit(pcm));
+  ASSERT_TRUE(core.interrupt_for_barge_in());
+
+  const auto replacement = core.start(normal_goal());
+  EXPECT_FALSE(replacement.start_synthesis);
+  EXPECT_TRUE(replacement.waits_for_generation);
+  EXPECT_EQ(core.ready_scope_id(), 0U);
+
+  std::array<Sample, AudioEngine::kFrameSamples> output{};
+  engine.process_callback(nullptr, output.data(), output.size(), CallbackStatus{});
+  EXPECT_TRUE(core.advance());
+  EXPECT_EQ(core.ready_scope_id(), replacement.scope_id);
+  ASSERT_TRUE(core.begin_synthesis(replacement.scope_id));
+  ASSERT_TRUE(tts.emit(pcm));
+  tts.complete();
+
+  engine.process_callback(nullptr, output.data(), output.size(), CallbackStatus{});
+  (void)core.advance();
+  ASSERT_EQ(observer.results.size(), 2U);
+  EXPECT_EQ(observer.results.front().scope_id, barged.scope_id);
+  EXPECT_EQ(observer.results.front().code, SpeechResultCode::BargedIn);
   EXPECT_EQ(observer.results.back().scope_id, replacement.scope_id);
   EXPECT_EQ(observer.results.back().code, SpeechResultCode::Completed);
 }

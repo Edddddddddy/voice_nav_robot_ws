@@ -52,6 +52,7 @@ def test_app_is_installed_as_the_voice_nav_bringup_executable():
     microphone_helper = sensevoice_helper.read_text(encoding='utf-8')
     assert "input_profile:=microphone_once" in microphone_helper
     assert "include_agent:=false" in microphone_helper
+    assert "input_profile:=vad_auto" in microphone_helper
     assert chaowen_verifier.is_file()
     assert chaowen_manifest.is_file()
     assert not suffixed_executable.exists()

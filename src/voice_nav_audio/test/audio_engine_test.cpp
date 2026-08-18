@@ -156,12 +156,14 @@ TEST(AudioEngineTest, ReportsGenerationFenceAndNoStalePcmAfterCallbackBoundary)
     }));
 }
 
-TEST(AudioEngineTest, RingLossFencesStaleFramesAndSelectsSilence)
+TEST(AudioEngineTest, PlaybackRingLossFencesPlaybackWithoutRotatingCapture)
 {
   AudioEngine engine;
+  const auto capture_generation = engine.generation();
+  const auto playback_generation = engine.playback_generation();
   std::array<Sample, AudioEngine::kFrameSamples> playback{};
   playback.fill(700);
-  for (std::size_t index = 0U; index < AudioEngine::kRingCapacity - 1U; ++index) {
+  for (std::size_t index = 0U; index < AudioEngine::kPlaybackRingCapacity - 1U; ++index) {
     ASSERT_TRUE(engine.enqueue_playback(playback.data(), playback.size()));
   }
   EXPECT_FALSE(engine.enqueue_playback(playback.data(), playback.size()));
@@ -171,6 +173,8 @@ TEST(AudioEngineTest, RingLossFencesStaleFramesAndSelectsSilence)
 
   EXPECT_EQ(engine.metrics().playback_overflows, 1U);
   EXPECT_GE(engine.metrics().playback_underflows, 1U);
+  EXPECT_EQ(engine.generation(), capture_generation);
+  EXPECT_GT(engine.playback_generation(), playback_generation);
   EXPECT_TRUE(std::all_of(output.begin(), output.end(), [](const Sample sample) {
       return sample == 0;
     }));

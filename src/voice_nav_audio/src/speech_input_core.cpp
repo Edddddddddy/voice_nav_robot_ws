@@ -199,6 +199,7 @@ void SpeechInputCore::accept_cleaned_frame(const CleanedAudioFrame & frame) noex
     audio_generation_quarantined_ = false;
     has_wake_audio_seq_ = false;
     latest_wake_audio_seq_ = 0U;
+    has_terminal_event_ = false;
   }
   if (audio_generation_quarantined_) {
     return;
@@ -273,7 +274,9 @@ void SpeechInputCore::on_speech_event(const SpeechRecognitionEvent & event) noex
       if (!privileged_stop_without_scope && !matches_active_scope(event)) {
         return;
       }
-      if (valid_final(event)) {
+      const bool final_is_valid = valid_final(event);
+      notify_recognizer_terminal(event, final_is_valid);
+      if (final_is_valid) {
         if (privileged_stop_without_scope) {
           has_accepted_stop_frame_ = true;
           accepted_stop_generation_ = event.audio_generation;
@@ -306,6 +309,7 @@ void SpeechInputCore::on_speech_event(const SpeechRecognitionEvent & event) noex
     }
     case SpeechEventKind::kTimeout:
     case SpeechEventKind::kFailure:
+      notify_recognizer_terminal(event, false);
       if (matches_active_scope(event)) {
         retire_turn_scope();
       }
@@ -326,6 +330,22 @@ bool SpeechInputCore::matches_active_scope(const SpeechRecognitionEvent & event)
          event.scope.audio_generation == active_scope_.audio_generation &&
          event.scope.session_id == active_scope_.session_id &&
          event.scope.turn_id == active_scope_.turn_id;
+}
+
+void SpeechInputCore::notify_recognizer_terminal(
+  const SpeechRecognitionEvent & event, const bool published) noexcept
+{
+  if (has_terminal_event_ && terminal_event_generation_ == event.audio_generation &&
+    terminal_event_seq_ == event.audio_seq)
+  {
+    return;
+  }
+  has_terminal_event_ = true;
+  terminal_event_generation_ = event.audio_generation;
+  terminal_event_seq_ = event.audio_seq;
+  if (coordination_ != nullptr) {
+    coordination_->on_recognizer_terminal(event.kind, published);
+  }
 }
 
 bool SpeechInputCore::is_duplicate_privileged_stop(

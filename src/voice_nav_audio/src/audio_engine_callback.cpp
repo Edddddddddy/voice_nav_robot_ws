@@ -38,6 +38,7 @@ void AudioEngine::process_callback(
 {
   try {
     commit_pending_discontinuities();
+    commit_pending_playback_fences();
     if (status.input_overflow || status.output_underflow) {
       xruns_.fetch_add(1U, std::memory_order_relaxed);
       mark_discontinuity();
@@ -58,6 +59,7 @@ void AudioEngine::process_callback(
     }
 
     const auto callback_generation = generation();
+    const auto callback_playback_generation = playback_generation();
     const auto callback_phase = static_cast<AudioEnginePhase>(
       phase_.load(std::memory_order_acquire));
 #ifdef VOICE_NAV_AUDIO_TEST_CALLBACK_BOUNDARY
@@ -77,13 +79,13 @@ void AudioEngine::process_callback(
     }
     PlaybackPacket rendered_packet{};
     const bool rendered_playback = render_playback(
-      rendered, callback_generation, rendered_packet);
+      rendered, callback_playback_generation, rendered_packet);
 
     // This is the publication linearization point for an already-entered
     // callback.  Both externally visible playback copies must originate from
     // this same final frame, so a request observed here quarantines them
     // together without committing the next generation early.
-    if (has_pending_discontinuities()) {
+    if (has_pending_discontinuities() || has_pending_playback_fences()) {
       rendered.samples.fill(0);
     }
     if (device_output != nullptr) {
@@ -96,14 +98,14 @@ void AudioEngine::process_callback(
       rendered.samples.begin() + static_cast<std::ptrdiff_t>(rendered_packet.sample_count),
       [](const Sample sample) {return sample != 0;});
     if (device_output != nullptr && wrote_non_silent_pcm && rendered_packet.scope_id != 0U &&
-      !has_pending_discontinuities())
+      !has_pending_discontinuities() && !has_pending_playback_fences())
     {
       const PlaybackWrite write{
-        rendered_packet.scope_id, callback_generation, rendered_packet.sample_count};
+        rendered_packet.scope_id, callback_playback_generation, rendered_packet.sample_count};
       if (!playback_write_ring_.push(write)) {
         // Losing accounting would falsely inflate played.  Fail closed before
         // a subsequent callback can expose more scope-owned audio.
-        mark_discontinuity();
+        request_playback_fence();
       }
     }
 
@@ -133,7 +135,7 @@ bool AudioEngine::pop_playback_for_current_generation(
   PlaybackPacket & packet, const std::uint64_t expected_generation) noexcept
 {
   PlaybackPacket candidate{};
-  for (std::size_t attempt = 0U; attempt < kRingCapacity; ++attempt) {
+  for (std::size_t attempt = 0U; attempt < kPlaybackRingCapacity; ++attempt) {
     if (!playback_ring_.pop(candidate)) {
       return false;
     }
@@ -152,6 +154,12 @@ bool AudioEngine::has_pending_discontinuities() const noexcept
          observed_discontinuity_requests_;
 }
 
+bool AudioEngine::has_pending_playback_fences() const noexcept
+{
+  return playback_fence_requests_.load(std::memory_order_acquire) !=
+         observed_playback_fence_requests_;
+}
+
 void AudioEngine::commit_pending_discontinuities() noexcept
 {
   const auto requested = discontinuity_requests_.load(std::memory_order_acquire);
@@ -162,11 +170,23 @@ void AudioEngine::commit_pending_discontinuities() noexcept
   const auto generation_before = generation_.load(std::memory_order_acquire);
   const auto generation_after = generation_before + count;
   generation_.store(generation_after, std::memory_order_release);
+  playback_generation_.fetch_add(count, std::memory_order_release);
   last_fence_generation_before_.store(generation_before, std::memory_order_release);
   last_fence_generation_after_.store(generation_after, std::memory_order_release);
   stale_pcm_after_fence_.store(0U, std::memory_order_release);
   discontinuities_.fetch_add(count, std::memory_order_relaxed);
   observed_discontinuity_requests_ = requested;
+}
+
+void AudioEngine::commit_pending_playback_fences() noexcept
+{
+  const auto requested = playback_fence_requests_.load(std::memory_order_acquire);
+  if (requested == observed_playback_fence_requests_) {
+    return;
+  }
+  playback_generation_.fetch_add(
+    requested - observed_playback_fence_requests_, std::memory_order_release);
+  observed_playback_fence_requests_ = requested;
 }
 
 bool AudioEngine::render_playback(

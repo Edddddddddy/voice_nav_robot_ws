@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Installed, headless VoiceNav composition root for bounded SenseVoice WAV and
-// microphone-once input. The explicit real_model_gate profile retains the
-// locked fixture evidence; this process owns only the real provider and the
-// selected package-private composition seam.
+// Installed, headless VoiceNav composition root for bounded SenseVoice WAV,
+// microphone-once, and continuous VAD input. The explicit real_model_gate
+// profile retains the locked fixture evidence; this process owns only the
+// real provider and the selected package-private composition seam.
 
 #include <algorithm>
 #include <chrono>
@@ -25,7 +25,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
-#include <fcntl.h>
 #include <fstream>
 #include <functional>
 #include <iomanip>
@@ -36,17 +35,22 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <unistd.h>
 #include <vector>
 
 #include "rclcpp/rclcpp.hpp"
 #include "chaowen_tts_adapter.hpp"
+#include "continuous_vad_session.hpp"
 #include "file_audio_device.hpp"
 #include "microphone_once_runner.hpp"
+#include "one_shot_recognizer_proxy.hpp"
 #include "sensevoice_sherpa_adapter.hpp"
 #include "sherpa-onnx/c-api/c-api.h"
 #include "speech_input_node.hpp"
 #include "voice_input_policy.hpp"
+#include "voice_node_executor.hpp"
+#include "vad_auto_dsp_adapter.hpp"
 #include "voice_pipeline.hpp"
 #include "voice_nav_interfaces/msg/voice_turn.hpp"
 
@@ -62,6 +66,7 @@ enum class InputProfile
 {
   kSenseVoiceWav,
   kMicrophoneOnce,
+  kVadAuto,
   kRealModelGate,
 };
 
@@ -96,6 +101,9 @@ InputProfile parse_input_profile(const std::string & value)
   }
   if (value == "microphone_once") {
     return InputProfile::kMicrophoneOnce;
+  }
+  if (value == "vad_auto") {
+    return InputProfile::kVadAuto;
   }
   if (value == "real_model_gate") {
     return InputProfile::kRealModelGate;
@@ -164,6 +172,27 @@ std::string parameter_or_environment(
   return from_environment == nullptr ? std::string{} : std::string(from_environment);
 }
 
+class AssetBackedOneShotFactory final : public OneShotRecognizerFactory
+{
+public:
+  explicit AssetBackedOneShotFactory(SherpaSenseVoiceAssetPaths assets)
+  : assets_(std::move(assets))
+  {
+  }
+
+  std::unique_ptr<SpeechRecognizerAdapter> create_armed() override
+  {
+    auto provider = make_sherpa_sensevoice_provider(assets_);
+    if (!provider || !provider->arm_once()) {
+      throw std::runtime_error("SenseVoice one-shot provider could not arm");
+    }
+    return provider;
+  }
+
+private:
+  SherpaSenseVoiceAssetPaths assets_{};
+};
+
 class VoiceNode final : public rclcpp::Node, public SpeechOutputTraceSink
 {
 public:
@@ -182,8 +211,14 @@ public:
     turn_subscription_ = create_subscription<VoiceTurn>(
       "/voice/turn", voice_turn_qos(),
       [this](const VoiceTurn::SharedPtr message) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        turns_.push_back(ObservedTurn{message->kind, message->text, message->voice_seq});
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+          turns_.push_back(ObservedTurn{message->kind, message->text, message->voice_seq});
+        }
+        RCLCPP_INFO(
+          get_logger(), "voice_turn seq=%llu kind=%u text=%s",
+          static_cast<unsigned long long>(message->voice_seq),
+          static_cast<unsigned int>(message->kind), message->text.c_str());
         condition_.notify_all();
       });
   }
@@ -232,8 +267,14 @@ public:
   void on_result(const SpeechResult & result) noexcept override
   {
     try {
-      std::lock_guard<std::mutex> lock(mutex_);
-      speak_results_.push_back(result);
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        speak_results_.push_back(result);
+      }
+      RCLCPP_INFO(
+        get_logger(), "speak_result code=%u played_samples=%llu detail=%s",
+        static_cast<unsigned int>(result.code),
+        static_cast<unsigned long long>(result.played_samples), result.detail.c_str());
       condition_.notify_all();
     } catch (...) {
     }
@@ -381,6 +422,67 @@ void write_report(
   }
 }
 
+void write_vad_auto_report(
+  const std::string & report_path,
+  const std::string & head,
+  const std::vector<ObservedTurn> & turns,
+  const std::vector<SpeechResult> & speak_results,
+  const std::uint64_t elapsed_ms)
+{
+  const std::filesystem::path final_path(report_path);
+  if (!final_path.is_absolute()) {
+    throw std::runtime_error("vad_auto report path must be absolute");
+  }
+  const auto parent = final_path.parent_path();
+  std::filesystem::create_directories(parent);
+  std::error_code exists_error;
+  if (std::filesystem::exists(final_path, exists_error) || exists_error) {
+    throw std::runtime_error("refusing to overwrite vad_auto report");
+  }
+
+  const auto temp_path = final_path.string() + ".tmp." +
+    std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+  std::ofstream report(temp_path, std::ios::binary | std::ios::trunc);
+  if (!report) {
+    throw std::runtime_error("cannot write vad_auto report");
+  }
+  report << "{\n"
+         << "  \"schema_version\": \"voice_nav.vad_auto_session.v1\",\n"
+         << "  \"exact_head\": " << json_escape(head) << ",\n"
+         << "  \"turns\": [";
+  for (std::size_t index = 0U; index < turns.size(); ++index) {
+    if (index != 0U) {
+      report << ',';
+    }
+    report << "{\"kind\": " << static_cast<unsigned int>(turns[index].kind)
+           << ", \"voice_seq\": " << turns[index].voice_seq
+           << ", \"text\": " << json_escape(turns[index].text) << '}';
+  }
+  report << "],\n  \"speak_results\": [";
+  for (std::size_t index = 0U; index < speak_results.size(); ++index) {
+    if (index != 0U) {
+      report << ',';
+    }
+    report << "{\"code\": " << static_cast<unsigned int>(speak_results[index].code)
+           << ", \"played_samples\": " << speak_results[index].played_samples
+           << ", \"detail\": " << json_escape(speak_results[index].detail) << '}';
+  }
+  report << "],\n  \"elapsed_ms\": " << elapsed_ms << "\n}\n";
+  report.flush();
+  if (!report) {
+    std::filesystem::remove(temp_path);
+    throw std::runtime_error("cannot flush vad_auto report");
+  }
+  report.close();
+  if (::link(temp_path.c_str(), final_path.string().c_str()) != 0) {
+    std::filesystem::remove(temp_path);
+    throw std::runtime_error("cannot publish vad_auto report without replacement");
+  }
+  if (::unlink(temp_path.c_str()) != 0) {
+    throw std::runtime_error("cannot remove vad_auto temporary report");
+  }
+}
+
 }  // namespace
 }  // namespace voice_nav_audio
 
@@ -405,11 +507,15 @@ int main(int argc, char ** argv)
   std::shared_ptr<voice_nav_audio::VoiceNode> node;
   std::shared_ptr<voice_nav_audio::SpeechInputNode> speech;
   std::unique_ptr<voice_nav_audio::VoicePipeline> pipeline;
+  std::unique_ptr<voice_nav_audio::ContinuousVadSession> vad_auto;
   std::unique_ptr<voice_nav_audio::MicrophoneOnceRunner> microphone_once;
   std::unique_ptr<voice_nav_audio::MicrophoneOnceDspAdapter> microphone_dsp;
+  std::unique_ptr<voice_nav_audio::DspAdapter> vad_auto_dsp;
   std::unique_ptr<voice_nav_audio::FileAudioDevice> file_device;
+  std::unique_ptr<voice_nav_audio::AssetBackedOneShotFactory> vad_auto_recognizer_factory;
   voice_nav_audio::WavePtr wave{nullptr};
   bool microphone_profile = false;
+  bool vad_auto_profile = false;
   bool real_model_gate = false;
 
   try {
@@ -419,6 +525,7 @@ int main(int argc, char ** argv)
     node->get_parameter("input_profile", profile);
     const auto input_profile = voice_nav_audio::parse_input_profile(profile);
     microphone_profile = input_profile == voice_nav_audio::InputProfile::kMicrophoneOnce;
+    vad_auto_profile = input_profile == voice_nav_audio::InputProfile::kVadAuto;
     real_model_gate = input_profile == voice_nav_audio::InputProfile::kRealModelGate;
     if (!microphone_profile) {
       output_wav_path = voice_nav_audio::parameter_or_environment(
@@ -430,7 +537,7 @@ int main(int argc, char ** argv)
       chaowen_tts_root = environment_tts_root == nullptr ?
         std::string{} : std::string(environment_tts_root);
     }
-    if (real_model_gate && !output_wav_path.empty()) {
+    if ((real_model_gate || vad_auto_profile) && !output_wav_path.empty()) {
       throw std::invalid_argument("output_wav requires the sensevoice_wav input profile");
     }
     if (real_model_gate) {
@@ -452,6 +559,19 @@ int main(int argc, char ** argv)
         throw std::invalid_argument("real_model_gate evidence parameters are incomplete");
       }
     }
+    if (vad_auto_profile) {
+      const auto * const environment_report = std::getenv("VOICE_NAV_VAD_AUTO_REPORT");
+      const auto * const environment_head = std::getenv("VOICE_NAV_MOTION_SMOKE_HEAD");
+      report_path = environment_report == nullptr ?
+        std::string{} : std::string(environment_report);
+      exact_head = environment_head == nullptr ?
+        std::string{} : std::string(environment_head);
+      if ((report_path.empty() && !exact_head.empty()) ||
+        (!report_path.empty() && (exact_head.empty() || exact_head == "unknown")))
+      {
+        throw std::invalid_argument("vad_auto evidence parameters are incomplete");
+      }
+    }
     if (!microphone_profile) {
       wav_path = voice_nav_audio::parameter_or_environment(
         *node, "input_wav", "VOICE_NAV_SENSEVOICE_WAV");
@@ -461,16 +581,21 @@ int main(int argc, char ** argv)
         *node, "sensevoice_model", "VOICE_NAV_SENSEVOICE_MODEL");
       tokens_path = voice_nav_audio::parameter_or_environment(
         *node, "sensevoice_tokens", "VOICE_NAV_SENSEVOICE_TOKENS");
-      if (wav_path.empty() || vad_path.empty() || model_path.empty() || tokens_path.empty()) {
+      if (vad_path.empty() || model_path.empty() || tokens_path.empty() ||
+        (!vad_auto_profile && wav_path.empty()) ||
+        (vad_auto_profile && chaowen_tts_root.empty()))
+      {
         throw std::invalid_argument("SenseVoice asset parameters are incomplete");
       }
-      wave = voice_nav_audio::read_input_wave(wav_path);
-      if (real_model_gate) {
-        if (std::filesystem::file_size(wav_path) != voice_nav_audio::kExpectedWaveBytes) {
-          throw std::invalid_argument("locked zh.wav size mismatch");
-        }
-        if (wave->num_samples != static_cast<int32_t>(voice_nav_audio::kExpectedWaveSamples)) {
-          throw std::invalid_argument("locked zh.wav format mismatch");
+      if (!vad_auto_profile) {
+        wave = voice_nav_audio::read_input_wave(wav_path);
+        if (real_model_gate) {
+          if (std::filesystem::file_size(wav_path) != voice_nav_audio::kExpectedWaveBytes) {
+            throw std::invalid_argument("locked zh.wav size mismatch");
+          }
+          if (wave->num_samples != static_cast<int32_t>(voice_nav_audio::kExpectedWaveSamples)) {
+            throw std::invalid_argument("locked zh.wav format mismatch");
+          }
         }
       }
     }
@@ -517,6 +642,15 @@ int main(int argc, char ** argv)
         std::make_unique<voice_nav_audio::ChaowenTtsAdapter>(chaowen_tts_root),
         *microphone_dsp, nullptr, node.get(),
         voice_nav_audio::MicrophoneOnceSpec{});
+    } else if (vad_auto_profile) {
+      vad_auto_recognizer_factory =
+        std::make_unique<voice_nav_audio::AssetBackedOneShotFactory>(
+        voice_nav_audio::SherpaSenseVoiceAssetPaths{vad_path, model_path, tokens_path});
+      vad_auto_dsp = voice_nav_audio::make_vad_auto_dsp_adapter();
+      if (vad_auto_dsp == nullptr) {
+        throw std::runtime_error(
+                "vad_auto requires the verified WebRtcApmAdapter composition");
+      }
     } else {
       auto provider = voice_nav_audio::make_sherpa_sensevoice_provider(
         voice_nav_audio::SherpaSenseVoiceAssetPaths{vad_path, model_path, tokens_path});
@@ -533,31 +667,48 @@ int main(int argc, char ** argv)
           *file_device, node.get());
       }
     }
+    if (vad_auto_profile && !node->wait_for_agent(std::chrono::seconds(20))) {
+      throw std::runtime_error("agent_node did not subscribe to /voice/turn");
+    }
+    if (vad_auto_profile) {
+      vad_auto = std::make_unique<voice_nav_audio::ContinuousVadSession>(
+        *vad_auto_recognizer_factory, *vad_auto_dsp,
+        std::make_unique<voice_nav_audio::ChaowenTtsAdapter>(chaowen_tts_root),
+        nullptr, node.get());
+    }
+
     rclcpp::executors::SingleThreadedExecutor executor;
     executor.add_node(node);
     if (microphone_once) {
       microphone_once->add_to_executor(executor);
+    } else if (vad_auto) {
+      vad_auto->add_to_executor(executor);
     } else if (pipeline) {
       pipeline->add_to_executor(executor);
     } else {
       executor.add_node(speech);
     }
-    std::thread spin_thread([&executor]() {executor.spin();});
+    voice_nav_audio::VoiceNodeExecutorGuard spin_guard(executor);
 
-    if (!node->wait_for_agent(std::chrono::seconds(20))) {
-      executor.cancel();
-      spin_thread.join();
+    if (!vad_auto_profile && !node->wait_for_agent(std::chrono::seconds(20))) {
+      spin_guard.stop();
       throw std::runtime_error("agent_node did not subscribe to /voice/turn");
     }
     bool got_turn = false;
     bool got_speak = false;
-    if (microphone_once) {
+    if (vad_auto) {
+      while (rclcpp::ok()) {
+        if (vad_auto->pump() == voice_nav_audio::ContinuousVadPumpResult::kFailed) {
+          throw std::runtime_error("vad_auto capture pump failed");
+        }
+        std::this_thread::yield();
+      }
+    } else if (microphone_once) {
       const auto capture_result = microphone_once->capture_until(std::chrono::seconds(20));
       if (capture_result != voice_nav_audio::MicrophoneOnceResult::kReadyForPlayback ||
         !microphone_once->allow_playback())
       {
-        executor.cancel();
-        spin_thread.join();
+        spin_guard.stop();
         throw std::runtime_error("microphone_once capture did not reach playback");
       }
       got_turn = node->wait_for_turn(std::chrono::seconds(20));
@@ -584,15 +735,18 @@ int main(int argc, char ** argv)
         node->wait_for_speak(std::chrono::seconds(45)));
     }
     turns = node->turns();
-    executor.cancel();
-    spin_thread.join();
-    if (!got_turn || turns.size() != 1U ||
+    spin_guard.stop();
+    if (vad_auto && !report_path.empty()) {
+      voice_nav_audio::write_vad_auto_report(
+        report_path, exact_head, turns, node->speak_results(), elapsed_ms());
+    }
+    if (!vad_auto && (!got_turn || turns.size() != 1U ||
       turns.front().kind != voice_nav_interfaces::msg::VoiceTurn::COMMAND ||
-      turns.front().voice_seq != 1U)
+      turns.front().voice_seq != 1U))
     {
       throw std::runtime_error("installed voice_node did not produce one VoiceTurn");
     }
-    if (pipeline || microphone_once) {
+    if (!vad_auto && (pipeline || microphone_once)) {
       const auto speak_results = node->speak_results();
       if (!got_speak || speak_results.size() != 1U ||
         speak_results.front().code != voice_nav_audio::SpeechResultCode::Completed ||
@@ -605,9 +759,10 @@ int main(int argc, char ** argv)
       throw std::runtime_error("real-model gate did not produce the exact VoiceTurn");
     }
     status = "passed";
-    detail = microphone_profile ?
+    detail = vad_auto_profile ?
+      "installed vad_auto session exited cleanly" : (microphone_profile ?
       "installed microphone_once produced one COMMAND VoiceTurn and completed Speak" :
-      "installed real SenseVoiceProvider produced one COMMAND VoiceTurn";
+      "installed real SenseVoiceProvider produced one COMMAND VoiceTurn");
     if (real_model_gate) {
       detail = "installed real SenseVoiceProvider produced one exact COMMAND VoiceTurn";
     }
@@ -616,6 +771,9 @@ int main(int argc, char ** argv)
         report_path, exact_head, wav_path, vad_path, model_path, tokens_path, turns, status, detail,
         elapsed_ms());
     }
+    vad_auto.reset();
+    vad_auto_recognizer_factory.reset();
+    vad_auto_dsp.reset();
     microphone_once.reset();
     microphone_dsp.reset();
     pipeline.reset();
@@ -629,6 +787,9 @@ int main(int argc, char ** argv)
     return 0;
   } catch (const std::exception & error) {
     detail = error.what();
+    vad_auto.reset();
+    vad_auto_recognizer_factory.reset();
+    vad_auto_dsp.reset();
     microphone_once.reset();
     microphone_dsp.reset();
     pipeline.reset();
