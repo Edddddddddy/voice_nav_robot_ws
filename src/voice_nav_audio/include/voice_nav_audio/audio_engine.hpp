@@ -42,12 +42,32 @@ struct CallbackStatus
 {
   bool input_overflow{false};
   bool output_underflow{false};
+  // Missing input samples are an xrun metric, not a stale-capture boundary.
+  bool input_underflow{false};
 };
 
 enum class AudioEnginePhase : std::uint8_t
 {
   kCapture,
   kPlaybackOnly,
+};
+
+enum class DiscontinuityReason : std::uint8_t
+{
+  kExternal,
+  kStreamLifecycle,
+  kActiveOutputXrun,
+  kFrameSize,
+  kReferenceOverflow,
+  kCallbackException,
+};
+
+enum class PlaybackFenceReason : std::uint8_t
+{
+  kExternal,
+  kSpeechScope,
+  kPlaybackRingOverflow,
+  kPlaybackWriteOverflow,
 };
 
 struct AudioMetrics
@@ -64,6 +84,17 @@ struct AudioMetrics
   std::uint64_t last_fence_generation_before{0U};
   std::uint64_t last_fence_generation_after{0U};
   std::uint64_t stale_pcm_after_fence{0U};
+  std::uint64_t capture_input_overflow_fences{0U};
+  std::uint64_t external_discontinuity_fences{0U};
+  std::uint64_t stream_lifecycle_fences{0U};
+  std::uint64_t active_output_xrun_fences{0U};
+  std::uint64_t frame_size_fences{0U};
+  std::uint64_t reference_overflow_fences{0U};
+  std::uint64_t callback_exception_fences{0U};
+  std::uint64_t external_playback_fence_requests{0U};
+  std::uint64_t speech_playback_fence_requests{0U};
+  std::uint64_t playback_ring_overflow_fences{0U};
+  std::uint64_t playback_write_overflow_fences{0U};
 };
 
 struct PlaybackWrite
@@ -85,7 +116,7 @@ public:
   // TTS inference produces bounded PCM bursts faster than the real-time
   // callback consumes them. Keep that bounded queue separate from the small
   // capture/reference rings so continuous input latency stays low.
-  static constexpr std::size_t kPlaybackRingCapacity = 1024U;
+  static constexpr std::size_t kPlaybackRingCapacity = 2048U;
 
   AudioEngine() = default;
 
@@ -97,11 +128,15 @@ public:
 
   void set_playback_gain(float gain) noexcept;
   void request_fade_to_silence(std::size_t sample_count) noexcept;
+  // The PlaybackScope owner clears activity when its scope retires.
+  void mark_playback_inactive() noexcept;
   // Retire queued playback without changing the continuous capture timeline.
-  void request_playback_fence() noexcept;
+  void request_playback_fence(
+    PlaybackFenceReason reason = PlaybackFenceReason::kExternal) noexcept;
   // May be called by a control/producer thread.  It only publishes a
   // lock-free request; the audio callback commits the generation fence.
-  void mark_discontinuity() noexcept;
+  void mark_discontinuity(
+    DiscontinuityReason reason = DiscontinuityReason::kExternal) noexcept;
   // Capture phase publishes input/reference; playback-only phase publishes output only.
   void set_phase(AudioEnginePhase phase) noexcept;
 
@@ -254,8 +289,13 @@ private:
     PlaybackPacket & packet, std::uint64_t expected_generation) noexcept;
   [[nodiscard]] bool has_pending_discontinuities() const noexcept;
   [[nodiscard]] bool has_pending_playback_fences() const noexcept;
+  // Retire only the capture timeline after input overflow or reference
+  // backpressure.  Queued and active playback remain in the current playback
+  // generation.
+  void commit_capture_discontinuity(bool input_overflow) noexcept;
   void commit_pending_discontinuities() noexcept;
   void commit_pending_playback_fences() noexcept;
+  [[nodiscard]] bool playback_is_active() const noexcept;
   [[nodiscard]] bool render_playback(
     AudioFrame & rendered, std::uint64_t callback_generation,
     PlaybackPacket & rendered_packet) noexcept;
@@ -272,6 +312,7 @@ private:
   std::uint64_t observed_discontinuity_requests_{0U};
   std::atomic<std::uint64_t> playback_fence_requests_{0U};
   std::uint64_t observed_playback_fence_requests_{0U};
+  std::atomic<std::uint8_t> playback_active_{0U};
   std::atomic<std::uint32_t> gain_q15_{32768U};
   std::atomic<std::uint32_t> fade_sample_count_{0U};
   std::atomic<std::uint64_t> fade_request_{0U};
@@ -290,6 +331,17 @@ private:
   std::atomic<std::uint64_t> last_fence_generation_before_{0U};
   std::atomic<std::uint64_t> last_fence_generation_after_{0U};
   std::atomic<std::uint64_t> stale_pcm_after_fence_{0U};
+  std::atomic<std::uint64_t> capture_input_overflow_fences_{0U};
+  std::atomic<std::uint64_t> external_discontinuity_fences_{0U};
+  std::atomic<std::uint64_t> stream_lifecycle_fences_{0U};
+  std::atomic<std::uint64_t> active_output_xrun_fences_{0U};
+  std::atomic<std::uint64_t> frame_size_fences_{0U};
+  std::atomic<std::uint64_t> reference_overflow_fences_{0U};
+  std::atomic<std::uint64_t> callback_exception_fences_{0U};
+  std::atomic<std::uint64_t> external_playback_fence_requests_{0U};
+  std::atomic<std::uint64_t> speech_playback_fence_requests_{0U};
+  std::atomic<std::uint64_t> playback_ring_overflow_fences_{0U};
+  std::atomic<std::uint64_t> playback_write_overflow_fences_{0U};
 };
 
 }  // namespace voice_nav_audio

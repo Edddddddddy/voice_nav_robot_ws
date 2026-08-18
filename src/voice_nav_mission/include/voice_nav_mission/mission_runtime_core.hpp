@@ -380,6 +380,15 @@ public:
   }
 };
 
+// Package-private map persistence seam.  The Runtime owns Mission admission
+// and terminal fencing; this port owns the map package transaction.
+class MapStorePort
+{
+public:
+  virtual ~MapStorePort() = default;
+  [[nodiscard]] virtual ChildResult save(const std::string & map_id) = 0;
+};
+
 struct RuntimeConfig
 {
   OperatingMode operating_mode{OperatingMode::Mapping};
@@ -442,7 +451,8 @@ public:
     AdmissionFenceCheck admission_fence_check = {},
     ChildResultRegistrar child_result_registrar = {},
     ChildResultUnregistrar child_result_unregistrar = {},
-    std::shared_ptr<NavigationPort> navigation = {});
+    std::shared_ptr<NavigationPort> navigation = {},
+    std::shared_ptr<MapStorePort> map_store = {});
 
   [[nodiscard]] AdmissionResult admit(
     const MissionGoal & goal,
@@ -548,6 +558,7 @@ private:
   std::shared_ptr<MotionAuthorityPort> authority_;
   std::shared_ptr<RelativeMotionPort> relative_motion_;
   std::shared_ptr<NavigationPort> navigation_;
+  std::shared_ptr<MapStorePort> map_store_;
   StateCallback state_callback_;
   FeedbackCallback feedback_callback_;
   ResultCallback result_callback_;

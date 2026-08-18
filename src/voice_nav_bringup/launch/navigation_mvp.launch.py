@@ -3,7 +3,9 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 
-"""Thin Navigation MVP composition for the fixed study place."""
+"""Navigation MVP composition using the saved map package."""
+
+import os
 
 from launch import LaunchDescription
 from launch.actions import (
@@ -22,6 +24,8 @@ def generate_launch_description():
     """Start simulation, localization, Nav2, and the navigation Runtime."""
     headless = LaunchConfiguration('headless')
     shutdown_on_gazebo_exit = LaunchConfiguration('shutdown_on_gazebo_exit')
+    map_id = LaunchConfiguration('map_id')
+    map_root = LaunchConfiguration('map_root')
     bringup_share = FindPackageShare('voice_nav_bringup')
     nav2_share = FindPackageShare('nav2_bringup')
     runtime_config = PathJoinSubstitution([
@@ -30,9 +34,7 @@ def generate_launch_description():
     nav2_params = PathJoinSubstitution([
         bringup_share, 'config', 'nav2_navigation_mvp.yaml'
     ])
-    map_file = PathJoinSubstitution([
-        bringup_share, 'config', 'voice_nav_study_map.yaml'
-    ])
+    map_file = PathJoinSubstitution([map_root, map_id, 'map.yaml'])
 
     product = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(PathJoinSubstitution([
@@ -44,6 +46,7 @@ def generate_launch_description():
             'world_name': 'voice_nav_house_world',
             'laser_update_rate': '20',
             'runtime_config': runtime_config,
+            'map_id': map_id,
         }.items(),
     )
 
@@ -145,6 +148,26 @@ def generate_launch_description():
             'shutdown_on_gazebo_exit',
             default_value='true',
             choices=['true', 'false'],
+        ),
+        DeclareLaunchArgument(
+            'map_id',
+            default_value='voice_mvp',
+            description='Map package ID published by the Mapping MVP.',
+        ),
+        DeclareLaunchArgument(
+            'map_root',
+            default_value=os.path.join(
+                os.environ.get(
+                    'XDG_DATA_HOME',
+                    os.path.join(os.path.expanduser('~'), '.local', 'share'),
+                ),
+                'voice_nav',
+                'maps',
+            ),
+            description=(
+                'Trusted map package root; it is not supplied by Mission '
+                'payloads.'
+            ),
         ),
         product,
         map_server,

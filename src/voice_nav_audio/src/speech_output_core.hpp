@@ -140,6 +140,7 @@ private:
     bool waiting_for_generation{false};
     bool synthesis_started{false};
     bool synthesis_completed{false};
+    std::uint8_t synthesis_restart_count{0U};
   };
 
   [[nodiscard]] bool on_pcm(

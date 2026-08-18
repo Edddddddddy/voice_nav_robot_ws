@@ -39,9 +39,40 @@ void AudioEngine::process_callback(
   try {
     commit_pending_discontinuities();
     commit_pending_playback_fences();
-    if (status.input_overflow || status.output_underflow) {
+    const bool input_xrun = status.input_underflow || status.input_overflow;
+    if (input_xrun) {
       xruns_.fetch_add(1U, std::memory_order_relaxed);
-      mark_discontinuity();
+    }
+    const bool active_output_xrun = status.output_underflow && playback_is_active();
+    const bool invalid_frame_size = frame_count != kFrameSamples;
+    const auto callback_phase = static_cast<AudioEnginePhase>(
+      phase_.load(std::memory_order_acquire));
+    const bool reference_overflow = callback_phase == AudioEnginePhase::kCapture &&
+      !reference_ring_.can_push();
+    if (active_output_xrun || status.input_overflow) {
+      if (!input_xrun) {
+        xruns_.fetch_add(1U, std::memory_order_relaxed);
+      }
+      if (active_output_xrun || invalid_frame_size || reference_overflow) {
+        auto reason = DiscontinuityReason::kReferenceOverflow;
+        if (active_output_xrun) {
+          reason = DiscontinuityReason::kActiveOutputXrun;
+        } else if (invalid_frame_size) {
+          reason = DiscontinuityReason::kFrameSize;
+        }
+        mark_discontinuity(reason);
+        commit_pending_discontinuities();
+      } else {
+        commit_capture_discontinuity(true);  // input overflow
+      }
+      if (device_output != nullptr) {
+        std::fill_n(device_output, frame_count, static_cast<Sample>(0));
+      }
+      return;
+    }
+
+    if (invalid_frame_size) {
+      mark_discontinuity(DiscontinuityReason::kFrameSize);
       commit_pending_discontinuities();
       if (device_output != nullptr) {
         std::fill_n(device_output, frame_count, static_cast<Sample>(0));
@@ -49,9 +80,14 @@ void AudioEngine::process_callback(
       return;
     }
 
-    if (frame_count != kFrameSamples) {
-      mark_discontinuity();
-      commit_pending_discontinuities();
+    if (status.output_underflow) {
+      // PortAudio can report an output underflow while the stream is idle,
+      // before a pending Speak scope has published its first PCM.  It is an
+      // xrun metric, but there is no active playback to quarantine, so do not
+      // advance the generation seen by that pending scope.
+      if (!input_xrun) {
+        xruns_.fetch_add(1U, std::memory_order_relaxed);
+      }
       if (device_output != nullptr) {
         std::fill_n(device_output, frame_count, static_cast<Sample>(0));
       }
@@ -60,23 +96,11 @@ void AudioEngine::process_callback(
 
     const auto callback_generation = generation();
     const auto callback_playback_generation = playback_generation();
-    const auto callback_phase = static_cast<AudioEnginePhase>(
-      phase_.load(std::memory_order_acquire));
 #ifdef VOICE_NAV_AUDIO_TEST_CALLBACK_BOUNDARY
     test_support::invoke_callback_boundary_hook();
 #endif
     AudioFrame rendered{};
     rendered.generation = callback_generation;
-    if (callback_phase == AudioEnginePhase::kCapture && !reference_ring_.can_push())
-    {
-      reference_overflows_.fetch_add(1U, std::memory_order_relaxed);
-      mark_discontinuity();
-      commit_pending_discontinuities();
-      if (device_output != nullptr) {
-        std::fill_n(device_output, kFrameSamples, static_cast<Sample>(0));
-      }
-      return;
-    }
     PlaybackPacket rendered_packet{};
     const bool rendered_playback = render_playback(
       rendered, callback_playback_generation, rendered_packet);
@@ -85,8 +109,13 @@ void AudioEngine::process_callback(
     // callback.  Both externally visible playback copies must originate from
     // this same final frame, so a request observed here quarantines them
     // together without committing the next generation early.
-    if (has_pending_discontinuities() || has_pending_playback_fences()) {
+    const bool playback_committed = rendered_playback &&
+      !has_pending_discontinuities() && !has_pending_playback_fences();
+    if (!playback_committed) {
       rendered.samples.fill(0);
+    }
+    if (playback_committed) {
+      playback_active_.store(1U, std::memory_order_release);
     }
     if (device_output != nullptr) {
       std::copy(rendered.samples.begin(), rendered.samples.end(), device_output);
@@ -105,11 +134,17 @@ void AudioEngine::process_callback(
       if (!playback_write_ring_.push(write)) {
         // Losing accounting would falsely inflate played.  Fail closed before
         // a subsequent callback can expose more scope-owned audio.
-        request_playback_fence();
+        request_playback_fence(PlaybackFenceReason::kPlaybackWriteOverflow);
       }
     }
 
     if (callback_phase == AudioEnginePhase::kPlaybackOnly) {
+      return;
+    }
+
+    if (!reference_ring_.can_push()) {
+      reference_overflows_.fetch_add(1U, std::memory_order_relaxed);
+      commit_capture_discontinuity(false);  // reference backpressure
       return;
     }
 
@@ -123,7 +158,7 @@ void AudioEngine::process_callback(
     capture_ring_.push_drop_oldest(captured);
     capture_produced_.fetch_add(1U, std::memory_order_relaxed);
   } catch (...) {
-    mark_discontinuity();
+    mark_discontinuity(DiscontinuityReason::kCallbackException);
     commit_pending_discontinuities();
     if (device_output != nullptr) {
       std::fill_n(device_output, frame_count, static_cast<Sample>(0));
@@ -160,6 +195,17 @@ bool AudioEngine::has_pending_playback_fences() const noexcept
          observed_playback_fence_requests_;
 }
 
+void AudioEngine::commit_capture_discontinuity(const bool input_overflow) noexcept
+{
+  if (input_overflow) {
+    capture_input_overflow_fences_.fetch_add(1U, std::memory_order_relaxed);
+  } else {
+    reference_overflow_fences_.fetch_add(1U, std::memory_order_relaxed);
+  }
+  generation_.fetch_add(1U, std::memory_order_release);
+  discontinuities_.fetch_add(1U, std::memory_order_relaxed);
+}
+
 void AudioEngine::commit_pending_discontinuities() noexcept
 {
   const auto requested = discontinuity_requests_.load(std::memory_order_acquire);
@@ -171,6 +217,7 @@ void AudioEngine::commit_pending_discontinuities() noexcept
   const auto generation_after = generation_before + count;
   generation_.store(generation_after, std::memory_order_release);
   playback_generation_.fetch_add(count, std::memory_order_release);
+  playback_active_.store(0U, std::memory_order_release);
   last_fence_generation_before_.store(generation_before, std::memory_order_release);
   last_fence_generation_after_.store(generation_after, std::memory_order_release);
   stale_pcm_after_fence_.store(0U, std::memory_order_release);
@@ -186,7 +233,13 @@ void AudioEngine::commit_pending_playback_fences() noexcept
   }
   playback_generation_.fetch_add(
     requested - observed_playback_fence_requests_, std::memory_order_release);
+  playback_active_.store(0U, std::memory_order_release);
   observed_playback_fence_requests_ = requested;
+}
+
+bool AudioEngine::playback_is_active() const noexcept
+{
+  return playback_active_.load(std::memory_order_acquire) != 0U;
 }
 
 bool AudioEngine::render_playback(

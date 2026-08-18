@@ -138,7 +138,7 @@ AdapterStartResult PortAudioAdapter::start() noexcept
   engine_.set_phase(AudioEnginePhase::kCapture);
   // A successful start has a fresh generation.  A failed start fences any
   // queued playback just as strictly, so a later recovery cannot leak it.
-  engine_.mark_discontinuity();
+  engine_.mark_discontinuity(DiscontinuityReason::kStreamLifecycle);
   if (device_ == nullptr) {
     return AdapterStartResult::NoDevice;
   }
@@ -166,7 +166,7 @@ void PortAudioAdapter::stop() noexcept
     device_->close();
   }
   running_ = false;
-  engine_.mark_discontinuity();
+  engine_.mark_discontinuity(DiscontinuityReason::kStreamLifecycle);
 }
 
 bool PortAudioAdapter::pause_for_playback() noexcept

@@ -58,10 +58,6 @@ using Clock = rosgraph_msgs::msg::Clock;
 using LaserScan = sensor_msgs::msg::LaserScan;
 
 constexpr char kNavigationCommandTopic[] = "/voice_nav/nav2_cmd_vel";
-constexpr char kStudyPlaceId[] = "study";
-constexpr double kStudyX = 0.5;
-constexpr double kStudyY = 0.0;
-constexpr double kStudyYaw = 0.0;
 constexpr char kNavigationCommandType[] = "geometry_msgs/msg/TwistStamped";
 constexpr char kNavigationWriterFqn[] = "/controller_server";
 
@@ -494,11 +490,13 @@ public:
     rclcpp::Node & node,
     std::shared_ptr<MotionAuthorityPort> authority,
     RelativeMotionPolicy policy,
-    MotionConditioningConfig conditioning_config)
+    MotionConditioningConfig conditioning_config,
+    NamedPlaceResolver named_place_resolver)
   : node_(node),
     authority_(std::move(authority)),
     policy_(std::move(policy)),
     conditioning_config_(std::move(conditioning_config)),
+    named_place_resolver_(std::move(named_place_resolver)),
     controller_(policy_),
     callback_group_(node_.create_callback_group(rclcpp::CallbackGroupType::Reentrant)),
     ingress_(std::make_shared<AdapterIngressState>()),
@@ -1571,9 +1569,19 @@ private:
         return false;
       }
     }
-    if (
-      step.target_id != kStudyPlaceId || !navigation_client_ ||
-      !navigation_client_->wait_for_action_server(100ms))
+    if (!navigation_client_ || !navigation_client_->wait_for_action_server(100ms)) {
+      return false;
+    }
+    std::optional<NavigationPlace> place;
+    try {
+      if (named_place_resolver_) {
+        place = named_place_resolver_(step.target_id);
+      }
+    } catch (...) {
+      return false;
+    }
+    if (!place.has_value() || !std::isfinite(place->x) ||
+      !std::isfinite(place->y) || !std::isfinite(place->yaw))
     {
       return false;
     }
@@ -1611,10 +1619,10 @@ private:
     NavigateToPose::Goal goal;
     goal.pose.header.frame_id = "map";
     goal.pose.header.stamp = node_.get_clock()->now();
-    goal.pose.pose.position.x = kStudyX;
-    goal.pose.pose.position.y = kStudyY;
-    goal.pose.pose.orientation.z = std::sin(kStudyYaw * 0.5);
-    goal.pose.pose.orientation.w = std::cos(kStudyYaw * 0.5);
+    goal.pose.pose.position.x = place->x;
+    goal.pose.pose.position.y = place->y;
+    goal.pose.pose.orientation.z = std::sin(place->yaw * 0.5);
+    goal.pose.pose.orientation.w = std::cos(place->yaw * 0.5);
 
     rclcpp_action::Client<NavigateToPose>::SendGoalOptions options;
     options.goal_response_callback = [weak_impl, token](
@@ -2453,6 +2461,7 @@ private:
   std::shared_ptr<MotionAuthorityPort> authority_;
   RelativeMotionPolicy policy_;
   MotionConditioningConfig conditioning_config_;
+  NamedPlaceResolver named_place_resolver_;
   RelativeMotionController controller_;
   rclcpp::CallbackGroup::SharedPtr callback_group_;
   rclcpp_action::Client<NavigateToPose>::SharedPtr navigation_client_;
@@ -2527,10 +2536,11 @@ RelativeMotionRosAdapter::RelativeMotionRosAdapter(
   rclcpp::Node & node,
   std::shared_ptr<MotionAuthorityPort> authority,
   RelativeMotionPolicy policy,
-  MotionConditioningConfig conditioning_config)
+  MotionConditioningConfig conditioning_config,
+  NamedPlaceResolver named_place_resolver)
 : impl_(std::make_shared<Impl>(
     node, std::move(authority), std::move(policy),
-    std::move(conditioning_config)))
+    std::move(conditioning_config), std::move(named_place_resolver)))
 {
   impl_->initialize();
 }

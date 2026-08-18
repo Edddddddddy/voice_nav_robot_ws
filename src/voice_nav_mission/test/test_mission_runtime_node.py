@@ -144,7 +144,7 @@ class MissionRuntimeNodeTest(unittest.TestCase):
         self.assertEqual(state.operating_mode, MissionState.MAPPING)
         self.assertEqual(state.availability, MissionState.UNAVAILABLE)
         self.assertEqual(state.active_step, 2**32 - 1)
-        self.assertEqual(state.supported_step_mask, 3)
+        self.assertEqual(state.supported_step_mask, 11)
         self.assertEqual(state.max_steps, 3)
 
         send_future = self.action_client.send_goal_async(

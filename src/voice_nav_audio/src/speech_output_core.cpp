@@ -26,6 +26,25 @@ constexpr std::uint32_t kChaowenSampleRateHz = 22050U;
 constexpr std::uint32_t kMono = 1U;
 constexpr std::size_t kMaximumTtsChunkSamples = 220U;
 constexpr std::size_t kFadeSamples = AudioEngine::kFrameSamples;
+constexpr std::size_t kMaximumGenerationDetail = 192U;
+
+std::string generation_change_detail(const AudioMetrics & metrics)
+{
+  std::string detail = "AudioEngine generation changed while restarting; reasons=";
+  detail += "external=" + std::to_string(metrics.external_discontinuity_fences);
+  detail += ",stream=" + std::to_string(metrics.stream_lifecycle_fences);
+  detail += ",output=" + std::to_string(metrics.active_output_xrun_fences);
+  detail += ",frame=" + std::to_string(metrics.frame_size_fences);
+  detail += ",reference=" + std::to_string(metrics.reference_overflow_fences);
+  detail += ",callback=" + std::to_string(metrics.callback_exception_fences);
+  detail += ",playback=" + std::to_string(metrics.speech_playback_fence_requests);
+  detail += ",ring=" + std::to_string(metrics.playback_ring_overflow_fences);
+  detail += ",write=" + std::to_string(metrics.playback_write_overflow_fences);
+  if (detail.size() > kMaximumGenerationDetail) {
+    detail.resize(kMaximumGenerationDetail);
+  }
+  return detail;
+}
 
 }  // namespace
 
@@ -152,6 +171,10 @@ bool SpeechOutputCore::advance() noexcept
   }
   const auto generation = engine_.playback_generation();
   if (active_.waiting_for_generation) {
+    if (active_.synthesis_restart_count != 0U && generation > active_.wait_generation) {
+      retire(SpeechResultCode::Failed, generation_change_detail(engine_.metrics()));
+      return false;
+    }
     if (generation < active_.wait_generation) {
       return false;
     }
@@ -163,6 +186,18 @@ bool SpeechOutputCore::advance() noexcept
     return true;
   }
   if (generation != active_.audio_generation) {
+    if (active_.synthesis_completed && active_.enqueued_samples > 0U &&
+      active_.played_samples == 0U && active_.synthesis_restart_count == 0U)
+    {
+      active_.enqueued_samples = 0U;
+      active_.synthesis_started = false;
+      active_.synthesis_completed = false;
+      active_.synthesis_restart_count = 1U;
+      request_fence();
+      active_.waiting_for_generation = true;
+      active_.wait_generation = pending_fence_generation_;
+      return false;
+    }
     retire(SpeechResultCode::Failed, "AudioEngine generation changed");
     return false;
   }
@@ -185,12 +220,22 @@ bool SpeechOutputCore::on_pcm(
   const std::uint32_t channels, const Sample * const samples,
   const std::size_t sample_count) noexcept
 {
-  if (active_.id != scope_id || active_.waiting_for_generation || !active_.synthesis_started ||
-    engine_.playback_generation() != active_.audio_generation || samples == nullptr ||
-    sample_rate_hz != kChaowenSampleRateHz || channels != kMono || sample_count == 0U ||
-    sample_count > kMaximumTtsChunkSamples)
+  if (active_.id != scope_id || active_.waiting_for_generation || !active_.synthesis_started) {
+    return false;
+  }
+
+  if (samples == nullptr || sample_rate_hz != kChaowenSampleRateHz || channels != kMono ||
+    sample_count == 0U || sample_count > kMaximumTtsChunkSamples)
   {
     return false;
+  }
+
+  const auto generation = engine_.playback_generation();
+  if (generation != active_.audio_generation) {
+    if (active_.enqueued_samples != 0U || active_.synthesis_restart_count != 0U) {
+      return false;
+    }
+    active_.audio_generation = generation;
   }
 
   std::array<Sample, AudioEngine::kFrameSamples> converted{};
@@ -241,6 +286,7 @@ void SpeechOutputCore::retire(
   if (active_.id == 0U) {
     return;
   }
+  engine_.mark_playback_inactive();
   observer_.on_result(SpeechResult{
     active_.id, code, detail, active_.played_samples});
   active_ = Scope{};
@@ -253,7 +299,7 @@ void SpeechOutputCore::request_fence() noexcept
     pending_fence_generation_ = requested_generation;
   }
   engine_.request_fade_to_silence(kFadeSamples);
-  engine_.request_playback_fence();
+  engine_.request_playback_fence(PlaybackFenceReason::kSpeechScope);
 }
 
 }  // namespace voice_nav_audio

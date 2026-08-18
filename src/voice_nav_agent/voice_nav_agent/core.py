@@ -1095,7 +1095,7 @@ class AgentCore:
 
         save_map = re.fullmatch(r'保存地图为\s*(.*)', clause)
         if save_map:
-            target = save_map.group(1)
+            target = _normalize_save_map_target(save_map.group(1))
             if not target:
                 return _ClauseResult(
                     'missing',
@@ -1143,9 +1143,13 @@ class AgentCore:
                 value = _parse_number(match.group(1))
                 if value is None:
                     return _ParseResult('invalid', reason='invalid_number')
-        elif pending.parameter in ('missing_place', 'missing_map'):
+        elif pending.parameter == 'missing_place':
             target = text
             if ' ' in target:
+                target = ''
+        elif pending.parameter == 'missing_map':
+            target = _normalize_save_map_target(text)
+            if target == text and ' ' in target:
                 target = ''
 
         if pending.parameter == 'missing_distance' and value is not None:
@@ -1173,6 +1177,7 @@ class AgentCore:
         elif pending.parameter == 'missing_map' and target is not None:
             if not target:
                 return self._repeat_clarification(pending)
+            target = _normalize_save_map_target(target)
             if not _valid_logical_id(target):
                 return _ParseResult('invalid', reason='invalid_map_id')
             return self._pending_target_result(pending, target, True)
@@ -1278,6 +1283,20 @@ def _resolve_named_place_target(target: str, state: MissionState) -> str:
     """Resolve the one approved Chinese alias against the frozen Runtime snapshot."""
     if target == '书房' and 'study' in state.named_place_ids:
         return 'study'
+    return target
+
+
+def _normalize_save_map_target(target: str) -> str:
+    """Accept only the fixed spoken spellings of the MVP map ID."""
+    candidate = target.strip(' \t').casefold()
+    if candidate in {'voice_mvp', 'voicemvp', 'voice下划线mvp'}:
+        return 'voice_mvp'
+    if (
+        re.fullmatch(r'voice[ \t]+mvp', candidate) or
+        re.fullmatch(r'voice[ \t]+m[ \t]+v[ \t]+p', candidate) or
+        re.fullmatch(r'voice[ \t]+下划线[ \t]+mvp', candidate)
+    ):
+        return 'voice_mvp'
     return target
 
 

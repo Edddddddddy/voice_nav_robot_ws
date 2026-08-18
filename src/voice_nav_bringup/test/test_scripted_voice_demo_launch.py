@@ -74,7 +74,7 @@ FROZEN_SNAPSHOT = {
     'operating_mode': 1,
     'availability': 1,
     'gate_state': 0,
-    'supported_step_mask': 0b0011,
+    'supported_step_mask': 0b1011,
     'max_steps': 3,
     'named_place_ids': [],
 }
@@ -276,7 +276,7 @@ def _is_frozen_snapshot(value):
         and value['operating_mode'] == MissionState.MAPPING
         and value['availability'] == MissionState.AVAILABLE
         and value['gate_state'] == MissionState.GATE_INHIBITED
-        and value['supported_step_mask'] == 0b0011
+        and value['supported_step_mask'] == 0b1011
         and value['max_steps'] == 3
         and value['named_place_ids'] == []
     )
@@ -630,7 +630,7 @@ def _product_runtime_state():
         availability=Availability.AVAILABLE,
         gate_state=GateState.GATE_INHIBITED,
         active_step=2**32 - 1,
-        supported_step_mask=0b0011,
+        supported_step_mask=0b1011,
         max_steps=3,
         named_place_ids=(),
     )

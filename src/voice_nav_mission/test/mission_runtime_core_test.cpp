@@ -110,6 +110,30 @@ public:
   ResultCallback result_callback;
 };
 
+class RecordingMapStorePort final : public MapStorePort
+{
+public:
+  explicit RecordingMapStorePort(
+    std::shared_ptr<MotionAuthorityPort> authority)
+  : authority_(std::move(authority))
+  {
+  }
+
+  ChildResult save(const std::string & map_id) override
+  {
+    saved_map_ids.push_back(map_id);
+    const auto snapshot = authority_->snapshot();
+    saw_inhibited_zero =
+      snapshot.state == GateState::Inhibited && snapshot.motion_inhibited &&
+      snapshot.zero_selected && snapshot.zero_published;
+    return ChildResult{ChildResultCode::Succeeded, "map package saved"};
+  }
+
+  std::shared_ptr<MotionAuthorityPort> authority_;
+  std::vector<std::string> saved_map_ids;
+  bool saw_inhibited_zero{false};
+};
+
 AuthorityResult converged_stale_inhibit(
   std::chrono::milliseconds elapsed,
   bool transport_unavailable = false)
@@ -470,6 +494,69 @@ TEST(RuntimeCore, NavigationStudyUsesNavigationPort)
   ASSERT_EQ(navigation->started_steps.size(), 1U);
   EXPECT_EQ(navigation->started_steps.front().target_id, "study");
   navigation->complete();
+}
+
+TEST(RuntimeCore, MappingSaveMapUsesMapStoreAndSucceeds)
+{
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  auto map_store = std::make_shared<RecordingMapStorePort>(authority);
+  std::vector<MissionResult> results;
+  auto runtime_config = config();
+  runtime_config.operating_mode = OperatingMode::Mapping;
+  RuntimeCore core(
+    runtime_config, clock, authority, relative,
+    {}, {}, [&results](std::uint64_t, const MissionResult & result) {
+      results.push_back(result);
+    }, {}, {}, {}, {}, {}, {}, map_store);
+  core.observe_gate(authority->snapshot());
+
+  const auto admission = core.admit(goal(
+    1U,
+    {MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::SaveMap),
+        0.0F, 0.0F, "voice_mvp"}}));
+
+  ASSERT_TRUE(admission.accepted);
+  ASSERT_EQ(map_store->saved_map_ids, std::vector<std::string>{"voice_mvp"});
+  EXPECT_TRUE(map_store->saw_inhibited_zero);
+  EXPECT_EQ(authority->operations().size(), 1U);
+  EXPECT_EQ(authority->inhibit_count(), 1U);
+  ASSERT_EQ(results.size(), 1U);
+  EXPECT_EQ(results.front().code, MissionResultCode::Succeeded);
+  EXPECT_FALSE(results.front().detail.find("not implemented") != std::string::npos);
+  EXPECT_FALSE(core.has_active_mission());
+}
+
+TEST(RuntimeCore, MappingMixedSaveMapPlanIsRejectedBeforeGateOpen)
+{
+  auto clock = std::make_shared<ScriptedSteadyClock>();
+  auto authority = std::make_shared<ScriptedMotionAuthorityPort>(kGateId);
+  auto relative = std::make_shared<ScriptedRelativeMotionPort>();
+  auto map_store = std::make_shared<RecordingMapStorePort>(authority);
+  auto runtime_config = config();
+  runtime_config.operating_mode = OperatingMode::Mapping;
+  RuntimeCore core(
+    runtime_config, clock, authority, relative,
+    {}, {}, {}, {}, {}, {}, {}, {}, {}, map_store);
+  core.observe_gate(authority->snapshot());
+
+  const auto admission = core.admit(goal(
+    1U,
+    {
+      MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::MoveDistance),
+        0.5F, 0.0F, ""},
+      MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::SaveMap),
+        0.0F, 0.0F, "voice_mvp"},
+    }));
+
+  EXPECT_FALSE(admission.accepted);
+  EXPECT_EQ(admission.result.code, MissionResultCode::InvalidPlan);
+  EXPECT_TRUE(map_store->saved_map_ids.empty());
+  EXPECT_TRUE(authority->operations().empty());
 }
 
 TEST(RuntimeCore, NavigationRejectsUnknownPlaceBeforeNavigationStart)

@@ -53,7 +53,8 @@ public:
     NodeCompletionMailbox::TokenEnqueue token_enqueue,
     NodeCompletionMailbox::EmergencyRequest emergency_request,
     ChildResultDeliveryDecorator delivery_decorator = {},
-    std::shared_ptr<NavigationPort> navigation = {})
+    std::shared_ptr<NavigationPort> navigation = {},
+    std::shared_ptr<MapStorePort> map_store = {})
   : emergency_request_(std::move(emergency_request)),
     terminal_handoff_lane_(
       [this](const MotionToken & token, const ChildResult & result) {
@@ -99,7 +100,8 @@ public:
         [this](const MotionToken & token) {
           completion_mailbox_.discard(token);
         },
-      std::move(navigation)))
+      std::move(navigation),
+      std::move(map_store)))
   {
   }
 

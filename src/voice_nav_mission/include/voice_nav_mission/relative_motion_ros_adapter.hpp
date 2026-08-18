@@ -16,7 +16,9 @@
 #define VOICE_NAV_MISSION__RELATIVE_MOTION_ROS_ADAPTER_HPP_
 
 #include <chrono>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include <rclcpp/rclcpp.hpp>
@@ -30,6 +32,16 @@ namespace voice_nav_mission
 {
 
 class RelativeMotionRosAdapter;
+
+struct NavigationPlace
+{
+  double x{0.0};
+  double y{0.0};
+  double yaw{0.0};
+};
+
+using NamedPlaceResolver = std::function<std::optional<NavigationPlace>(
+    const std::string & place_id)>;
 
 namespace detail
 {
@@ -55,7 +67,8 @@ public:
     rclcpp::Node & node,
     std::shared_ptr<MotionAuthorityPort> authority,
     RelativeMotionPolicy policy = {},
-    MotionConditioningConfig conditioning_config = {});
+    MotionConditioningConfig conditioning_config = {},
+    NamedPlaceResolver named_place_resolver = {});
   ~RelativeMotionRosAdapter() override;
 
   RelativeMotionRosAdapter(const RelativeMotionRosAdapter &) = delete;

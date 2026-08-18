@@ -19,6 +19,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -42,6 +43,8 @@
 #include "voice_nav_interfaces/msg/mission_step.hpp"
 #include "voice_nav_interfaces/srv/stop_mission.hpp"
 #include "voice_nav_mission/action_admission_tracker.hpp"
+#include "voice_nav_mission/map_package.hpp"
+#include "voice_nav_mission/map_store_ros_adapter.hpp"
 #include "voice_nav_mission/mission_action_result_router.hpp"
 #include "voice_nav_mission/motion_authority_ros_adapter.hpp"
 #include "voice_nav_mission/relative_motion_ros_adapter.hpp"
@@ -291,6 +294,35 @@ public:
       [this](const std::uint64_t current, const std::uint64_t next) {
         return emergency_fence_.advance_epoch(current, next);
       };
+    map_reader_ = std::make_unique<MapPackageReader>(default_map_root());
+    if (config_.operating_mode == OperatingMode::Mapping) {
+      map_upstream_ = std::make_shared<RosMapStoreUpstream>(*this);
+      map_store_ = std::make_shared<ProductionMapStore>(
+        default_map_root(),
+        [this](const std::filesystem::path & staging_directory) {
+          return map_upstream_ ? map_upstream_->capture(staging_directory) :
+                 ChildResult{ChildResultCode::DependencyUnavailable,
+                   "Map upstream is unavailable"};
+        },
+        trusted_named_places_file_);
+    }
+    const NamedPlaceResolver named_place_resolver =
+      [this](const std::string & place_id) -> std::optional<NavigationPlace> {
+        if (!map_reader_) {
+          return std::nullopt;
+        }
+        MapPackage package;
+        if (map_reader_->load(map_id_, &package).code != ChildResultCode::Succeeded) {
+          return std::nullopt;
+        }
+        NamedPlace place;
+        if (map_reader_->read_named_place(package, place_id, &place).code !=
+          ChildResultCode::Succeeded)
+        {
+          return std::nullopt;
+        }
+        return NavigationPlace{place.x, place.y, place.yaw};
+      };
     auto state_qos = rclcpp::QoS(rclcpp::KeepLast(1));
     state_qos.reliable().transient_local();
     state_publisher_ = create_publisher<MissionStateMessage>(kStateTopic, state_qos);
@@ -321,7 +353,7 @@ public:
                execution_plane_->completion_mailbox().relay(std::move(record));
       };
     relative_motion_ = std::make_shared<RelativeMotionRosAdapter>(
-      *this, authority_, motion_policy, conditioning_config);
+      *this, authority_, motion_policy, conditioning_config, named_place_resolver);
     execution_plane_ = std::make_unique<RuntimeExecutionPlane>(
       config_,
       clock_,
@@ -353,7 +385,8 @@ public:
         request_emergency_fence(std::move(detail));
       },
       RuntimeExecutionPlane::ChildResultDeliveryDecorator{},
-      std::static_pointer_cast<NavigationPort>(relative_motion_));
+      std::static_pointer_cast<NavigationPort>(relative_motion_),
+      map_store_);
     shutdown_coordinator_ = std::make_unique<RuntimeShutdownCoordinator>(
       [this]() {
         return admission_gate_.close_generation(action_admission_tracker_);
@@ -621,6 +654,10 @@ private:
       "rotate_angle_max_rad", kTrustedRotateAngleMaxRad, descriptor);
     const auto named_place_ids = declare_parameter<std::vector<std::string>>(
       "named_place_ids", {}, descriptor);
+    const auto map_id = declare_parameter<std::string>(
+      "map_id", "voice_mvp", descriptor);
+    const auto trusted_named_places_file = declare_parameter<std::string>(
+      "trusted_named_places_file", "", descriptor);
     if (mode != "mapping" && mode != "navigation") {
       throw std::invalid_argument("operating_mode must be mapping or navigation");
     }
@@ -641,7 +678,9 @@ private:
       static_cast<float>(move_distance_max_m) != kTrustedMoveDistanceMaxM ||
       static_cast<float>(rotate_angle_min_rad) != kTrustedRotateAngleMinRad ||
       static_cast<float>(rotate_angle_max_rad) != kTrustedRotateAngleMaxRad ||
-      named_place_ids.size() > 32U)
+      named_place_ids.size() > 32U || !valid_map_id(map_id) ||
+      (!trusted_named_places_file.empty() &&
+      !std::filesystem::path(trusted_named_places_file).is_absolute()))
     {
       throw std::invalid_argument("Mission Runtime trusted YAML is not frozen");
     }
@@ -650,6 +689,8 @@ private:
         throw std::invalid_argument("named place ID is outside the trusted bound");
       }
     }
+    map_id_ = map_id;
+    trusted_named_places_file_ = trusted_named_places_file;
     RuntimeConfig config;
     config.operating_mode = mode == "mapping" ?
       OperatingMode::Mapping : OperatingMode::Navigation;
@@ -1054,6 +1095,11 @@ private:
   ActionAdmissionTracker action_admission_tracker_;
   RuntimeAdmissionGate admission_gate_;
   std::shared_ptr<RosMotionAuthorityPort> authority_;
+  std::unique_ptr<MapPackageReader> map_reader_;
+  std::shared_ptr<RosMapStoreUpstream> map_upstream_;
+  std::shared_ptr<MapStorePort> map_store_;
+  std::string map_id_{"voice_mvp"};
+  std::filesystem::path trusted_named_places_file_;
   std::shared_ptr<RelativeMotionRosAdapter> relative_motion_;
   std::unique_ptr<RuntimeExecutionPlane> execution_plane_;
   RuntimeEventQueueType event_queue_;

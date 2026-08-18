@@ -27,6 +27,7 @@ def generate_launch_description():
     """Start the fixed world, product Runtime, and one active SLAM owner."""
     headless = LaunchConfiguration('headless')
     shutdown_on_gazebo_exit = LaunchConfiguration('shutdown_on_gazebo_exit')
+    map_id = LaunchConfiguration('map_id')
     product = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             PathJoinSubstitution([
@@ -40,6 +41,7 @@ def generate_launch_description():
             'shutdown_on_gazebo_exit': shutdown_on_gazebo_exit,
             'world_name': 'voice_nav_house_world',
             'laser_update_rate': '20',
+            'map_id': map_id,
         }.items(),
     )
     slam = LifecycleNode(
@@ -91,6 +93,11 @@ def generate_launch_description():
             default_value='true',
             choices=['true', 'false'],
             description='Shut down the Mapping MVP when Gazebo exits.',
+        ),
+        DeclareLaunchArgument(
+            'map_id',
+            default_value='voice_mvp',
+            description='Map package ID used for the Mapping MVP.',
         ),
         product,
         slam,

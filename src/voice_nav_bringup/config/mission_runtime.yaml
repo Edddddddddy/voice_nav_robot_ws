@@ -2,6 +2,8 @@ mission_runtime_node:
   ros__parameters:
     use_sim_time: true
     operating_mode: mapping
+    map_id: voice_mvp
+    trusted_named_places_file: ''
     mission_deadline_ms: 30000
     gate_discovery_deadline_ms: 2000
     control_response_deadline_ms: 100
