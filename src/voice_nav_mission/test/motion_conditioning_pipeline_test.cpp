@@ -1120,14 +1120,17 @@ public:
       [this](
         const std::shared_ptr<ListControllers::Request>,
         std::shared_ptr<ListControllers::Response> response) {
+        bool active = false;
         {
           std::unique_lock<std::mutex> lock(controller_mutex_);
+          active = controller_active_;
           if (controller_barrier_armed_) {
             if (controller_calls_until_block_ > 0U) {
               --controller_calls_until_block_;
             }
             if (controller_calls_until_block_ == 0U) {
               controller_barrier_entered_ = true;
+              controller_barrier_entered_at_ = std::chrono::steady_clock::now();
               controller_cv_.notify_all();
               controller_cv_.wait(
                 lock, [this]() {return controller_barrier_released_;});
@@ -1137,8 +1140,18 @@ public:
         }
         controller_manager_msgs::msg::ControllerState controller;
         controller.name = "diff_drive_controller";
-        controller.state = controller_active_ ? "active" : "inactive";
+        controller.state = active ? "active" : "inactive";
         response->controller = {controller};
+        {
+          std::lock_guard<std::mutex> lock(controller_mutex_);
+          if (controller_barrier_entered_) {
+            controller_response_completed_ = true;
+            controller_response_delay_ = std::chrono::duration_cast<
+              std::chrono::milliseconds>(
+              std::chrono::steady_clock::now() - controller_barrier_entered_at_);
+          }
+          controller_cv_.notify_all();
+        }
       });
 
     create_lifecycle_services(
@@ -1412,6 +1425,7 @@ public:
 
   void set_controller_active(bool value)
   {
+    std::lock_guard<std::mutex> lock(controller_mutex_);
     controller_active_ = value;
   }
 
@@ -1421,6 +1435,9 @@ public:
     controller_calls_until_block_ = calls_until_block;
     controller_barrier_entered_ = false;
     controller_barrier_released_ = false;
+    controller_response_completed_ = false;
+    controller_barrier_entered_at_ = {};
+    controller_response_delay_ = {};
     controller_barrier_armed_ = true;
   }
 
@@ -1437,6 +1454,31 @@ public:
     std::lock_guard<std::mutex> lock(controller_mutex_);
     controller_barrier_released_ = true;
     controller_cv_.notify_all();
+  }
+
+  bool wait_for_controller_response(std::chrono::milliseconds timeout = 2s)
+  {
+    std::unique_lock<std::mutex> lock(controller_mutex_);
+    return controller_cv_.wait_for(lock, timeout, [this]() {
+             return controller_response_completed_;
+           });
+  }
+
+  void release_controller_barrier_after(std::chrono::milliseconds delay)
+  {
+    std::unique_lock<std::mutex> lock(controller_mutex_);
+    const auto release_at = std::chrono::steady_clock::now() + delay;
+    controller_cv_.wait_until(lock, release_at, [this]() {
+             return controller_barrier_released_;
+           });
+    controller_barrier_released_ = true;
+    controller_cv_.notify_all();
+  }
+
+  std::chrono::milliseconds controller_response_delay() const
+  {
+    std::lock_guard<std::mutex> lock(controller_mutex_);
+    return controller_response_delay_;
   }
 
 private:
@@ -1566,12 +1608,15 @@ private:
   bool freeze_clock_{false};
   rclcpp::Time frozen_clock_;
   mutable std::mutex health_mutex_;
-  std::mutex controller_mutex_;
+  mutable std::mutex controller_mutex_;
   std::condition_variable controller_cv_;
   std::size_t controller_calls_until_block_{0U};
   bool controller_barrier_armed_{false};
   bool controller_barrier_entered_{false};
   bool controller_barrier_released_{false};
+  bool controller_response_completed_{false};
+  std::chrono::steady_clock::time_point controller_barrier_entered_at_{};
+  std::chrono::milliseconds controller_response_delay_{};
   std::mutex activation_mutex_;
   std::condition_variable activation_cv_;
   bool activation_barrier_{false};
@@ -2561,6 +2606,44 @@ TEST_F(
       AuthorityOperationKind::Renew),
     4);
   EXPECT_EQ(producer->start_count, 1U);
+}
+
+TEST_F(
+  MotionConditioningPipelineTest,
+  DelayedActiveControllerObservationDoesNotFailRunningRenew)
+{
+  auto health_ready = std::make_shared<CallbackCounter>();
+  auto pipeline_config = config();
+  pipeline_config.renew_period = 10ms;
+  pipeline_config.health_rpc_timeout = 100ms;
+  pipeline_config.dependency_liveness_timeout = 500ms;
+  pipeline_config.after_health_callback = [health_ready]() {
+      (*health_ready)();
+    };
+  MotionConditioningPipeline pipeline(
+    *client, authority, producer, pipeline_config);
+
+  ASSERT_TRUE(pipeline.prepare().ok);
+  health_ready->expect(4U);
+  graph->publish_health_once();
+  ASSERT_TRUE(health_ready->wait_for_target());
+  ASSERT_TRUE(pipeline.start().ok);
+
+  graph->arm_controller_barrier(1U);
+  ASSERT_TRUE(graph->wait_for_controller_barrier());
+  std::thread delayed_release([graph = graph.get()]() {
+        graph->release_controller_barrier_after(150ms);
+      });
+  const bool response_completed = graph->wait_for_controller_response();
+  delayed_release.join();
+
+  ASSERT_TRUE(response_completed);
+  EXPECT_GE(graph->controller_response_delay(), 100ms);
+  EXPECT_EQ(pipeline.state(), MotionConditioningState::Running);
+  const auto stopped = pipeline.stop();
+  if (pipeline.state() == MotionConditioningState::Running) {
+    EXPECT_TRUE(stopped.ok) << stopped.detail;
+  }
 }
 
 TEST_F(

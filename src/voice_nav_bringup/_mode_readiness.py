@@ -18,6 +18,8 @@ from __future__ import annotations
 
 
 PRIMARY_STATE_ACTIVE = 3
+RUNTIME_MODE_MAPPING = 1
+RUNTIME_MODE_NAVIGATION = 2
 RUNTIME_AVAILABLE = 1
 GATE_INHIBITED = 0
 MOTION_GATE_INHIBITED = 0
@@ -79,12 +81,14 @@ class _ModeReadinessState:
         self,
         mode: str,
         active_state_id: int = PRIMARY_STATE_ACTIVE,
+        require_runtime: bool = False,
     ):
         if mode not in _MODE_LIFECYCLE_NODES:
             raise ValueError(f'unsupported mode: {mode}')
         self.mode = mode
         self._active_state_id = active_state_id
         self._required_nodes = _MODE_LIFECYCLE_NODES[mode]
+        self._runtime_ready = not require_runtime
         self._active_nodes = set()
         self._map_seen = False
         self._map_odom_seen = False
@@ -95,6 +99,19 @@ class _ModeReadinessState:
             and state_id == self._active_state_id
         ):
             self._active_nodes.add(node_name)
+
+    def observe_runtime(self, message) -> None:
+        """Accept only the Runtime snapshot for this selected mode."""
+        expected_mode = (
+            RUNTIME_MODE_MAPPING
+            if self.mode == 'mapping'
+            else RUNTIME_MODE_NAVIGATION
+        )
+        self._runtime_ready = (
+            int(message.operating_mode) == expected_mode
+            and int(message.availability) == RUNTIME_AVAILABLE
+            and int(message.gate_state) == GATE_INHIBITED
+        )
 
     def observe_map(self, message) -> None:
         self._map_seen = self._map_seen or _valid_map(message)
@@ -107,12 +124,15 @@ class _ModeReadinessState:
 
     def is_ready(self) -> bool:
         return (
-            len(self._active_nodes) == len(self._required_nodes)
+            self._runtime_ready
+            and len(self._active_nodes) == len(self._required_nodes)
             and self._map_seen
             and self._map_odom_seen
         )
 
     def failure_stage(self) -> str:
+        if not self._runtime_ready:
+            return 'runtime_mode_snapshot'
         for node_name in self._required_nodes:
             if node_name not in self._active_nodes:
                 return f'{node_name}_lifecycle'
@@ -401,6 +421,7 @@ def wait_for_mode_readiness(session_spec, deadline, clock):
             QoSProfile,
             ReliabilityPolicy,
         )
+        from voice_nav_interfaces.msg import MissionState
         from tf2_msgs.msg import TFMessage
     except Exception:
         return _unavailable_result(mode, 'setup', 'mode_readiness_failed')
@@ -409,7 +430,9 @@ def wait_for_mode_readiness(session_spec, deadline, clock):
         return _unavailable_result(mode, 'context', 'mode_readiness_failed')
 
     node = None
-    state = _ModeReadinessState(mode, State.PRIMARY_STATE_ACTIVE)
+    state = _ModeReadinessState(
+        mode, State.PRIMARY_STATE_ACTIVE, require_runtime=True,
+    )
     pending = {}
     try:
         node = rclpy.create_node('voice_nav_app_mode_readiness')
@@ -437,6 +460,9 @@ def wait_for_mode_readiness(session_spec, deadline, clock):
             OccupancyGrid, _MAP_TOPIC, on_map, map_qos,
         )
         node.create_subscription(TFMessage, _TF_TOPIC, on_tf, tf_qos)
+        node.create_subscription(
+            MissionState, '/mission/state', state.observe_runtime, map_qos,
+        )
         clients = {
             node_name: node.create_client(GetState, service_name)
             for node_name, service_name in _LIFECYCLE_SERVICES[mode].items()

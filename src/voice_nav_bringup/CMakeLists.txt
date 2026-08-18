@@ -72,6 +72,11 @@ if(BUILD_TESTING)
     TIMEOUT 30
   )
   ament_add_pytest_test(
+    vad_mode_launcher
+    test/test_vad_mode_launcher.py
+    TIMEOUT 30
+  )
+  ament_add_pytest_test(
     real_audio_motion_smoke_contract
     test/test_real_audio_motion_smoke_contract.py
     TIMEOUT 30
