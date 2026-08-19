@@ -56,6 +56,7 @@ _EXPECTED_VERSIONS = {
 }
 
 Mode = Literal['mapping', 'navigation']
+Display = Literal['headless', 'gui']
 Clock = Callable[[], float]
 
 
@@ -637,10 +638,15 @@ class MapRoundtripSupervisor:
 RoundtripSupervisor = MapRoundtripSupervisor
 
 
-def build_production_command(mode: Mode) -> tuple[str, ...]:
+def build_production_command(
+    mode: Mode,
+    display: Display = 'headless',
+) -> tuple[str, ...]:
     """Return the fixed installed app command for one immutable mode."""
     if mode not in (_MAPPING_MODE, _NAVIGATION_MODE):
         raise RoundtripError(f'unsupported roundtrip mode: {mode}')
+    if display not in ('headless', 'gui'):
+        raise RoundtripError(f'unsupported roundtrip display: {display}')
     return (
         'ros2',
         'run',
@@ -649,7 +655,7 @@ def build_production_command(mode: Mode) -> tuple[str, ...]:
         '--mode',
         mode,
         '--display',
-        'headless',
+        display,
         '--input',
         'vad-auto',
     )
@@ -771,7 +777,10 @@ class ObservedProcess:
 class ProductionProcessFactory:
     """Create fixed app commands and retain their observed process handles."""
 
-    def __init__(self) -> None:
+    def __init__(self, display: Display = 'headless') -> None:
+        if display not in ('headless', 'gui'):
+            raise RoundtripError(f'unsupported roundtrip display: {display}')
+        self._display = display
         self._processes: dict[Mode, ObservedProcess] = {}
 
     def __call__(
@@ -810,7 +819,9 @@ class ProductionProcessFactory:
             options['creationflags'] = subprocess.CREATE_NEW_PROCESS_GROUP
         else:
             options['start_new_session'] = True
-        process = subprocess.Popen(build_production_command(mode), **options)
+        process = subprocess.Popen(
+            build_production_command(mode, self._display), **options,
+        )
         observed = ObservedProcess(process, mode)
         self._processes[mode] = observed
         return observed
@@ -1022,12 +1033,18 @@ def main(
         default=_DEFAULT_PHASE_TIMEOUT_S,
         help='Bound each injected phase (seconds).',
     )
+    parser.add_argument(
+        '--display',
+        choices=('headless', 'gui'),
+        default='headless',
+        help='Run both Mapping and Navigation with or without Gazebo GUI.',
+    )
     try:
         arguments = parser.parse_args(argv)
     except SystemExit as error:
         return int(error.code)
     if process_factory is None and observer is None:
-        production_factory = ProductionProcessFactory()
+        production_factory = ProductionProcessFactory(arguments.display)
         process_factory = production_factory
         observer = ProductionRoundtripObserver(
             process_factory=production_factory,
