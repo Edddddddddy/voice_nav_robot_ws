@@ -17,7 +17,6 @@
 
 #include <memory>
 #include <cstddef>
-#include <atomic>
 
 #include "rclcpp/executor.hpp"
 #include "speech_input_node.hpp"
@@ -29,15 +28,9 @@
 namespace voice_nav_audio
 {
 
-enum class VoicePipelineCaptureMode
-{
-  kKeepCapture,
-  kStopBeforeTurnPublication
-};
-
 // Package-private composition root. It is the one owner of AudioEngine and
 // places both stable ROS seams behind injected input, output, and device adapters.
-class VoicePipeline final : private VoiceTurnBoundary
+class VoicePipeline final
 {
 public:
   using Speak = SpeechOutputNode::Speak;
@@ -48,7 +41,6 @@ public:
     FullDuplexAudioDevice & device,
     SpeechOutputTraceSink * trace = nullptr,
     StopMissionPort * stop_port = nullptr,
-    VoicePipelineCaptureMode capture_mode = VoicePipelineCaptureMode::kKeepCapture,
     bool defer_input_publisher = false);
   VoicePipeline(
     std::unique_ptr<SpeechRecognizerAdapter> recognizer,
@@ -56,14 +48,12 @@ public:
     FullDuplexAudioDevice * device,
     SpeechOutputTraceSink * trace = nullptr,
     StopMissionPort * stop_port = nullptr,
-    VoicePipelineCaptureMode capture_mode = VoicePipelineCaptureMode::kKeepCapture,
     bool defer_input_publisher = false);
   VoicePipeline(
     std::unique_ptr<SpeechRecognizerAdapter> recognizer,
     std::unique_ptr<TtsAdapter> tts,
     SpeechOutputTraceSink * trace = nullptr,
     StopMissionPort * stop_port = nullptr,
-    VoicePipelineCaptureMode capture_mode = VoicePipelineCaptureMode::kKeepCapture,
     bool defer_input_publisher = false);
   ~VoicePipeline();
 
@@ -77,11 +67,6 @@ public:
   [[nodiscard]] bool try_pop_reference(AudioFrame & frame) noexcept;
   [[nodiscard]] bool stop_capture() noexcept;
   void abort_capture() noexcept;
-  [[nodiscard]] bool allow_playback() noexcept;
-  [[nodiscard]] bool capture_finished() const noexcept;
-  // Consumes the package-private turn boundary event on the control pump.
-  // The provider callback only sets this event and never replaces a child.
-  [[nodiscard]] bool consume_turn_completed_event() noexcept;
   [[nodiscard]] bool activate_input_publisher() noexcept;
   void add_to_executor(rclcpp::Executor & executor);
   void remove_from_executor(rclcpp::Executor & executor);
@@ -89,18 +74,12 @@ public:
   [[nodiscard]] AudioMetrics audio_metrics() const noexcept;
 
 private:
-  void on_recognizer_terminal(
-    SpeechEventKind kind, bool published) noexcept override;
-
   AudioEngine engine_{};
   PortAudioAdapter adapter_;
-  VoicePipelineCaptureMode capture_mode_{VoicePipelineCaptureMode::kKeepCapture};
   std::shared_ptr<SpeechOutputNode> output_;
   std::unique_ptr<RosStopMissionPort> owned_stop_port_;
   std::unique_ptr<VoicePipelineCoordination> coordination_;
   std::shared_ptr<SpeechInputNode> input_;
-  std::atomic<bool> capture_finished_{false};
-  std::atomic<bool> turn_completed_event_{false};
 };
 
 }  // namespace voice_nav_audio

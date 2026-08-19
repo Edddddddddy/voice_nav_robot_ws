@@ -66,12 +66,24 @@ public:
   {
     std::unique_lock<std::mutex> lock(mutex_);
     return condition_.wait_for(lock, 2s, [this, kind]() {
-               for (const auto & event : events) {
-                 if (event.kind == kind) {
-                   return true;
-                 }
-               }
-               return false;
+      for (const auto & event : events) {
+        if (event.kind == kind) {
+          return true;
+        }
+      }
+      return false;
+    });
+  }
+
+  bool wait_for_kind_count(const SpeechEventKind kind, const std::size_t expected)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, 2s, [this, kind, expected]() {
+      std::size_t actual = 0U;
+      for (const auto & event : events) {
+        actual += event.kind == kind ? 1U : 0U;
+      }
+      return actual >= expected;
     });
   }
 
@@ -112,10 +124,11 @@ public:
   {
     std::lock_guard<std::mutex> lock(mutex_);
     ++calls;
+    ++turn_calls_;
     condition_.notify_all();
-    if (calls >= endpoint_after_) {
+    if (turn_calls_ >= endpoint_after_) {
       return SileroVadResult{
-        SileroVadDecision::kEndpoint, calls * CleanedAudioFrame::kSamples};
+        SileroVadDecision::kEndpoint, turn_calls_ * CleanedAudioFrame::kSamples};
     }
     return SileroVadResult{SileroVadDecision::kSpeech, 0U};
   }
@@ -130,6 +143,9 @@ public:
 
   void reset() noexcept override
   {
+    std::lock_guard<std::mutex> lock(mutex_);
+    ++reset_calls;
+    turn_calls_ = 0U;
   }
 
   bool wait_for_calls(const std::size_t expected)
@@ -152,11 +168,13 @@ public:
 
   std::size_t calls{0U};
   std::size_t finish_calls{0U};
+  std::size_t reset_calls{0U};
   SileroVadFlushResult flush_result{
     SileroVadFlushStatus::kUnique, 0U};
 
 private:
   const std::size_t endpoint_after_;
+  std::size_t turn_calls_{0U};
   mutable std::mutex mutex_;
   std::condition_variable condition_;
 };
@@ -203,15 +221,22 @@ public:
     const Sample * samples, const std::size_t sample_count,
     std::string & labeled_text) noexcept override
   {
+    bool succeeds = true;
     {
       std::lock_guard<std::mutex> lock(mutex_);
+      const auto call_index = calls;
       ++calls;
+      if (call_index < inference_results.size()) {
+        succeeds = inference_results[call_index];
+      }
       inference_thread = std::this_thread::get_id();
       inferred_samples.assign(samples, samples + sample_count);
-      labeled_text = labeled_text_;
+      if (succeeds) {
+        labeled_text = labeled_text_;
+      }
     }
     condition_.notify_all();
-    return true;
+    return succeeds;
   }
 
   bool wait_for_call()
@@ -241,6 +266,7 @@ public:
   std::size_t calls{0U};
   std::thread::id inference_thread{};
   std::vector<Sample> inferred_samples{};
+  std::vector<bool> inference_results{};
 
 private:
   const std::string labeled_text_;
@@ -406,6 +432,12 @@ public:
     return condition_.wait_for(lock, 2s, [this]() {return blocked_;});
   }
 
+  bool wait_for_calls(const std::size_t expected)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, 2s, [this, expected]() {return calls >= expected;});
+  }
+
   void release() noexcept
   {
     {
@@ -467,8 +499,7 @@ public:
     state_->process_active = false;
     state_->process_exited = true;
     state_->condition.notify_all();
-    return SileroVadResult{
-      SileroVadDecision::kEndpoint, CleanedAudioFrame::kSamples};
+    return SileroVadResult{SileroVadDecision::kSilence, 0U};
   }
 
   void reset() noexcept override
@@ -627,12 +658,24 @@ public:
   {
     std::unique_lock<std::mutex> lock(mutex_);
     return condition_.wait_for(lock, 2s, [this, kind]() {
-               for (const auto & event : events) {
-                 if (event.kind == kind) {
-                   return true;
-                 }
-               }
-               return false;
+      for (const auto & event : events) {
+        if (event.kind == kind) {
+          return true;
+        }
+      }
+      return false;
+    });
+  }
+
+  bool wait_for_kind_count(const SpeechEventKind kind, const std::size_t expected)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, 2s, [this, kind, expected]() {
+      std::size_t actual = 0U;
+      for (const auto & event : events) {
+        actual += event.kind == kind ? 1U : 0U;
+      }
+      return actual >= expected;
     });
   }
 
@@ -681,7 +724,7 @@ private:
   std::condition_variable condition_;
 };
 
-TEST(SenseVoiceProviderTest, ArmOncePublishesOneFinalAndInferenceLeavesCallerThread)
+TEST(SenseVoiceProviderTest, ContinuousProviderReusesVadAndAsrAcrossTwoTurns)
 {
   auto vad = std::make_unique<ScriptedSileroVad>(3U);
   auto * const vad_probe = vad.get();
@@ -692,12 +735,6 @@ TEST(SenseVoiceProviderTest, ArmOncePublishesOneFinalAndInferenceLeavesCallerThr
 
   const auto callback_thread = std::this_thread::get_id();
   provider.process_frame(frame(1U), sink);
-  EXPECT_EQ(vad_probe->call_count(), 0U);
-  EXPECT_EQ(asr_probe->call_count(), 0U);
-  ASSERT_TRUE(provider.arm_once());
-  EXPECT_FALSE(provider.arm_once());
-
-  provider.process_frame(frame(1U), sink);
   provider.process_frame(frame(2U), sink);
   provider.process_frame(frame(3U), sink);
 
@@ -706,17 +743,38 @@ TEST(SenseVoiceProviderTest, ArmOncePublishesOneFinalAndInferenceLeavesCallerThr
   EXPECT_EQ(sink.count(SpeechEventKind::kEndpointFinal), 1U);
   EXPECT_NE(asr_probe->inference_thread_id(), callback_thread);
   EXPECT_EQ(vad_probe->call_count(), 3U);
+  EXPECT_EQ(vad_probe->reset_calls, 1U);
   ASSERT_EQ(sink.count(SpeechEventKind::kEndpointFinal), 1U);
   EXPECT_EQ(sink.events.back().final_text, "开放时间早上9点至下午5点。");
 
-  provider.finish_input();
-  std::this_thread::yield();
-  EXPECT_EQ(sink.count(SpeechEventKind::kEndpointFinal), 1U);
-
   provider.process_frame(frame(4U), sink);
-  EXPECT_EQ(vad_probe->call_count(), 3U);
+  provider.process_frame(frame(5U), sink);
+  provider.process_frame(frame(6U), sink);
+  ASSERT_TRUE(sink.wait_for_kind_count(SpeechEventKind::kEndpointFinal, 2U));
+  ASSERT_TRUE(asr_probe->wait_for_call());
+  EXPECT_EQ(sink.count(SpeechEventKind::kEndpointFinal), 2U);
+  EXPECT_EQ(vad_probe->call_count(), 6U);
+  EXPECT_EQ(vad_probe->reset_calls, 2U);
+  EXPECT_EQ(asr_probe->call_count(), 2U);
+}
+
+TEST(SenseVoiceProviderTest, ReArmsAfterAsrInferenceFailureForTheNextTurn)
+{
+  auto vad = std::make_unique<ScriptedSileroVad>(1U);
+  auto asr = std::make_unique<RecordingSenseVoice>();
+  asr->inference_results = {false, true};
+  auto * const asr_probe = asr.get();
+  SenseVoiceProvider provider(std::move(vad), std::move(asr));
+  ScopeWiringSink sink(provider);
+
+  provider.process_frame(frame(1U), sink);
+  ASSERT_TRUE(sink.wait_for_kind(SpeechEventKind::kFailure));
+  provider.process_frame(frame(2U), sink);
+
+  ASSERT_TRUE(sink.wait_for_kind(SpeechEventKind::kEndpointFinal));
+  EXPECT_EQ(sink.count(SpeechEventKind::kFailure), 1U);
   EXPECT_EQ(sink.count(SpeechEventKind::kEndpointFinal), 1U);
-  EXPECT_EQ(asr_probe->call_count(), 1U);
+  EXPECT_EQ(asr_probe->call_count(), 2U);
 }
 
 TEST(SenseVoiceProviderTest, EndpointInferenceIncludesPreSpeechAndTrailingFrames)
@@ -729,7 +787,6 @@ TEST(SenseVoiceProviderTest, EndpointInferenceIncludesPreSpeechAndTrailingFrames
   auto * const asr_probe = asr.get();
   SenseVoiceProvider provider(std::move(vad), std::move(asr));
   ScopeWiringSink sink(provider);
-  ASSERT_TRUE(provider.arm_once());
 
   auto prefix_one = frame(1U);
   prefix_one.samples.fill(111);
@@ -775,12 +832,13 @@ TEST(SenseVoiceProviderTest, InvalidEndpointSampleFailsClosedWithoutInference)
     auto * const asr_probe = asr.get();
     SenseVoiceProvider provider(std::move(vad), std::move(asr));
     RecordingEventSink sink;
-    ASSERT_TRUE(provider.arm_once());
 
     provider.process_frame(frame(1U), sink);
     provider.finish_input();
 
     ASSERT_TRUE(sink.wait_for_kind(SpeechEventKind::kFailure));
+    provider.process_frame(frame(2U), sink);
+    ASSERT_TRUE(sink.wait_for_kind_count(SpeechEventKind::kFailure, 2U));
     EXPECT_EQ(sink.count(SpeechEventKind::kEndpointFinal), 0U);
     EXPECT_EQ(asr_probe->call_count(), 0U);
   }
@@ -796,7 +854,6 @@ TEST(SenseVoiceProviderTest, FlushKeepsValidTailAndExcludesPadding)
   auto * const asr_probe = asr.get();
   SenseVoiceProvider provider(std::move(vad), std::move(asr));
   ScopeWiringSink sink(provider);
-  ASSERT_TRUE(provider.arm_once());
 
   auto first = frame(1U);
   first.samples.fill(111);
@@ -835,11 +892,13 @@ TEST(SenseVoiceProviderTest, EmptyMultipleZeroAndOutOfRangeFlushFailClosed)
     auto * const asr_probe = asr.get();
     SenseVoiceProvider provider(std::move(vad), std::move(asr));
     RecordingEventSink sink;
-    ASSERT_TRUE(provider.arm_once());
     provider.process_frame(frame(1U), sink);
     provider.finish_input();
 
     ASSERT_TRUE(sink.wait_for_kind(SpeechEventKind::kFailure));
+    provider.process_frame(frame(2U), sink);
+    provider.finish_input();
+    ASSERT_TRUE(sink.wait_for_kind_count(SpeechEventKind::kFailure, 2U));
     EXPECT_EQ(sink.count(SpeechEventKind::kEndpointFinal), 0U);
     EXPECT_EQ(asr_probe->call_count(), 0U);
   }
@@ -853,7 +912,6 @@ TEST(SenseVoiceProviderTest, DuplicateFinishInputFailsClosedWithoutSecondInferen
   auto * const asr_probe = asr.get();
   SenseVoiceProvider provider(std::move(vad), std::move(asr));
   RecordingEventSink sink;
-  ASSERT_TRUE(provider.arm_once());
   provider.process_frame(frame(1U), sink);
   provider.finish_input();
   provider.finish_input();
@@ -880,11 +938,12 @@ TEST(SenseVoiceProviderTest, RejectsUnknownOrMalformedSenseVoiceTagCombinations)
     auto asr = std::make_unique<RecordingSenseVoice>(invalid_label);
     SenseVoiceProvider provider(std::move(vad), std::move(asr));
     ScopeWiringSink sink(provider);
-    ASSERT_TRUE(provider.arm_once());
     provider.process_frame(frame(1U), sink);
     provider.finish_input();
 
     ASSERT_TRUE(sink.wait_for_kind(SpeechEventKind::kFailure));
+    provider.process_frame(frame(2U), sink);
+    ASSERT_TRUE(sink.wait_for_kind_count(SpeechEventKind::kFailure, 2U));
     EXPECT_EQ(sink.count(SpeechEventKind::kEndpointFinal), 0U);
   }
 }
@@ -895,30 +954,11 @@ TEST(SenseVoiceProviderTest, PlainUpstreamSenseVoiceTextRemainsAccepted)
   auto asr = std::make_unique<RecordingSenseVoice>("开放时间早上9点至下午5点。");
   SenseVoiceProvider provider(std::move(vad), std::move(asr));
   ScopeWiringSink sink(provider);
-  ASSERT_TRUE(provider.arm_once());
   provider.process_frame(frame(1U), sink);
   provider.finish_input();
 
   ASSERT_TRUE(sink.wait_for_kind(SpeechEventKind::kEndpointFinal));
   EXPECT_EQ(sink.events.back().final_text, "开放时间早上9点至下午5点。");
-}
-
-TEST(SenseVoiceProviderTest, UnarmedAudioProducesNoEventsOrInference)
-{
-  auto vad = std::make_unique<ScriptedSileroVad>(2U);
-  auto * const vad_probe = vad.get();
-  auto asr = std::make_unique<RecordingSenseVoice>();
-  auto * const asr_probe = asr.get();
-  SenseVoiceProvider provider(std::move(vad), std::move(asr));
-  RecordingEventSink sink;
-
-  provider.process_frame(frame(1U), sink);
-  provider.process_frame(frame(2U), sink);
-
-  EXPECT_FALSE(vad_probe->wait_for_calls(1U));
-  EXPECT_EQ(asr_probe->call_count(), 0U);
-  EXPECT_EQ(sink.count(SpeechEventKind::kWakeAccepted), 0U);
-  EXPECT_EQ(sink.count(SpeechEventKind::kEndpointFinal), 0U);
 }
 
 TEST(SenseVoiceProviderTest, FifteenSecondSilenceBudgetTimesOutAtExactFrame)
@@ -934,7 +974,6 @@ TEST(SenseVoiceProviderTest, FifteenSecondSilenceBudgetTimesOutAtExactFrame)
   SenseVoiceProvider provider(
     std::move(vad), std::move(asr), SenseVoiceProviderConfig{kMaximumUtteranceFrames});
   RecordingEventSink sink;
-  ASSERT_TRUE(provider.arm_once());
 
   for (std::uint64_t sequence = 1U; sequence <= kMaximumUtteranceFrames; ++sequence) {
     provider.process_frame(frame(sequence), sink);
@@ -942,7 +981,9 @@ TEST(SenseVoiceProviderTest, FifteenSecondSilenceBudgetTimesOutAtExactFrame)
 
   ASSERT_TRUE(sink.wait_for_kind(SpeechEventKind::kTimeout));
   EXPECT_TRUE(vad_probe->wait_for_calls(kMaximumUtteranceFrames));
-  EXPECT_EQ(vad_probe->call_count(), kMaximumUtteranceFrames);
+  provider.process_frame(frame(kMaximumUtteranceFrames + 1U), sink);
+  EXPECT_TRUE(vad_probe->wait_for_calls(kMaximumUtteranceFrames + 1U));
+  EXPECT_EQ(vad_probe->call_count(), kMaximumUtteranceFrames + 1U);
   EXPECT_EQ(asr_probe->call_count(), 0U);
   EXPECT_EQ(sink.count(SpeechEventKind::kWakeAccepted), 0U);
   EXPECT_EQ(sink.count(SpeechEventKind::kEndpointFinal), 0U);
@@ -958,7 +999,6 @@ TEST(SenseVoiceProviderTest, QueueOverflowQuarantinesOnWorkerWithOneFailure)
   SenseVoiceProvider provider(
     std::move(vad), std::move(asr), SenseVoiceProviderConfig{kQueueCapacityFrames});
   RecordingEventSink sink;
-  ASSERT_TRUE(provider.arm_once());
 
   provider.process_frame(frame(1U), sink);
   const bool worker_blocked = vad_probe->wait_until_blocked();
@@ -973,24 +1013,24 @@ TEST(SenseVoiceProviderTest, QueueOverflowQuarantinesOnWorkerWithOneFailure)
 
   ASSERT_TRUE(worker_blocked);
   ASSERT_TRUE(sink.wait_for_kind(SpeechEventKind::kFailure));
-  EXPECT_EQ(vad_probe->call_count(), 1U);
+  provider.process_frame(frame(6U), sink);
+  ASSERT_TRUE(vad_probe->wait_for_calls(2U));
+  EXPECT_EQ(vad_probe->call_count(), 2U);
   EXPECT_EQ(asr_probe->call_count(), 0U);
   EXPECT_EQ(sink.count(SpeechEventKind::kEndpointFinal), 0U);
   EXPECT_EQ(
     sink.count(SpeechEventKind::kFailure) + sink.count(SpeechEventKind::kTimeout), 1U);
 }
 
-TEST(SenseVoiceProviderTest, ShutdownJoinsWorkerBeforeVadResetAndDropsLateEvents)
+TEST(SenseVoiceProviderTest, ShutdownJoinsWorkerBeforeVadResetAndAsrShutdown)
 {
   auto vad_state = std::make_shared<ShutdownBarrierVadState>();
   auto vad = std::make_unique<ShutdownBarrierVad>(vad_state);
   auto * const vad_probe = vad.get();
   auto asr_state = std::make_shared<ShutdownAwareAsrState>();
   auto asr = std::make_unique<ShutdownAwareAsr>(asr_state);
-  auto * const asr_probe = asr.get();
   auto provider = std::make_unique<SenseVoiceProvider>(std::move(vad), std::move(asr));
   RecordingEventSink sink;
-  ASSERT_TRUE(provider->arm_once());
 
   provider->process_frame(frame(1U), sink);
   ASSERT_TRUE(vad_probe->wait_until_process_entered());
@@ -1000,7 +1040,10 @@ TEST(SenseVoiceProviderTest, ShutdownJoinsWorkerBeforeVadResetAndDropsLateEvents
       provider->shutdown();
       shutdown_returned.store(true, std::memory_order_release);
     });
-  EXPECT_TRUE(asr_probe->wait_until_shutdown());
+  {
+    std::lock_guard<std::mutex> lock(asr_state->mutex);
+    EXPECT_FALSE(asr_state->shutdown_called);
+  }
   EXPECT_FALSE(shutdown_returned.load(std::memory_order_acquire));
 
   {
@@ -1012,7 +1055,7 @@ TEST(SenseVoiceProviderTest, ShutdownJoinsWorkerBeforeVadResetAndDropsLateEvents
     EXPECT_EQ(asr_state->late_inference_calls, 0U);
   }
 
-  // Release the worker only after shutdown has revoked admission and the sink.
+  // Release the worker before the post-join VAD reset and ASR shutdown.
   vad_probe->release_process();
   shutdown_thread.join();
   EXPECT_TRUE(shutdown_returned.load(std::memory_order_acquire));
@@ -1033,14 +1076,13 @@ TEST(SenseVoiceProviderTest, ShutdownJoinsWorkerBeforeVadResetAndDropsLateEvents
   EXPECT_EQ(sink.total_count(), 0U);
 }
 
-TEST(SenseVoiceProviderTest, ShutdownRevokesInferenceAdmissionWhileWakeSinkIsBlocked)
+TEST(SenseVoiceProviderTest, ShutdownFencesBlockedWakeBeforeAsrShutdown)
 {
   WakeBarrierSink sink;
   auto vad = std::make_unique<ScriptedSileroVad>(1U);
   auto asr_state = std::make_shared<ShutdownAwareAsrState>();
   auto asr = std::make_unique<ShutdownAwareAsr>(asr_state);
   auto provider = std::make_unique<SenseVoiceProvider>(std::move(vad), std::move(asr));
-  ASSERT_TRUE(provider->arm_once());
 
   provider->process_frame(frame(1U), sink);
   ASSERT_TRUE(sink.wait_until_wake_entered());
@@ -1050,17 +1092,17 @@ TEST(SenseVoiceProviderTest, ShutdownRevokesInferenceAdmissionWhileWakeSinkIsBlo
       provider->shutdown();
       shutdown_returned.store(true, std::memory_order_release);
     });
-  std::unique_lock<std::mutex> asr_lock(asr_state->mutex);
-  const bool shutdown_called = asr_state->condition.wait_for(
-    asr_lock, 2s, [asr_state]() {return asr_state->shutdown_called;});
-  asr_lock.unlock();
+  {
+    std::lock_guard<std::mutex> lock(asr_state->mutex);
+    EXPECT_FALSE(asr_state->shutdown_called);
+  }
   sink.release_wake();
   shutdown_thread.join();
 
-  ASSERT_TRUE(shutdown_called);
   EXPECT_TRUE(shutdown_returned.load(std::memory_order_acquire));
   {
     std::lock_guard<std::mutex> lock(asr_state->mutex);
+    EXPECT_TRUE(asr_state->shutdown_called);
     EXPECT_EQ(asr_state->lifecycle_events, (std::vector<std::string>{"shutdown"}));
     EXPECT_EQ(asr_state->inference_calls, 0U);
     EXPECT_EQ(asr_state->late_inference_calls, 0U);
@@ -1079,7 +1121,6 @@ TEST(SenseVoiceProviderTest, CoreFenceBlocksGapAndReorderFramesFromProviderAdapt
       auto provider = std::make_unique<SenseVoiceProvider>(std::move(vad), std::move(asr));
       CollectingVoiceTurnSink turn_sink;
       SpeechInputCore core(*provider, turn_sink);
-      ASSERT_TRUE(provider->arm_once());
 
       core.accept_cleaned_frame(first);
       ASSERT_TRUE(vad_probe->wait_for_calls(1U));
@@ -1105,7 +1146,6 @@ TEST(SenseVoiceProviderTest, CoreDropsLateProviderFinalAfterContinuityRetiresSco
   auto provider = std::make_unique<SenseVoiceProvider>(std::move(vad), std::move(asr));
   CollectingVoiceTurnSink turn_sink;
   SpeechInputCore core(*provider, turn_sink);
-  ASSERT_TRUE(provider->arm_once());
 
   core.accept_cleaned_frame(frame(1U));
   core.accept_cleaned_frame(frame(2U));
@@ -1126,7 +1166,6 @@ TEST(SenseVoiceProviderTest, CorePublishesOneFinalFromSerialProviderDelivery)
   auto provider = std::make_unique<SenseVoiceProvider>(std::move(vad), std::move(asr));
   CollectingVoiceTurnSink turn_sink;
   SpeechInputCore core(*provider, turn_sink);
-  ASSERT_TRUE(provider->arm_once());
 
   core.accept_cleaned_frame(frame(1U));
   core.accept_cleaned_frame(frame(2U));

@@ -30,8 +30,6 @@ def test_app_is_installed_as_the_voice_nav_bringup_executable():
     assert 'DESTINATION lib/${PROJECT_NAME}' in cmake
     assert 'install(\n  FILES\n    _mode_readiness.py' in cmake
     assert '    _sensevoice_input.py' in cmake
-    assert '    _chaowen_asset_verifier.py' in cmake
-    assert 'chaowen_tts_asset_manifest.def' in cmake
 
     prefix = Path(get_package_prefix('voice_nav_bringup'))
     executable = prefix / 'lib' / 'voice_nav_bringup' / 'voice_nav_app'
@@ -39,21 +37,11 @@ def test_app_is_installed_as_the_voice_nav_bringup_executable():
     sensevoice_helper = (
         prefix / 'lib' / 'voice_nav_bringup' / '_sensevoice_input.py'
     )
-    chaowen_verifier = (
-        prefix / 'lib' / 'voice_nav_bringup' / '_chaowen_asset_verifier.py'
-    )
-    chaowen_manifest = (
-        prefix / 'lib' / 'voice_nav_bringup' / 'chaowen_tts_asset_manifest.def'
-    )
     suffixed_executable = executable.with_name('voice_nav_app.py')
     assert executable.is_file()
     assert os.access(executable, os.X_OK)
     assert sensevoice_helper.is_file()
-    microphone_helper = sensevoice_helper.read_text(encoding='utf-8')
-    assert "input_profile:=microphone_once" in microphone_helper
-    assert "include_agent:=false" in microphone_helper
-    assert "input_profile:=vad_auto" in microphone_helper
-    assert chaowen_verifier.is_file()
-    assert chaowen_manifest.is_file()
+    continuous_helper = sensevoice_helper.read_text(encoding='utf-8')
+    assert "input_profile:=vad_auto" in continuous_helper
     assert not suffixed_executable.exists()
     assert helper.is_file()

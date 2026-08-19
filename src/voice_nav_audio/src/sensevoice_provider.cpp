@@ -116,13 +116,6 @@ bool normalize_sensevoice_text(const std::string & labeled, std::string & normal
 
 class SenseVoiceProvider::Implementation final
 {
-  enum class LifecycleState
-  {
-    kRunning,
-    kInferenceAdmitted,
-    kStopping,
-  };
-
 public:
   Implementation(
     std::unique_ptr<SileroVadAdapter> vad,
@@ -140,6 +133,7 @@ public:
     if (!vad_ || !asr_) {
       throw std::invalid_argument("SenseVoiceProvider requires VAD and ASR adapters");
     }
+    armed_ = true;
     worker_ = std::thread([this]() {worker_loop();});
   }
 
@@ -150,9 +144,8 @@ public:
 
   void shutdown() noexcept
   {
-    std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
-    const bool was_stopping = lifecycle_state_.exchange(
-      LifecycleState::kStopping, std::memory_order_acq_rel) == LifecycleState::kStopping;
+    std::lock_guard<std::mutex> shutdown_lock(shutdown_mutex_);
+    const bool should_shutdown = !stop_requested_.exchange(true, std::memory_order_acq_rel);
     {
       std::lock_guard<std::mutex> lock(queue_mutex_);
       stopping_ = true;
@@ -165,42 +158,16 @@ public:
       duplicate_finish_pending_ = false;
     }
     queue_condition_.notify_all();
-    if (!was_stopping) {
-      // ASR cancellation is a separate adapter seam. Production SenseVoice
-      // keeps it a no-op; adapters that implement it must make it safe to
-      // call while infer() is in flight.
-      asr_->shutdown();
-    }
     if (worker_.joinable()) {
       worker_.join();
     }
-    if (!was_stopping) {
+    if (should_shutdown) {
+      // The worker is joined before either adapter is reset or destroyed.
+      // This keeps reset and ASR shutdown out of process/infer and fences all
+      // late provider events after input has stopped.
       vad_->reset();
+      asr_->shutdown();
     }
-  }
-
-  [[nodiscard]] bool arm_once() noexcept
-  {
-    std::lock_guard<std::mutex> lock(queue_mutex_);
-    if (stopping_ || armed_ || has_been_armed_) {
-      return false;
-    }
-    has_been_armed_ = true;
-    armed_ = true;
-    queue_count_ = 0U;
-    queue_read_ = 0U;
-    queue_write_ = 0U;
-    admission_frames_ = 0U;
-    utterance_sample_count_ = 0U;
-    last_endpoint_sample_exclusive_ = 0U;
-    wake_sent_ = false;
-    quarantined_ = false;
-    overflow_pending_ = false;
-    failure_emitted_ = false;
-    finish_requested_ = false;
-    finish_handled_ = false;
-    duplicate_finish_pending_ = false;
-    return true;
   }
 
   void process_frame(const CleanedAudioFrame & frame, SpeechEventSink & sink) noexcept
@@ -208,7 +175,7 @@ public:
     bool notify_worker = false;
     {
       std::lock_guard<std::mutex> lock(queue_mutex_);
-      if (stopping_ || !armed_) {
+      if (stopping_) {
         return;
       }
       if (finish_requested_) {
@@ -299,9 +266,6 @@ private:
           frame = queue_[queue_read_];
           queue_read_ = (queue_read_ + 1U) % queue_.size();
           --queue_count_;
-          if (!armed_) {
-            continue;
-          }
         } else if (finish_requested_ && !finish_handled_) {
           finish_handled_ = true;
           handle_finish = armed_;
@@ -337,28 +301,50 @@ private:
     return stopping_ ? nullptr : sink_;
   }
 
-  [[nodiscard]] bool acquire_inference_admission() noexcept
-  {
-    auto expected = LifecycleState::kRunning;
-    return lifecycle_state_.compare_exchange_strong(
-      expected, LifecycleState::kInferenceAdmitted,
-      std::memory_order_acq_rel, std::memory_order_acquire);
-  }
-
   [[nodiscard]] TurnScopeIdentity active_scope() const noexcept
   {
     std::lock_guard<std::mutex> lock(scope_mutex_);
     return active_scope_;
   }
 
-  void disarm() noexcept
+  void retire_turn() noexcept
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    armed_ = false;
+    queue_count_ = 0U;
+    queue_read_ = queue_write_;
+  }
+
+  void reset_turn(const bool preserve_pending_frames) noexcept
   {
     {
       std::lock_guard<std::mutex> lock(queue_mutex_);
-      armed_ = false;
-      queue_count_ = 0U;
-      queue_read_ = queue_write_;
+      if (stopping_) {
+        return;
+      }
+      armed_ = true;
+      if (!preserve_pending_frames) {
+        queue_count_ = 0U;
+        queue_read_ = 0U;
+        queue_write_ = 0U;
+      }
+      admission_frames_ = 0U;
+      utterance_sample_count_ = 0U;
+      last_endpoint_sample_exclusive_ = 0U;
+      wake_sent_ = false;
+      quarantined_ = false;
+      overflow_pending_ = false;
+      failure_emitted_ = false;
+      finish_requested_ = false;
+      finish_handled_ = false;
+      duplicate_finish_pending_ = false;
+      has_last_frame_ = false;
+      if (!preserve_pending_frames || queue_count_ == 0U) {
+        sink_ = nullptr;
+      }
     }
+    // Reset is serialized on the provider worker: no VAD call can overlap
+    // this reset, and the ASR instance remains alive for the next turn.
     vad_->reset();
   }
 
@@ -382,13 +368,14 @@ private:
     if (!claim_overflow_frame(fallback, event_frame)) {
       return;
     }
-    disarm();
+    retire_turn();
     SpeechRecognitionEvent failure{};
     failure.kind = SpeechEventKind::kFailure;
     failure.audio_generation = event_frame.audio_generation;
     failure.audio_seq = event_frame.audio_seq;
     failure.scope = active_scope();
     emit(failure);
+    reset_turn(true);
   }
 
   void emit(const SpeechRecognitionEvent & event) noexcept
@@ -401,13 +388,14 @@ private:
 
   void emit_failure(const CleanedAudioFrame & frame) noexcept
   {
-    disarm();
+    retire_turn();
     SpeechRecognitionEvent failure{};
     failure.kind = SpeechEventKind::kFailure;
     failure.audio_generation = frame.audio_generation;
     failure.audio_seq = frame.audio_seq;
     failure.scope = active_scope();
     emit(failure);
+    reset_turn(true);
   }
 
   void finish_endpoint(const std::size_t endpoint_sample_exclusive) noexcept
@@ -419,14 +407,10 @@ private:
       queue_read_ = queue_write_;
       utterance_sample_count_ = endpoint_sample_exclusive;
     }
-    vad_->reset();
   }
 
   void infer_final(const CleanedAudioFrame & event_frame) noexcept
   {
-    if (!acquire_inference_admission()) {
-      return;
-    }
     const auto scope = active_scope();
     std::string labeled_text{};
     const bool inferred = asr_->infer(
@@ -496,7 +480,11 @@ private:
       wake_sent_ = true;
       emit(SpeechRecognitionEvent::wake_accepted(event_frame));
     }
+    if (stop_requested_.load(std::memory_order_acquire)) {
+      return;
+    }
     infer_final(event_frame);
+    reset_turn(true);
   }
 
   void consume(const CleanedAudioFrame & frame) noexcept
@@ -522,13 +510,14 @@ private:
     }
 
     if (admission_frames_ >= maximum_utterance_frames_) {
-      disarm();
+      retire_turn();
       SpeechRecognitionEvent timeout{};
       timeout.kind = SpeechEventKind::kTimeout;
       timeout.audio_generation = frame.audio_generation;
       timeout.audio_seq = frame.audio_seq;
       timeout.scope = active_scope();
       emit(timeout);
+      reset_turn(true);
       return;
     }
 
@@ -548,6 +537,10 @@ private:
       emit(SpeechRecognitionEvent::wake_accepted(frame));
     }
 
+    if (stop_requested_.load(std::memory_order_acquire)) {
+      return;
+    }
+
     const auto scope = active_scope();
     if (vad_result.decision == SileroVadDecision::kSpeech) {
       if (scope.id != 0U) {
@@ -565,6 +558,7 @@ private:
     last_endpoint_sample_exclusive_ = vad_result.endpoint_sample_exclusive;
     finish_endpoint(vad_result.endpoint_sample_exclusive);
     infer_final(frame);
+    reset_turn(true);
   }
 
   [[nodiscard]] bool quarantined() const noexcept
@@ -597,12 +591,11 @@ private:
   std::size_t queue_write_{0U};
   std::size_t queue_count_{0U};
   mutable std::mutex queue_mutex_;
-  std::mutex lifecycle_mutex_;
-  std::atomic<LifecycleState> lifecycle_state_{LifecycleState::kRunning};
+  std::mutex shutdown_mutex_;
   std::condition_variable queue_condition_;
+  std::atomic<bool> stop_requested_{false};
   bool stopping_{false};
   bool armed_{false};
-  bool has_been_armed_{false};
   SpeechEventSink * sink_{nullptr};
   std::thread worker_;
   std::vector<Sample> utterance_samples_;
@@ -632,11 +625,6 @@ SenseVoiceProvider::SenseVoiceProvider(
 }
 
 SenseVoiceProvider::~SenseVoiceProvider() = default;
-
-bool SenseVoiceProvider::arm_once() noexcept
-{
-  return implementation_->arm_once();
-}
 
 void SenseVoiceProvider::shutdown() noexcept
 {

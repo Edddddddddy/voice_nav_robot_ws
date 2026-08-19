@@ -4,7 +4,7 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 
-"""Installed, bounded four-phase headless runner for Issue #164."""
+"""Installed, bounded non-Audio headless runner for Issue #164."""
 
 from __future__ import annotations
 
@@ -55,17 +55,6 @@ class PhaseSpec:
 
 
 PHASES = (
-    PhaseSpec(
-        'A', 'real_voice_turn', 'voice_nav_audio',
-        '^real_sensevoice_agent_launch_test$', 120.0,
-        ('real_sensevoice_agent_launch_test',),
-        (
-            'exactly_one_voice_turn', 'safe_reply_observed',
-            'mission_count_zero', 'controller_nonzero_count_zero',
-            'final_zero_motion',
-        ),
-        'installed real SenseVoice voice input with Agent safety observation',
-    ),
     PhaseSpec(
         'B', 'move_stop', 'voice_nav_bringup',
         '^(scripted_voice_demo_launch_test|voice_nav_demo_stop_launch_test)$',
@@ -374,13 +363,12 @@ def write_result_no_replace(path: Path, document: Mapping[str, object]) -> None:
 
 
 def preflight_output_paths(output_path: Path) -> None:
-    """Reject any reused task evidence before starting phase A."""
+    """Reject any reused task evidence before starting product phases."""
     paths = (
         output_path,
         *(output_path.parent / f'inventory-{phase.phase_id}.log'
           for phase in PHASES),
         *(output_path.parent / f'phase-{phase.phase_id}.log' for phase in PHASES),
-        output_path.parent / 'voice-node-report.json',
     )
     existing = tuple(path for path in paths if path.exists())
     if existing:
@@ -510,7 +498,7 @@ def run_inventory_preflight(
     output_path: Path,
     command_runner: CommandRunner,
 ) -> dict[str, object]:
-    """Verify every required installed CTest name before starting phase A."""
+    """Verify every required installed CTest name before starting product phases."""
     checks: list[dict[str, object]] = []
     failures: list[dict[str, object]] = []
     environment = _runner_environment()
@@ -707,7 +695,7 @@ def run_pipeline(
     exact_head: str,
     command_runner: CommandRunner = _run_owned_command,
 ) -> int:
-    """Run A-D once, publish structured evidence, and return process status."""
+    """Run the non-Audio B-D phases once and publish structured evidence."""
     exact_head = validate_exact_head(exact_head)
     workspace_root = workspace_root.resolve()
     output_path = output_path.resolve()
@@ -757,11 +745,6 @@ def run_pipeline(
         log_path = output_path.parent / f'phase-{phase.phase_id}.log'
         phase_environment = dict(environment)
         phase_environment['VOICE_NAV_EXACT_HEAD'] = exact_head
-        if phase.phase_id == 'A':
-            phase_environment['VOICE_NAV_REAL_GATE_HEAD_OVERRIDE'] = exact_head
-            phase_environment['VOICE_NAV_REAL_GATE_REPORT_OVERRIDE'] = str(
-                output_path.parent / 'voice-node-report.json'
-            )
         result = command_runner(
             command,
             cwd=workspace_root,
@@ -813,7 +796,7 @@ def run_pipeline(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description='Run the installed Issue #164 A-D headless product phases.'
+        description='Run the installed Issue #164 B-D headless product phases.'
     )
     parser.add_argument(
         '--workspace-root',

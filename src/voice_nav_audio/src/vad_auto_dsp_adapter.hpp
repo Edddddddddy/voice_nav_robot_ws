@@ -13,9 +13,8 @@
 namespace voice_nav_audio
 {
 
-// Package-private production composition seam. vad_auto is only allowed to
-// run with the verified WebRTC APM; the no-AEC microphone-once adapter is a
-// separate compatibility profile.
+// Package-private production composition seam. vad_auto runs with the
+// verified WebRTC APM for the continuous full-duplex input path.
 [[nodiscard]] std::unique_ptr<DspAdapter> make_vad_auto_dsp_adapter();
 
 }  // namespace voice_nav_audio

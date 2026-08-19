@@ -3,6 +3,7 @@
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
 
+#include <chrono>
 #include <stdexcept>
 
 #include "gtest/gtest.h"
@@ -31,11 +32,11 @@ public:
   }
 };
 
-TEST(VoiceNodeExecutorGuardTest, JoinsOnEachPumpFailureExceptionPath)
+TEST(VoiceNodeExecutorGuardTest, JoinsOnReadinessAndPumpExceptionWithoutSleep)
 {
   RclcppContextGuard context;
   const char * const failure_stages[] = {
-    "re-arm factory", "DSP", "publisher activation",
+    "agent readiness timeout", "continuous VAD pump failure",
   };
   for (const auto * const stage : failure_stages) {
     SCOPED_TRACE(stage);
@@ -48,6 +49,7 @@ TEST(VoiceNodeExecutorGuardTest, JoinsOnEachPumpFailureExceptionPath)
       std::runtime_error);
     // Reaching the next iteration means the guard reclaimed its joinable
     // thread during stack unwinding; no sleep or retry is involved.
+    EXPECT_NO_THROW(executor.spin_some(std::chrono::milliseconds(0)));
   }
 }
 

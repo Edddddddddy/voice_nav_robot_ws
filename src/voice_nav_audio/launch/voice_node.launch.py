@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Start the installed real-ASR voice root with the existing Agent."""
+"""Start the installed continuous full-duplex voice root with the Agent."""
 
 import os
 
@@ -34,16 +34,12 @@ def _environment(name: str) -> str:
 
 
 def generate_launch_description() -> LaunchDescription:
-    """Run the selected bounded or continuous voice_node profile."""
-    input_wav = LaunchConfiguration('input_wav')
+    """Run the continuous full-duplex voice_node profile."""
     input_profile = LaunchConfiguration('input_profile')
-    output_wav = LaunchConfiguration('output_wav')
     chaowen_tts_root = LaunchConfiguration('chaowen_tts_root')
-    result_path = LaunchConfiguration('result_path')
     silero_vad_model = LaunchConfiguration('silero_vad_model')
     sensevoice_model = LaunchConfiguration('sensevoice_model')
     sensevoice_tokens = LaunchConfiguration('sensevoice_tokens')
-    exact_head = LaunchConfiguration('exact_head')
     include_agent = LaunchConfiguration('include_agent')
 
     voice_node = Node(
@@ -53,14 +49,10 @@ def generate_launch_description() -> LaunchDescription:
         output='screen',
         parameters=[{
             'input_profile': input_profile,
-            'input_wav': input_wav,
-            'output_wav': output_wav,
             'chaowen_tts_root': chaowen_tts_root,
             'silero_vad_model': silero_vad_model,
             'sensevoice_model': sensevoice_model,
             'sensevoice_tokens': sensevoice_tokens,
-            'result_path': result_path,
-            'exact_head': exact_head,
         }],
     )
     agent_node = Node(
@@ -81,22 +73,10 @@ def generate_launch_description() -> LaunchDescription:
         ),
         DeclareLaunchArgument(
             'input_profile',
-            default_value='sensevoice_wav',
-            choices=[
-                'sensevoice_wav',
-                'microphone_once',
-                'real_model_gate',
-                'vad_auto',
-            ],
-            description=(
-                'Use product WAV, one-shot microphone, continuous VAD, or real-model gate.'
-            ),
+            default_value='vad_auto',
+            choices=['vad_auto'],
+            description='Use the continuous full-duplex VAD/ASR session.',
         ),
-        DeclareLaunchArgument(
-            'input_wav',
-            default_value=_environment('VOICE_NAV_SENSEVOICE_WAV'),
-        ),
-        DeclareLaunchArgument('output_wav', default_value=''),
         DeclareLaunchArgument(
             'chaowen_tts_root',
             default_value=_environment('VOICE_NAV_CHAOWEN_TTS_ROOT'),
@@ -112,11 +92,6 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument(
             'sensevoice_tokens',
             default_value=_environment('VOICE_NAV_SENSEVOICE_TOKENS'),
-        ),
-        DeclareLaunchArgument('result_path', default_value=''),
-        DeclareLaunchArgument(
-            'exact_head',
-            default_value=_environment('VOICE_NAV_REAL_GATE_HEAD'),
         ),
         agent_node,
         voice_node,

@@ -46,8 +46,6 @@ TEST(SenseVoiceSherpaAdapterTest, UsesOnlyThreeExplicitResolvedAssetPaths)
 
   auto provider = make_sherpa_sensevoice_provider(assets);
   ASSERT_NE(provider, nullptr);
-  EXPECT_TRUE(provider->arm_once());
-  EXPECT_FALSE(provider->arm_once());
 }
 
 TEST(SenseVoiceSherpaAdapterTest, RejectsAnIncompleteResolvedAssetSetBeforeLoading)

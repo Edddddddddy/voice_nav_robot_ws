@@ -40,22 +40,22 @@ SLAM、完整物理 Nav2 运动链、Agent 与语音仍是目标能力。Mission
 raw-stamp-age 与 TF 验收由 Issue #72 独立追踪。尚无 `map → odom` owner。controller timeout 已配置，
 却不能当作 Gate 死亡或物理停止完成；进程死亡验收是独立目标切片。
 
-## Issue #164 pre-release framework MVP
+## Continuous voice input composition
 
-Issue #164 在不改变公共 ROS IDL、MotionGate 阈值或 controller contract 的前提下，交付一个可安装的
-framework MVP：`voice_node` 只拥有真实语音输入 authority；`voice_nav_issue164_runner` 是
-`voice_nav_bringup` 内的验证编排器，串行运行真实 Voice、MOVE+STOP、Mapping MVP 与单 `study` Place
-Navigation 的既有 headless product tests。它不发布速度、不拥有 `map → odom`，也不替代这些测试中的
-Agent、Mission、Nav2 或 TF/zero observers。结果写入 task-local schema-versioned JSON，并要求 exact HEAD。
-
-该切片是 pre-release framework MVP，不宣称 v1.0、物理麦克风/KWS/TTS、真实机器人，或 Mapping→Navigation
-原子地图 artifact handoff 已完成。
+`voice_node` 只拥有连续语音输入 authority：`vad_auto` 直接组合一个长期存活的 SenseVoice
+recognizer 与 full-duplex audio device。Capture、AEC render reference、STOP/wake/TTS 和 barge-in
+在多个 `VoiceTurn` 之间保持；terminal 后只重置 turn-local VAD/ASR 状态，不销毁设备或模型。
+该组合不改变公共 ROS IDL、MotionGate 阈值或 controller contract，也不提供 WAV 回放、一次性麦克风
+或真实模型 gate profile。
 
 Issue #166 的 `voice_nav_app` 是该框架的统一 installed composition root：它只接受封闭的
 `mode=motion|mapping|navigation` 与 `display=headless|gui`，由 `voice_nav_session.launch.py` 互斥选择一个
 底层模式组合，并在其外层拥有一个 Agent 与一个 command gateway。app 不发布 VoiceTurn、Mission、
 StopMission 或速度；Mapping/Navigation 的 `map → odom` ownership 仍分别属于 `slam_toolbox`/AMCL，模式
 不能在线切换。
+
+Issue #164 的 `voice_nav_issue164_runner` 仍编排非 Audio 的 MOVE+STOP、Mapping MVP 与单一 `study`
+Navigation 阶段；已删除的一次性/WAV/真实模型入口不再作为生产或 headless phase。
 
 ## 当前独立 MotionGate 切片
 
@@ -137,7 +137,7 @@ mission_runtime_node
 motion_gate_node
 ```
 
-上游 ROS/Gazebo 进程仍独立受管。`voice_nav_issue164_runner` 是验证编排器，不是产品运行时进程。
+上游 ROS/Gazebo 进程仍独立受管；语音输入验证由 `voice_nav_audio` 的行为测试覆盖。
 
 ## 深层模块与公共接口
 
@@ -207,7 +207,7 @@ odom ingress 在 stationarity success/failure 后 drain。
 | `voice_nav_agent` | 规则、本地 LLM Adapter、对话策略 | `agent_node` |
 | `voice_nav_mission` | Runtime、Gate 与内部依赖 Adapter | `mission_runtime_node`、`motion_gate_node` |
 | `voice_nav_sim` | 机器人模型、Gazebo、ros2_control、`/clock`/`/scan` bridge | 无 |
-| `voice_nav_bringup` | launch、parameter、地图、Named Place、统一 app 与 headless 验证编排 | `voice_nav_app`、`voice_nav_issue164_runner`（后者仅验证） |
+| `voice_nav_bringup` | launch、parameter、地图、Named Place、统一 app 与非 Audio headless 验证编排 | `voice_nav_app`、`voice_nav_issue164_runner`（后者仅验证） |
 
 不得创建 Guard、scheduler、Nav2 bridge、map saver 或顶层行为树进程；它们是 Mission Runtime 内部 seam。
 

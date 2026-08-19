@@ -91,9 +91,9 @@ struct SenseVoiceProviderConfig
   std::size_t maximum_utterance_frames{kDefaultMaximumUtteranceFrames};
 };
 
-// Package-private one-shot VoicePipeline recognizer. arm_once() is the only
-// admission seam; frames are copied into a fixed-capacity worker queue, Silero
-// owns endpointing, and SenseVoice returns only a closed final event.
+// Package-private continuous VoicePipeline recognizer. The VAD and ASR
+// adapters are created once for the owning session; each terminal boundary is
+// reset on the provider worker before the next frame is admitted.
 class SenseVoiceProvider final : public SpeechRecognizerAdapter
 {
 public:
@@ -105,8 +105,6 @@ public:
 
   SenseVoiceProvider(const SenseVoiceProvider &) = delete;
   SenseVoiceProvider & operator=(const SenseVoiceProvider &) = delete;
-
-  [[nodiscard]] bool arm_once() noexcept;
 
   void shutdown() noexcept override;
   void finish_input() noexcept override;

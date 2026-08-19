@@ -54,7 +54,6 @@ def _write_fake_phase_log(log_path):
 def _write_complete_inventory_log(command, log_path):
     package = Path(command[command.index('--test-dir') + 1]).name
     names = {
-        'voice_nav_audio': ('real_sensevoice_agent_launch_test',),
         'voice_nav_bringup': (
             'scripted_voice_demo_launch_test',
             'voice_nav_demo_stop_launch_test',
@@ -252,12 +251,12 @@ class Issue164HeadlessRunnerTest(unittest.TestCase):
                     )
 
                 self.assertEqual(result, 1)
-                self.assertEqual(document['phases'][3]['status'], 'failed')
+                self.assertEqual(document['phases'][2]['status'], 'failed')
                 self.assertEqual(
                     document['final_stationary'], expected_stationary
                 )
 
-    def test_pipeline_json_has_exact_four_phase_contract(self):
+    def test_pipeline_json_has_exact_three_non_audio_phase_contract(self):
         calls = []
 
         def fake_runner(command, *, cwd, env, timeout_s, log_path):
@@ -294,7 +293,7 @@ class Issue164HeadlessRunnerTest(unittest.TestCase):
         self.assertEqual(document['schema'], 'voice_nav.issue164.headless')
         self.assertEqual(document['exact_head'], 'a' * 40)
         self.assertEqual(document['status'], 'passed')
-        self.assertEqual(document['phase_count'], 4)
+        self.assertEqual(document['phase_count'], 3)
         self.assertEqual(
             document['inventory_preflight']['status'], 'passed'
         )
@@ -303,53 +302,44 @@ class Issue164HeadlessRunnerTest(unittest.TestCase):
                 check['status']
                 for check in document['inventory_preflight']['checks']
             ],
-            ['passed', 'passed', 'passed', 'passed'],
+            ['passed', 'passed', 'passed'],
         )
         self.assertEqual(document['owned_processes_remaining'], 0)
         self.assertEqual(
             [phase['id'] for phase in document['phases']],
-            ['A', 'B', 'C', 'D'],
+            ['B', 'C', 'D'],
         )
         self.assertEqual(
             [phase['status'] for phase in document['phases']],
-            ['passed', 'passed', 'passed', 'passed'],
+            ['passed', 'passed', 'passed'],
         )
-        self.assertEqual(len(calls), 8)
+        self.assertEqual(len(calls), 6)
         inventory_calls = [call for call in calls if '-N' in call[0]]
         phase_calls = [call for call in calls if '-N' not in call[0]]
-        self.assertEqual(len(inventory_calls), 4)
-        self.assertEqual(len(phase_calls), 4)
+        self.assertEqual(len(inventory_calls), 3)
+        self.assertEqual(len(phase_calls), 3)
         self.assertEqual(
             [
                 'inventory' if '-N' in call[0] else 'phase'
                 for call in calls
             ],
             [
-                'inventory', 'inventory', 'inventory', 'inventory',
-                'phase', 'phase', 'phase', 'phase',
+                'inventory', 'inventory', 'inventory',
+                'phase', 'phase', 'phase',
             ],
-        )
-        self.assertEqual(
-            phase_calls[0][2]['VOICE_NAV_REAL_GATE_HEAD_OVERRIDE'], 'a' * 40
-        )
-        self.assertTrue(
-            phase_calls[0][2]['VOICE_NAV_REAL_GATE_REPORT_OVERRIDE'].endswith(
-                'voice-node-report.json'
-            )
         )
         self.assertEqual(
             [call[0][call[0].index('-R') + 1] for call in phase_calls],
             [
-                '^real_sensevoice_agent_launch_test$',
                 '^(scripted_voice_demo_launch_test|voice_nav_demo_stop_launch_test)$',
                 '^mapping_mvp_launch_test$',
                 '^navigation_mvp_launch_test$',
             ],
         )
-        self.assertIn('MOVE', document['phases'][1]['proves'])
-        self.assertIn('STOP', document['phases'][1]['proves'])
-        self.assertIn('final_zero', document['phases'][1]['proves'])
-        self.assertIn('stationary>=200ms', document['phases'][1]['proves'])
+        self.assertIn('MOVE', document['phases'][0]['proves'])
+        self.assertIn('STOP', document['phases'][0]['proves'])
+        self.assertIn('final_zero', document['phases'][0]['proves'])
+        self.assertIn('stationary>=200ms', document['phases'][0]['proves'])
         self.assertTrue(document['final_zero'])
         self.assertTrue(document['final_stationary'])
         self.assertFalse(document['tf_owner_overlap_observed'])
@@ -358,13 +348,12 @@ class Issue164HeadlessRunnerTest(unittest.TestCase):
         )
         self.assertNotIn('--verbose', phase_calls[0][0])
         self.assertNotIn('--verbose', phase_calls[1][0])
-        self.assertNotIn('--verbose', phase_calls[2][0])
-        self.assertIn('--verbose', phase_calls[3][0])
+        self.assertIn('--verbose', phase_calls[2][0])
         self.assertTrue(all('cleanup_stage' in phase for phase in document['phases']))
         self.assertTrue(all('log' in phase for phase in document['phases']))
         self.assertTrue(all(call[3] > 0 for call in calls))
 
-    def test_missing_real_voice_inventory_blocks_all_product_phases(self):
+    def test_missing_product_inventory_blocks_all_product_phases(self):
         calls = []
 
         def fake_runner(command, *, cwd, env, timeout_s, log_path):
@@ -379,9 +368,7 @@ class Issue164HeadlessRunnerTest(unittest.TestCase):
                     command[command.index('--test-dir') + 1]
                 ).name
                 names = {
-                    'voice_nav_audio': ('unrelated_audio_test',),
                     'voice_nav_bringup': (
-                        'scripted_voice_demo_launch_test',
                         'voice_nav_demo_stop_launch_test',
                         'mapping_mvp_launch_test',
                         'navigation_mvp_launch_test',
@@ -408,7 +395,7 @@ class Issue164HeadlessRunnerTest(unittest.TestCase):
             result = runner.run_pipeline(
                 workspace_root=Path(directory),
                 output_path=output,
-                task_id='missing-real-voice-inventory',
+                task_id='missing-product-inventory',
                 exact_head='a' * 40,
                 command_runner=fake_runner,
             )
@@ -424,16 +411,13 @@ class Issue164HeadlessRunnerTest(unittest.TestCase):
         )
         failures = document['inventory_preflight']['failures']
         self.assertEqual(len(failures), 1)
-        self.assertEqual(failures[0]['phase'], 'A')
+        self.assertEqual(failures[0]['phase'], 'B')
         self.assertEqual(
-            failures[0]['test'], 'real_sensevoice_agent_launch_test'
+            failures[0]['test'], 'scripted_voice_demo_launch_test'
         )
         self.assertEqual(failures[0]['failure_kind'], 'build_contract')
         self.assertEqual(failures[0]['reason'], 'missing_required_test')
-        self.assertEqual(
-            [kind for kind, command in calls],
-            ['inventory', 'inventory', 'inventory', 'inventory'],
-        )
+        self.assertEqual([kind for kind, command in calls], ['inventory'] * 3)
 
     def test_duplicate_required_inventory_test_blocks_all_product_phases(self):
         calls = []
@@ -449,11 +433,8 @@ class Issue164HeadlessRunnerTest(unittest.TestCase):
                     command[command.index('--test-dir') + 1]
                 ).name
                 names = {
-                    'voice_nav_audio': (
-                        'real_sensevoice_agent_launch_test',
-                        'real_sensevoice_agent_launch_test',
-                    ),
                     'voice_nav_bringup': (
+                        'scripted_voice_demo_launch_test',
                         'scripted_voice_demo_launch_test',
                         'voice_nav_demo_stop_launch_test',
                         'mapping_mvp_launch_test',
@@ -492,16 +473,13 @@ class Issue164HeadlessRunnerTest(unittest.TestCase):
         self.assertEqual(document['phases'], [])
         failures = document['inventory_preflight']['failures']
         self.assertEqual(len(failures), 1)
-        self.assertEqual(failures[0]['phase'], 'A')
+        self.assertEqual(failures[0]['phase'], 'B')
         self.assertEqual(
-            failures[0]['test'], 'real_sensevoice_agent_launch_test'
+            failures[0]['test'], 'scripted_voice_demo_launch_test'
         )
         self.assertEqual(failures[0]['failure_kind'], 'build_contract')
         self.assertEqual(failures[0]['reason'], 'duplicate_required_test')
-        self.assertEqual(
-            [kind for kind, command in calls],
-            ['inventory', 'inventory', 'inventory', 'inventory'],
-        )
+        self.assertEqual([kind for kind, command in calls], ['inventory'] * 3)
 
     def test_exact_head_is_injected_into_every_phase_environment(self):
         exact_head = 'e' * 40
@@ -541,10 +519,10 @@ class Issue164HeadlessRunnerTest(unittest.TestCase):
                 0,
             )
 
-        self.assertEqual(len(environments), 4)
+        self.assertEqual(len(environments), 3)
         self.assertEqual(
             [environment['VOICE_NAV_EXACT_HEAD'] for environment in environments],
-            [exact_head] * 4,
+            [exact_head] * 3,
         )
 
     def test_failure_is_recorded_and_later_phases_are_skipped(self):
@@ -588,15 +566,11 @@ class Issue164HeadlessRunnerTest(unittest.TestCase):
         self.assertEqual(document['status'], 'failed')
         self.assertEqual(
             [phase['status'] for phase in document['phases']],
-            ['passed', 'passed', 'failed', 'skipped'],
+            ['passed', 'passed', 'failed'],
         )
-        self.assertEqual(len(calls), 7)
+        self.assertEqual(len(calls), 6)
         self.assertEqual(len(phase_calls), 3)
         self.assertEqual(document['phases'][2]['returncode'], 1)
-        self.assertEqual(
-            document['phases'][3]['reason'],
-            'previous_phase_failed',
-        )
 
     def test_result_path_is_no_replace(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -610,18 +584,15 @@ class Issue164HeadlessRunnerTest(unittest.TestCase):
                 output.read_text(encoding='utf-8'), '{"old":true}\n'
             )
 
-    def test_preflight_rejects_any_task_evidence_before_phase_a(self):
+    def test_preflight_rejects_any_task_evidence_before_product_phases(self):
         evidence_names = (
             'result.json',
-            'inventory-A.log',
             'inventory-B.log',
             'inventory-C.log',
             'inventory-D.log',
-            'phase-A.log',
             'phase-B.log',
             'phase-C.log',
             'phase-D.log',
-            'voice-node-report.json',
         )
         for evidence_name in evidence_names:
             with self.subTest(evidence_name=evidence_name):
@@ -666,7 +637,7 @@ class Issue164HeadlessRunnerTest(unittest.TestCase):
             'start_new_session=False);'
         )
         with tempfile.TemporaryDirectory() as directory:
-            log_path = Path(directory) / 'phase-A.log'
+            log_path = Path(directory) / 'phase-B.log'
             result = runner._run_owned_command(
                 (sys.executable, '-c', parent_code, child_code),
                 cwd=Path(directory),

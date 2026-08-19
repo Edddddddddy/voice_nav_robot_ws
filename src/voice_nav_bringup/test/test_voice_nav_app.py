@@ -18,13 +18,11 @@ from __future__ import annotations
 
 import ast
 import builtins
-import hashlib
 import importlib.util
 from io import StringIO
 from pathlib import Path
 import signal
 from types import SimpleNamespace
-import wave
 
 
 def _load_app_module():
@@ -58,27 +56,6 @@ def _load_sensevoice_input_module():
     module = importlib.util.module_from_spec(specification)
     specification.loader.exec_module(module)
     return module
-
-
-def _load_chaowen_asset_verifier_module():
-    source = (
-        Path(__file__).resolve().parents[1] / '_chaowen_asset_verifier.py'
-    )
-    specification = importlib.util.spec_from_file_location(
-        'voice_nav_chaowen_asset_verifier', source,
-    )
-    assert specification is not None and specification.loader is not None
-    module = importlib.util.module_from_spec(specification)
-    specification.loader.exec_module(module)
-    return module
-
-
-def _write_pcm_wav(path: Path, *, frames: int = 1600) -> None:
-    with wave.open(str(path), 'wb') as stream:
-        stream.setnchannels(1)
-        stream.setsampwidth(2)
-        stream.setframerate(16000)
-        stream.writeframes(b'\x00\x00' * frames)
 
 
 def _configured_motion_readiness(readiness, now):
@@ -277,18 +254,6 @@ def test_motion_mode_readiness_respects_an_expired_shared_deadline():
     }
 
 
-def test_product_frontend_accepts_a_bounded_noncanonical_pcm_wav(tmp_path):
-    """Accept a supported bounded WAV without requiring the locked fixture."""
-    sensevoice_input = _load_sensevoice_input_module()
-    wav = tmp_path / 'noncanonical.wav'
-    _write_pcm_wav(wav, frames=1600)
-
-    assert sensevoice_input.validate_input_wav(str(wav)) == {
-        'status': 'ready',
-        'reason': '',
-    }
-
-
 def test_vad_auto_frontend_readiness_uses_existing_publisher_identity():
     """Recognize the real SpeechInputNode and no look-alike graph owner."""
     sensevoice_input = _load_sensevoice_input_module()
@@ -303,7 +268,9 @@ def test_vad_auto_frontend_readiness_uses_existing_publisher_identity():
     ])
 
 
-def test_frontend_readiness_accepts_a_publisher_seen_on_the_first_poll(monkeypatch):
+def test_frontend_readiness_accepts_a_publisher_seen_on_the_first_poll(
+    monkeypatch,
+):
     """Do not require a second poll when the frontend is already ready."""
     sensevoice_input = _load_sensevoice_input_module()
     events = []
@@ -353,30 +320,6 @@ def test_frontend_readiness_accepts_a_publisher_seen_on_the_first_poll(monkeypat
 
     assert result == {'status': 'ready', 'reason': ''}
     assert events == ['init', 'spin', 'destroy', 'shutdown']
-
-
-def test_product_frontend_rejects_empty_malformed_and_oversized_wav(tmp_path):
-    """Reject invalid WAVs before any session or provider process starts."""
-    sensevoice_input = _load_sensevoice_input_module()
-
-    empty = tmp_path / 'empty.wav'
-    empty.write_bytes(b'')
-    assert sensevoice_input.validate_input_wav(str(empty))['reason'] == (
-        'input_wav_empty'
-    )
-
-    malformed = tmp_path / 'malformed.wav'
-    _write_pcm_wav(malformed, frames=1600)
-    malformed.write_bytes(malformed.read_bytes()[:-2])
-    assert sensevoice_input.validate_input_wav(str(malformed))['reason'] == (
-        'input_wav_unsupported_format'
-    )
-
-    oversized = tmp_path / 'oversized.wav'
-    _write_pcm_wav(oversized, frames=240001)
-    assert sensevoice_input.validate_input_wav(str(oversized))['reason'] == (
-        'input_wav_too_large'
-    )
 
 
 def test_motion_readiness_requires_typed_safe_stationary_barrier():
@@ -772,165 +715,6 @@ def test_invalid_mode_or_display_is_rejected_before_process_spawn():
         assert starts == []
 
 
-def test_input_matrix_rejects_invalid_values_before_process_spawn(tmp_path):
-    """Reject the closed input/path matrix before creating an owned process."""
-    app = _load_app_module()
-    wav = tmp_path / 'input.wav'
-    _write_pcm_wav(wav)
-    directory = tmp_path / 'wav-directory'
-    directory.mkdir()
-    invalid_argv = (
-        ['--input', 'microphone'],
-        ['--input', 'none'],
-        ['--input', 'console', '--input-wav', str(wav.resolve())],
-        ['--input', 'sensevoice-wav'],
-        ['--input', 'sensevoice-wav', '--input-wav', 'relative.wav'],
-        ['--input', 'sensevoice-wav', '--input-wav', str(directory.resolve())],
-        [
-            '--input', 'sensevoice-wav',
-            '--input-wav', str(tmp_path / 'missing.wav'),
-        ],
-    )
-
-    for argv in invalid_argv:
-        starts = []
-        result = app.main(
-            argv,
-            process_factory=(
-                lambda *args, **kwargs: starts.append((args, kwargs))
-            ),
-            stdout=StringIO(),
-            stderr=StringIO(),
-        )
-
-        assert result != 0
-        assert starts == []
-
-
-def test_input_matrix_keeps_console_default_and_selects_one_wav_frontend(
-    tmp_path,
-):
-    """Select console by default or one bounded WAV frontend."""
-    app = _load_app_module()
-    wav = tmp_path / 'input.wav'
-    _write_pcm_wav(wav)
-    starts = []
-
-    def process_factory(command, **kwargs):
-        starts.append((tuple(command), kwargs))
-        return _FakeProcess()
-
-    def readiness(*_args):
-        return {'status': 'ready', 'reason': ''}
-
-    assert app.main(
-        [],
-        process_factory=process_factory,
-        readiness=readiness,
-        mode_readiness=lambda *_args: {'status': 'ready', 'reason': ''},
-        console_main=lambda **_kwargs: 0,
-        clock=lambda: 0.0,
-        stdout=StringIO(),
-        stderr=StringIO(),
-    ) == 0
-    assert starts[-1][0] == (
-        'ros2', 'launch', 'voice_nav_bringup',
-        'voice_nav_session.launch.py',
-        'mode:=motion', 'headless:=true',
-        'shutdown_on_gazebo_exit:=true',
-    )
-
-    assert app.main(
-        [
-            '--mode', 'motion', '--display', 'headless',
-            '--input', 'sensevoice-wav', '--input-wav', str(wav.resolve()),
-        ],
-        process_factory=process_factory,
-        readiness=readiness,
-        mode_readiness=lambda *_args: {'status': 'ready', 'reason': ''},
-        frontend_factory=(
-            lambda command, **kwargs: process_factory(command, **kwargs)
-        ),
-        clock=lambda: 0.0,
-        stdout=StringIO(),
-        stderr=StringIO(),
-    ) == 0
-    assert starts[-2][0] == (
-        'ros2', 'launch', 'voice_nav_bringup',
-        'voice_nav_session.launch.py',
-        'mode:=motion', 'headless:=true',
-        'shutdown_on_gazebo_exit:=true',
-        'input:=none',
-    )
-    assert starts[-1][0] == (
-        'ros2', 'launch', 'voice_nav_audio', 'voice_node.launch.py',
-        'input_profile:=sensevoice_wav',
-        f'input_wav:={wav.resolve()}', 'include_agent:=false',
-    )
-    assert not any(
-        'model' in argument or 'vad' in argument
-        for command, _kwargs in starts[-2:]
-        for argument in command
-    )
-
-
-def test_microphone_once_uses_one_closed_voice_composition_without_forwarding(
-):
-    """Stage one bounded microphone frontend without child tuning arguments."""
-    app = _load_app_module()
-    session_process = _FakeProcess()
-    frontend_process = _FakeProcess()
-    starts = []
-
-    def process_factory(command, **kwargs):
-        starts.append((tuple(command), kwargs))
-        return session_process
-
-    def frontend_factory(command, **kwargs):
-        starts.append((tuple(command), kwargs))
-        return frontend_process
-
-    result = app.main(
-        [
-            '--mode', 'motion', '--display', 'headless',
-            '--input', 'microphone-once',
-        ],
-        process_factory=process_factory,
-        frontend_factory=frontend_factory,
-        readiness=lambda *_args: {'status': 'ready', 'reason': ''},
-        mode_readiness=lambda *_args: {'status': 'ready', 'reason': ''},
-        clock=lambda: 0.0,
-        stdout=StringIO(),
-        stderr=StringIO(),
-    )
-
-    assert result == 0
-    assert starts[0][0] == (
-        'ros2', 'launch', 'voice_nav_bringup',
-        'voice_nav_session.launch.py',
-        'mode:=motion', 'headless:=true',
-        'shutdown_on_gazebo_exit:=true', 'input:=none',
-    )
-    assert starts[1][0] == (
-        'ros2', 'launch', 'voice_nav_audio', 'voice_node.launch.py',
-        'input_profile:=microphone_once',
-        'include_agent:=false',
-    )
-    assert starts[1][0].count('include_agent:=false') == 1
-    assert not any(
-        any(
-            token.startswith(prefix)
-            for prefix in (
-                'input_wav:=', 'output_wav:=', 'silero_vad_model:=',
-                'sensevoice_model:=', 'sensevoice_tokens:=',
-                'threshold:=', 'device:=', 'ros__parameters:=',
-            )
-        )
-        for command, _kwargs in starts
-        for token in command
-    )
-
-
 def test_vad_auto_uses_dedicated_frontend_and_never_console():
     """Keep continuous VAD closed and prevent stdin text passthrough."""
     app = _load_app_module()
@@ -1191,257 +975,6 @@ def test_vad_auto_ctrl_c_returns_130_from_child_wait():
     assert result == 130
     assert frontend_process.wait_timeouts[0] == 0.05
     assert frontend_process.group_signals == [signal.SIGINT]
-
-
-def test_sensevoice_output_wav_forwards_only_output_and_locked_tts_root(
-    monkeypatch, tmp_path,
-):
-    """Pass the output contract and locked TTS root without audio details."""
-    app = _load_app_module()
-    wav = tmp_path / 'input.wav'
-    output = tmp_path / 'reply.wav'
-    tts_root = tmp_path / 'chaowen'
-    tts_root.mkdir()
-    _write_pcm_wav(wav)
-    monkeypatch.setenv('VOICE_NAV_CHAOWEN_TTS_ROOT', str(tts_root.resolve()))
-    monkeypatch.setattr(
-        app,
-        '_chaowen_asset_verifier_module',
-        lambda: {
-            'verify_chaowen_root': lambda _root: {
-                'status': 'ready', 'reason': '',
-            },
-        },
-    )
-    starts = []
-
-    def process_factory(command, **kwargs):
-        starts.append((tuple(command), kwargs))
-        return _FakeProcess()
-
-    assert app.main(
-        [
-            '--input', 'sensevoice-wav', '--input-wav', str(wav.resolve()),
-            '--output-wav', str(output.resolve()),
-        ],
-        process_factory=process_factory,
-        readiness=lambda *_args: {'status': 'ready', 'reason': ''},
-        mode_readiness=lambda *_args: {'status': 'ready', 'reason': ''},
-        frontend_factory=lambda command, **kwargs: process_factory(command, **kwargs),
-        clock=lambda: 0.0,
-        stdout=StringIO(),
-        stderr=StringIO(),
-    ) == 0
-
-    assert starts[-1][0] == (
-        'ros2', 'launch', 'voice_nav_audio', 'voice_node.launch.py',
-        'input_profile:=sensevoice_wav', f'input_wav:={wav.resolve()}',
-        f'output_wav:={output.resolve()}',
-        f'chaowen_tts_root:={tts_root.resolve()}', 'include_agent:=false',
-    )
-
-
-def test_tampered_chaowen_asset_is_rejected_before_process_spawn(
-    monkeypatch, tmp_path,
-):
-    """Reject a same-sized changed runtime file before creating a child."""
-    verifier = _load_chaowen_asset_verifier_module()
-    tts_root = tmp_path / 'chaowen'
-    tts_root.mkdir()
-    asset_names = (
-        'model.onnx', 'lexicon.txt', 'tokens.txt', 'phone.fst', 'date.fst',
-        'number.fst',
-    )
-    for name in asset_names:
-        (tts_root / name).write_bytes(b'safe')
-    monkeypatch.setattr(
-        verifier,
-        '_EXPECTED_FILES',
-        tuple(
-            (name, 4, hashlib.sha256(b'safe').hexdigest())
-            for name in asset_names
-        ),
-    )
-    asset = tts_root / 'model.onnx'
-    asset.write_bytes(b'tamp')
-
-    app = _load_app_module()
-    monkeypatch.setenv('VOICE_NAV_CHAOWEN_TTS_ROOT', str(tts_root.resolve()))
-    wav = tmp_path / 'input.wav'
-    _write_pcm_wav(wav)
-    monkeypatch.setattr(
-        app,
-        '_chaowen_asset_verifier_module',
-        lambda: verifier.__dict__,
-    )
-    starts = []
-    stdout = StringIO()
-
-    result = app.main(
-        [
-            '--input', 'sensevoice-wav', '--input-wav', str(wav.resolve()),
-            '--output-wav', str((tmp_path / 'reply.wav').resolve()),
-        ],
-        process_factory=lambda *args, **kwargs: starts.append((args, kwargs)),
-        stdout=stdout,
-        stderr=StringIO(),
-    )
-
-    assert result == 2
-    assert starts == []
-    assert 'chaowen_tts_asset_sha256_mismatch:model.onnx' in stdout.getvalue()
-
-
-def test_output_wav_path_is_rejected_before_process_spawn(tmp_path):
-    """Reject output paths that could create partial or ambiguous artifacts."""
-    app = _load_app_module()
-    wav = tmp_path / 'input.wav'
-    _write_pcm_wav(wav)
-    existing = tmp_path / 'existing.wav'
-    existing.write_bytes(b'keep')
-    starts = []
-
-    for output in (
-        'relative.wav',
-        str(existing.resolve()),
-        str((tmp_path / 'missing-parent' / 'reply.wav').resolve()),
-    ):
-        result = app.main(
-            [
-                '--input', 'sensevoice-wav', '--input-wav', str(wav.resolve()),
-                '--output-wav', output,
-            ],
-            process_factory=lambda *args, **kwargs: starts.append((args, kwargs)),
-            stdout=StringIO(),
-            stderr=StringIO(),
-        )
-        assert result == 2
-
-    assert starts == []
-    assert existing.read_bytes() == b'keep'
-
-
-def test_sensevoice_provider_is_not_started_when_mode_readiness_is_blocked(
-    tmp_path,
-):
-    """Stage the provider behind mode readiness and clean the session."""
-    app = _load_app_module()
-    wav = tmp_path / 'input.wav'
-    _write_pcm_wav(wav)
-    session_process = _FakeProcess()
-    frontend_starts = []
-
-    def frontend_factory(*args, **kwargs):
-        frontend_starts.append((args, kwargs))
-        return _FakeProcess()
-
-    result = app.main(
-        [
-            '--input', 'sensevoice-wav', '--input-wav', str(wav.resolve()),
-        ],
-        process_factory=lambda *_args, **_kwargs: session_process,
-        frontend_factory=frontend_factory,
-        readiness=lambda *_args: {'status': 'ready', 'reason': ''},
-        mode_readiness=lambda *_args: {
-            'status': 'unavailable',
-            'reason': 'mode_readiness_timeout',
-            'mode': 'motion',
-            'stage': 'deadline',
-        },
-        clock=lambda: 0.0,
-        stdout=StringIO(),
-        stderr=StringIO(),
-    )
-
-    assert result == 1
-    assert frontend_starts == []
-    assert session_process.group_signals == [signal.SIGINT]
-
-
-def test_sensevoice_provider_is_not_started_until_agent_input_sink_is_ready(
-    tmp_path,
-):
-    """Block the one-shot provider until the long-lived Agent sink is ready."""
-    app = _load_app_module()
-    wav = tmp_path / 'input.wav'
-    _write_pcm_wav(wav)
-    session_process = _FakeProcess()
-    frontend_starts = []
-    events = []
-
-    def mode_readiness(*_args):
-        events.append('mode-ready')
-        return {'status': 'ready', 'reason': ''}
-
-    def input_sink_readiness(timeout_s, _clock):
-        assert timeout_s == 60.0
-        events.append('input-sink-check')
-        return {
-            'status': 'unavailable',
-            'reason': 'sensevoice_wav_input_sink_timeout',
-        }
-
-    result = app.main(
-        [
-            '--input', 'sensevoice-wav', '--input-wav', str(wav.resolve()),
-        ],
-        process_factory=lambda *_args, **_kwargs: session_process,
-        frontend_factory=lambda *args, **kwargs: frontend_starts.append(
-            (args, kwargs)
-        ),
-        readiness=input_sink_readiness,
-        mode_readiness=mode_readiness,
-        clock=lambda: 0.0,
-        stdout=StringIO(),
-        stderr=StringIO(),
-    )
-
-    assert result == 1
-    assert events == ['mode-ready', 'input-sink-check']
-    assert frontend_starts == []
-    assert session_process.group_signals == [signal.SIGINT]
-
-
-def test_sensevoice_provider_starts_once_only_after_input_sink_readiness(
-    tmp_path,
-):
-    """Wait for the Agent sink before starting one provider."""
-    app = _load_app_module()
-    wav = tmp_path / 'input.wav'
-    _write_pcm_wav(wav)
-    session_process = _FakeProcess()
-    frontend_process = _FakeProcess()
-    events = []
-
-    def mode_readiness(*_args):
-        events.append('mode-ready')
-        return {'status': 'ready', 'reason': ''}
-
-    def frontend_factory(command, **kwargs):
-        events.append(('frontend-start', tuple(command)))
-        return frontend_process
-
-    def input_sink_readiness(*_args):
-        events.append('input-sink-ready')
-        return {'status': 'ready', 'reason': ''}
-
-    result = app.main(
-        [
-            '--input', 'sensevoice-wav', '--input-wav', str(wav.resolve()),
-        ],
-        process_factory=lambda *_args, **_kwargs: session_process,
-        frontend_factory=frontend_factory,
-        readiness=input_sink_readiness,
-        mode_readiness=mode_readiness,
-        clock=lambda: 0.0,
-        stdout=StringIO(),
-        stderr=StringIO(),
-    )
-
-    assert result == 0
-    assert events[0] == 'mode-ready'
-    assert events[1] == 'input-sink-ready'
-    assert events[2][0] == 'frontend-start'
 
 
 def test_installed_console_fallback_loads_extensionless_existing_console(
