@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "voice_nav.agent.response.v1",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": ["kind", "text"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "reply"},
+        "text": {"type": "string", "minLength": 1, "maxLength": 512}
+      }
+    },
+    {
+      "type": "object",
+      "required": ["kind", "text"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "clarify"},
+        "text": {"type": "string", "minLength": 1, "maxLength": 512}
+      }
+    },
+    {
+      "type": "object",
+      "required": ["kind", "steps"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "mission"},
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "items": {"$ref": "mission.schema.json#/oneOf/0/properties/steps/items"}
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": ["kind", "tool_call"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "tool"},
+        "tool_call": {
+          "type": "object",
+          "required": ["name", "arguments"],
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "enum": [
+                "read_runtime_snapshot",
+                "propose_mission",
+                "cancel_owned_mission"
+              ]
+            },
+            "arguments": {"type": "object"}
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": ["kind", "tool_call"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": {"const": "tool"},
+        "tool_call": {
+          "type": "object",
+          "required": ["kind", "steps"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {"const": "mission"},
+            "steps": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 3,
+              "items": {"$ref": "mission.schema.json#/oneOf/0/properties/steps/items"}
+            }
+          }
+        }
+      }
+    }
+  ]
+}

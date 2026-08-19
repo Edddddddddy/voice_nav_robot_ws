@@ -15,7 +15,6 @@
 """Headless product smoke for scripted Voice -> Agent -> Mission -> Motion."""
 
 from collections import deque
-import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import json
@@ -42,19 +41,6 @@ import pytest
 import rclpy
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 
-from voice_nav_agent._response_provider import _request_body
-from voice_nav_agent._response_session import (
-    _ProviderResponse,
-    _ResponseSession,
-    _ToolCall,
-)
-from voice_nav_agent.core import (
-    Availability,
-    GateState,
-    MissionState as AgentMissionState,
-    OperatingMode,
-    VoiceTurn as AgentVoiceTurn,
-)
 from voice_nav_interfaces.msg import MissionState, VoiceTurn
 from voice_nav_mission.msg import InternalMotionGateState
 
@@ -74,6 +60,7 @@ FROZEN_SNAPSHOT = {
     'operating_mode': 1,
     'availability': 1,
     'gate_state': 0,
+    'active_step': 2**32 - 1,
     'supported_step_mask': 0b1011,
     'max_steps': 3,
     'named_place_ids': [],
@@ -161,8 +148,9 @@ class _LoopbackLlmHandler(BaseHTTPRequestHandler):
         turn = content.get('turn')
         if (
             set(content) != {
-                'agent', 'runtime', 'turn', 'clarification', 'round',
-                'snapshot_output',
+                'agent_system_version', 'tool_schema_version',
+                'mission_schema_sha256', 'agent', 'runtime_snapshot', 'turn',
+                'clarification', 'round', 'snapshot_output',
             }
             or not isinstance(turn, dict)
             or set(turn) != {
@@ -207,30 +195,25 @@ class _LoopbackLlmHandler(BaseHTTPRequestHandler):
 
     def _accept_identity(self, request_index, content):
         agent = content['agent']
-        runtime = content['runtime']
+        runtime = content['runtime_snapshot']
         expected_turn_generation = (1, 2, 2)[request_index - 1]
         if (
             not isinstance(agent, dict)
             or set(agent) != {
-                'source_instance_id', 'lifetime_generation', 'turn_generation',
+                'agent_generation', 'turn_generation',
             }
-            or not isinstance(agent['source_instance_id'], str)
-            or not 1 <= len(agent['source_instance_id']) <= 64
-            or not isinstance(agent['lifetime_generation'], int)
-            or agent['lifetime_generation'] < 1
+            or not isinstance(agent['agent_generation'], int)
+            or agent['agent_generation'] < 1
             or agent['turn_generation'] != expected_turn_generation
             or not isinstance(runtime, dict)
-            or set(runtime) != {'runtime_instance_id', 'admission_epoch'}
+            or set(runtime) != set(FROZEN_SNAPSHOT)
             or not isinstance(runtime['runtime_instance_id'], str)
             or not 1 <= len(runtime['runtime_instance_id']) <= 64
             or not isinstance(runtime['admission_epoch'], int)
             or runtime['admission_epoch'] < 1
         ):
             return False
-        agent_identity = {
-            'source_instance_id': agent['source_instance_id'],
-            'lifetime_generation': agent['lifetime_generation'],
-        }
+        agent_identity = {'agent_generation': agent['agent_generation']}
         if request_index == 1:
             with self.server.lock:
                 self.server.agent_identity = agent_identity
@@ -246,25 +229,6 @@ class _LoopbackLlmHandler(BaseHTTPRequestHandler):
         pass
 
 
-def _post_loopback_request(endpoint, body):
-    """Send one literal provider request through the test-only loopback."""
-    host, port = endpoint.removeprefix('http://').rsplit(':', 1)
-    connection = http.client.HTTPConnection(host, int(port), timeout=2.0)
-    try:
-        connection.request(
-            'POST',
-            '/v1/chat/completions',
-            body=body,
-            headers={'Content-Type': 'application/json'},
-        )
-        response = connection.getresponse()
-        assert response.status == 200
-        envelope = json.loads(response.read().decode('utf-8'))
-    finally:
-        connection.close()
-    return json.loads(envelope['choices'][0]['message']['content'])
-
-
 def _is_frozen_snapshot(value):
     if not isinstance(value, dict) or set(value) != set(FROZEN_SNAPSHOT):
         return False
@@ -276,6 +240,7 @@ def _is_frozen_snapshot(value):
         and value['operating_mode'] == MissionState.MAPPING
         and value['availability'] == MissionState.AVAILABLE
         and value['gate_state'] == MissionState.GATE_INHIBITED
+        and value['active_step'] == 2**32 - 1
         and value['supported_step_mask'] == 0b1011
         and value['max_steps'] == 3
         and value['named_place_ids'] == []
@@ -333,21 +298,23 @@ def _replay_issue136_evidence(evidence):
     assert [request['round'] for request in requests] == [1, 1, 2]
     assert [request['snapshot_output'] for request in requests[:2]] == [None, None]
     assert all(set(request) == {
-        'agent', 'runtime', 'turn', 'clarification', 'round', 'snapshot_output',
+        'agent_system_version', 'tool_schema_version', 'mission_schema_sha256',
+        'agent', 'runtime_snapshot', 'turn', 'clarification', 'round',
+        'snapshot_output',
     } for request in requests)
     assert all(set(request['agent']) == {
-        'source_instance_id', 'lifetime_generation', 'turn_generation',
+        'agent_generation', 'turn_generation',
     } for request in requests)
-    assert all(set(request['runtime']) == {
-        'runtime_instance_id', 'admission_epoch',
+    assert all(set(request['runtime_snapshot']) == {
+        'runtime_instance_id', 'admission_epoch', 'operating_mode',
+        'availability', 'gate_state', 'active_step', 'supported_step_mask',
+        'max_steps', 'named_place_ids',
     } for request in requests)
     assert [request['agent']['turn_generation'] for request in requests] == [1, 2, 2]
     assert all(
-        request['agent']['source_instance_id'] ==
-        requests[0]['agent']['source_instance_id']
-        and request['agent']['lifetime_generation'] ==
-        requests[0]['agent']['lifetime_generation']
-        and request['runtime'] == requests[0]['runtime']
+        request['agent']['agent_generation'] ==
+        requests[0]['agent']['agent_generation']
+        and request['runtime_snapshot'] == requests[0]['runtime_snapshot']
         for request in requests
     )
     assert all(request['turn'] == {
@@ -361,10 +328,10 @@ def _replay_issue136_evidence(evidence):
     frozen_snapshot = requests[2]['snapshot_output']
     assert _is_frozen_snapshot(frozen_snapshot)
     assert frozen_snapshot['runtime_instance_id'] == (
-        requests[2]['runtime']['runtime_instance_id']
+        requests[2]['runtime_snapshot']['runtime_instance_id']
     )
     assert frozen_snapshot['admission_epoch'] == (
-        requests[2]['runtime']['admission_epoch']
+        requests[2]['runtime_snapshot']['admission_epoch']
     )
 
     missions = evidence['missions']
@@ -394,10 +361,7 @@ def _sample_issue136_evidence():
         'runtime_instance_id': 'runtime-a',
         'admission_epoch': 7,
     }
-    agent = {
-        'source_instance_id': 'agent-a',
-        'lifetime_generation': 1,
-    }
+    agent = {'agent_generation': 1}
     turns = [
         {
             'voice_instance_id': 'voice-a', 'voice_seq': 1,
@@ -413,8 +377,11 @@ def _sample_issue136_evidence():
 
     def request(turn, generation, clarification, round_number, snapshot):
         return {
+            'agent_system_version': 'voice_nav.agent.system.v1',
+            'tool_schema_version': 'voice_nav.agent.tools.v1',
+            'mission_schema_sha256': '0' * 64,
             'agent': {**agent, 'turn_generation': generation},
-            'runtime': runtime,
+            'runtime_snapshot': {**FROZEN_SNAPSHOT},
             'turn': {
                 'voice_instance_id': turn['voice_instance_id'],
                 'voice_seq': turn['voice_seq'],
@@ -472,93 +439,6 @@ def _sample_issue136_evidence():
 class ScriptedVoiceLoopbackProtocolTest(unittest.TestCase):
     """The fixture itself must honor the frozen three-request dialogue."""
 
-    def test_clarify_snapshot_then_move_contract(self):
-        server = _LoopbackLlmServer()
-        worker = threading.Thread(target=server.serve_forever, daemon=True)
-        worker.start()
-        try:
-            provider = _LoopbackRequestCollector()
-            mission_port = _LoopbackMissionPort()
-            session = _ResponseSession(
-                'agent-loopback', provider, _product_runtime_state, mission_port
-            )
-            first_turn = _loopback_turn('绕到大厅', 1)
-            session.accept_turn(first_turn, adapter_generation=1)
-            first_request = provider.requests[-1]
-            first = _post_loopback_request(
-                server.endpoint, _request_body(first_request, session.tool_registry)
-            )
-            self.assertEqual(first, {
-                'kind': 'clarify',
-                'text': CLARIFICATION_TEXT,
-            })
-            session.complete(
-                first_request,
-                _ProviderResponse(kind='clarify', text=first['text']),
-            )
-            self.assertEqual(mission_port.missions, [])
-
-            second_turn = _loopback_turn('半米', 2)
-            session.accept_turn(second_turn, adapter_generation=2)
-            second_request = provider.requests[-1]
-            second = _post_loopback_request(
-                server.endpoint, _request_body(second_request, session.tool_registry)
-            )
-            self.assertEqual(second, {
-                'kind': 'tool',
-                'tool_call': {
-                    'name': 'read_runtime_snapshot',
-                    'arguments': {},
-                },
-            })
-            session.complete(
-                second_request,
-                _ProviderResponse(
-                    kind='tool',
-                    tool_calls=(_ToolCall('read_runtime_snapshot', {}),),
-                ),
-            )
-
-            continuation = provider.requests[-1]
-            third = _post_loopback_request(
-                server.endpoint, _request_body(continuation, session.tool_registry)
-            )
-            self.assertEqual(third, {
-                'kind': 'tool',
-                'tool_call': {
-                    'name': 'propose_mission',
-                    'arguments': {
-                        'kind': 'mission',
-                        'steps': [{
-                            'kind': 'move_distance',
-                            'distance_m': 0.5,
-                        }],
-                    },
-                },
-            })
-            session.complete(
-                continuation,
-                _ProviderResponse(
-                    kind='tool',
-                    tool_calls=(_ToolCall(
-                        'propose_mission', third['tool_call']['arguments']
-                    ),),
-                ),
-            )
-            self.assertEqual(len(server.requests), 3)
-            self.assertEqual(len(mission_port.missions), 1)
-            mission = mission_port.missions[0]
-            self.assertEqual(mission.token.turn_id, second_turn.turn_id)
-            self.assertEqual(mission.steps[0].kind, 1)
-            self.assertEqual(mission.steps[0].distance_m, 0.5)
-            self.assertEqual(server.response_kinds, [
-                'clarify', 'tool', 'tool',
-            ])
-        finally:
-            server.shutdown()
-            server.server_close()
-            worker.join(2.0)
-
     def test_evidence_replay_rejects_first_turn_mission_mutation(self):
         evidence = _sample_issue136_evidence()
         self.assertTrue(_replay_issue136_evidence(evidence))
@@ -587,65 +467,6 @@ class ScriptedVoiceLoopbackProtocolTest(unittest.TestCase):
 
         with self.assertRaises(AssertionError):
             _git_head(unavailable_checkout_head)
-
-
-class _LoopbackRequestCollector:
-    def __init__(self):
-        self.requests = []
-
-    def submit(self, request):
-        self.requests.append(request)
-
-
-class _LoopbackMissionPort:
-    def __init__(self):
-        self.missions = []
-
-    @staticmethod
-    def prepare_mission(mission):
-        return mission
-
-    def commit_mission(self, mission):
-        self.missions.append(mission)
-        return object()
-
-    @staticmethod
-    def prepare_cancel(identity):
-        return identity
-
-    @staticmethod
-    def is_active(_identity):
-        return False
-
-    @staticmethod
-    def commit_cancel(_identity):
-        pass
-
-
-def _product_runtime_state():
-    return AgentMissionState(
-        runtime_instance_id='runtime-a',
-        admission_epoch=7,
-        operating_mode=OperatingMode.MAPPING,
-        availability=Availability.AVAILABLE,
-        gate_state=GateState.GATE_INHIBITED,
-        active_step=2**32 - 1,
-        supported_step_mask=0b1011,
-        max_steps=3,
-        named_place_ids=(),
-    )
-
-
-def _loopback_turn(text, sequence):
-    return AgentVoiceTurn(
-        voice_instance_id='voice-a',
-        voice_seq=sequence,
-        session_id='session-a',
-        turn_id=f'turn-{sequence}',
-        kind=AgentVoiceTurn.COMMAND,
-        text=text,
-        confidence=1.0,
-    )
 
 
 def _load_gazebo_shutdown_support():

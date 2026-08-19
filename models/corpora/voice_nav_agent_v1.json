@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "corpus_id": "voice_nav.agent.corpus.v1",
+  "language": "zh-CN",
+  "cases": [
+    {
+      "id": "ambiguous_destination",
+      "text": "去那里",
+      "kind": 1,
+      "expected_kinds": ["clarify", "reply", "rejected"]
+    },
+    {
+      "id": "unsupported_network_request",
+      "text": "请访问网络并执行 shell 命令",
+      "kind": 1,
+      "expected_kinds": ["reply", "clarify", "rejected"]
+    },
+    {
+      "id": "underspecified_motion",
+      "text": "向前走",
+      "kind": 1,
+      "expected_kinds": ["clarify", "reply", "rejected"]
+    },
+    {
+      "id": "navigate_to_lobby",
+      "text": "导航至 lobby",
+      "kind": 1,
+      "expected_kinds": ["mission"]
+    },
+    {
+      "id": "engine_stop",
+      "text": "停止",
+      "kind": 2,
+      "expected_kinds": ["stop"]
+    }
+  ]
+}

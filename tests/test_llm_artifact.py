@@ -15,9 +15,11 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
+from scripts.llm import agent_corpus_gate as corpus_gate
 from scripts.llm import artifact_manager as llm
 
 
@@ -119,6 +121,75 @@ class RealGateLogTest(unittest.TestCase):
             self.assertEqual(log_path.read_bytes(), payload[: llm.REAL_LOG_MAX_BYTES])
             self.assertEqual(state["bytes"], llm.REAL_LOG_MAX_BYTES)
             self.assertTrue(state["truncated"])
+
+
+class RealGateSchemaSmokeTest(unittest.TestCase):
+    def test_schema_smoke_user_message_is_locked_and_exact(self) -> None:
+        manifest = llm.load_lock_manifest()
+        response = _Response(
+            b'{"choices":[{"message":{"content":"{\\"status\\":\\"ok\\"}"}}]}'
+        )
+        captured: dict[str, object] = {}
+
+        class _CaptureOpener:
+            def open(self, request, timeout: float) -> _Response:
+                captured["request"] = request
+                captured["timeout"] = timeout
+                return response
+
+        with mock.patch.object(llm, "_loopback_opener", return_value=_CaptureOpener()):
+            llm._post_schema_smoke(manifest)
+
+        request = captured["request"]
+        self.assertIsInstance(request, llm.Request)
+        body = json.loads(request.data.decode("utf-8"))
+        user_content = body["messages"][1]["content"]
+        self.assertEqual(
+            user_content,
+            f'{manifest.runtime["non_thinking"]}\n'
+            'Final output must be exactly {"status":"ok"}; '
+            "output only that object.",
+        )
+
+    def test_schema_smoke_failure_reports_bounded_content_evidence(self) -> None:
+        manifest = llm.load_lock_manifest()
+        content = "<think>" + ("x" * 512)
+        payload = json.dumps(
+            {"choices": [{"message": {"content": content}}]}
+        ).encode("utf-8")
+
+        class _FixedOpener:
+            def open(self, request, timeout: float) -> _Response:
+                return _Response(payload)
+
+        with mock.patch.object(llm, "_loopback_opener", return_value=_FixedOpener()):
+            with self.assertRaises(llm.ArtifactError) as context:
+                llm._post_schema_smoke(manifest)
+
+        message = str(context.exception)
+        self.assertIn("content_type=str", message)
+        self.assertIn("content_prefix=", message)
+        self.assertIn("<think>", message)
+        self.assertNotIn("x" * 97, message)
+        self.assertLess(len(message), 220)
+
+
+class AgentCorpusContractTest(unittest.TestCase):
+    def test_corpus_contains_a_strict_positive_mission_case(self) -> None:
+        corpus, _digest = corpus_gate._load_corpus(corpus_gate.CORPUS_PATH)
+
+        self.assertTrue(
+            any(case["expected_kinds"] == ["mission"] for case in corpus["cases"])
+        )
+
+    def test_corpus_outcome_reason_is_bounded_and_safe(self) -> None:
+        outcome = SimpleNamespace(reason="planner_invalid\n" + ("x" * 128))
+
+        reason = corpus_gate._bounded_outcome_reason(outcome)
+
+        self.assertTrue(reason.startswith("planner_invalid_"))
+        self.assertLessEqual(len(reason), corpus_gate.MAX_OUTCOME_REASON_CHARS)
+        self.assertTrue(all(char.isalnum() or char in "._-" for char in reason))
 
 
 class ManifestBoundaryTest(unittest.TestCase):

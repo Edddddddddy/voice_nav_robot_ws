@@ -186,7 +186,7 @@ def test_rule_mission_keeps_unconfigured_or_unknown_place_fail_closed(
     assert decision.reason == reason
 
 
-def test_rule_mission_accepts_the_scripted_route_without_llm_fallback():
+def test_rule_mission_accepts_the_scripted_route_without_planner():
     core = make_core()
 
     decision = core.handle_turn(
@@ -910,7 +910,7 @@ def test_unknown_well_formed_expression_becomes_llm_needed_with_same_token():
 
 
 def test_issue136_scripted_turn_texts_both_take_llm_needed_path():
-    """The product scenario must not bypass its provider dialogue locally."""
+    """The product scenario must not bypass its Planner dialogue locally."""
     core = make_core()
 
     first = core.handle_turn(make_turn('绕到大厅'), make_state())
