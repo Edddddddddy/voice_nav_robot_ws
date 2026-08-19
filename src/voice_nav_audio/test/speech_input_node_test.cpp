@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <memory>
@@ -248,14 +249,13 @@ TEST(SpeechInputNodeTest, HeadlessCompositionPublishesOnlyOneFinalVoiceTurn)
   (void)subscription;
 }
 
-TEST(SpeechInputNodeTest, DestructionJoinsRecognizerBeforeCoreAndSuppressesLateFinal)
+TEST(SpeechInputNodeTest, DestructionWaitsForRecognizerBeforeAsrShutdownAndSuppressesLateFinal)
 {
   rclcpp::init(0, nullptr);
   auto vad = std::make_unique<NodeBarrierVad>();
   auto asr = std::make_unique<NodeBarrierAsr>();
   auto * const asr_probe = asr.get();
   auto provider = std::make_unique<SenseVoiceProvider>(std::move(vad), std::move(asr));
-  ASSERT_TRUE(provider->arm_once());
   auto speech = std::make_unique<SpeechInputNode>(std::move(provider));
   auto observer = std::make_shared<rclcpp::Node>("speech_input_teardown_observer");
   std::mutex count_mutex;
@@ -276,9 +276,20 @@ TEST(SpeechInputNodeTest, DestructionJoinsRecognizerBeforeCoreAndSuppressesLateF
   speech->finish_input();
   ASSERT_TRUE(asr_probe->wait_until_entered());
 
-  std::thread destroyer([&speech]() {speech.reset();});
-  EXPECT_TRUE(asr_probe->wait_until_shutdown());
+  std::atomic<bool> destroyer_started{false};
+  std::thread destroyer([&speech, &destroyer_started]() {
+      destroyer_started.store(true, std::memory_order_release);
+      speech.reset();
+    });
+  while (!destroyer_started.load(std::memory_order_acquire)) {
+    std::this_thread::yield();
+  }
+  // The destructor must first revoke provider admission; keep the ASR
+  // blocked long enough for that stop-input phase to acquire the provider
+  // queue before releasing the in-flight VAD/ASR sequence.
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
   asr_probe->release();
+  EXPECT_TRUE(asr_probe->wait_until_shutdown());
   destroyer.join();
 
   {

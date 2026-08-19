@@ -23,10 +23,13 @@ Mission，并通过受保护的 Gazebo 差速驱动链执行。已批准的目�
   强类型状态/反馈/结果与脚本化行为替身；MotionConditioningPipeline 在受控容器中协调
   `nav2_velocity_smoother`、`nav2_collision_monitor` 与 MotionGate。
 
-Issue #164 增加了一个 pre-release framework MVP：已安装的 `voice_node` 可用锁定的 SenseVoice WAV
-组成真实 `VoiceTurn`，并提供 MOVE+STOP、Mapping MVP 与单一 `study` Named Place Navigation 的
-headless 产品检查。四阶段结果由安装入口 `voice_nav_issue164_runner` 以 schema-versioned JSON
-写入 task-local 的 `build/test-results/issue164/`，每次运行必须给出 exact HEAD：
+当前 `voice_node` 只提供连续 `vad_auto` 输入：一个 full-duplex 设备和一个长期存活的
+SenseVoice ASR 实例可跨多个 `VoiceTurn` 复用。输入端在启动时等待 Agent 的 `/voice/turn`
+订阅，保持 capture、AEC render reference、STOP/wake/TTS 和 barge-in 链路；不提供 WAV
+回放、一次性麦克风或真实模型 gate profile。
+
+Issue #164 的 headless 编排器仍只覆盖非 Audio 的 MOVE+STOP、Mapping MVP 与单一 `study` Navigation
+阶段；语音行为由 `voice_nav_audio` 的连续会话测试覆盖。运行时仍要求每次使用新的 exact HEAD 和输出路径：
 
 ```bash
 HEAD_SHA="$(git rev-parse HEAD)"
@@ -35,9 +38,6 @@ voice_nav_issue164_runner \
   --exact-head "$HEAD_SHA" \
   --output "build/test-results/issue164/manual-${HEAD_SHA}/result.json"
 ```
-
-这只是 #164 的 pre-release framework MVP，不宣称 v1.0 完成，也不包含物理麦克风、KWS、真实 TTS、
-完整 Mapping→Navigation 地图 artifact handoff 或真实机器人验收。
 
 Issue #166 将 Motion、Mapping 和 fixture Navigation 收敛到同一个已安装主程序。安装并 source 工作区后，
 在一个终端选择一次模式；程序会启动恰好一个对应组合、等待 command gateway ready，再复用同一中文控制台：
@@ -56,30 +56,10 @@ ros2 run voice_nav_bringup voice_nav_app --mode mapping --display gui
 `--mode` 仅接受 `motion|mapping|navigation`，`--display` 仅接受 `headless|gui`；不支持 launch 或 ROS
 参数透传，也不支持运行中热切换。Mapping 由 `slam_toolbox` 拥有 `map → odom`，Navigation 由 AMCL
 拥有它；切换模式需退出当前 app 后重新启动。`:quit`、EOF、Ctrl+C、STOP 和启动失败继续沿用已有
-有界 teardown 与退出码契约。默认 console path 仍是仿真-only，不提供物理麦克风、KWS、AEC 或真实 LLM；
-SenseVoice WAV safe-reply 输出见下文。
+有界 teardown 与退出码契约。默认 console path 仍是仿真-only，不提供物理麦克风、KWS、AEC 或真实 LLM。
 
 Navigation 规则仅在 Runtime 公布 `study` 时把 `去书房` 解析为 `NAVIGATE_TO(study)`；缺少该 Place 或遇到
 其他未知中文目标时保持 fail-closed。
-
-### SenseVoice WAV safe-reply 输出
-
-Issue #170 支持在保留默认 console 行为的前提下，把一个已存在的 SenseVoice WAV 输入经过既有
-`VoiceTurn → Agent → Speak` 链路写成 48 kHz、mono、16-bit WAV：
-
-```bash
-export VOICE_NAV_CHAOWEN_TTS_ROOT="$PWD/models/weights/voice-assets/tts/vits-piper-zh_CN-chaowen-medium-int8"
-ros2 run voice_nav_bringup voice_nav_app \
-  --input sensevoice-wav \
-  --input-wav "$PWD/input.wav" \
-  --output-wav "$PWD/safe-reply.wav"
-```
-
-`VOICE_NAV_CHAOWEN_TTS_ROOT` 必须是绝对、已验证的 Chaowen 目录；运行时不会下载模型。先按
-`models/manifests/voice-models.yaml` 的 `tts-chaowen-medium-int8` manifest provision 并执行
-`bash scripts/provision_voice_assets.sh --verify --asset tts-chaowen-medium-int8`。该权重的模型卡
-记录 Xiao Ya/BZNSYP 来源链并限制为非商业使用，详见
-<https://k2-fsa.github.io/sherpa/onnx/tts/all/Chinese/vits-piper-zh_CN-chaowen-medium.html>。
 
 已配置的 controller timeout 是消费者侧 deadman，本身并不能单独证明实体静止。当前 main 已验证
 MotionGate、Mission Runtime、RelativeMotion、运动调节组件以及 crash-stop 的受限仿真验收；真实机器人、

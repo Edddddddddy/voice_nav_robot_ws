@@ -41,11 +41,8 @@ def _input_profile_argument():
     )
 
 
-def test_launch_accepts_vad_auto_and_preserves_profiles():
-    """Keep the existing launch profiles and accept continuous VAD."""
-    assert _input_profile_argument().choices == [
-        'sensevoice_wav',
-        'microphone_once',
-        'real_model_gate',
-        'vad_auto',
-    ]
+def test_launch_exposes_only_continuous_vad_auto():
+    """The installed launch entrypoint has one continuous input profile."""
+    argument = _input_profile_argument()
+    assert argument.default_value[0].text == 'vad_auto'
+    assert argument.choices == ['vad_auto']

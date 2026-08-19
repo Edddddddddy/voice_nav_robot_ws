@@ -160,45 +160,6 @@ TEST(PortAudioAdapterTest, OpensOneFixedStreamAndRestartFencesOldPlayback)
   EXPECT_FALSE(device.has_callback());
 }
 
-TEST(PortAudioAdapterTest, OneShotPauseResumesWithoutAPlaybackGenerationFence)
-{
-  AudioEngine engine;
-  ScriptedDevice device;
-  PortAudioAdapter adapter(engine, device);
-  std::array<Sample, AudioEngine::kFrameSamples> input{};
-  std::array<Sample, AudioEngine::kFrameSamples> output{};
-  std::array<Sample, AudioEngine::kFrameSamples> playback{};
-  playback.fill(1200);
-
-  ASSERT_EQ(adapter.start(), AdapterStartResult::Started);
-  device.fire(input, output);
-  AudioFrame capture{};
-  AudioFrame reference{};
-  ASSERT_TRUE(engine.try_pop_capture(capture));
-  ASSERT_TRUE(engine.try_pop_reference(reference));
-  const auto generation = engine.generation();
-
-  ASSERT_TRUE(adapter.pause_for_playback());
-  EXPECT_FALSE(device.has_callback());
-  EXPECT_EQ(engine.generation(), generation);
-  ASSERT_TRUE(engine.enqueue_playback(playback.data(), playback.size(), 9U));
-
-  ASSERT_EQ(adapter.resume_playback(), AdapterStartResult::Started);
-  EXPECT_EQ(engine.generation(), generation);
-  device.fire(input, output);
-  EXPECT_TRUE(std::any_of(output.begin(), output.end(), [](const Sample sample) {
-      return sample != 0;
-    }));
-  PlaybackWrite write{};
-  ASSERT_TRUE(engine.try_pop_playback_write(write));
-  EXPECT_EQ(write.scope_id, 9U);
-  EXPECT_EQ(write.generation, generation);
-  AudioFrame playback_capture{};
-  AudioFrame playback_reference{};
-  EXPECT_FALSE(engine.try_pop_capture(playback_capture));
-  EXPECT_FALSE(engine.try_pop_reference(playback_reference));
-}
-
 TEST(PortAudioAdapterTest, PlaybackOverflowQuarantinesAnAlreadyEnteredCallback)
 {
   AudioEngine engine;

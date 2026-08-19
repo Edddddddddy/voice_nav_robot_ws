@@ -24,16 +24,13 @@ add_library(audio_engine_callback OBJECT src/audio_engine_callback.cpp)
 add_library(audio_engine_core OBJECT src/audio_engine.cpp)
 add_library(dsp_pipeline STATIC src/dsp_pipeline.cpp)
 add_library(speech_input_core STATIC src/speech_input_core.cpp)
-add_library(one_shot_recognizer_proxy STATIC src/one_shot_recognizer_proxy.cpp)
 add_library(continuous_vad_session STATIC src/continuous_vad_session.cpp)
 add_library(sensevoice_provider STATIC src/sensevoice_provider.cpp)
 add_library(speech_input_node STATIC src/speech_input_node.cpp)
-add_library(voice_input_policy STATIC src/voice_input_policy.cpp)
 add_library(speech_output_core STATIC src/speech_output_core.cpp)
 add_library(speech_output_node STATIC src/speech_output_node.cpp)
 add_library(voice_pipeline_coordination STATIC src/voice_pipeline_coordination.cpp)
 add_library(voice_pipeline STATIC src/voice_pipeline.cpp)
-add_library(microphone_once_runner STATIC src/microphone_once_runner.cpp)
 add_library(ros_stop_mission_port STATIC src/ros_stop_mission_port.cpp)
 add_library(chaowen_tts_asset_verifier STATIC src/chaowen_tts_asset_verifier.cpp)
 add_library(chaowen_tts_adapter STATIC src/chaowen_tts_adapter.cpp)
@@ -55,16 +52,13 @@ foreach(target
     audio_engine_callback
     dsp_pipeline
     speech_input_core
-    one_shot_recognizer_proxy
     continuous_vad_session
     sensevoice_provider
     speech_input_node
-    voice_input_policy
     speech_output_core
     speech_output_node
     voice_pipeline_coordination
     voice_pipeline
-    microphone_once_runner
     ros_stop_mission_port
     chaowen_tts_asset_verifier
     chaowen_tts_adapter
@@ -79,8 +73,7 @@ foreach(target
   )
 endforeach()
 target_link_libraries(sensevoice_provider speech_input_core)
-target_link_libraries(one_shot_recognizer_proxy speech_input_core)
-target_link_libraries(continuous_vad_session one_shot_recognizer_proxy dsp_pipeline voice_pipeline)
+target_link_libraries(continuous_vad_session dsp_pipeline voice_pipeline)
 ament_target_dependencies(speech_input_node rclcpp voice_nav_interfaces)
 target_link_libraries(speech_input_node speech_input_core)
 target_link_libraries(speech_output_core audio_engine)
@@ -99,8 +92,6 @@ target_link_libraries(
   ros_stop_mission_port
   portaudio_adapter
 )
-ament_target_dependencies(microphone_once_runner rclcpp rclcpp_action voice_nav_interfaces)
-target_link_libraries(microphone_once_runner voice_pipeline dsp_pipeline)
 target_link_libraries(chaowen_tts_adapter speech_output_core chaowen_tts_asset_verifier)
 target_link_libraries(portaudio_adapter PUBLIC audio_engine)
 
@@ -243,9 +234,8 @@ if(VOICE_NAV_AUDIO_WITH_SHERPA_ONNX)
     PRIVATE include src "${SHERPA_ONNX_INCLUDE_DIR}")
   ament_target_dependencies(voice_node rclcpp voice_nav_interfaces)
   target_link_libraries(
-    voice_node speech_input_node sensevoice_sherpa_adapter voice_pipeline microphone_once_runner
-    continuous_vad_session chaowen_tts_adapter file_audio_device vad_auto_dsp_adapter)
-  target_link_libraries(voice_node voice_input_policy)
+    voice_node sensevoice_sherpa_adapter continuous_vad_session
+    chaowen_tts_adapter vad_auto_dsp_adapter)
   target_link_options(
     voice_node
     PRIVATE
@@ -318,14 +308,6 @@ if(BUILD_TESTING)
   add_dependencies(speech_input_core_test speech_input_identity_probe)
 
   ament_add_gtest(
-    one_shot_recognizer_proxy_test
-    test/one_shot_recognizer_proxy_test.cpp
-  )
-  target_compile_features(one_shot_recognizer_proxy_test PUBLIC cxx_std_17)
-  target_include_directories(one_shot_recognizer_proxy_test PRIVATE include src)
-  target_link_libraries(one_shot_recognizer_proxy_test one_shot_recognizer_proxy)
-
-  ament_add_gtest(
     continuous_vad_session_test
     test/continuous_vad_session_test.cpp
   )
@@ -351,21 +333,12 @@ if(BUILD_TESTING)
   target_include_directories(sensevoice_provider_test PRIVATE include src)
   target_link_libraries(sensevoice_provider_test sensevoice_provider)
 
-  ament_add_gtest(
-    voice_input_policy_test
-    test/voice_input_policy_test.cpp
-  )
-  target_compile_features(voice_input_policy_test PUBLIC cxx_std_17)
-  target_include_directories(voice_input_policy_test PRIVATE include src)
-  target_link_libraries(voice_input_policy_test voice_input_policy)
-
   if(VOICE_NAV_AUDIO_WITH_SHERPA_ONNX)
     set(_voice_nav_real_asset_root
       "${CMAKE_CURRENT_SOURCE_DIR}/../../models/weights/voice-assets")
     set(_voice_nav_real_vad "$ENV{VOICE_NAV_SENSEVOICE_VAD_MODEL}")
     set(_voice_nav_real_model "$ENV{VOICE_NAV_SENSEVOICE_MODEL}")
     set(_voice_nav_real_tokens "$ENV{VOICE_NAV_SENSEVOICE_TOKENS}")
-    set(_voice_nav_real_wav "$ENV{VOICE_NAV_SENSEVOICE_WAV}")
     if(_voice_nav_real_vad STREQUAL "")
       set(_voice_nav_real_vad
         "${_voice_nav_real_asset_root}/vad/silero_vad.int8.onnx")
@@ -377,10 +350,6 @@ if(BUILD_TESTING)
     if(_voice_nav_real_tokens STREQUAL "")
       set(_voice_nav_real_tokens
         "${_voice_nav_real_asset_root}/asr/sensevoice-small-int8-2024-07-17/tokens.txt")
-    endif()
-    if(_voice_nav_real_wav STREQUAL "")
-      set(_voice_nav_real_wav
-        "${_voice_nav_real_asset_root}/asr/sensevoice-small-int8-2024-07-17/test_wavs/zh.wav")
     endif()
     ament_add_gtest(
       sensevoice_sherpa_adapter_test
@@ -399,25 +368,6 @@ if(BUILD_TESTING)
         ENVIRONMENT
           "VOICE_NAV_SENSEVOICE_VAD_MODEL=${_voice_nav_real_vad};VOICE_NAV_SENSEVOICE_MODEL=${_voice_nav_real_model};VOICE_NAV_SENSEVOICE_TOKENS=${_voice_nav_real_tokens}")
 
-    add_launch_test(
-      test/test_real_sensevoice_agent_launch.py
-      TARGET real_sensevoice_agent_launch_test
-      TIMEOUT 120
-    )
-    set(_voice_nav_real_report "$ENV{VOICE_NAV_REAL_GATE_REPORT}")
-    if(_voice_nav_real_report STREQUAL "")
-      set(_voice_nav_real_report
-        "${CMAKE_CURRENT_BINARY_DIR}/voice_nav_real_model_gate.json")
-    endif()
-    set(_voice_nav_real_head "$ENV{VOICE_NAV_REAL_GATE_HEAD}")
-    if(_voice_nav_real_head STREQUAL "")
-      set(_voice_nav_real_head "unknown")
-    endif()
-    set_tests_properties(
-      real_sensevoice_agent_launch_test
-      PROPERTIES
-        ENVIRONMENT
-          "VOICE_NAV_REAL_GATE_REPORT=${_voice_nav_real_report};VOICE_NAV_REAL_GATE_HEAD=${_voice_nav_real_head};VOICE_NAV_SENSEVOICE_VAD_MODEL=${_voice_nav_real_vad};VOICE_NAV_SENSEVOICE_MODEL=${_voice_nav_real_model};VOICE_NAV_SENSEVOICE_TOKENS=${_voice_nav_real_tokens};VOICE_NAV_SENSEVOICE_WAV=${_voice_nav_real_wav}")
   endif()
 
   ament_add_gtest(
@@ -504,19 +454,6 @@ if(BUILD_TESTING)
     voice_pipeline_test
     voice_pipeline
     file_audio_device
-  )
-
-  ament_add_gtest(
-    microphone_once_runner_test
-    test/microphone_once_runner_test.cpp
-  )
-  target_compile_features(microphone_once_runner_test PUBLIC cxx_std_17)
-  target_include_directories(microphone_once_runner_test PRIVATE include src)
-  ament_target_dependencies(microphone_once_runner_test rclcpp rclcpp_action voice_nav_interfaces)
-  target_link_libraries(
-    microphone_once_runner_test
-    microphone_once_runner
-    sensevoice_provider
   )
 
   ament_add_gtest(

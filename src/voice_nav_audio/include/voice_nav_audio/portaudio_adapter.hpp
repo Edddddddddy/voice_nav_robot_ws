@@ -74,9 +74,6 @@ public:
   [[nodiscard]] AdapterStartResult start() noexcept;
   [[nodiscard]] bool restart() noexcept;
   void stop() noexcept;
-  // One-shot playback seam: close/reopen in playback-only phase without changing generation.
-  [[nodiscard]] bool pause_for_playback() noexcept;
-  [[nodiscard]] AdapterStartResult resume_playback() noexcept;
   [[nodiscard]] bool running() const noexcept;
 
 private:

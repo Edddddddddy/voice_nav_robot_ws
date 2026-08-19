@@ -18,23 +18,14 @@ namespace voice_nav_audio
 {
 
 VoicePipelineCoordination::VoicePipelineCoordination(
-  SpeechOutputControl & output, StopMissionPort & stop_port,
-  VoiceTurnBoundary * const turn_boundary) noexcept
-: output_(output), stop_port_(stop_port), turn_boundary_(turn_boundary)
+  SpeechOutputControl & output, StopMissionPort & stop_port) noexcept
+: output_(output), stop_port_(stop_port)
 {
 }
 
 bool VoicePipelineCoordination::on_wake_accepted() noexcept
 {
   return output_.admit_ordinary_wake();
-}
-
-void VoicePipelineCoordination::on_recognizer_terminal(
-  const SpeechEventKind kind, const bool published) noexcept
-{
-  if (turn_boundary_ != nullptr) {
-    turn_boundary_->on_recognizer_terminal(kind, published);
-  }
 }
 
 void VoicePipelineCoordination::before_turn_published(VoiceTurnPublication & turn) noexcept

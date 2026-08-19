@@ -169,36 +169,6 @@ void PortAudioAdapter::stop() noexcept
   engine_.mark_discontinuity(DiscontinuityReason::kStreamLifecycle);
 }
 
-bool PortAudioAdapter::pause_for_playback() noexcept
-{
-  engine_.set_phase(AudioEnginePhase::kPlaybackOnly);
-  if (!running_) {
-    return true;
-  }
-  if (device_ != nullptr) {
-    device_->close();
-  }
-  running_ = false;
-  return true;
-}
-
-AdapterStartResult PortAudioAdapter::resume_playback() noexcept
-{
-  if (running_) {
-    return AdapterStartResult::AlreadyStarted;
-  }
-  engine_.set_phase(AudioEnginePhase::kPlaybackOnly);
-  if (device_ == nullptr) {
-    return AdapterStartResult::NoDevice;
-  }
-  if (!device_->open(FullDuplexStreamSpec{}, &PortAudioAdapter::callback, &engine_)) {
-    device_->close();
-    return AdapterStartResult::NoDevice;
-  }
-  running_ = true;
-  return AdapterStartResult::Started;
-}
-
 bool PortAudioAdapter::running() const noexcept
 {
   return running_;

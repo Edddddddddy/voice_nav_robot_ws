@@ -2,44 +2,42 @@
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 #include "continuous_vad_session.hpp"
 
 #include <algorithm>
-#include <stdexcept>
 #include <utility>
 
 namespace voice_nav_audio
 {
 
 ContinuousVadSession::ContinuousVadSession(
-  OneShotRecognizerFactory & recognizer_factory,
+  std::unique_ptr<SpeechRecognizerAdapter> recognizer,
   DspAdapter & dsp_adapter,
   std::unique_ptr<TtsAdapter> tts,
   FullDuplexAudioDevice * const device,
   SpeechOutputTraceSink * const trace,
   StopMissionPort * const stop_port)
-: recognizer_(std::make_unique<OneShotRecognizerProxy>(recognizer_factory)),
-  recognizer_view_(recognizer_.get()),
-  dsp_(std::make_unique<DspPipeline>(dsp_adapter)),
+: dsp_(std::make_unique<DspPipeline>(dsp_adapter)),
   pipeline_(std::make_unique<VoicePipeline>(
-      std::move(recognizer_), std::move(tts), device, trace, stop_port,
-      VoicePipelineCaptureMode::kKeepCapture, true))
+      std::move(recognizer), std::move(tts), device, trace, stop_port, true))
 {
-  if (recognizer_view_ == nullptr || !recognizer_view_->start_turn()) {
-    throw std::runtime_error("ContinuousVadSession could not arm its first one-shot child");
-  }
 }
 
 ContinuousVadSession::~ContinuousVadSession() = default;
 
 ContinuousVadPumpResult ContinuousVadSession::pump() noexcept
 {
-  if (pipeline_ == nullptr || recognizer_view_ == nullptr) {
-    return ContinuousVadPumpResult::kFailed;
-  }
-  if (pipeline_->consume_turn_completed_event() && !recognizer_view_->start_turn()) {
-    stop();
+  if (pipeline_ == nullptr) {
     return ContinuousVadPumpResult::kFailed;
   }
 
