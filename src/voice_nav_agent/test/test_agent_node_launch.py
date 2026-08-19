@@ -48,8 +48,8 @@ from voice_nav_interfaces.msg import MissionState, VoiceTurn
 from voice_nav_interfaces.srv import StopMission
 
 
-class _LoopbackResponseServer:
-    """Test-only literal loopback provider with the frozen three-round script."""
+class _LoopbackPlannerServer:
+    """Test-only literal loopback Planner with the frozen three-round script."""
 
     def __init__(self):
         self.requests = []
@@ -70,12 +70,12 @@ class _LoopbackResponseServer:
                 owner.request_received.set()
                 content = json.loads(body['messages'][-1]['content'])
                 turn_id = content['turn']['turn_id']
-                blocked = turn_id == 'provider-blocked'
+                blocked = turn_id == 'planner-blocked'
                 if blocked:
                     owner.blocked_response_entered.set()
                     assert owner.release_blocked_response.wait(10.0)
                     inner = {'kind': 'reply', 'text': '旧响应不得播报。'}
-                elif turn_id == 'provider-after-stop':
+                elif turn_id == 'planner-after-stop':
                     inner = {'kind': 'reply', 'text': '新响应。'}
                 elif turn_id == 'llm-clarify':
                     inner = {'kind': 'clarify', 'text': '请说明目的地。'}
@@ -140,7 +140,7 @@ class _LoopbackResponseServer:
         self._thread.join(5.0)
 
 
-_LOOPBACK_RESPONSE_SERVER = None
+_LOOPBACK_PLANNER_SERVER = None
 
 
 def _test_state_qos():
@@ -167,14 +167,14 @@ def _test_voice_turn_qos():
 @launch_testing.markers.keep_alive
 def generate_test_description():
     """Launch the installed product entry point under test."""
-    global _LOOPBACK_RESPONSE_SERVER
-    _LOOPBACK_RESPONSE_SERVER = _LoopbackResponseServer()
+    global _LOOPBACK_PLANNER_SERVER
+    _LOOPBACK_PLANNER_SERVER = _LoopbackPlannerServer()
     agent = Node(
         package='voice_nav_agent',
         executable='agent_node',
         name='agent_node',
         output='screen',
-        parameters=[{'llm_endpoint': _LOOPBACK_RESPONSE_SERVER.endpoint}],
+        parameters=[{'llm_endpoint': _LOOPBACK_PLANNER_SERVER.endpoint}],
     )
     return LaunchDescription(
         [agent, launch_testing.actions.ReadyToTest()]
@@ -326,7 +326,7 @@ class AgentNodeLaunchTest(unittest.TestCase):
         )
         self.stop_event = threading.Event()
         self.speak_event = threading.Event()
-        self.new_provider_reply_event = threading.Event()
+        self.new_planner_reply_event = threading.Event()
         self.clarification_speak_event = threading.Event()
         self.mission_event = threading.Event()
         self.stop_requests = []
@@ -513,8 +513,8 @@ class AgentNodeLaunchTest(unittest.TestCase):
 
         initial_missions = len(self.mission_goals)
         initial_requests = (
-            len(_LOOPBACK_RESPONSE_SERVER.requests)
-            if _LOOPBACK_RESPONSE_SERVER is not None
+            len(_LOOPBACK_PLANNER_SERVER.requests)
+            if _LOOPBACK_PLANNER_SERVER is not None
             else 0
         )
         self.speak_event.clear()
@@ -529,8 +529,8 @@ class AgentNodeLaunchTest(unittest.TestCase):
             '移动距离超出安全范围。'
         ]
         assert len(self.mission_goals) == initial_missions
-        if _LOOPBACK_RESPONSE_SERVER is not None:
-            assert len(_LOOPBACK_RESPONSE_SERVER.requests) == initial_requests
+        if _LOOPBACK_PLANNER_SERVER is not None:
+            assert len(_LOOPBACK_PLANNER_SERVER.requests) == initial_requests
         return sequence + 1
 
     def _state_endpoint_gid(self, label='A'):
@@ -595,7 +595,7 @@ class AgentNodeLaunchTest(unittest.TestCase):
         self.speak_goals.append(goal_handle.request)
         self.speak_event.set()
         if goal_handle.request.text == '新响应。':
-            self.new_provider_reply_event.set()
+            self.new_planner_reply_event.set()
         if goal_handle.request.text == '请说明目的地。':
             self.clarification_speak_event.set()
         goal_handle.succeed()
@@ -612,8 +612,8 @@ class AgentNodeLaunchTest(unittest.TestCase):
 
     def tearDown(self):
         self.release_mission_result.set()
-        if _LOOPBACK_RESPONSE_SERVER is not None:
-            _LOOPBACK_RESPONSE_SERVER.release_blocked_response.set()
+        if _LOOPBACK_PLANNER_SERVER is not None:
+            _LOOPBACK_PLANNER_SERVER.release_blocked_response.set()
         self.executor.shutdown()
         self.spin_thread.join(5.0)
         self.speak_probe.destroy()
@@ -711,9 +711,9 @@ class AgentNodeLaunchTest(unittest.TestCase):
             and state_qos.depth == 0
         )
 
-    def test_installed_response_provider_clarifies_then_proposes_one_mission(self):
-        """Exercise the installed Agent through the frozen loopback provider."""
-        assert _LOOPBACK_RESPONSE_SERVER is not None
+    def test_installed_planner_clarifies_then_proposes_one_mission(self):
+        """Exercise the installed Agent through the frozen loopback Planner."""
+        assert _LOOPBACK_PLANNER_SERVER is not None
         assert self.turn_matched.wait(10.0)
         assert self.state_matched.wait(10.0)
         assert self.speak_probe.wait_for_server(timeout_sec=10.0)
@@ -721,17 +721,17 @@ class AgentNodeLaunchTest(unittest.TestCase):
         barrier_sequence = self._refresh_runtime_snapshot(
             9, 'response-state-refresh'
         )
-        first_request = len(_LOOPBACK_RESPONSE_SERVER.requests)
+        first_request = len(_LOOPBACK_PLANNER_SERVER.requests)
 
         self.speak_event.clear()
         self.clarification_speak_event.clear()
-        _LOOPBACK_RESPONSE_SERVER.request_received.clear()
+        _LOOPBACK_PLANNER_SERVER.request_received.clear()
         self._publish_unknown_turn(
             barrier_sequence + 1,
             'llm-clarify',
             '请沿着大厅右侧绕过去',
         )
-        assert _LOOPBACK_RESPONSE_SERVER.request_received.wait(10.0)
+        assert _LOOPBACK_PLANNER_SERVER.request_received.wait(10.0)
         assert self.clarification_speak_event.wait(10.0)
         clarification_goals = [
             goal for goal in self.speak_goals
@@ -748,7 +748,7 @@ class AgentNodeLaunchTest(unittest.TestCase):
         )
         assert self.mission_event.wait(10.0)
 
-        requests = _LOOPBACK_RESPONSE_SERVER.requests[first_request:]
+        requests = _LOOPBACK_PLANNER_SERVER.requests[first_request:]
         assert len(requests) == 3
         assert requests[0]['model'] == 'Qwen3-0.6B-Q8_0.gguf'
         assert requests[0]['stream'] is False
@@ -769,6 +769,7 @@ class AgentNodeLaunchTest(unittest.TestCase):
             'operating_mode': MissionState.NAVIGATION,
             'availability': MissionState.AVAILABLE,
             'gate_state': MissionState.GATE_INHIBITED,
+            'active_step': 2**32 - 1,
             'supported_step_mask': 0b1111,
             'max_steps': 3,
             'named_place_ids': ['lobby'],
@@ -786,9 +787,9 @@ class AgentNodeLaunchTest(unittest.TestCase):
 
         self.release_mission_result.set()
 
-    def test_z_blocked_provider_stop_is_direct_and_late_reply_is_fenced(self):
-        """STOP reaches its port before a blocked provider can create effects."""
-        assert _LOOPBACK_RESPONSE_SERVER is not None
+    def test_z_blocked_planner_stop_is_direct_and_late_reply_is_fenced(self):
+        """STOP reaches its port before a blocked Planner can create effects."""
+        assert _LOOPBACK_PLANNER_SERVER is not None
         assert self.turn_matched.wait(10.0)
         assert self.state_matched.wait(10.0)
         assert self.stop_probe.wait_for_service(timeout_sec=10.0)
@@ -798,24 +799,24 @@ class AgentNodeLaunchTest(unittest.TestCase):
 
         self.stop_event.clear()
         self.speak_event.clear()
-        self.new_provider_reply_event.clear()
-        _LOOPBACK_RESPONSE_SERVER.blocked_response_entered.clear()
-        _LOOPBACK_RESPONSE_SERVER.blocked_response_released.clear()
-        _LOOPBACK_RESPONSE_SERVER.release_blocked_response.clear()
+        self.new_planner_reply_event.clear()
+        _LOOPBACK_PLANNER_SERVER.blocked_response_entered.clear()
+        _LOOPBACK_PLANNER_SERVER.blocked_response_released.clear()
+        _LOOPBACK_PLANNER_SERVER.release_blocked_response.clear()
         initial_stops = len(self.stop_requests)
         initial_speaks = len(self.speak_goals)
         initial_missions = len(self.mission_goals)
 
         self._publish_unknown_turn(
             barrier_sequence + 1,
-            'provider-blocked',
+            'planner-blocked',
             '请沿着大厅右侧绕过去',
         )
-        assert _LOOPBACK_RESPONSE_SERVER.blocked_response_entered.wait(10.0)
+        assert _LOOPBACK_PLANNER_SERVER.blocked_response_entered.wait(10.0)
 
         self._publish_stop_turn(
             barrier_sequence + 2,
-            'stop-during-provider',
+            'stop-during-planner',
         )
         assert self.stop_event.wait(10.0)
         assert self.speak_event.wait(10.0)
@@ -823,14 +824,14 @@ class AgentNodeLaunchTest(unittest.TestCase):
         assert len(self.speak_goals) == initial_speaks + 1
         assert len(self.mission_goals) == initial_missions
 
-        _LOOPBACK_RESPONSE_SERVER.release_blocked_response.set()
-        assert _LOOPBACK_RESPONSE_SERVER.blocked_response_released.wait(10.0)
+        _LOOPBACK_PLANNER_SERVER.release_blocked_response.set()
+        assert _LOOPBACK_PLANNER_SERVER.blocked_response_released.wait(10.0)
         self._publish_unknown_turn(
             barrier_sequence + 3,
-            'provider-after-stop',
+            'planner-after-stop',
             '请继续说明情况',
         )
-        assert self.new_provider_reply_event.wait(10.0)
+        assert self.new_planner_reply_event.wait(10.0)
 
         assert len(self.stop_requests) == initial_stops + 1
         assert len(self.speak_goals) == initial_speaks + 2
@@ -1056,7 +1057,7 @@ class AgentNodeLaunchShutdownTest(unittest.TestCase):
 
     def test_loopback_server_exits_cleanly(self):
         """Release the test-only HTTP server after the installed-node scenario."""
-        global _LOOPBACK_RESPONSE_SERVER
-        if _LOOPBACK_RESPONSE_SERVER is not None:
-            _LOOPBACK_RESPONSE_SERVER.close()
-            _LOOPBACK_RESPONSE_SERVER = None
+        global _LOOPBACK_PLANNER_SERVER
+        if _LOOPBACK_PLANNER_SERVER is not None:
+            _LOOPBACK_PLANNER_SERVER.close()
+            _LOOPBACK_PLANNER_SERVER = None

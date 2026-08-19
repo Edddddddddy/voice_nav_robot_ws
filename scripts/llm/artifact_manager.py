@@ -57,8 +57,10 @@ REAL_READINESS_SECONDS = 30.0
 REAL_REQUEST_SECONDS = 10.0
 PROCESS_TERM_SECONDS = 3.0
 REAL_LOG_MAX_BYTES = 1024 * 1024
+SCHEMA_SMOKE_CONTENT_PREFIX_CHARS = 64
 RENAME_NOREPLACE = 1
 AT_FDCWD = -100
+_MISSING_SCHEMA_SMOKE_CONTENT = object()
 
 LOCKED_BUILD_FLAGS: tuple[tuple[str, str], ...] = (
     ("BUILD_SHARED_LIBS", "OFF"),
@@ -1372,9 +1374,21 @@ def _wait_for_server(host: str, port: int, process: subprocess.Popen[Any], timeo
     raise ArtifactError("llama-server readiness timed out")
 
 
+def _schema_smoke_content_evidence(content: object) -> str:
+    if content is _MISSING_SCHEMA_SMOKE_CONTENT:
+        return "content_type=missing content_prefix=''"
+    content_type = type(content).__name__
+    if isinstance(content, str):
+        prefix = content[:SCHEMA_SMOKE_CONTENT_PREFIX_CHARS]
+    else:
+        prefix = repr(content)[:SCHEMA_SMOKE_CONTENT_PREFIX_CHARS]
+    return f"content_type={content_type} content_prefix={ascii(prefix)}"
+
+
 def _post_schema_smoke(manifest: LockManifest) -> None:
     runtime = manifest.runtime
     url = f"http://{runtime['host']}:{runtime['port']}/v1/chat/completions"
+    expected_json = json.dumps({"status": "ok"}, separators=(",", ":"))
     schema = {
         "type": "object",
         "properties": {"status": {"type": "string", "const": "ok"}},
@@ -1385,7 +1399,13 @@ def _post_schema_smoke(manifest: LockManifest) -> None:
         "model": manifest.model_file,
         "messages": [
             {"role": "system", "content": manifest.runtime["non_thinking"]},
-            {"role": "user", "content": "Return the locked smoke object."},
+            {
+                "role": "user",
+                "content": (
+                    f"{runtime['non_thinking']}\n"
+                    f"Final output must be exactly {expected_json}; output only that object."
+                ),
+            },
         ],
         "stream": manifest.runtime["stream"],
         "max_tokens": manifest.runtime["max_output"],
@@ -1402,13 +1422,20 @@ def _post_schema_smoke(manifest: LockManifest) -> None:
             payload = json.loads(response.read().decode("utf-8"))
     except (OSError, URLError, json.JSONDecodeError) as error:
         raise ArtifactError("loopback JSON-schema smoke failed") from error
+    content: object = _MISSING_SCHEMA_SMOKE_CONTENT
     try:
         content = payload["choices"][0]["message"]["content"]
         result = json.loads(content)
     except (KeyError, IndexError, TypeError, json.JSONDecodeError) as error:
-        raise ArtifactError("loopback JSON-schema smoke returned invalid content") from error
+        evidence = _schema_smoke_content_evidence(content)
+        raise ArtifactError(
+            f"loopback JSON-schema smoke returned invalid content ({evidence})"
+        ) from error
     if result != {"status": "ok"}:
-        raise ArtifactError("loopback JSON-schema smoke returned an unexpected object")
+        evidence = _schema_smoke_content_evidence(content)
+        raise ArtifactError(
+            f"loopback JSON-schema smoke returned an unexpected object ({evidence})"
+        )
 
 
 def _terminate_process_group(process: subprocess.Popen[Any]) -> bool:
