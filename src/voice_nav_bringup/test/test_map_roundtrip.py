@@ -274,14 +274,50 @@ def test_trusted_id_and_overwrite_guard_run_before_process_start(tmp_path: Path)
     assert starts == []
 
 
-def test_production_command_is_fixed_and_has_no_caller_mode_arguments():
+def test_production_command_has_one_closed_display_choice():
     module = _load_roundtrip_module()
     assert module.build_production_command('mapping') == (
         'ros2', 'run', 'voice_nav_bringup', 'voice_nav_app',
         '--mode', 'mapping', '--display', 'headless', '--input', 'vad-auto',
     )
+    assert module.build_production_command('navigation', 'gui') == (
+        'ros2', 'run', 'voice_nav_bringup', 'voice_nav_app',
+        '--mode', 'navigation', '--display', 'gui', '--input', 'vad-auto',
+    )
     with pytest.raises(module.RoundtripError):
         module.build_production_command('motion')
+    with pytest.raises(module.RoundtripError):
+        module.build_production_command('mapping', 'browser')
+
+
+def test_installed_entry_passes_gui_to_both_production_phases(monkeypatch):
+    module = _load_roundtrip_module()
+    selected: list[str] = []
+
+    class _Factory:
+        def __init__(self, display):
+            selected.append(display)
+
+    class _Supervisor:
+        def __init__(self, **_):
+            pass
+
+        def run(self):
+            return module.RoundtripResult(
+                status='completed',
+                map_id=module.TRUSTED_MAP_ID,
+                package_root=Path('/tmp/map'),
+            )
+
+    monkeypatch.setattr(module, 'ProductionProcessFactory', _Factory)
+    monkeypatch.setattr(
+        module, 'ProductionRoundtripObserver', lambda **_: object(),
+    )
+    monkeypatch.setattr(module, 'MapRoundtripSupervisor', _Supervisor)
+
+    output = io.StringIO()
+    assert module.main(['--display', 'gui'], stdout=output) == 0
+    assert selected == ['gui']
 
 
 def test_observed_process_forwards_prefixed_output_and_bounds_recent_ring(
