@@ -16,14 +16,13 @@
 """Installed simulation-only app wrapper for the existing command console."""
 
 import argparse
+from dataclasses import dataclass
 import json
 import os
 import runpy
-import signal
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
 from typing import Literal
 
 
@@ -130,11 +129,8 @@ _SESSION_SPECS = {
 }
 SESSION_COMMAND = _SESSION_SPECS[('motion', 'headless')].command
 READINESS_TIMEOUT_S = 60.0
-GRACEFUL_SHUTDOWN_TIMEOUT_S = 10.0
-TERMINATE_SHUTDOWN_TIMEOUT_S = 5.0
 COMMAND_GATEWAY_SERVICE = '/voice_nav_command_gateway/set_parameters'
 _OWNED_RCLPY_CONTEXT = False
-_CleanupStage = Literal['graceful', 'terminated', 'killed', 'failed']
 
 
 def _selected_session_spec(
@@ -353,6 +349,7 @@ def _wait_for_command_gateway_readiness(
 _MODE_READINESS = None
 _SENSEVOICE_INPUT = None
 _CHAOWEN_ASSET_VERIFIER = None
+_PROCESS_LIFECYCLE = None
 
 
 def _sensevoice_input_module():
@@ -365,6 +362,18 @@ def _sensevoice_input_module():
         )
         _SENSEVOICE_INPUT = runpy.run_path(helper_path)
     return _SENSEVOICE_INPUT
+
+
+def _process_lifecycle_module():
+    """Load the one installed process lifecycle implementation."""
+    global _PROCESS_LIFECYCLE
+
+    if _PROCESS_LIFECYCLE is None:
+        helper_path = os.path.join(
+            os.path.dirname(__file__), '_process_lifecycle.py',
+        )
+        _PROCESS_LIFECYCLE = runpy.run_path(helper_path)
+    return _PROCESS_LIFECYCLE
 
 
 def _chaowen_asset_verifier_module():
@@ -454,82 +463,7 @@ def _run_existing_console(*, stdin, stdout) -> int:
         transport.close()
 
 
-def _poll(process):
-    poll = getattr(process, 'poll', None)
-    if poll is None:
-        return None
-    try:
-        return poll()
-    except Exception:
-        return None
-
-
-def _send_group_signal(process, signum) -> bool:
-    """Signal only the process group owned by this app."""
-    group_signal = getattr(process, 'send_group_signal', None)
-    if group_signal is not None:
-        try:
-            group_signal(signum)
-            return True
-        except Exception:
-            return False
-
-    group_id = getattr(process, 'process_group_id', None)
-    if os.name != 'nt' and group_id is not None:
-        try:
-            os.killpg(group_id, signum)
-        except ProcessLookupError:
-            return True
-        except OSError:
-            return False
-        return True
-
-    send_signal = getattr(process, 'send_signal', None)
-    if send_signal is None:
-        return False
-    try:
-        if os.name == 'nt' and signum == signal.SIGINT:
-            send_signal(signal.CTRL_BREAK_EVENT)
-        else:
-            send_signal(signum)
-    except Exception:
-        return False
-    return True
-
-
-def _wait_for_exit(process, timeout_s: float, clock) -> bool:
-    """Wait once for a bounded phase, using the injected monotonic clock."""
-    deadline = _clock_now(clock) + timeout_s
-    remaining = max(0.0, deadline - _clock_now(clock))
-    try:
-        process.wait(timeout=remaining)
-    except (subprocess.TimeoutExpired, TimeoutError):
-        return _poll(process) is not None
-    except Exception:
-        return _poll(process) is not None
-    return True
-
-
-def _cleanup_owned_session(process, clock) -> _CleanupStage:
-    """Stop only the owned process group and report the strongest stage."""
-    if process is None or _poll(process) is not None:
-        return 'graceful'
-
-    if not _send_group_signal(process, signal.SIGINT):
-        return 'failed'
-    if _wait_for_exit(process, GRACEFUL_SHUTDOWN_TIMEOUT_S, clock):
-        return 'graceful'
-    if not _send_group_signal(process, signal.SIGTERM):
-        return 'failed'
-    if _wait_for_exit(process, TERMINATE_SHUTDOWN_TIMEOUT_S, clock):
-        return 'terminated'
-    if not _send_group_signal(process, signal.SIGKILL):
-        return 'failed'
-    try:
-        process.wait()
-    except Exception:
-        return 'killed' if _poll(process) is not None else 'failed'
-    return 'killed' if _poll(process) is not None else 'failed'
+_poll = _process_lifecycle_module()['poll_process']
 
 
 def _readiness_is_ready(result) -> bool:
@@ -540,6 +474,7 @@ def _readiness_is_ready(result) -> bool:
 
 def _run_selected_input(
     process,
+    owner_process,
     input_spec,
     console_main,
     clock,
@@ -550,7 +485,9 @@ def _run_selected_input(
     """Run exactly the chosen frontend after shared readiness succeeds."""
     if input_spec.profile == 'vad-auto':
         try:
-            process.wait()
+            outcome = _process_lifecycle_module()[
+                'wait_for_frontend_or_owner_exit'
+            ](process, owner_process)
         except KeyboardInterrupt:
             return 130
         except Exception as error:
@@ -560,6 +497,12 @@ def _run_selected_input(
                     'unavailable',
                     f'vad_auto_failed:{_reason(error)}',
                 ),
+            )
+            return 1
+        if outcome == 'owner_exited':
+            _write_result(
+                stdout,
+                _stable_result('unavailable', 'session_exited_during_input'),
             )
             return 1
         return 0 if _poll(process) == 0 else 1
@@ -730,6 +673,12 @@ def _run_started_session(
                 )
                 return 1
 
+    if _poll(process) is not None:
+        _write_result(
+            run.stdout,
+            _stable_result('unavailable', 'session_exited_before_input'),
+        )
+        return 1
     if _poll(input_process) is not None:
         if input_spec.profile == 'console':
             _write_result(
@@ -741,6 +690,7 @@ def _run_started_session(
     _write_result(run.stdout, _stable_result('ready'))
     input_result = _run_selected_input(
         input_process,
+        process,
         input_spec,
         run.console_main,
         run.clock,
@@ -827,12 +777,16 @@ def run_app(
         exit_code = 1
     finally:
         cleanup_stage = 'graceful'
+        lifecycle = _process_lifecycle_module()
         for process in reversed(owned_processes):
             try:
-                process_stage = _cleanup_owned_session(process, clock)
+                process_stage = lifecycle['close_owned_process'](process)
             except Exception:
                 process_stage = 'failed'
-            if cleanup_stage == 'graceful' and process_stage != 'graceful':
+            if (
+                cleanup_stage == 'graceful'
+                and process_stage not in lifecycle['NORMAL_CLEANUP_STAGES']
+            ):
                 cleanup_stage = process_stage
         if exit_code == 0 and cleanup_stage != 'graceful':
             _write_result(
@@ -958,7 +912,8 @@ def main(
 
     base_session_spec = _SESSION_SPECS[(arguments.mode, arguments.display)]
     session_spec = _selected_session_spec(base_session_spec, input_spec)
-    if process_factory is None:
+    production_process_factory = process_factory is None
+    if production_process_factory:
         process_factory = _spawn_session
     if readiness is None:
         readiness = (
@@ -968,20 +923,43 @@ def main(
         )
     if console_main is None:
         console_main = _run_existing_console
-    return run_app(
-        process_factory,
-        readiness,
-        console_main,
-        clock,
-        stdout,
-        stderr,
-        stdin,
-        session_spec,
-        mode_readiness,
-        input_spec,
-        frontend_factory,
-        frontend_readiness,
-    )
+
+    def invoke() -> int:
+        return run_app(
+            process_factory,
+            readiness,
+            console_main,
+            clock,
+            stdout,
+            stderr,
+            stdin,
+            session_spec,
+            mode_readiness,
+            input_spec,
+            frontend_factory,
+            frontend_readiness,
+        )
+
+    if not production_process_factory:
+        return invoke()
+    lifecycle = _process_lifecycle_module()
+    try:
+        lease = lifecycle['acquire_session_lease']()
+    except lifecycle['SessionBusyError']:
+        _write_result(
+            stdout, _stable_result('unavailable', 'session_already_running'),
+        )
+        return 1
+    except lifecycle['SessionLeaseError'] as error:
+        _write_result(
+            stdout,
+            _stable_result(
+                'unavailable', f'session_lease_failed:{_reason(error)}',
+            ),
+        )
+        return 1
+    with lease:
+        return invoke()
 
 
 if __name__ == '__main__':

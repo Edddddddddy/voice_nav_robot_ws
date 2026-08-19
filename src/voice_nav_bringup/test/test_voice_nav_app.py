@@ -20,11 +20,11 @@ import ast
 import builtins
 import hashlib
 import importlib.util
-import signal
-import wave
 from io import StringIO
 from pathlib import Path
+import signal
 from types import SimpleNamespace
+import wave
 
 
 def _load_app_module():
@@ -132,8 +132,6 @@ class _InteractiveFakeProcess(_FakeProcess):
 
     def wait(self, timeout=None):
         self.wait_timeouts.append(timeout)
-        if timeout is not None:
-            raise TimeoutError('interactive frontend must not be timed')
         self.returncode = 0
         return self.returncode
 
@@ -471,7 +469,7 @@ class _SlowFakeProcess(_FakeProcess):
 class _StubbornFakeProcess(_FakeProcess):
     def wait(self, timeout=None):
         self.wait_timeouts.append(timeout)
-        if timeout is not None:
+        if timeout != 1.0:
             raise TimeoutError('shutdown still running')
         self.returncode = -signal.SIGKILL
         return self.returncode
@@ -1063,6 +1061,42 @@ def test_vad_auto_frontend_failure_is_unavailable_before_ready():
     assert session_process.group_signals == [signal.SIGINT]
 
 
+def test_vad_auto_session_exit_during_frontend_readiness_never_reports_ready():
+    """Cancel the frontend when the owned product session disappears."""
+    app = _load_app_module()
+    session_process = _FakeProcess()
+    frontend_process = _FakeProcess()
+    stdout = StringIO()
+
+    def frontend_readiness(*_args):
+        session_process.returncode = 17
+        return {'status': 'ready', 'reason': ''}
+
+    result = app.main(
+        [
+            '--mode', 'mapping', '--display', 'headless',
+            '--input', 'vad-auto',
+        ],
+        process_factory=lambda *_args, **_kwargs: session_process,
+        frontend_factory=lambda *_args, **_kwargs: frontend_process,
+        readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        frontend_readiness=frontend_readiness,
+        mode_readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        clock=lambda: 0.0,
+        stdout=stdout,
+        stderr=StringIO(),
+    )
+
+    assert result == 1
+    assert '"status":"ready"' not in stdout.getvalue()
+    assert stdout.getvalue() == (
+        '{"reason":"session_exited_before_input",'
+        '"status":"unavailable"}\n'
+    )
+    assert frontend_process.group_signals == [signal.SIGINT]
+    assert session_process.group_signals == []
+
+
 def test_vad_auto_waits_for_child_after_startup_deadline():
     """Do not apply the readiness deadline to the continuous VAD child."""
     app = _load_app_module()
@@ -1089,7 +1123,49 @@ def test_vad_auto_waits_for_child_after_startup_deadline():
     )
 
     assert result == 0
-    assert frontend_process.wait_timeouts == [None]
+    assert frontend_process.wait_timeouts == [0.05]
+
+
+def test_vad_auto_session_exit_during_continuous_input_stops_frontend():
+    """Treat loss of the product session as the terminal input failure."""
+    app = _load_app_module()
+    session_process = _FakeProcess()
+    stdout = StringIO()
+
+    class _Frontend(_FakeProcess):
+        def wait(self, timeout=None):
+            self.wait_timeouts.append(timeout)
+            session_process.returncode = 17
+            raise TimeoutError('continuous input is still running')
+
+        def send_group_signal(self, signum):
+            super().send_group_signal(signum)
+            self.returncode = 0
+
+    frontend_process = _Frontend()
+    result = app.main(
+        [
+            '--mode', 'mapping', '--display', 'headless',
+            '--input', 'vad-auto',
+        ],
+        process_factory=lambda *_args, **_kwargs: session_process,
+        frontend_factory=lambda *_args, **_kwargs: frontend_process,
+        readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        frontend_readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        mode_readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        clock=lambda: 0.0,
+        stdout=stdout,
+        stderr=StringIO(),
+    )
+
+    assert result == 1
+    assert stdout.getvalue() == (
+        '{"reason":"","status":"ready"}\n'
+        '{"reason":"session_exited_during_input",'
+        '"status":"unavailable"}\n'
+    )
+    assert frontend_process.group_signals == [signal.SIGINT]
+    assert session_process.group_signals == []
 
 
 def test_vad_auto_ctrl_c_returns_130_from_child_wait():
@@ -1113,7 +1189,7 @@ def test_vad_auto_ctrl_c_returns_130_from_child_wait():
     )
 
     assert result == 130
-    assert frontend_process.wait_timeouts[0] is None
+    assert frontend_process.wait_timeouts[0] == 0.05
     assert frontend_process.group_signals == [signal.SIGINT]
 
 
@@ -1505,6 +1581,68 @@ def test_startup_failure_is_structured_nonzero_and_does_not_enter_console():
     )
 
 
+def test_second_production_app_in_same_domain_fails_before_session_spawn(
+    monkeypatch, tmp_path,
+):
+    """Do not create a second Gazebo/controller graph in one ROS domain."""
+    app = _load_app_module()
+    monkeypatch.setenv('XDG_RUNTIME_DIR', str(tmp_path))
+    monkeypatch.setenv('ROS_DOMAIN_ID', '184')
+    starts = []
+    stdout = StringIO()
+    monkeypatch.setattr(
+        app,
+        '_spawn_session',
+        lambda *_args, **_kwargs: starts.append(True) or _FakeProcess(),
+    )
+
+    acquire = app._process_lifecycle_module()['acquire_session_lease']
+    with acquire():
+        result = app.main(
+            [],
+            readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+            console_main=lambda **_kwargs: 0,
+            clock=lambda: 0.0,
+            stdout=stdout,
+            stderr=StringIO(),
+        )
+
+    assert result == 1
+    assert starts == []
+    assert stdout.getvalue() == (
+        '{"reason":"session_already_running","status":"unavailable"}\n'
+    )
+
+
+def test_production_apps_in_different_domains_do_not_share_a_lease(
+    monkeypatch, tmp_path,
+):
+    """Keep isolated ROS domains independently runnable by one user."""
+    app = _load_app_module()
+    monkeypatch.setenv('XDG_RUNTIME_DIR', str(tmp_path))
+    starts = []
+    monkeypatch.setattr(
+        app,
+        '_spawn_session',
+        lambda *_args, **_kwargs: starts.append(True) or _FakeProcess(),
+    )
+
+    acquire = app._process_lifecycle_module()['acquire_session_lease']
+    with acquire(domain_id='184'):
+        monkeypatch.setenv('ROS_DOMAIN_ID', '185')
+        result = app.main(
+            [],
+            readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+            console_main=lambda **_kwargs: 0,
+            clock=lambda: 0.0,
+            stdout=StringIO(),
+            stderr=StringIO(),
+        )
+
+    assert result == 0
+    assert starts == [True]
+
+
 def test_readiness_failure_cleans_child_and_returns_nonzero():
     """Stop a started child when gateway readiness never becomes ready."""
     app = _load_app_module()
@@ -1686,7 +1824,7 @@ def test_stubborn_group_is_forced_after_both_bounded_shutdown_phases():
         signal.SIGTERM,
         signal.SIGKILL,
     ]
-    assert process.wait_timeouts == [10.0, 5.0, None]
+    assert process.wait_timeouts == [10.0, 5.0, 1.0]
 
 
 def test_app_static_authority_is_limited_to_process_and_gateway_readiness():
