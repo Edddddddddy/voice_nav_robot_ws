@@ -27,10 +27,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
-#include <unordered_map>
-#include <unordered_set>
 #include <utility>
-#include <variant>
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
@@ -42,18 +39,11 @@
 #include "voice_nav_interfaces/msg/mission_state.hpp"
 #include "voice_nav_interfaces/msg/mission_step.hpp"
 #include "voice_nav_interfaces/srv/stop_mission.hpp"
-#include "voice_nav_mission/action_admission_tracker.hpp"
 #include "voice_nav_mission/map_package.hpp"
 #include "voice_nav_mission/map_store_ros_adapter.hpp"
-#include "voice_nav_mission/mission_action_result_router.hpp"
 #include "voice_nav_mission/motion_authority_ros_adapter.hpp"
 #include "voice_nav_mission/relative_motion_ros_adapter.hpp"
-#include "voice_nav_mission/runtime_admission_gate.hpp"
-#include "voice_nav_mission/runtime_emergency_fence.hpp"
-#include "voice_nav_mission/runtime_execution_plane.hpp"
-#include "voice_nav_mission/runtime_event_ingress.hpp"
-#include "voice_nav_mission/runtime_event_queue.hpp"
-#include "voice_nav_mission/runtime_shutdown_coordinator.hpp"
+#include "../src/runtime_engine.hpp"
 
 namespace voice_nav_mission
 {
@@ -67,9 +57,61 @@ using MissionStepMessage = voice_nav_interfaces::msg::MissionStep;
 using GoalHandle = rclcpp_action::ServerGoalHandle<ExecuteMission>;
 using GoalUUID = rclcpp_action::GoalUUID;
 
-// Shared by the rclcpp_action server callbacks and the shutdown coordinator.
-// Each handler runs while the lifetime mutex is held, so shutdown cannot
-// destroy Node-owned state while an already-entered callback still uses it.
+// Shared by Gate, timer, STOP, and action callbacks.  A callback holds a
+// shared Engine handle while it is in flight; shutdown closes this ingress and
+// drains every entered callback before releasing the Engine.
+class RuntimeIngressLifetime final
+{
+public:
+  void bind(const std::shared_ptr<RuntimeEngine> & runtime)
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    runtime_ = runtime;
+  }
+
+  [[nodiscard]] std::shared_ptr<RuntimeEngine> acquire() noexcept
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!active_) {
+      return {};
+    }
+    auto runtime = runtime_.lock();
+    if (runtime) {
+      ++inflight_;
+    }
+    return runtime;
+  }
+
+  void release() noexcept
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (inflight_ > 0U) {
+      --inflight_;
+      if (inflight_ == 0U) {
+        condition_.notify_all();
+      }
+    }
+  }
+
+  void deactivate_and_drain() noexcept
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    active_ = false;
+    runtime_.reset();
+    condition_.wait(lock, [this]() {return inflight_ == 0U;});
+  }
+
+private:
+  std::weak_ptr<RuntimeEngine> runtime_;
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  std::size_t inflight_{0U};
+  bool active_{true};
+};
+
+// Action callbacks use the same ingress lifetime as Gate/timer/STOP.  Handler
+// function objects may retain Node state, but the shared ingress guarantees
+// they finish before shutdown releases that state.
 class ActionCallbackLifetime final
 {
 public:
@@ -80,10 +122,12 @@ public:
   using AcceptedHandler = std::function<void(const std::shared_ptr<GoalHandle> &)>;
 
   ActionCallbackLifetime(
+    std::shared_ptr<RuntimeIngressLifetime> ingress,
     GoalHandler goal_handler,
     CancelHandler cancel_handler,
     AcceptedHandler accepted_handler)
-  : goal_handler_(std::move(goal_handler)),
+  : ingress_(std::move(ingress)),
+    goal_handler_(std::move(goal_handler)),
     cancel_handler_(std::move(cancel_handler)),
     accepted_handler_(std::move(accepted_handler))
   {
@@ -93,43 +137,98 @@ public:
     const GoalUUID & uuid,
     std::shared_ptr<const ExecuteMission::Goal> goal)
   {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!active_ || !goal_handler_) {
+    const auto runtime = ingress_ ? ingress_->acquire() : nullptr;
+    GoalHandler handler;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (active_) {
+        handler = goal_handler_;
+      }
+    }
+    if (!runtime || !handler) {
+      if (runtime) {
+        ingress_->release();
+      }
       return rclcpp_action::GoalResponse::REJECT;
     }
-    return goal_handler_(uuid, std::move(goal));
+    try {
+      const auto response = handler(uuid, std::move(goal));
+      ingress_->release();
+      return response;
+    } catch (...) {
+      ingress_->release();
+      throw;
+    }
   }
 
   [[nodiscard]] rclcpp_action::CancelResponse on_cancel(
     const std::shared_ptr<GoalHandle> & goal_handle)
   {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!active_ || !cancel_handler_) {
+    const auto runtime = ingress_ ? ingress_->acquire() : nullptr;
+    CancelHandler handler;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (active_) {
+        handler = cancel_handler_;
+      }
+    }
+    if (!runtime || !handler) {
+      if (runtime) {
+        ingress_->release();
+      }
       return rclcpp_action::CancelResponse::REJECT;
     }
-    return cancel_handler_(goal_handle);
+    try {
+      const auto response = handler(goal_handle);
+      ingress_->release();
+      return response;
+    } catch (...) {
+      ingress_->release();
+      throw;
+    }
   }
 
   void on_accepted(const std::shared_ptr<GoalHandle> & goal_handle)
   {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (active_ && accepted_handler_) {
-      accepted_handler_(goal_handle);
+    const auto runtime = ingress_ ? ingress_->acquire() : nullptr;
+    AcceptedHandler handler;
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (active_) {
+        handler = accepted_handler_;
+      }
+    }
+    if (runtime && handler) {
+      try {
+        handler(goal_handle);
+        ingress_->release();
+      } catch (...) {
+        ingress_->release();
+        throw;
+      }
       return;
     }
-    // The provisional ticket is revoked by ActionAdmissionTracker during the
-    // bounded shutdown drain.  Jazzy does not expose a transport handoff
-    // guarantee for a callback that has not entered production on_accepted;
-    // do not fabricate a Result for that no-handle path.
+    if (runtime) {
+      ingress_->release();
+    }
+    // RuntimeEngine owns the provisional admission fence during the bounded
+    // shutdown drain.  Jazzy does not expose a transport handoff guarantee
+    // for a callback that has not entered production on_accepted; do not
+    // fabricate a Result for that no-handle path.
   }
 
   void deactivate() noexcept
   {
-    std::lock_guard<std::mutex> lock(mutex_);
-    active_ = false;
-    goal_handler_ = {};
-    cancel_handler_ = {};
-    accepted_handler_ = {};
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      active_ = false;
+      goal_handler_ = {};
+      cancel_handler_ = {};
+      accepted_handler_ = {};
+    }
+    if (ingress_) {
+      ingress_->deactivate_and_drain();
+    }
   }
 
   [[nodiscard]] bool active() const noexcept
@@ -139,6 +238,7 @@ public:
   }
 
 private:
+  std::shared_ptr<RuntimeIngressLifetime> ingress_;
   mutable std::mutex mutex_;
   GoalHandler goal_handler_;
   CancelHandler cancel_handler_;
@@ -161,85 +261,6 @@ constexpr float kTrustedMoveDistanceMaxM = 2.0F;
 constexpr float kTrustedRotateAngleMinRad = 0.05F;
 constexpr float kTrustedRotateAngleMaxRad = 6.283185F;
 
-struct StopWaiter
-{
-  std::mutex mutex;
-  std::condition_variable condition;
-  bool completed{false};
-  StopResponse response{};
-};
-
-struct AdmitEvent
-{
-  MissionGoal goal;
-  std::shared_ptr<GoalHandle> goal_handle;
-};
-
-struct CancelEvent
-{
-  std::uint64_t mission_id{0U};
-};
-
-struct StopEvent
-{
-  StopRequest request;
-  std::shared_ptr<StopWaiter> waiter;
-};
-
-struct TickEvent
-{
-  SteadyClockPort::TimePoint now{};
-};
-
-struct GateSnapshotEvent
-{
-  GateSnapshot snapshot;
-};
-
-struct ChildFeedbackEvent
-{
-  MotionToken token;
-  double progress{0.0};
-};
-
-struct ChildResultEvent
-{
-  MotionToken token;
-};
-
-struct QueueFaultEvent
-{
-  std::string detail;
-};
-
-using RuntimeEventPayload = std::variant<
-  AdmitEvent,
-  CancelEvent,
-  StopEvent,
-  TickEvent,
-  GateSnapshotEvent,
-  ChildFeedbackEvent,
-  ChildResultEvent,
-  QueueFaultEvent>;
-
-struct RuntimeEvent
-{
-  std::uint64_t generation{0U};
-  RuntimeEventPayload payload;
-};
-
-using RuntimeEventQueueType = RuntimeEventQueue<RuntimeEvent>;
-
-[[nodiscard]] RuntimeEventQueueType::Lane runtime_event_lane(
-  const RuntimeEvent & event) noexcept
-{
-  return std::holds_alternative<CancelEvent>(event.payload) ||
-         std::holds_alternative<StopEvent>(event.payload) ||
-         std::holds_alternative<ChildResultEvent>(event.payload) ||
-         std::holds_alternative<QueueFaultEvent>(event.payload) ?
-         RuntimeEventQueueType::Lane::Control : RuntimeEventQueueType::Lane::Normal;
-}
-
 class RosSteadyClock final : public SteadyClockPort
 {
 public:
@@ -249,6 +270,82 @@ public:
   }
 };
 
+class RosGoalSink final : public RuntimeGoalSink
+{
+public:
+  explicit RosGoalSink(std::shared_ptr<GoalHandle> goal_handle)
+  : goal_handle_(std::move(goal_handle))
+  {
+  }
+
+  [[nodiscard]] const void * identity() const noexcept override
+  {
+    return goal_handle_.get();
+  }
+
+  void deliver(const ActionResultDelivery & delivery) override
+  {
+    auto result = std::make_shared<ExecuteMission::Result>();
+    result->code = static_cast<std::uint16_t>(delivery.result.code);
+    result->failed_step = delivery.result.failed_step;
+    result->detail = delivery.result.detail;
+    if (delivery.status == OuterActionStatus::Succeeded) {
+      goal_handle_->succeed(result);
+    } else if (delivery.status == OuterActionStatus::Canceled) {
+      goal_handle_->canceled(result);
+    } else {
+      goal_handle_->abort(result);
+    }
+  }
+
+  void feedback(const MissionFeedback & value) override
+  {
+    auto message = std::make_shared<ExecuteMission::Feedback>();
+    message->phase = static_cast<std::uint8_t>(value.phase);
+    message->step_index = value.step_index;
+    message->progress = value.progress;
+    goal_handle_->publish_feedback(message);
+  }
+
+private:
+  std::shared_ptr<GoalHandle> goal_handle_;
+};
+
+class RosStateSink final : public RuntimeStateSink
+{
+public:
+  explicit RosStateSink(
+    rclcpp::Publisher<MissionStateMessage>::SharedPtr publisher)
+  : publisher_(std::move(publisher))
+  {
+  }
+
+  void publish(const RuntimeState & state) override
+  {
+    if (!publisher_) {
+      return;
+    }
+    MissionStateMessage message;
+    message.runtime_instance_id = state.runtime_instance_id;
+    message.admission_epoch = state.admission_epoch;
+    message.operating_mode = static_cast<std::uint8_t>(state.operating_mode);
+    message.availability = static_cast<std::uint8_t>(state.availability);
+    message.gate_state = state.gate_state == GateState::Faulted ?
+      MissionStateMessage::GATE_FAULTED :
+      (state.gate_state == GateState::Armed ?
+      MissionStateMessage::GATE_ARMED : MissionStateMessage::GATE_INHIBITED);
+    message.active_step = state.active_step;
+    message.supported_step_mask = state.supported_step_mask;
+    message.max_steps = state.max_steps;
+    message.named_place_ids.assign(
+      state.named_place_ids.begin(), state.named_place_ids.end());
+    publisher_->publish(message);
+  }
+
+private:
+  rclcpp::Publisher<MissionStateMessage>::SharedPtr publisher_;
+};
+
 }  // namespace
 
 class MissionRuntimeNode final : public rclcpp::Node
@@ -256,44 +353,12 @@ class MissionRuntimeNode final : public rclcpp::Node
 public:
   explicit MissionRuntimeNode(const rclcpp::NodeOptions & options = rclcpp::NodeOptions())
   : Node("mission_runtime_node", options),
-    clock_(std::make_shared<RosSteadyClock>()),
-    action_admission_tracker_([this]() {return clock_->now();}),
-    admission_gate_(),
-    event_queue_([]() {
-        return RuntimeEvent{0U, QueueFaultEvent{"Runtime event queue overflow"}};
-      }),
-    emergency_fence_(1U),
-    event_ingress_(
-      event_queue_,
-      emergency_fence_,
-      runtime_event_lane,
-      [this]() {request_independent_emergency();},
-      [this](const RuntimeEmergencyFenceSnapshot & snapshot) {
-        if (execution_plane_ && execution_plane_->core()) {
-          std::lock_guard<std::recursive_mutex> lock(
-            execution_plane_->core_serial_mutex());
-          execution_plane_->core()->fail_closed_at_epoch(
-            snapshot.admission_epoch, snapshot.detail);
-        }
-        // Keep completion cleanup independently wakeable even after this
-        // one-shot fence has been consumed by the runtime worker.
-        if (execution_plane_) {
-          execution_plane_->completion_mailbox().request_reap();
-        }
-      },
-      [](const RuntimeEvent & event) {
-        return std::holds_alternative<CancelEvent>(event.payload) ||
-               std::holds_alternative<StopEvent>(event.payload);
-      })
+    clock_(std::make_shared<RosSteadyClock>())
   {
     if (std::string(get_fully_qualified_name()) != "/mission_runtime_node") {
       throw std::runtime_error("mission_runtime_node must run at /mission_runtime_node");
     }
     config_ = load_config();
-    config_.admission_epoch_advance =
-      [this](const std::uint64_t current, const std::uint64_t next) {
-        return emergency_fence_.advance_epoch(current, next);
-      };
     map_reader_ = std::make_unique<MapPackageReader>(default_map_root());
     if (config_.operating_mode == OperatingMode::Mapping) {
       map_upstream_ = std::make_shared<RosMapStoreUpstream>(*this);
@@ -302,7 +367,7 @@ public:
         [this](const std::filesystem::path & staging_directory) {
           return map_upstream_ ? map_upstream_->capture(staging_directory) :
                  ChildResult{ChildResultCode::DependencyUnavailable,
-                   "Map upstream is unavailable"};
+                 "Map upstream is unavailable"};
         },
         trusted_named_places_file_);
     }
@@ -326,98 +391,69 @@ public:
     auto state_qos = rclcpp::QoS(rclcpp::KeepLast(1));
     state_qos.reliable().transient_local();
     state_publisher_ = create_publisher<MissionStateMessage>(kStateTopic, state_qos);
+    auto ingress_lifetime = std::make_shared<RuntimeIngressLifetime>();
+    auto gate_observer =
+      std::make_shared<std::function<void(const GateSnapshot &)>>();
     authority_ = std::make_shared<RosMotionAuthorityPort>(
       *this,
       config_.control_response_deadline,
       config_.stop_barrier,
-      [this](const GateSnapshot & snapshot) {
-        (void)enqueue_internal_event(RuntimeEvent{0U, GateSnapshotEvent{snapshot}});
+      [gate_observer](const GateSnapshot & snapshot) {
+        if (*gate_observer) {
+          (*gate_observer)(snapshot);
+        }
       });
     const auto initial_gate_snapshot = authority_->snapshot();
-    RelativeMotionPolicy motion_policy;
-    motion_policy.stationarity_deadline = config_.stationarity_deadline;
-    MotionConditioningConfig conditioning_config;
-    conditioning_config.stop_barrier = config_.stop_barrier;
-    conditioning_config.collision_source_timeout = std::chrono::milliseconds(
-      kTrustedCollisionSourceTimeoutMs);
-    conditioning_config.transaction_plane = admission_gate_.transaction_plane();
-    conditioning_config.admission_fence_check = [this](const std::uint64_t epoch) {
-        return admission_gate_.admission_allowed(
-          epoch,
-          [this](const std::uint64_t value) {
-            return event_ingress_.admission_allowed(value);
-          });
-      };
-    conditioning_config.completion_relay = [this](RelativeMotionCompletionRecordPtr record) {
-        return execution_plane_ &&
-               execution_plane_->completion_mailbox().relay(std::move(record));
-      };
-    relative_motion_ = std::make_shared<RelativeMotionRosAdapter>(
-      *this, authority_, motion_policy, conditioning_config, named_place_resolver);
-    execution_plane_ = std::make_unique<RuntimeExecutionPlane>(
+    auto relative_slot =
+      std::make_shared<std::shared_ptr<RelativeMotionRosAdapter>>();
+    runtime_ = std::make_shared<RuntimeEngine>(
       config_,
       clock_,
       authority_,
-      relative_motion_,
-      [this](const RuntimeState & state) {publish_state(state);},
-      [this](std::uint64_t mission_id, const MissionFeedback & feedback) {
-        publish_feedback(mission_id, feedback);
+      initial_gate_snapshot,
+      [this, named_place_resolver, relative_slot](
+        const RuntimeEngine::MotionConditioningBindings & bindings) {
+        RelativeMotionPolicy motion_policy;
+        motion_policy.stationarity_deadline = config_.stationarity_deadline;
+        MotionConditioningConfig conditioning_config;
+        conditioning_config.stop_barrier = config_.stop_barrier;
+        conditioning_config.collision_source_timeout = std::chrono::milliseconds(
+          kTrustedCollisionSourceTimeoutMs);
+        conditioning_config.transaction_plane = bindings.transaction_plane;
+        conditioning_config.admission_fence_check = bindings.admission_fence_check;
+        conditioning_config.completion_relay = bindings.completion_relay;
+        auto relative = std::make_shared<RelativeMotionRosAdapter>(
+          *this, authority_, motion_policy, conditioning_config, named_place_resolver);
+        *relative_slot = relative;
+        return RuntimeEngine::ChildDependencies{
+        relative,
+        std::static_pointer_cast<NavigationPort>(relative),
+        map_store_};
       },
-      [this](std::uint64_t mission_id, const MissionResult & result) {
-        action_adapter_.finish(mission_id, result);
-      },
-      [this](const MotionToken & token, const double progress) {
-        return enqueue_internal_event(RuntimeEvent{
-          token.mission_generation, ChildFeedbackEvent{token, progress}});
-      },
-      [this](const std::uint64_t epoch) {
-        return admission_gate_.admission_allowed(
-          epoch,
-          [this](const std::uint64_t value) {
-            return event_ingress_.admission_allowed(value);
-          });
-      },
-      [this](const MotionToken & token) {
-        return enqueue_internal_event(RuntimeEvent{
-          token.mission_generation, ChildResultEvent{token}});
-      },
-      [this](std::string detail) {
-        request_emergency_fence(std::move(detail));
-      },
-      RuntimeExecutionPlane::ChildResultDeliveryDecorator{},
-      std::static_pointer_cast<NavigationPort>(relative_motion_),
-      map_store_);
-    shutdown_coordinator_ = std::make_unique<RuntimeShutdownCoordinator>(
-      [this]() {
-        return admission_gate_.close_generation(action_admission_tracker_);
-      },
-      [this](const RuntimeShutdownCoordinator::TimePoint deadline) {
-        timer_.reset();
-        stop_service_.reset();
-        if (relative_motion_) {
-          detail::begin_relative_motion_shutdown(*relative_motion_, deadline);
+      [relative_slot]() {
+        if (*relative_slot) {
+          (*relative_slot)->request_emergency_stop();
         }
       },
-      [this](const RuntimeShutdownCoordinator::TimePoint deadline) {
-        return wait_for_shutdown_conditions(deadline);
+      [relative_slot](const RuntimeEngine::TimePoint deadline) {
+        return *relative_slot && (*relative_slot)->emergency_stop(deadline);
       },
-      [this]() {request_independent_emergency();},
-      [this](std::string detail) {request_emergency_fence(std::move(detail));},
-      [this](std::string detail) {
-        if (execution_plane_ && execution_plane_->core()) {
-          std::lock_guard<std::recursive_mutex> lock(
-            execution_plane_->core_serial_mutex());
-          execution_plane_->core()->fail_closed_at_epoch(
-            emergency_fence_.admission_epoch(), std::move(detail));
+      [authority = authority_]() {authority->refresh_endpoint();},
+      std::make_shared<RosStateSink>(state_publisher_));
+    relative_motion_ = *relative_slot;
+    ingress_lifetime->bind(runtime_);
+    *gate_observer = [ingress_lifetime](const GateSnapshot & snapshot) {
+        const auto runtime = ingress_lifetime->acquire();
+        if (runtime) {
+          runtime->post(RuntimeEngine::GateSnapshotInput{snapshot});
+          ingress_lifetime->release();
         }
-      });
-    runtime_worker_ = std::thread([this]() {run_runtime_events();});
-    (void)enqueue_event(RuntimeEvent{
-        0U, GateSnapshotEvent{initial_gate_snapshot}});
+      };
 
     action_callback_group_ = create_callback_group(
       rclcpp::CallbackGroupType::Reentrant);
     action_callback_lifetime_ = std::make_shared<ActionCallbackLifetime>(
+      ingress_lifetime,
       [this](const GoalUUID & uuid, std::shared_ptr<const ExecuteMission::Goal> goal) {
         return on_goal(uuid, std::move(goal));
       },
@@ -447,17 +483,30 @@ public:
       action_callback_group_);
     stop_service_ = create_service<StopMission>(
       kStopService,
-      [this](
+      [this, ingress_lifetime](
         const std::shared_ptr<StopMission::Request> request,
         std::shared_ptr<StopMission::Response> response) {
-        on_stop(*request, *response);
+        const auto runtime = ingress_lifetime->acquire();
+        if (runtime) {
+          try {
+            on_stop(*runtime, *request, *response);
+          } catch (...) {
+            response->detail = "Runtime STOP callback raised";
+          }
+          ingress_lifetime->release();
+        } else {
+          response->detail = "Runtime is unavailable";
+        }
       });
     timer_ = create_wall_timer(
-      std::chrono::milliseconds(20), [this]() {
-        const auto now = clock_->now();
-        (void)action_admission_tracker_.revoke_expired(now);
-        (void)enqueue_event(RuntimeEvent{0U, TickEvent{now}});
+      std::chrono::milliseconds(20), [ingress_lifetime, clock = clock_]() {
+        const auto runtime = ingress_lifetime->acquire();
+        if (runtime) {
+          runtime->post(RuntimeEngine::TickInput{clock->now()});
+          ingress_lifetime->release();
+        }
       });
+    ingress_lifetime_ = std::move(ingress_lifetime);
     shutdown_context_ = get_node_base_interface()->get_context();
     shutdown_callback_handle_ = shutdown_context_->add_pre_shutdown_callback(
       [this]() {shutdown_barrier();});
@@ -478,23 +527,6 @@ private:
   {
     return std::string(
       reinterpret_cast<const char *>(uuid.data()), uuid.size());
-  }
-
-  [[nodiscard]] bool wait_for_action_admission_drain() noexcept
-  {
-    (void)action_admission_tracker_.revoke_expired(clock_->now());
-    const auto handoff_deadline = std::chrono::steady_clock::now() +
-      ActionAdmissionTracker::kDefaultHandoffDeadline;
-    if (action_admission_tracker_.wait_for_drain_until(handoff_deadline)) {
-      return true;
-    }
-    // A response may have been sent without an on_accepted callback.  Revoke
-    // those provisional tickets at the fixed bound, then give an already
-    // entered callback one separate short drain window.
-    (void)action_admission_tracker_.revoke_all_provisional(clock_->now());
-    const auto callback_deadline = std::chrono::steady_clock::now() +
-      ActionAdmissionTracker::kDefaultHandoffDeadline;
-    return action_admission_tracker_.wait_for_drain_until(callback_deadline);
   }
 
   void shutdown_barrier() noexcept
@@ -518,49 +550,35 @@ private:
 
     const auto shutdown_deadline = std::chrono::steady_clock::now() +
       config_.stop_barrier + config_.stationarity_deadline;
-    const auto shutdown_outcome = shutdown_coordinator_ ?
-      shutdown_coordinator_->run(shutdown_deadline) :
-      RuntimeShutdownCoordinator::Outcome{false, true};
-    if (!shutdown_outcome.transaction_drained) {
-      action_shutdown_fail_closed_ = true;
-    }
     if (action_callback_lifetime_) {
       action_callback_lifetime_->deactivate();
+    } else if (ingress_lifetime_) {
+      ingress_lifetime_->deactivate_and_drain();
     }
-    // The lifetime mutex and admission lease cover callbacks that have already
-    // entered production on_accepted.  A provisional ticket without that
-    // handoff is revoked at the fixed bound and has no fabricated Result.
-    const auto action_admission_drained = wait_for_action_admission_drain();
-    if (!action_admission_drained) {
-      action_shutdown_fail_closed_ = true;
-      request_independent_emergency();
-      request_emergency_fence(
-        "Action admission drain deadline expired; no-handle Result is not "
-        "guaranteed; SAFETY_FAULT");
-      RCLCPP_ERROR(
-        get_logger(),
-        "Action callback drain deadline expired; closing without fabricating a "
-        "no-handle Result and retaining fail-closed state");
-    }
-    event_queue_.close();
-    if (runtime_worker_.joinable()) {
-      runtime_worker_.join();
-    }
-    // An accepted production callback has already completed its handoff before
-    // this point; the runtime worker has also delivered active GoalHandles.
-    // If only a provisional/no-handle tombstone missed the bound, close the
-    // shared transport state without claiming that a client Result can still
-    // be delivered after context shutdown.
+    (void)runtime_->shutdown(
+      shutdown_deadline,
+      RuntimeEngine::ShutdownHooks{
+        [this](const RuntimeEngine::TimePoint deadline) {
+          timer_.reset();
+          stop_service_.reset();
+          if (relative_motion_) {
+            detail::begin_relative_motion_shutdown(*relative_motion_, deadline);
+          }
+        },
+        [this](const RuntimeEngine::TimePoint deadline) {
+          return relative_motion_ &&
+                 detail::wait_for_relative_motion_internal_completion(
+                   *relative_motion_, deadline);
+        },
+        [this]() {
+          if (relative_motion_) {
+            relative_motion_->finalize_shutdown();
+          }
+        }});
     action_server_.reset();
-    action_admission_tracker_.clear();
     action_callback_lifetime_.reset();
-    if (relative_motion_) {
-      relative_motion_->finalize_shutdown();
-    }
-    if (execution_plane_) {
-      execution_plane_->shutdown();
-      execution_plane_.reset();
-    }
+    runtime_.reset();
+    ingress_lifetime_.reset();
     relative_motion_.reset();
     authority_.reset();
 
@@ -570,53 +588,6 @@ private:
       shutdown_barrier_complete_ = true;
     }
     shutdown_condition_.notify_all();
-  }
-
-  [[nodiscard]] bool wait_for_shutdown_conditions(
-    const RuntimeShutdownCoordinator::TimePoint deadline) noexcept
-  {
-    bool internal_complete = false;
-    try {
-      internal_complete = relative_motion_ &&
-        detail::wait_for_relative_motion_internal_completion(
-        *relative_motion_, deadline);
-    } catch (...) {
-      internal_complete = false;
-    }
-
-    const auto transaction_drained = admission_gate_.wait_for_transaction_drain(
-      deadline);
-    bool gate_safe = false;
-    try {
-      const auto snapshot = authority_ ? authority_->snapshot() : GateSnapshot{};
-      gate_safe = relative_motion_ && relative_motion_->zero_proven() &&
-        snapshot.state == GateState::Inhibited && snapshot.motion_inhibited &&
-        snapshot.zero_selected && snapshot.zero_published;
-    } catch (...) {
-      gate_safe = false;
-    }
-    return internal_complete && transaction_drained && gate_safe &&
-           wait_for_runtime_terminal_until(deadline);
-  }
-
-  [[nodiscard]] bool wait_for_runtime_terminal_until(
-    const RuntimeShutdownCoordinator::TimePoint deadline) noexcept
-  {
-    std::unique_lock<std::mutex> lock(shutdown_completion_mutex_);
-    return runtime_terminal_condition_.wait_until(lock, deadline, [this]() {
-               bool goals_empty = false;
-               {
-                 std::lock_guard<std::recursive_mutex> goal_lock(mutex_);
-                 goals_empty = goals_.empty();
-               }
-               bool core_idle = true;
-               if (execution_plane_ && execution_plane_->core()) {
-                 std::lock_guard<std::recursive_mutex> core_lock(
-          execution_plane_->core_serial_mutex());
-                 core_idle = !execution_plane_->core()->has_active_mission();
-               }
-               return goals_empty && core_idle;
-    });
   }
 
   RuntimeConfig load_config()
@@ -713,13 +684,8 @@ private:
     const GoalUUID & uuid,
     const std::shared_ptr<const ExecuteMission::Goal> & goal)
   {
-    const auto uuid_key = goal_uuid_key(uuid);
-    if (!rclcpp::ok() || !admission_gate_.try_provision(
-        action_admission_tracker_, uuid_key, goal->admission_epoch,
-        [this](const std::uint64_t epoch) {
-          return !event_ingress_.blocked() &&
-                 event_ingress_.admission_allowed(epoch);
-        }))
+    if (!rclcpp::ok() || !runtime_ || !goal ||
+      !runtime_->authorize_admission(goal_uuid_key(uuid), goal->admission_epoch))
     {
       return rclcpp_action::GoalResponse::REJECT;
     }
@@ -731,29 +697,18 @@ private:
   rclcpp_action::CancelResponse on_cancel(
     const std::shared_ptr<GoalHandle> & goal_handle)
   {
-    std::optional<std::uint64_t> mission_id;
-    {
-      std::lock_guard<std::recursive_mutex> lock(mutex_);
-      for (const auto & entry : goals_) {
-        if (entry.second == goal_handle) {
-          mission_id = entry.first;
-          break;
-        }
-      }
-      if (!mission_id.has_value()) {
-        pending_goal_cancels_.insert(goal_handle.get());
-      }
-    }
-    if (mission_id.has_value()) {
-      (void)enqueue_event(RuntimeEvent{*mission_id, CancelEvent{*mission_id}});
+    if (runtime_ && goal_handle) {
+      runtime_->submit_cancel(goal_handle.get());
     }
     return rclcpp_action::CancelResponse::ACCEPT;
   }
 
   void on_accepted(const std::shared_ptr<GoalHandle> & goal_handle)
   {
+    if (!runtime_ || !goal_handle) {
+      return;
+    }
     const auto uuid_key = goal_uuid_key(goal_handle->get_goal_id());
-    auto admission_lease = action_admission_tracker_.enter_accepted(uuid_key);
     const auto goal_message = goal_handle->get_goal();
     MissionGoal goal;
     goal.source_instance_id = goal_message->source_instance_id;
@@ -765,335 +720,32 @@ private:
       goal.steps.push_back(MissionStep{
           step.kind, step.distance_m, step.angle_rad, step.target_id});
     }
-    const auto queued = admission_lease.has_ticket() &&
-      !admission_lease.was_revoked() && admission_gate_.submit([this, &goal,
-        goal_handle, goal_message]() {
-          if (event_ingress_.blocked() ||
-          !event_ingress_.admission_allowed(goal_message->admission_epoch))
-          {
-            return false;
-          }
-          return enqueue_internal_event(RuntimeEvent{
-          0U, AdmitEvent{std::move(goal), goal_handle}});
-      });
-    if (!queued) {
-      abort_goal(goal_handle, MissionResult{
-          MissionResultCode::SafetyFault, -1,
-          admission_gate_.quiescing() ? "Runtime is quiescing" :
-          "Runtime admission queue could not accept Mission admission"});
-    }
-  }
-
-  [[nodiscard]] bool enqueue_event(RuntimeEvent event) noexcept
-  {
-    return admission_gate_.submit([this, &event]() {
-               return enqueue_internal_event(std::move(event));
-    });
-  }
-
-  [[nodiscard]] bool enqueue_internal_event(RuntimeEvent event) noexcept
-  {
-    return event_ingress_.enqueue(std::move(event));
-  }
-
-  void request_independent_emergency() noexcept
-  {
-    if (!relative_motion_) {
-      return;
-    }
-    relative_motion_->request_emergency_stop();
-  }
-
-  void request_emergency_fence(std::string detail) noexcept
-  {
-    event_ingress_.request_emergency(std::move(detail));
-  }
-
-  void run_runtime_events()
-  {
-    event_ingress_.run(
-      [this](RuntimeEvent & event) {
-        std::lock_guard<std::recursive_mutex> lock(
-          execution_plane_->core_serial_mutex());
-        std::visit(
-          [this](auto & typed_event) {process_event(typed_event);},
-          event.payload);
-      },
-      [this](std::string detail) {
-        request_emergency_fence(std::move(detail));
-      });
-  }
-
-  void process_event(AdmitEvent & event)
-  {
-    if (!execution_plane_ || !execution_plane_->core()) {
-      abort_goal(event.goal_handle, MissionResult{
-          MissionResultCode::SafetyFault, -1,
-          "Runtime execution plane is unavailable"});
-      return;
-    }
-    const auto start_permit = admission_gate_.claim_start(
-      event.goal.admission_epoch);
-    if (!start_permit.issued) {
-      abort_goal(event.goal_handle, MissionResult{
-          MissionResultCode::SafetyFault, -1,
-          "Runtime admission was quiesced before dispatch"});
-      return;
-    }
-    std::uint64_t admitted_id = 0U;
-    bool cancel_after_admission = false;
-    action_adapter_.on_accepted(
-      event.goal,
-      [this, start_permit](const MissionGoal & value) {
-        return execution_plane_->core()->admit(
-          value,
-          [this, start_permit]() {
-            return admission_gate_.start_allowed(start_permit) &&
-                   event_ingress_.admission_allowed(start_permit.admission_epoch);
-          },
-          start_permit.generation);
-      },
-      [this, &event, &admitted_id, &cancel_after_admission](
-        const std::uint64_t mission_id) {
-        std::lock_guard<std::recursive_mutex> lock(mutex_);
-        goals_.emplace(mission_id, event.goal_handle);
-        admitted_id = mission_id;
-        const auto found = pending_goal_cancels_.find(event.goal_handle.get());
-        if (found != pending_goal_cancels_.end()) {
-          pending_goal_cancels_.erase(found);
-          cancel_after_admission = true;
-        }
-      },
-      [this](const std::uint64_t mission_id, const ActionResultDelivery & delivery) {
-        finish_goal(mission_id, delivery);
-      },
-      [this, &event](const MissionResult & result) {
-        {
-          std::lock_guard<std::recursive_mutex> lock(mutex_);
-          pending_goal_cancels_.erase(event.goal_handle.get());
-        }
-        abort_goal(event.goal_handle, result);
-      });
-    if (cancel_after_admission && admitted_id != 0U) {
-      execution_plane_->core()->cancel(admitted_id);
-    }
-  }
-
-  void process_event(CancelEvent & event)
-  {
-    execution_plane_->core()->cancel(event.mission_id);
-  }
-
-  void process_event(StopEvent & event)
-  {
-    StopResponse response;
-    try {
-      response = execution_plane_->core()->stop(event.request);
-    } catch (const std::exception & error) {
-      request_independent_emergency();
-      response = StopResponse{
-        2U, {}, 0U, false,
-        std::string{"STOP worker raised: "} + error.what()};
-      execution_plane_->core()->fail_closed(response.detail);
-    } catch (...) {
-      request_independent_emergency();
-      response = StopResponse{
-        2U, {}, 0U, false, "STOP worker raised an unknown exception"};
-      execution_plane_->core()->fail_closed(response.detail);
-    }
-    {
-      std::lock_guard<std::mutex> lock(event.waiter->mutex);
-      event.waiter->response = std::move(response);
-      event.waiter->completed = true;
-    }
-    event.waiter->condition.notify_one();
-  }
-
-  void process_event(TickEvent & event)
-  {
-    (void)action_admission_tracker_.revoke_expired(event.now);
-    authority_->refresh_endpoint();
-    execution_plane_->core()->on_tick();
-  }
-
-  void process_event(GateSnapshotEvent & event)
-  {
-    execution_plane_->core()->observe_gate(event.snapshot);
-  }
-
-  void process_event(ChildFeedbackEvent & event)
-  {
-    execution_plane_->core()->on_child_feedback(event.token, event.progress);
-  }
-
-  void process_event(ChildResultEvent & event)
-  {
-    const auto dispatch = execution_plane_->completion_mailbox().take(event.token);
-    if (!dispatch.has_value()) {
-      return;
-    }
-    try {
-      if (dispatch->delivery) {
-        dispatch->delivery(dispatch->record->token, dispatch->record->result);
-      }
-    } catch (...) {
-      request_emergency_fence("Node completion delivery raised");
-    }
-  }
-
-  void process_event(QueueFaultEvent & event)
-  {
-    request_emergency_fence(event.detail);
-  }
-
-  static void abort_goal(
-    const std::shared_ptr<GoalHandle> & goal_handle,
-    const MissionResult & result)
-  {
-    auto action_result = std::make_shared<ExecuteMission::Result>();
-    fill_result(result, *action_result);
-    goal_handle->abort(action_result);
+    runtime_->submit_admission(
+      uuid_key, std::move(goal), std::make_shared<RosGoalSink>(goal_handle));
   }
 
   void on_stop(
+    RuntimeEngine & runtime,
     const StopMission::Request & request,
     StopMission::Response & response)
   {
-    auto waiter = std::make_shared<StopWaiter>();
-    const auto accepted = enqueue_event(RuntimeEvent{
-        0U,
-        StopEvent{
-          StopRequest{
-            request.request_id,
-            request.source_instance_id,
-            request.source_seq,
-            request.reason},
-          waiter}});
-    if (!accepted) {
-      const auto emergency_deadline = std::chrono::steady_clock::now() +
-        config_.stationarity_deadline + config_.stop_barrier;
-      bool zero_proven = false;
-      if (relative_motion_) {
-        try {
-          zero_proven = relative_motion_->emergency_stop(emergency_deadline);
-        } catch (...) {
-          zero_proven = false;
-        }
-      }
-      const auto state = state_snapshot();
-      response.code = 2U;
-      response.runtime_instance_id = state.runtime_instance_id;
-      response.admission_epoch = state.admission_epoch;
-      response.motion_inhibited = zero_proven;
-      response.detail = "Runtime event queue could not accept STOP";
-      return;
-    }
-    std::unique_lock<std::mutex> lock(waiter->mutex);
-    const auto wait_deadline = std::chrono::steady_clock::now() +
-      config_.stationarity_deadline + config_.stop_barrier;
-    if (!waiter->condition.wait_until(
-        lock, wait_deadline, [waiter]() {return waiter->completed;}))
-    {
-      request_independent_emergency();
-      const auto state = state_snapshot();
-      response.code = 2U;
-      response.runtime_instance_id = state.runtime_instance_id;
-      response.admission_epoch = state.admission_epoch;
-      response.motion_inhibited = relative_motion_ && relative_motion_->zero_proven();
-      response.detail = "STOP response deadline expired before zero proof";
-      return;
-    }
-    response.code = waiter->response.code;
-    response.runtime_instance_id = waiter->response.runtime_instance_id;
-    response.admission_epoch = waiter->response.admission_epoch;
-    response.motion_inhibited = waiter->response.motion_inhibited;
-    response.detail = waiter->response.detail;
-  }
-
-  void finish_goal(
-    std::uint64_t mission_id,
-    const ActionResultDelivery & delivery)
-  {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    const auto found = goals_.find(mission_id);
-    if (found == goals_.end()) {
-      return;
-    }
-    auto action_result = std::make_shared<ExecuteMission::Result>();
-    fill_result(delivery.result, *action_result);
-    if (delivery.status == OuterActionStatus::Succeeded) {
-      found->second->succeed(action_result);
-    } else if (delivery.status == OuterActionStatus::Canceled) {
-      found->second->canceled(action_result);
-    } else {
-      found->second->abort(action_result);
-    }
-    goals_.erase(found);
-    runtime_terminal_condition_.notify_all();
-  }
-
-  static void fill_result(
-    const MissionResult & source,
-    ExecuteMission::Result & target)
-  {
-    target.code = static_cast<std::uint16_t>(source.code);
-    target.failed_step = source.failed_step;
-    target.detail = source.detail;
-  }
-
-  void publish_feedback(
-    std::uint64_t mission_id,
-    const MissionFeedback & feedback)
-  {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    const auto found = goals_.find(mission_id);
-    if (found == goals_.end()) {
-      return;
-    }
-    auto message = std::make_shared<ExecuteMission::Feedback>();
-    message->phase = static_cast<std::uint8_t>(feedback.phase);
-    message->step_index = feedback.step_index;
-    message->progress = feedback.progress;
-    found->second->publish_feedback(message);
-  }
-
-  void publish_state(const RuntimeState & state)
-  {
-    {
-      std::lock_guard<std::recursive_mutex> lock(mutex_);
-      cached_state_ = state;
-      cached_state_valid_ = true;
-    }
-    if (!state_publisher_) {
-      return;
-    }
-    MissionStateMessage message;
-    message.runtime_instance_id = state.runtime_instance_id;
-    message.admission_epoch = state.admission_epoch;
-    message.operating_mode = static_cast<std::uint8_t>(state.operating_mode);
-    message.availability = static_cast<std::uint8_t>(state.availability);
-    message.gate_state = state.gate_state == GateState::Faulted ?
-      MissionStateMessage::GATE_FAULTED :
-      (state.gate_state == GateState::Armed ?
-      MissionStateMessage::GATE_ARMED : MissionStateMessage::GATE_INHIBITED);
-    message.active_step = state.active_step;
-    message.supported_step_mask = state.supported_step_mask;
-    message.max_steps = state.max_steps;
-    message.named_place_ids.assign(
-      state.named_place_ids.begin(), state.named_place_ids.end());
-    state_publisher_->publish(message);
-  }
-
-  [[nodiscard]] RuntimeState state_snapshot()
-  {
-    std::lock_guard<std::recursive_mutex> lock(mutex_);
-    return cached_state_;
+    StopResponse stop_response;
+    runtime.submit_stop(
+      StopRequest{
+        request.request_id,
+        request.source_instance_id,
+        request.source_seq,
+        request.reason},
+      stop_response);
+    response.code = stop_response.code;
+    response.runtime_instance_id = stop_response.runtime_instance_id;
+    response.admission_epoch = stop_response.admission_epoch;
+    response.motion_inhibited = stop_response.motion_inhibited;
+    response.detail = stop_response.detail;
   }
 
   RuntimeConfig config_;
   std::shared_ptr<RosSteadyClock> clock_;
-  ActionAdmissionTracker action_admission_tracker_;
-  RuntimeAdmissionGate admission_gate_;
   std::shared_ptr<RosMotionAuthorityPort> authority_;
   std::unique_ptr<MapPackageReader> map_reader_;
   std::shared_ptr<RosMapStoreUpstream> map_upstream_;
@@ -1101,34 +753,21 @@ private:
   std::string map_id_{"voice_mvp"};
   std::filesystem::path trusted_named_places_file_;
   std::shared_ptr<RelativeMotionRosAdapter> relative_motion_;
-  std::unique_ptr<RuntimeExecutionPlane> execution_plane_;
-  RuntimeEventQueueType event_queue_;
-  RuntimeEmergencyFence emergency_fence_{1U};
-  RuntimeEventIngress<RuntimeEvent> event_ingress_;
-  std::thread runtime_worker_;
-  std::unique_ptr<RuntimeShutdownCoordinator> shutdown_coordinator_;
-  std::recursive_mutex mutex_;
-  std::unordered_set<const GoalHandle *> pending_goal_cancels_;
-  RuntimeState cached_state_{};
-  bool cached_state_valid_{false};
+  std::shared_ptr<RuntimeEngine> runtime_;
   std::shared_ptr<rclcpp::Context> shutdown_context_;
   rclcpp::PreShutdownCallbackHandle shutdown_callback_handle_;
   std::mutex shutdown_mutex_;
-  std::mutex shutdown_completion_mutex_;
   std::condition_variable shutdown_condition_;
-  std::condition_variable runtime_terminal_condition_;
   std::thread::id shutdown_barrier_owner_{};
   bool shutdown_barrier_started_{false};
   bool shutdown_barrier_complete_{false};
-  bool action_shutdown_fail_closed_{false};
   rclcpp::Publisher<MissionStateMessage>::SharedPtr state_publisher_;
   rclcpp::CallbackGroup::SharedPtr action_callback_group_;
   std::shared_ptr<ActionCallbackLifetime> action_callback_lifetime_;
+  std::shared_ptr<RuntimeIngressLifetime> ingress_lifetime_;
   rclcpp_action::Server<ExecuteMission>::SharedPtr action_server_;
   rclcpp::Service<StopMission>::SharedPtr stop_service_;
   rclcpp::TimerBase::SharedPtr timer_;
-  MissionActionAdapterBoundary action_adapter_;
-  std::unordered_map<std::uint64_t, std::shared_ptr<GoalHandle>> goals_;
 };
 
 }  // namespace voice_nav_mission

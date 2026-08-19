@@ -23,14 +23,13 @@
 
 #include "voice_nav_mission/mission_runtime_core.hpp"
 #include "voice_nav_mission/runtime_completion_mailbox.hpp"
-#include "voice_nav_mission/runtime_terminal_handoff_lane.hpp"
 
 namespace voice_nav_mission
 {
 
 // Package-private production Module shared by MissionRuntimeNode and its
-// deterministic seam tests.  It owns the Core-to-Node completion handoff so
-// an Adapter thread can publish only immutable records; Core and Goal terminal
+// deterministic seam tests.  It owns the Core-to-Node completion mailbox so
+// Adapter threads publish only immutable records; Core and Goal terminal
 // delivery remain on the Node runtime worker.
 class RuntimeExecutionPlane final
 {
@@ -54,20 +53,10 @@ public:
     NodeCompletionMailbox::EmergencyRequest emergency_request,
     ChildResultDeliveryDecorator delivery_decorator = {},
     std::shared_ptr<NavigationPort> navigation = {},
-    std::shared_ptr<MapStorePort> map_store = {})
+    std::shared_ptr<MapStorePort> map_store = {},
+    NodeCompletionMailbox::TerminalEnqueue terminal_enqueue = {},
+    RuntimeCore::ChildResultDispatcher child_result_dispatcher = {})
   : emergency_request_(std::move(emergency_request)),
-    terminal_handoff_lane_(
-      [this](const MotionToken & token, const ChildResult & result) {
-        std::lock_guard<std::recursive_mutex> lock(core_serial_mutex_);
-        if (core_) {
-          core_->on_child_result(token, result);
-        }
-      },
-      [this](std::string detail) {
-        if (emergency_request_) {
-          emergency_request_(std::move(detail));
-        }
-      }),
     completion_mailbox_(
       std::move(token_enqueue),
       [this](std::string detail) {
@@ -75,9 +64,7 @@ public:
           emergency_request_(std::move(detail));
         }
       },
-      [this](const MotionToken & token, const ChildResult & result) {
-        return terminal_handoff_lane_.enqueue(token, result);
-      }),
+      std::move(terminal_enqueue)),
     completion_reaper_(completion_mailbox_),
     core_(std::make_unique<RuntimeCore>(
       std::move(config),
@@ -88,7 +75,7 @@ public:
       std::move(feedback_callback),
       std::move(result_callback),
       std::move(child_feedback_dispatcher),
-      RuntimeCore::ChildResultDispatcher{},
+      std::move(child_result_dispatcher),
       std::move(admission_fence_check),
         [this, decorator = std::move(delivery_decorator)](
           const MotionToken & token, RuntimeCore::ChildResultDelivery delivery) mutable {
@@ -133,11 +120,6 @@ public:
     return core_serial_mutex_;
   }
 
-  [[nodiscard]] NodeTerminalHandoffLane & terminal_handoff_lane() noexcept
-  {
-    return terminal_handoff_lane_;
-  }
-
   [[nodiscard]] std::thread::id completion_reaper_thread_id() const noexcept
   {
     return completion_reaper_.thread_id();
@@ -150,7 +132,6 @@ public:
     }
     completion_mailbox_.close();
     completion_reaper_.stop();
-    terminal_handoff_lane_.stop();
     core_.reset();
     completion_mailbox_.stop();
     shutdown_complete_ = true;
@@ -159,7 +140,6 @@ public:
 private:
   NodeCompletionMailbox::EmergencyRequest emergency_request_;
   std::recursive_mutex core_serial_mutex_;
-  NodeTerminalHandoffLane terminal_handoff_lane_;
   NodeCompletionMailbox completion_mailbox_;
   NodeCompletionReaper completion_reaper_;
   std::unique_ptr<RuntimeCore> core_;

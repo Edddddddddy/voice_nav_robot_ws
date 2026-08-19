@@ -21,7 +21,6 @@
 #include <thread>
 
 #include "voice_nav_mission/runtime_completion_mailbox.hpp"
-#include "voice_nav_mission/runtime_terminal_handoff_lane.hpp"
 
 namespace voice_nav_mission
 {
@@ -125,42 +124,6 @@ TEST(RuntimeCompletionMailboxTest, RepeatedConstructionAndStopAreJoinSafe)
     EXPECT_EQ(mailbox.entry_count(), 0U);
     EXPECT_EQ(mailbox.rejected_count(), 0U);
   }
-}
-
-TEST(RuntimeCompletionMailboxTest, RejectionUsesIndependentTerminalHandoffWorker)
-{
-  std::mutex mutex;
-  std::condition_variable condition;
-  std::size_t terminal_count = 0U;
-  std::thread::id terminal_thread;
-  ChildResultCode terminal_code = ChildResultCode::Failed;
-  NodeTerminalHandoffLane terminal_lane(
-    [&](const MotionToken &, const ChildResult & result) {
-      std::lock_guard<std::mutex> lock(mutex);
-      ++terminal_count;
-      terminal_thread = std::this_thread::get_id();
-      terminal_code = result.code;
-      condition.notify_all();
-    });
-  NodeCompletionMailbox mailbox(
-    [](const MotionToken &) {return false;},
-    [](std::string) {},
-    [&](const MotionToken & token, const ChildResult & result) {
-      return terminal_lane.enqueue(token, result);
-    });
-  NodeCompletionReaper reaper(mailbox);
-
-  const auto token = token_for(9U);
-  ASSERT_TRUE(mailbox.register_delivery(
-    token, [](const MotionToken &, const ChildResult &) {}));
-  EXPECT_FALSE(mailbox.relay(record_for(token)));
-
-  {
-    std::unique_lock<std::mutex> lock(mutex);
-    ASSERT_TRUE(condition.wait_for(lock, 2s, [&]() {return terminal_count == 1U;}));
-  }
-  EXPECT_EQ(terminal_code, ChildResultCode::SafetyFault);
-  EXPECT_NE(terminal_thread, std::this_thread::get_id());
 }
 
 }  // namespace

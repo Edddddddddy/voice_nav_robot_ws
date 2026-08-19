@@ -28,8 +28,8 @@ namespace voice_nav_mission
 // the already-running generation and wait for the joint safe conditions.  A
 // failed joint barrier never claims a clean generation: it requests
 // independent emergency handling, raises the admission fence, and
-// synchronously asks the Node-owned Core lane to select its SAFETY_FAULT
-// terminal before the outer shutdown proceeds to joins.
+// submits an immutable fail-closed control event before the outer shutdown
+// proceeds to joins; the RuntimeEngine worker owns the Core transition.
 class RuntimeShutdownCoordinator final
 {
 public:
@@ -39,7 +39,7 @@ public:
   using WaitForJointConditions = std::function<bool(TimePoint)>;
   using Emergency = std::function<void()>;
   using Fence = std::function<void(std::string)>;
-  using CoreFailClosed = std::function<void(std::string)>;
+  using FailClosedEvent = std::function<void(std::string)>;
 
   struct Outcome
   {
@@ -53,13 +53,13 @@ public:
     WaitForJointConditions wait_for_joint_conditions,
     Emergency emergency,
     Fence fence,
-    CoreFailClosed core_fail_closed)
+    FailClosedEvent fail_closed_event)
   : close_admission_(std::move(close_admission)),
     begin_running_shutdown_(std::move(begin_running_shutdown)),
     wait_for_joint_conditions_(std::move(wait_for_joint_conditions)),
     emergency_(std::move(emergency)),
     fence_(std::move(fence)),
-    core_fail_closed_(std::move(core_fail_closed))
+    fail_closed_event_(std::move(fail_closed_event))
   {
   }
 
@@ -109,8 +109,8 @@ public:
     } catch (...) {
     }
     try {
-      if (core_fail_closed_) {
-        core_fail_closed_(kDetail);
+      if (fail_closed_event_) {
+        fail_closed_event_(kDetail);
       }
     } catch (...) {
     }
@@ -123,7 +123,7 @@ private:
   WaitForJointConditions wait_for_joint_conditions_;
   Emergency emergency_;
   Fence fence_;
-  CoreFailClosed core_fail_closed_;
+  FailClosedEvent fail_closed_event_;
 };
 
 }  // namespace voice_nav_mission

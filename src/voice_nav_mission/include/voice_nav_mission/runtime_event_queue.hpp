@@ -166,6 +166,14 @@ public:
     condition_.notify_all();
   }
 
+  [[nodiscard]] std::deque<Event> drain_normal() noexcept
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::deque<Event> drained;
+    drained.swap(normal_events_);
+    return drained;
+  }
+
   [[nodiscard]] PushResult request_fault(Event event) noexcept
   {
     try {

@@ -36,15 +36,17 @@ class NodeCompletionMailbox final
 public:
   using TokenEnqueue = std::function<bool(const MotionToken &)>;
   using EmergencyRequest = std::function<void(std::string)>;
-  using TerminalHandoff = std::function<bool(const MotionToken &, const ChildResult &)>;
+  // This callback only enqueues immutable terminal data. It must never touch
+  // RuntimeCore directly; the RuntimeEngine worker owns that write.
+  using TerminalEnqueue = std::function<bool(const MotionToken &, const ChildResult &)>;
 
   NodeCompletionMailbox(
     TokenEnqueue token_enqueue,
     EmergencyRequest emergency_request,
-    TerminalHandoff terminal_handoff = {})
+    TerminalEnqueue terminal_enqueue = {})
   : token_enqueue_(std::move(token_enqueue)),
     emergency_request_(std::move(emergency_request)),
-    terminal_handoff_(std::move(terminal_handoff))
+    terminal_enqueue_(std::move(terminal_enqueue))
   {
   }
 
@@ -83,12 +85,12 @@ public:
     const auto result = record->result;
     if (!registry_.accept(record)) {
       const auto retained = registry_.reject(token, std::move(record));
-      const auto terminal_handed_off = handoff_terminal(token, result);
+      const auto terminal_enqueued = enqueue_terminal(token, result);
       reject(
         retained ? "Node completion registry rejected a terminal record" :
         "Node completion registry rejected and could not retain a terminal record");
-      if (!terminal_handed_off) {
-        reject("Node terminal handoff lane rejected a terminal record");
+      if (!terminal_enqueued) {
+        reject("Runtime terminal event ingress rejected a terminal record");
       }
       return false;
     }
@@ -100,13 +102,13 @@ public:
     }
     if (!accepted) {
       const auto retained = registry_.reject_accepted(token);
-      const auto terminal_handed_off = handoff_terminal(token, result);
+      const auto terminal_enqueued = enqueue_terminal(token, result);
       reject("Runtime event ingress rejected a terminal completion token");
       if (!retained) {
         reject("Node completion registry could not retain a rejected terminal entry");
       }
-      if (!terminal_handed_off) {
-        reject("Node terminal handoff lane rejected a terminal record");
+      if (!terminal_enqueued) {
+        reject("Runtime terminal event ingress rejected a terminal record");
       }
     }
     return accepted;
@@ -181,12 +183,12 @@ public:
   }
 
 private:
-  [[nodiscard]] bool handoff_terminal(
+  [[nodiscard]] bool enqueue_terminal(
     const MotionToken & token,
     const ChildResult & result) noexcept
   {
     try {
-      return terminal_handoff_ && terminal_handoff_(token, result);
+      return terminal_enqueue_ && terminal_enqueue_(token, result);
     } catch (...) {
       return false;
     }
@@ -207,7 +209,7 @@ private:
 
   TokenEnqueue token_enqueue_;
   EmergencyRequest emergency_request_;
-  TerminalHandoff terminal_handoff_;
+  TerminalEnqueue terminal_enqueue_;
   NodeCompletionRegistry registry_;
   mutable std::mutex reaper_mutex_;
   std::condition_variable reaper_condition_;

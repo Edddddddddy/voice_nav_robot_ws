@@ -42,6 +42,7 @@ public:
     std::function<void(const RuntimeEmergencyFenceSnapshot &)>;
   using EmergencyControlSelector = std::function<bool(const Event &)>;
   using BeforeDispatchCallback = std::function<void(Event &)>;
+  using ExternalWakeCallback = std::function<void()>;
 
   RuntimeEventIngress(
     Queue & queue,
@@ -50,20 +51,30 @@ public:
     EmergencyCallback emergency_callback,
     FenceCallback fence_callback,
     EmergencyControlSelector emergency_control_selector = {},
-    BeforeDispatchCallback before_dispatch_callback = {})
+    BeforeDispatchCallback before_dispatch_callback = {},
+    ExternalWakeCallback external_wake_callback = {})
   : queue_(queue),
     fence_(fence),
     lane_selector_(std::move(lane_selector)),
     emergency_callback_(std::move(emergency_callback)),
     fence_callback_(std::move(fence_callback)),
     emergency_control_selector_(std::move(emergency_control_selector)),
-    before_dispatch_callback_(std::move(before_dispatch_callback))
+    before_dispatch_callback_(std::move(before_dispatch_callback)),
+    external_wake_callback_(std::move(external_wake_callback))
   {
   }
 
   [[nodiscard]] bool enqueue(Event event) noexcept
   {
-    if (fence_.blocked()) {
+    bool emergency_control = false;
+    try {
+      emergency_control = emergency_control_selector_ &&
+        emergency_control_selector_(event);
+    } catch (...) {
+      request_emergency("Runtime event emergency selector failed");
+      return false;
+    }
+    if (fence_.blocked() && !emergency_control) {
       return false;
     }
     typename Queue::Lane lane;
@@ -123,6 +134,13 @@ public:
       }
       if (wait_result == Queue::WaitResult::ExternalWake) {
         (void)process_pending_fence();
+        try {
+          if (external_wake_callback_) {
+            external_wake_callback_();
+          }
+        } catch (...) {
+          request_emergency("Runtime external wake callback raised");
+        }
         continue;
       }
       try {
@@ -194,6 +212,7 @@ private:
   FenceCallback fence_callback_;
   EmergencyControlSelector emergency_control_selector_;
   BeforeDispatchCallback before_dispatch_callback_;
+  ExternalWakeCallback external_wake_callback_;
   mutable std::mutex dispatch_mutex_;
 };
 

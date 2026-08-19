@@ -169,6 +169,7 @@ target_link_libraries(
 add_executable(
   mission_runtime_node
   src/mission_runtime_node.cpp
+  src/runtime_engine.cpp
 )
 target_compile_features(mission_runtime_node PUBLIC cxx_std_17)
 target_include_directories(
@@ -254,6 +255,29 @@ if(BUILD_TESTING)
   )
   target_link_libraries(
     mission_runtime_core_test
+    mission_runtime_core
+  )
+
+  ament_add_gtest(
+    runtime_engine_test
+    test/runtime_engine_test.cpp
+    src/runtime_engine.cpp
+  )
+  target_compile_features(runtime_engine_test PUBLIC cxx_std_17)
+  target_include_directories(
+    runtime_engine_test
+    PRIVATE include src
+  )
+  ament_target_dependencies(
+    runtime_engine_test
+    geometry_msgs
+    nav_msgs
+    rclcpp
+    rosgraph_msgs
+    sensor_msgs
+  )
+  target_link_libraries(
+    runtime_engine_test
     mission_runtime_core
   )
 
@@ -353,44 +377,12 @@ if(BUILD_TESTING)
   )
 
   ament_add_gtest(
-    runtime_execution_plane_test
-    test/runtime_execution_plane_test.cpp
-  )
-  target_compile_features(runtime_execution_plane_test PUBLIC cxx_std_17)
-  target_include_directories(
-    runtime_execution_plane_test
-    PRIVATE include
-  )
-  ament_target_dependencies(
-    runtime_execution_plane_test
-    geometry_msgs
-    nav_msgs
-    rclcpp
-    rosgraph_msgs
-    sensor_msgs
-  )
-  target_link_libraries(
-    runtime_execution_plane_test
-    mission_runtime_core
-  )
-
-  ament_add_gtest(
     action_admission_tracker_test
     test/action_admission_tracker_test.cpp
   )
   target_compile_features(action_admission_tracker_test PUBLIC cxx_std_17)
   target_include_directories(
     action_admission_tracker_test
-    PRIVATE include
-  )
-
-  ament_add_gtest(
-    runtime_admission_gate_test
-    test/runtime_admission_gate_test.cpp
-  )
-  target_compile_features(runtime_admission_gate_test PUBLIC cxx_std_17)
-  target_include_directories(
-    runtime_admission_gate_test
     PRIVATE include
   )
 
@@ -452,16 +444,6 @@ if(BUILD_TESTING)
   target_link_libraries(
     motion_source_freshness_test
     motion_conditioning_pipeline
-  )
-
-  ament_add_gtest(
-    mission_action_result_router_test
-    test/mission_action_result_router_test.cpp
-  )
-  target_compile_features(mission_action_result_router_test PUBLIC cxx_std_17)
-  target_include_directories(
-    mission_action_result_router_test
-    PRIVATE include
   )
 
   ament_add_gtest(
