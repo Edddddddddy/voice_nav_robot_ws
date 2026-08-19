@@ -24,6 +24,7 @@ import math
 import os
 from pathlib import Path
 import re
+import runpy
 import signal
 import subprocess
 import sys
@@ -36,9 +37,6 @@ TRUSTED_MAP_ID = 'voice_mvp'
 NAVIGATION_PHRASE = '去书房'
 _MAP_ROOT_PARTS = ('voice_nav', 'maps')
 _DEFAULT_PHASE_TIMEOUT_S = 300.0
-_CLEANUP_GRACEFUL_TIMEOUT_S = 10.0
-_CLEANUP_TERMINATE_TIMEOUT_S = 5.0
-_CLEANUP_KILL_TIMEOUT_S = 1.0
 _MAPPING_MODE = 'mapping'
 _NAVIGATION_MODE = 'navigation'
 _EXPECTED_PACKAGE_FILES = (
@@ -58,6 +56,13 @@ _EXPECTED_VERSIONS = {
 Mode = Literal['mapping', 'navigation']
 Display = Literal['headless', 'gui']
 Clock = Callable[[], float]
+
+_PROCESS_LIFECYCLE = runpy.run_path(
+    str(Path(__file__).with_name('_process_lifecycle.py')),
+)
+close_owned_process = _PROCESS_LIFECYCLE['close_owned_process']
+is_process_live = _PROCESS_LIFECYCLE['is_process_live']
+NORMAL_CLEANUP_STAGES = _PROCESS_LIFECYCLE['NORMAL_CLEANUP_STAGES']
 
 
 class RoundtripError(RuntimeError):
@@ -172,91 +177,6 @@ def _clock_now(clock: Clock | object) -> float:
     if not isinstance(value, (int, float)) or not math.isfinite(value):
         raise RoundtripError('clock must return a finite number')
     return float(value)
-
-
-def _is_live(process: OwnedProcess) -> bool:
-    try:
-        group_alive = getattr(process, 'group_alive', None)
-        if group_alive is not None:
-            return bool(group_alive())
-        return process.poll() is None
-    except Exception as error:
-        raise RoundtripError(f'process poll failed: {error}') from error
-
-
-def _signal_owned_group(process: OwnedProcess, signum: int) -> bool:
-    """Signal only the group identity supplied by the process factory."""
-    group_signal = getattr(process, 'send_group_signal', None)
-    if group_signal is not None:
-        try:
-            result = group_signal(signum)
-            return result is not False
-        except ProcessLookupError:
-            return True
-        except Exception:
-            return False
-
-    group_id = getattr(process, 'process_group_id', None)
-    if os.name != 'nt' and group_id is not None:
-        try:
-            os.killpg(int(group_id), signum)
-        except ProcessLookupError:
-            return True
-        except OSError:
-            return False
-        return True
-
-    send_signal = getattr(process, 'send_signal', None)
-    if send_signal is None:
-        return False
-    try:
-        if os.name == 'nt' and signum == signal.SIGINT:
-            send_signal(signal.CTRL_BREAK_EVENT)
-        else:
-            send_signal(signum)
-    except Exception:
-        return False
-    return True
-
-
-def _wait_for_exit(process: OwnedProcess, timeout_s: float) -> bool:
-    try:
-        process.wait(timeout=timeout_s)
-    except (subprocess.TimeoutExpired, TimeoutError):
-        return not _is_live(process)
-    except Exception:
-        return not _is_live(process)
-    return not _is_live(process)
-
-
-def _close_owned_process(process: OwnedProcess | None) -> str:
-    """Close one owned process group with bounded escalation."""
-    if process is None or not _is_live(process):
-        closer = getattr(process, 'close_streams', None)
-        if closer is not None:
-            closer()
-        return 'exited'
-    if not _signal_owned_group(process, signal.SIGINT):
-        return 'failed'
-    if _wait_for_exit(process, _CLEANUP_GRACEFUL_TIMEOUT_S):
-        closer = getattr(process, 'close_streams', None)
-        if closer is not None:
-            closer()
-        return 'graceful'
-    if not _signal_owned_group(process, signal.SIGTERM):
-        return 'failed'
-    if _wait_for_exit(process, _CLEANUP_TERMINATE_TIMEOUT_S):
-        closer = getattr(process, 'close_streams', None)
-        if closer is not None:
-            closer()
-        return 'terminated'
-    if not _signal_owned_group(process, signal.SIGKILL):
-        return 'failed'
-    killed = _wait_for_exit(process, _CLEANUP_KILL_TIMEOUT_S)
-    closer = getattr(process, 'close_streams', None)
-    if closer is not None:
-        closer()
-    return 'killed' if killed else 'failed'
 
 
 def _regular_nonempty(path: Path) -> bool:
@@ -500,7 +420,7 @@ class MapRoundtripSupervisor:
             raise RoundtripError(f'{mode} process failed to start: {error}') from error
         if process is None:
             raise RoundtripError(f'{mode} process factory returned no process')
-        if not _is_live(process):
+        if not is_process_live(process):
             raise RoundtripError(f'{mode} process exited on start')
         return process
 
@@ -541,16 +461,16 @@ class MapRoundtripSupervisor:
         except BaseException:
             try:
                 if mapping_process is not None:
-                    _close_owned_process(mapping_process)
+                    close_owned_process(mapping_process)
             finally:
                 raise
 
         cleanup_error: str | None = None
         if mapping_process is not None:
             try:
-                cleanup_stage = _close_owned_process(mapping_process)
-                if cleanup_stage == 'failed':
-                    cleanup_error = 'mapping_process_cleanup_failed'
+                cleanup_stage = close_owned_process(mapping_process)
+                if cleanup_stage not in NORMAL_CLEANUP_STAGES:
+                    cleanup_error = f'mapping_process_cleanup_{cleanup_stage}'
             except RoundtripError as error:
                 cleanup_error = str(error)
             try:
@@ -610,8 +530,11 @@ class MapRoundtripSupervisor:
         finally:
             if navigation_process is not None:
                 try:
-                    if _close_owned_process(navigation_process) == 'failed':
-                        failure = failure or 'navigation_process_cleanup_failed'
+                    cleanup_stage = close_owned_process(navigation_process)
+                    if cleanup_stage not in NORMAL_CLEANUP_STAGES:
+                        failure = failure or (
+                            f'navigation_process_cleanup_{cleanup_stage}'
+                        )
                 except RoundtripError as error:
                     failure = failure or str(error)
 
@@ -915,7 +838,7 @@ class ProductionRoundtripObserver:
         self, *, map_id: str, deadline: float,
     ) -> None:
         del map_id
-        if _is_live(self._process('mapping')):
+        if is_process_live(self._process('mapping')):
             raise RoundtripError('mapping process group is still alive')
         _confirm_slam_owner_gone(deadline=deadline, clock=self._clock)
 

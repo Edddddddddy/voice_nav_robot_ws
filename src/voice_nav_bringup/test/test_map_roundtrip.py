@@ -7,12 +7,14 @@
 
 from __future__ import annotations
 
-import importlib.util
 import hashlib
+import importlib.util
 import io
+import os
 from pathlib import Path
-import pytest
 import sys
+
+import pytest
 
 
 def _load_roundtrip_module():
@@ -183,6 +185,56 @@ def test_roundtrip_publishes_mapping_before_navigation_and_preserves_paths(
     ]
     assert processes['mapping'].poll() == 0
     assert processes['navigation'].poll() == 0
+
+
+def test_non_graceful_mapping_cleanup_never_starts_navigation(tmp_path: Path):
+    """Keep the two map-to-odom owners in separate graceful sessions."""
+    module = _load_roundtrip_module()
+    starts: list[str] = []
+
+    class _TerminatingProcess:
+        def __init__(self) -> None:
+            self.returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def send_group_signal(self, signum):
+            if signum == module.signal.SIGTERM:
+                self.returncode = 0
+
+        def wait(self, timeout=None):
+            del timeout
+            if self.returncode is None:
+                raise TimeoutError('SIGINT cleanup did not complete')
+            return self.returncode
+
+    def process_factory(*, mode, map_root, descriptor):
+        del map_root, descriptor
+        starts.append(mode)
+        return _TerminatingProcess()
+
+    class _Observer:
+        def wait_for_mapping_save(self, *, map_root, map_id, deadline):
+            del deadline
+            _write_fake_package(map_root / map_id)
+
+        def wait_for_speak(self, *, map_id, deadline):
+            del map_id, deadline
+
+        def wait_for_map_odom_owner_gone(self, *, map_id, deadline):
+            del map_id, deadline
+
+    result = module.MapRoundtripSupervisor(
+        process_factory=process_factory,
+        observer=_Observer(),
+        xdg_data_home=tmp_path,
+        phase_timeout_s=1.0,
+    ).run()
+
+    assert result.status == 'failed'
+    assert result.reason == 'mapping_process_cleanup_terminated'
+    assert starts == ['mapping']
 
 
 def test_mapping_keyboard_interrupt_cleans_owned_process_and_reraises(
@@ -472,9 +524,72 @@ def test_cleanup_signals_descendants_when_leader_already_exited():
             return 0
 
     process = _GroupProcess()
-    assert module._close_owned_process(process) == 'graceful'
+    assert module.close_owned_process(process) == 'graceful'
     assert process.signals == [module.signal.SIGINT]
     assert process.group_alive() is False
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='requires POSIX process groups')
+def test_cleanup_probes_owned_group_when_leader_already_exited(monkeypatch):
+    module = _load_roundtrip_module()
+    state = {'alive': True}
+    signals: list[int] = []
+
+    class _LeaderExitedProcess:
+        process_group_id = 4242
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            del timeout
+            return 0
+
+    def killpg(group_id, signum):
+        assert group_id == 4242
+        if signum == 0:
+            if state['alive']:
+                return
+            raise ProcessLookupError
+        signals.append(signum)
+        if signum == module.signal.SIGINT:
+            state['alive'] = False
+
+    monkeypatch.setattr(module.os, 'killpg', killpg)
+    assert module.close_owned_process(_LeaderExitedProcess()) == 'graceful'
+    assert signals == [module.signal.SIGINT]
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='requires POSIX process groups')
+def test_cleanup_waits_for_delayed_group_exit_within_grace_budget(monkeypatch):
+    module = _load_roundtrip_module()
+    state = {'zero_probes': 0, 'signal_seen': False}
+    signals: list[int] = []
+
+    class _DelayedDescendantProcess:
+        process_group_id = 4343
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            del timeout
+            return 0
+
+    def killpg(group_id, signum):
+        assert group_id == 4343
+        if signum == 0:
+            state['zero_probes'] += 1
+            if state['signal_seen'] and state['zero_probes'] >= 3:
+                raise ProcessLookupError
+            return
+        signals.append(signum)
+        if signum == module.signal.SIGINT:
+            state['signal_seen'] = True
+
+    monkeypatch.setattr(module.os, 'killpg', killpg)
+    assert module.close_owned_process(_DelayedDescendantProcess()) == 'graceful'
+    assert signals == [module.signal.SIGINT]
 
 
 def test_cleanup_escalation_uses_bounded_product_budgets_without_sleep():
@@ -502,7 +617,7 @@ def test_cleanup_escalation_uses_bounded_product_budgets_without_sleep():
             return 0
 
     process = _EscalatingProcess()
-    assert module._close_owned_process(process) == 'killed'
+    assert module.close_owned_process(process) == 'killed'
     assert process.signals == [
         module.signal.SIGINT,
         module.signal.SIGTERM,

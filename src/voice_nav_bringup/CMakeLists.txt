@@ -221,6 +221,7 @@ install(
 install(
   FILES
     _mode_readiness.py
+    _process_lifecycle.py
     _sensevoice_input.py
     _sensevoice_asset_verifier.py
     _chaowen_asset_verifier.py
