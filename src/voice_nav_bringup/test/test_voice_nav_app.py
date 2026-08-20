@@ -190,6 +190,51 @@ def test_mapping_state_requires_active_slam_valid_map_and_unique_map_odom_tf():
     assert state.is_ready()
 
 
+def test_mapping_product_readiness_requires_fresh_stationary_odometry_hold():
+    """Do not release the first patrol mission into stale startup odometry."""
+    readiness = _load_mode_readiness_module()
+    now = [0.0]
+    state = readiness._ModeReadinessState(
+        'mapping',
+        require_runtime=True,
+        clock=lambda: now[0],
+        require_stationary_odometry=True,
+    )
+    state.observe_lifecycle('slam_toolbox', readiness.PRIMARY_STATE_ACTIVE)
+    state.observe_map(SimpleNamespace(
+        info=SimpleNamespace(width=1, height=1), data=[0],
+    ))
+    state.observe_tf(SimpleNamespace(
+        transforms=[SimpleNamespace(
+            header=SimpleNamespace(frame_id='map'),
+            child_frame_id='odom',
+        )],
+    ))
+    state.observe_runtime(SimpleNamespace(
+        operating_mode=readiness.RUNTIME_MODE_MAPPING,
+        availability=readiness.RUNTIME_AVAILABLE,
+        gate_state=readiness.GATE_INHIBITED,
+    ))
+
+    assert not state.is_ready()
+    assert state.failure_stage() == 'odometry_stationary'
+
+    stationary = _odometry_sample()
+    sample_period_s = 0.02
+    sample_count = int(
+        readiness.MAPPING_STATIONARY_HOLD_S / sample_period_s
+    )
+    for sample_index in range(sample_count + 1):
+        now[0] = sample_index * sample_period_s
+        state.observe_odometry(stationary)
+
+    assert state.is_ready()
+
+    now[0] += readiness._MOTION_ODOMETRY_FRESHNESS_S + 0.01
+    assert not state.is_ready()
+    assert state.failure_stage() == 'odometry_fresh'
+
+
 def test_navigation_state_requires_all_lifecycle_nodes_before_map_and_tf():
     """Require every approved Navigation lifecycle dependency."""
     readiness = _load_mode_readiness_module()
@@ -768,6 +813,33 @@ def test_vad_auto_uses_dedicated_frontend_and_never_console():
         '--ros-args', '-p', 'input_profile:=vad_auto',
     )
     assert 'stdin' not in starts[1][1]
+
+
+def test_none_input_runs_only_the_owned_session_for_automation():
+    """Allow a Mission driver without starting console or audio frontends."""
+    app = _load_app_module()
+    starts = []
+    console_calls = []
+
+    def process_factory(command, **kwargs):
+        starts.append((tuple(command), kwargs))
+        return _FakeProcess()
+
+    result = app.main(
+        ['--mode', 'mapping', '--display', 'headless', '--input', 'none'],
+        process_factory=process_factory,
+        readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        mode_readiness=lambda *_args: {'status': 'ready', 'reason': ''},
+        console_main=lambda **_kwargs: console_calls.append(True),
+        clock=lambda: 0.0,
+        stdout=StringIO(),
+        stderr=StringIO(),
+    )
+
+    assert result == 0
+    assert console_calls == []
+    assert len(starts) == 1
+    assert starts[0][0][-1] == 'input:=none'
 
 
 def test_vad_auto_selects_the_same_frontend_after_each_product_mode_is_ready():

@@ -13,12 +13,20 @@ from launch.actions import (
     GroupAction,
     IncludeLaunchDescription,
     SetEnvironmentVariable,
+    TimerAction,
 )
+from launch.conditions import UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node, SetRemap
 from launch_ros.substitutions import FindPackageShare
 from voice_nav_sim._scenario_spec import resolve_scenario
+
+
+# Let Fast DDS discover every lifecycle service before the managers issue
+# their first transition.  The app's shared readiness deadline still bounds
+# the complete startup.
+_LIFECYCLE_DISCOVERY_SETTLE_S = 2.0
 
 
 def generate_launch_description():
@@ -136,8 +144,22 @@ def generate_launch_description():
         planner_server,
         behavior_server,
         bt_navigator,
-        navigation_manager,
     ])
+    lifecycle_autostart = TimerAction(
+        period=_LIFECYCLE_DISCOVERY_SETTLE_S,
+        actions=[localization_manager, navigation_manager],
+    )
+    rviz = Node(
+        package='rviz2',
+        executable='rviz2',
+        name='voice_nav_navigation_rviz',
+        output='screen',
+        condition=UnlessCondition(headless),
+        arguments=['-d', PathJoinSubstitution([
+            bringup_share, 'config', 'voice_nav_navigation.rviz'
+        ])],
+        parameters=[{'use_sim_time': True}],
+    )
 
     return LaunchDescription([
         SetEnvironmentVariable('RMW_IMPLEMENTATION', 'rmw_fastrtps_cpp'),
@@ -172,6 +194,7 @@ def generate_launch_description():
         product,
         map_server,
         amcl,
-        localization_manager,
         navigation,
+        lifecycle_autostart,
+        rviz,
     ])

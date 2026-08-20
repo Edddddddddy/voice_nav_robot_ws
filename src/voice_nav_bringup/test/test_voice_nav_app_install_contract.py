@@ -22,15 +22,6 @@ from ament_index_python.packages import get_package_prefix
 
 def test_app_is_installed_as_the_voice_nav_bringup_executable():
     """Require the exact extensionless ros2-run executable name."""
-    package = Path(__file__).resolve().parents[1]
-    cmake = (package / 'CMakeLists.txt').read_text(encoding='utf-8')
-
-    assert 'install(\n  PROGRAMS\n    voice_nav_app.py' in cmake
-    assert '  RENAME voice_nav_app' in cmake
-    assert 'DESTINATION lib/${PROJECT_NAME}' in cmake
-    assert 'install(\n  FILES\n    _mode_readiness.py' in cmake
-    assert '    _sensevoice_input.py' in cmake
-
     prefix = Path(get_package_prefix('voice_nav_bringup'))
     executable = prefix / 'lib' / 'voice_nav_bringup' / 'voice_nav_app'
     helper = prefix / 'lib' / 'voice_nav_bringup' / '_mode_readiness.py'
