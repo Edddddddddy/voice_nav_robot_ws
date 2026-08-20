@@ -18,12 +18,6 @@ PATHS = {
     "support": "src/voice_nav_sim/test_support/gazebo_shutdown.py",
     "simulation_launch": "src/voice_nav_sim/launch/simulation.launch.py",
     "product_launch": "src/voice_nav_bringup/launch/product_sim.launch.py",
-    "simulation_control": (
-        "src/voice_nav_sim/test/test_simulation_control.py"
-    ),
-    "simulation_interfaces": (
-        "src/voice_nav_sim/test/test_simulation_interfaces.py"
-    ),
     "product_test": (
         "src/voice_nav_bringup/test/test_motion_gate_product.py"
     ),
@@ -33,41 +27,6 @@ PATHS = {
 }
 
 TEST_POLICIES = {
-    "simulation_control": {
-        "class": "SimulationControlTest",
-        "shutdown_class": "SimulationControlShutdownTest",
-        "partition_name": "SIMULATION_TEST_PARTITION",
-        "partition_scope": "l0008_sim_control",
-        "active_test": (
-            "test_stamped_drive_odometry_tf_and_consumer_timeout"
-        ),
-        "pre_cleanup": "publish_zero_for_cleanup",
-        "pre_action": "publish_for",
-        "pre_action_args": (0.0, 0.0, 0.15),
-        "destroy_attributes": {
-            ("executor", "shutdown"),
-            ("gazebo_shutdown", "join_started_thread"),
-            ("node", "destroy_node"),
-            ("rclpy", "shutdown"),
-        },
-    },
-    "simulation_interfaces": {
-        "class": "SimulationInterfacesTest",
-        "shutdown_class": "SimulationInterfacesShutdownTest",
-        "partition_name": "SIMULATION_TEST_PARTITION",
-        "partition_scope": "l0008_sim_interfaces",
-        "active_test": "test_perception_odom_tf_and_ownership_contract",
-        "pre_cleanup": "publish_zero_for_cleanup",
-        "pre_action": "publish_command_for",
-        "pre_action_args": (0.0, 0.0, 0.25),
-        "destroy_attributes": {
-            ("executor", "shutdown"),
-            ("gazebo_shutdown", "join_started_thread"),
-            ("node", "destroy_node"),
-            ("rclpy", "shutdown"),
-            ("tf_listener", "unregister"),
-        },
-    },
     "product_test": {
         "class": "MotionGateProductTest",
         "shutdown_class": "MotionGateProductShutdownTest",

@@ -1,14 +1,18 @@
+"""Launch the trusted VoiceNav simulation selected by one ScenarioSpec."""
+
+from __future__ import annotations
+
 import os
 
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
     ExecuteProcess,
+    OpaqueFunction,
     RegisterEventHandler,
     Shutdown,
 )
-from launch.conditions import IfCondition
-from launch.conditions import UnlessCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.event_handlers import OnProcessExit
 from launch.substitutions import (
     Command,
@@ -20,8 +24,19 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 
+from voice_nav_sim._scenario_spec import (
+    display_from_headless,
+    resolve_scenario,
+)
+
+
+_ROBOT_DESCRIPTION = ('urdf', 'voice_nav_robot.urdf.xacro')
+_CONTROLLERS_CONFIG = ('config', 'controllers.yaml')
+_BRIDGE_CONFIG = ('config', 'bridge.yaml')
+
 
 def start_after_success(next_action, stage):
+    """Start the next owner only after the previous process succeeded."""
     def handle_exit(event, _context):
         if event.returncode == 0:
             return [] if next_action is None else [next_action]
@@ -37,54 +52,44 @@ def start_after_success(next_action, stage):
     return handle_exit
 
 
-def generate_launch_description():
-    headless = LaunchConfiguration('headless')
-    world_name = LaunchConfiguration('world_name')
-    laser_update_rate = LaunchConfiguration('laser_update_rate')
+def _build_simulation_actions(context):
+    """Resolve the closed spec before constructing any spawn action."""
+    scenario = context.perform_substitution(LaunchConfiguration('scenario'))
+    headless = context.perform_substitution(LaunchConfiguration('headless'))
+    display = display_from_headless(headless)
+    spec = resolve_scenario(scenario, display)
     shutdown_on_gazebo_exit = LaunchConfiguration(
         'shutdown_on_gazebo_exit'
     )
+
     package_share = FindPackageShare('voice_nav_sim')
-    xacro_file = PathJoinSubstitution(
-        [
-            package_share,
-            'urdf',
-            'voice_nav_robot.urdf.xacro',
-        ]
-    )
-    controllers_file = PathJoinSubstitution(
-        [
-            package_share,
-            'config',
-            'controllers.yaml',
-        ]
-    )
-    bridge_file = PathJoinSubstitution(
-        [
-            package_share,
-            'config',
-            'bridge.yaml',
-        ]
-    )
-    world_file = PathJoinSubstitution(
-        [
-            package_share,
-            'worlds',
-            [world_name, '.sdf'],
-        ]
-    )
+    xacro_file = PathJoinSubstitution([
+        package_share,
+        *_ROBOT_DESCRIPTION,
+    ])
+    controllers_file = PathJoinSubstitution([
+        package_share,
+        *_CONTROLLERS_CONFIG,
+    ])
+    bridge_file = PathJoinSubstitution([
+        package_share,
+        *_BRIDGE_CONFIG,
+    ])
+    world_file = PathJoinSubstitution([
+        package_share,
+        'worlds',
+        f'{spec.world_name}.sdf',
+    ])
     robot_description = ParameterValue(
-        Command(
-            [
-                FindExecutable(name='xacro'),
-                ' ',
-                xacro_file,
-                ' controllers_file:=',
-                controllers_file,
-                ' laser_update_rate:=',
-                laser_update_rate,
-            ]
-        ),
+        Command([
+            FindExecutable(name='xacro'),
+            ' ',
+            xacro_file,
+            ' controllers_file:=',
+            controllers_file,
+            ' laser_update_rate:=',
+            spec.laser_update_rate,
+        ]),
         value_type=str,
     )
 
@@ -93,15 +98,24 @@ def generate_launch_description():
         executable='robot_state_publisher',
         name='robot_state_publisher',
         output='screen',
-        parameters=[
-            {
-                'robot_description': robot_description,
-                'use_sim_time': True,
-            }
-        ],
+        parameters=[{
+            'robot_description': robot_description,
+            'use_sim_time': True,
+        }],
         on_exit=Shutdown(reason='Robot state publisher exited.'),
     )
 
+    gazebo_common_arguments = [
+        FindExecutable(name='ruby'),
+        FindExecutable(name='gz'),
+        'sim',
+        '-r',
+        '-v',
+        '2',
+        world_file,
+        '--force-version',
+        '8',
+    ]
     gazebo_environment = {
         'GZ_SIM_SYSTEM_PLUGIN_PATH': os.pathsep.join(
             filter(
@@ -117,17 +131,6 @@ def generate_launch_description():
             '',
         ),
     }
-    gazebo_common_arguments = [
-        FindExecutable(name='ruby'),
-        FindExecutable(name='gz'),
-        'sim',
-        '-r',
-        '-v',
-        '2',
-        world_file,
-        '--force-version',
-        '8',
-    ]
     gazebo_server = ExecuteProcess(
         cmd=gazebo_common_arguments[:4]
         + ['-s', '--headless-rendering']
@@ -179,7 +182,7 @@ def generate_launch_description():
         output='screen',
         arguments=[
             '--world',
-            world_name,
+            spec.world_name,
             '--topic',
             'robot_description',
             '--name',
@@ -213,7 +216,7 @@ def generate_launch_description():
         name='spawn_diff_drive_controller',
         output='screen',
         arguments=[
-            'diff_drive_controller',
+            spec.controller_owner.removeprefix('/'),
             '--controller-manager',
             '/controller_manager',
             '--controller-manager-timeout',
@@ -255,47 +258,43 @@ def generate_launch_description():
         )
     )
 
-    return LaunchDescription(
-        [
-            DeclareLaunchArgument(
-                'headless',
-                default_value='true',
-                description='Run Gazebo server-only when true.',
-                choices=['true', 'false'],
+    return [
+        robot_state_publisher,
+        gazebo_server,
+        gazebo_with_gui,
+        stop_after_gazebo_server_exit,
+        stop_after_gazebo_gui_exit,
+        simulation_bridge,
+        spawn_robot,
+        start_joint_state_broadcaster,
+        start_diff_drive_controller,
+        stop_after_diff_drive_failure,
+    ]
+
+
+def generate_launch_description():
+    """Declare only closed launch inputs; resolve them before spawning."""
+    return LaunchDescription([
+        DeclareLaunchArgument(
+            'scenario',
+            default_value='motion',
+            description='Select one packaged VoiceNav simulation scenario.',
+            choices=['motion', 'mapping', 'navigation'],
+        ),
+        DeclareLaunchArgument(
+            'headless',
+            default_value='true',
+            description='Run Gazebo server-only when true.',
+            choices=['true', 'false'],
+        ),
+        DeclareLaunchArgument(
+            'shutdown_on_gazebo_exit',
+            default_value='true',
+            description=(
+                'Shut down the whole launch when Gazebo exits. Tests '
+                'disable this while joining Gazebo explicitly.'
             ),
-            DeclareLaunchArgument(
-                'world_name',
-                default_value='voice_nav_test_world',
-                description='Select one packaged VoiceNav simulation world.',
-                choices=['voice_nav_test_world', 'voice_nav_house_world'],
-            ),
-            DeclareLaunchArgument(
-                'laser_update_rate',
-                default_value='10',
-                description=(
-                    'Select the trusted product or Mapping Mode LiDAR '
-                    'sampling profile.'
-                ),
-                choices=['10', '20'],
-            ),
-            DeclareLaunchArgument(
-                'shutdown_on_gazebo_exit',
-                default_value='true',
-                description=(
-                    'Shut down the whole launch when Gazebo exits. Tests '
-                    'disable this while joining Gazebo explicitly.'
-                ),
-                choices=['true', 'false'],
-            ),
-            robot_state_publisher,
-            gazebo_server,
-            gazebo_with_gui,
-            stop_after_gazebo_server_exit,
-            stop_after_gazebo_gui_exit,
-            simulation_bridge,
-            spawn_robot,
-            start_joint_state_broadcaster,
-            start_diff_drive_controller,
-            stop_after_diff_drive_failure,
-        ]
-    )
+            choices=['true', 'false'],
+        ),
+        OpaqueFunction(function=_build_simulation_actions),
+    ])

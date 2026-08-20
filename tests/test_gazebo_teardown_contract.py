@@ -34,22 +34,6 @@ GAZEBO_TESTS = (
     (
         REPOSITORY_ROOT
         / "src"
-        / "voice_nav_sim"
-        / "test"
-        / "test_simulation_control.py",
-        "l0008_sim_control",
-    ),
-    (
-        REPOSITORY_ROOT
-        / "src"
-        / "voice_nav_sim"
-        / "test"
-        / "test_simulation_interfaces.py",
-        "l0008_sim_interfaces",
-    ),
-    (
-        REPOSITORY_ROOT
-        / "src"
         / "voice_nav_bringup"
         / "test"
         / "test_motion_gate_product.py",
@@ -57,16 +41,6 @@ GAZEBO_TESTS = (
     ),
 )
 GAZEBO_TEST_CLASSES = {
-    "test_simulation_control.py": (
-        "SimulationControlTest",
-        "test_stamped_drive_odometry_tf_and_consumer_timeout",
-        "publish_zero_for_cleanup",
-    ),
-    "test_simulation_interfaces.py": (
-        "SimulationInterfacesTest",
-        "test_perception_odom_tf_and_ownership_contract",
-        "publish_zero_for_cleanup",
-    ),
     "test_motion_gate_product.py": (
         "MotionGateProductTest",
         "test_motion_gate_product_contract",
@@ -77,8 +51,6 @@ CONTRACT_FILES = (
     "src/voice_nav_sim/test_support/gazebo_shutdown.py",
     "src/voice_nav_sim/launch/simulation.launch.py",
     "src/voice_nav_bringup/launch/product_sim.launch.py",
-    "src/voice_nav_sim/test/test_simulation_control.py",
-    "src/voice_nav_sim/test/test_simulation_interfaces.py",
     "src/voice_nav_bringup/test/test_motion_gate_product.py",
     "src/voice_nav_sim/CMakeLists.txt",
     "src/voice_nav_bringup/CMakeLists.txt",
@@ -350,7 +322,7 @@ class GazeboTeardownMutationTest(unittest.TestCase):
 
     def test_failure_path_cleanup_registration_is_required(self):
         self.assert_mutation_rejected(
-            "src/voice_nav_sim/test/test_simulation_control.py",
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
             "        self.addCleanup(self.destroy_ros_fixture)",
             "        # cleanup omitted",
             "register independent failure-path cleanups first",
@@ -358,7 +330,7 @@ class GazeboTeardownMutationTest(unittest.TestCase):
 
     def test_test_launch_must_disable_early_shutdown(self):
         self.assert_mutation_rejected(
-            "src/voice_nav_sim/test/test_simulation_interfaces.py",
+            "src/voice_nav_bringup/test/test_motion_gate_product.py",
             "'shutdown_on_gazebo_exit': 'false'",
             "'shutdown_on_gazebo_exit': 'true'",
             "structured test teardown seam",

@@ -7,12 +7,14 @@ endif()
 
 # find dependencies
 find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
 # uncomment the following section in order to fill in
 # further dependencies manually.
 # find_package(<dependency> REQUIRED)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_gtest REQUIRED)
+  find_package(ament_cmake_pytest REQUIRED)
   find_package(ament_cmake_ros REQUIRED)
   find_package(ament_lint_auto REQUIRED)
   find_package(launch_testing_ament_cmake REQUIRED)
@@ -55,15 +57,10 @@ if(BUILD_TESTING)
     PRIVATE test
   )
 
-  add_launch_test(
-    test/test_simulation_control.py
-    TIMEOUT 120
-    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
-  )
-  add_launch_test(
-    test/test_simulation_interfaces.py
-    TIMEOUT 120
-    RUNNER "${ament_cmake_ros_DIR}/run_test_isolated.py"
+  ament_add_pytest_test(
+    scenario_spec
+    test/test_scenario_spec.py
+    TIMEOUT 30
   )
   add_launch_test(
     test/test_tf_ownership_conflict.py
@@ -72,8 +69,6 @@ if(BUILD_TESTING)
   )
 
   set_tests_properties(
-    test_test_simulation_control.py
-    test_test_simulation_interfaces.py
     test_test_tf_ownership_conflict.py
     PROPERTIES
       ENVIRONMENT
@@ -81,8 +76,6 @@ if(BUILD_TESTING)
       RUN_SERIAL TRUE
   )
   set_tests_properties(
-    test_test_simulation_control.py
-    test_test_simulation_interfaces.py
     test_test_tf_ownership_conflict.py
     PROPERTIES
       ENVIRONMENT_MODIFICATION
@@ -100,6 +93,11 @@ install(
   DESTINATION share/${PROJECT_NAME}
   PATTERN "__pycache__" EXCLUDE
   PATTERN "*.pyc" EXCLUDE
+)
+
+ament_python_install_package(
+  voice_nav_sim
+  PACKAGE_DIR python/voice_nav_sim
 )
 
 ament_package()

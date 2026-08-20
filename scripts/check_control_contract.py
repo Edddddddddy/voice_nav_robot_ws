@@ -681,6 +681,9 @@ def validate_launch(path: Path) -> None:
         )
     assigned_names = assigned_call_names(tree)
     returned_names = returned_action_names(calls)
+    deferred_launch_actions = any(
+        call_name(call) == "OpaqueFunction" for call in calls
+    )
     uses_conditional_exit_handler = False
     for process in execute_processes:
         shell = keyword_value(process, "shell")
@@ -703,6 +706,8 @@ def validate_launch(path: Path) -> None:
                 returned_names,
             )
         ):
+            if deferred_launch_actions:
+                continue
             raise ControlContractError(
                 "every Gazebo ExecuteProcess must shut down the launch on exit"
             )

@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 project(voice_nav_bringup)
 
 find_package(ament_cmake REQUIRED)
+find_package(voice_nav_sim REQUIRED)
 
 if(BUILD_TESTING)
   find_package(ament_cmake_ros REQUIRED)

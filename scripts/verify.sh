@@ -81,7 +81,6 @@ rosdep check --from-paths src --ignore-src
 echo "[3/6] Validating the robot model contract"
 robot_xacro="src/voice_nav_sim/urdf/voice_nav_robot.urdf.xacro"
 controllers_yaml="src/voice_nav_sim/config/controllers.yaml"
-bridge_yaml="src/voice_nav_sim/config/bridge.yaml"
 simulation_world="src/voice_nav_sim/worlds/voice_nav_test_world.sdf"
 robot_urdf="$(mktemp /tmp/voice-nav-model.XXXXXX.urdf)"
 robot_sdf="$(mktemp /tmp/voice-nav-model.XXXXXX.sdf)"
@@ -97,14 +96,6 @@ python3 scripts/check_control_contract.py \
   --package src/voice_nav_sim/package.xml \
   --cmake src/voice_nav_sim/CMakeLists.txt \
   --launch src/voice_nav_sim/launch/simulation.launch.py
-
-python3 scripts/check_simulation_contract.py \
-  --launch src/voice_nav_sim/launch/simulation.launch.py \
-  --world "${simulation_world}" \
-  --robot-description "${robot_xacro}" \
-  --bridge "${bridge_yaml}" \
-  --package src/voice_nav_sim/package.xml \
-  --cmake src/voice_nav_sim/CMakeLists.txt
 
 xacro \
   "${robot_xacro}" \

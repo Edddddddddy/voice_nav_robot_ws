@@ -25,6 +25,14 @@ import sys
 import time
 from typing import Literal
 
+from voice_nav_sim._scenario_spec import (
+    display_names,
+    resolve_scenario,
+    scenario_names,
+    ScenarioSpec,
+    ScenarioSpecError,
+)
+
 
 Mode = Literal['motion', 'mapping', 'navigation']
 Display = Literal['headless', 'gui']
@@ -38,31 +46,6 @@ class _InputSpec:
 
     profile: InputProfile
     explicit: bool = False
-
-
-class _SessionSpec:
-    """One closed product composition selected before process creation."""
-
-    __slots__ = ('mode', 'display', 'launch_file', 'command', '_frozen')
-
-    def __init__(
-        self,
-        *,
-        mode: Mode,
-        display: Display,
-        launch_file: str,
-        command: tuple[str, ...],
-    ) -> None:
-        object.__setattr__(self, 'mode', mode)
-        object.__setattr__(self, 'display', display)
-        object.__setattr__(self, 'launch_file', launch_file)
-        object.__setattr__(self, 'command', command)
-        object.__setattr__(self, '_frozen', True)
-
-    def __setattr__(self, name, value) -> None:
-        if getattr(self, '_frozen', False):
-            raise AttributeError('session spec is immutable')
-        object.__setattr__(self, name, value)
 
 
 @dataclass(frozen=True)
@@ -108,39 +91,27 @@ def _session_command(
     return command
 
 
-_SESSION_SPECS = {
-    (mode, display): _SessionSpec(
-        mode=mode,
-        display=display,
-        launch_file=launch_file,
-        command=_session_command(mode, display),
-    )
-    for mode, launch_file in (
-        ('motion', SESSION_LAUNCH_FILE),
-        ('mapping', 'mapping_mvp.launch.py'),
-        ('navigation', 'navigation_mvp.launch.py'),
-    )
-    for display in ('headless', 'gui')
-}
-SESSION_COMMAND = _SESSION_SPECS[('motion', 'headless')].command
 READINESS_TIMEOUT_S = 60.0
 COMMAND_GATEWAY_SERVICE = '/voice_nav_command_gateway/set_parameters'
 _OWNED_RCLPY_CONTEXT = False
 
 
-def _selected_session_spec(
-    session_spec: _SessionSpec,
-    input_spec: _InputSpec,
-) -> _SessionSpec:
-    """Bind one input frontend to the existing immutable mode selection."""
-    return _SessionSpec(
-        mode=session_spec.mode,
-        display=session_spec.display,
-        launch_file=session_spec.launch_file,
-        command=_session_command(
-            session_spec.mode, session_spec.display, input_spec,
-        ),
-    )
+def _scenario_argument(value: str) -> str:
+    """Validate the closed scenario enum through the canonical resolver."""
+    try:
+        resolve_scenario(value)
+    except ScenarioSpecError as error:
+        raise argparse.ArgumentTypeError(error.code) from error
+    return value
+
+
+def _display_argument(value: str) -> str:
+    """Validate the closed display enum through the canonical resolver."""
+    try:
+        resolve_scenario('motion', value)
+    except ScenarioSpecError as error:
+        raise argparse.ArgumentTypeError(error.code) from error
+    return value
 
 
 def _clock_now(clock) -> float:
@@ -601,7 +572,7 @@ def run_app(
     stdout,
     stderr,
     stdin=None,
-    session_spec: _SessionSpec | None = None,
+    session_spec: ScenarioSpec | None = None,
     mode_readiness=None,
     input_spec: _InputSpec | None = None,
     frontend_factory=None,
@@ -614,9 +585,12 @@ def run_app(
         if stdin is None:
             stdin = sys.stdin
         if session_spec is None:
-            session_spec = _SESSION_SPECS[('motion', 'headless')]
+            session_spec = resolve_scenario('motion', 'headless')
         if input_spec is None:
             input_spec = _InputSpec(profile='console')
+        session_command = _session_command(
+            session_spec.mode, session_spec.display, input_spec,
+        )
         if mode_readiness is None:
             mode_readiness = _wait_for_mode_readiness
         if frontend_factory is None:
@@ -640,7 +614,7 @@ def run_app(
             owned_processes=owned_processes,
         )
         process = process_factory(
-            session_spec.command,
+            session_command,
             stdout=stderr,
             stderr=stderr,
         )
@@ -710,12 +684,14 @@ def main(
     parser = argparse.ArgumentParser()
     parser.add_argument(
         '--mode',
-        choices=('motion', 'mapping', 'navigation'),
+        type=_scenario_argument,
+        choices=scenario_names(),
         default='motion',
     )
     parser.add_argument(
         '--display',
-        choices=('headless', 'gui'),
+        type=_display_argument,
+        choices=display_names(),
         default='headless',
     )
     parser.add_argument(
@@ -734,8 +710,7 @@ def main(
         explicit=arguments.input is not None,
     )
 
-    base_session_spec = _SESSION_SPECS[(arguments.mode, arguments.display)]
-    session_spec = _selected_session_spec(base_session_spec, input_spec)
+    session_spec = resolve_scenario(arguments.mode, arguments.display)
     production_process_factory = process_factory is None
     if production_process_factory:
         process_factory = _spawn_session
