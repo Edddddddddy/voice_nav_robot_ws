@@ -18,6 +18,7 @@ import importlib.util
 from pathlib import Path
 
 from launch.actions import DeclareLaunchArgument
+from launch_ros.actions import Node
 
 
 def _launch_module():
@@ -46,3 +47,27 @@ def test_launch_exposes_only_continuous_vad_auto():
     argument = _input_profile_argument()
     assert argument.default_value[0].text == 'vad_auto'
     assert argument.choices == ['vad_auto']
+
+
+def test_launch_passes_the_independent_keyword_model_to_voice_node(monkeypatch):
+    """The installed composition wires KWS separately from VAD and ASR."""
+    monkeypatch.setenv('VOICE_NAV_KWS_ROOT', '/tmp/kws')
+    description = _launch_module().generate_launch_description()
+    argument = next(
+        entity
+        for entity in description.entities
+        if isinstance(entity, DeclareLaunchArgument)
+        and entity.name == 'keyword_model_root'
+    )
+    voice_node = next(
+        entity
+        for entity in description.entities
+        if isinstance(entity, Node) and entity.node_executable == 'voice_node'
+    )
+
+    assert argument.default_value[0].text == '/tmp/kws'
+    parameters = {
+        key[0].text: value[0].variable_name[0].text
+        for key, value in voice_node._Node__parameters[0].items()
+    }
+    assert parameters['keyword_model_root'] == 'keyword_model_root'

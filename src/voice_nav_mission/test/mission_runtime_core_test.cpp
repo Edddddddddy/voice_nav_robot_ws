@@ -1092,6 +1092,10 @@ TEST(RuntimeCore, ChildFailureReportsTheStartedStepAndSkipsTheRest)
   EXPECT_EQ(fixture.results.front().code, MissionResultCode::ExecutionFailed);
   EXPECT_EQ(fixture.results.front().failed_step, 0);
   EXPECT_EQ(fixture.relative->started_steps().size(), 1U);
+  EXPECT_EQ(fixture.core.state().availability, RuntimeAvailability::Available);
+
+  const auto next_admission = fixture.core.admit(goal(2U));
+  EXPECT_TRUE(next_admission.accepted) << next_admission.result.detail;
 }
 
 TEST(RuntimeCore, ChildFailureCodesRemainTypedAtTheMissionBoundary)

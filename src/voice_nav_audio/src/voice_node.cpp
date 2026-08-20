@@ -57,6 +57,7 @@ public:
   {
     declare_parameter("input_profile", "vad_auto");
     declare_parameter("chaowen_tts_root", "");
+    declare_parameter("keyword_model_root", "");
     declare_parameter("silero_vad_model", "");
     declare_parameter("sensevoice_model", "");
     declare_parameter("sensevoice_tokens", "");
@@ -90,7 +91,7 @@ private:
   {
     const auto endpoints = get_subscriptions_info_by_topic("/voice/turn");
     return std::any_of(endpoints.cbegin(), endpoints.cend(), [](const auto & endpoint) {
-      return endpoint.node_name() == "agent_node" && endpoint.node_namespace() == "/";
+               return endpoint.node_name() == "agent_node" && endpoint.node_namespace() == "/";
     });
   }
 
@@ -120,6 +121,8 @@ int main(int argc, char ** argv)
       throw std::invalid_argument("voice_node only supports the continuous vad_auto profile");
     }
 
+    const auto keyword_root = voice_nav_audio::parameter_or_environment(
+      *node, "keyword_model_root", "VOICE_NAV_KWS_ROOT");
     const auto vad_path = voice_nav_audio::parameter_or_environment(
       *node, "silero_vad_model", "VOICE_NAV_SENSEVOICE_VAD_MODEL");
     const auto model_path = voice_nav_audio::parameter_or_environment(
@@ -128,12 +131,15 @@ int main(int argc, char ** argv)
       *node, "sensevoice_tokens", "VOICE_NAV_SENSEVOICE_TOKENS");
     const auto tts_root = voice_nav_audio::parameter_or_environment(
       *node, "chaowen_tts_root", "VOICE_NAV_CHAOWEN_TTS_ROOT");
-    if (vad_path.empty() || model_path.empty() || tokens_path.empty() || tts_root.empty()) {
+    if (keyword_root.empty() || vad_path.empty() || model_path.empty() || tokens_path.empty() ||
+      tts_root.empty())
+    {
       throw std::invalid_argument("continuous voice assets are incomplete");
     }
 
-    auto provider = voice_nav_audio::make_sherpa_sensevoice_provider(
-      voice_nav_audio::SherpaSenseVoiceAssetPaths{vad_path, model_path, tokens_path});
+    auto provider = voice_nav_audio::make_sherpa_speech_recognizer(
+      voice_nav_audio::SherpaSenseVoiceAssetPaths{
+      keyword_root, vad_path, model_path, tokens_path});
     dsp = voice_nav_audio::make_vad_auto_dsp_adapter();
     if (provider == nullptr || dsp == nullptr) {
       throw std::runtime_error("continuous voice requires verified VAD/DSP adapters");

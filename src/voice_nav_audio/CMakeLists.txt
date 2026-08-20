@@ -24,6 +24,7 @@ add_library(audio_engine_callback OBJECT src/audio_engine_callback.cpp)
 add_library(audio_engine_core OBJECT src/audio_engine.cpp)
 add_library(dsp_pipeline STATIC src/dsp_pipeline.cpp)
 add_library(speech_input_core STATIC src/speech_input_core.cpp)
+add_library(acoustic_wake_recognizer STATIC src/acoustic_wake_recognizer.cpp)
 add_library(continuous_vad_session STATIC src/continuous_vad_session.cpp)
 add_library(sensevoice_provider STATIC src/sensevoice_provider.cpp)
 add_library(speech_input_node STATIC src/speech_input_node.cpp)
@@ -52,6 +53,7 @@ foreach(target
     audio_engine_callback
     dsp_pipeline
     speech_input_core
+    acoustic_wake_recognizer
     continuous_vad_session
     sensevoice_provider
     speech_input_node
@@ -72,6 +74,7 @@ foreach(target
       "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
   )
 endforeach()
+target_link_libraries(acoustic_wake_recognizer speech_input_core)
 target_link_libraries(sensevoice_provider speech_input_core)
 target_link_libraries(continuous_vad_session dsp_pipeline voice_pipeline)
 ament_target_dependencies(speech_input_node rclcpp voice_nav_interfaces)
@@ -209,7 +212,7 @@ if(VOICE_NAV_AUDIO_WITH_SHERPA_ONNX)
     PRIVATE include src "${SHERPA_ONNX_INCLUDE_DIR}")
   target_link_libraries(
     sensevoice_sherpa_adapter
-    PUBLIC sensevoice_provider ${SHERPA_ONNX_LIBRARIES})
+    PUBLIC acoustic_wake_recognizer sensevoice_provider ${SHERPA_ONNX_LIBRARIES})
   target_link_options(
     sensevoice_sherpa_adapter
     INTERFACE
@@ -308,6 +311,14 @@ if(BUILD_TESTING)
   add_dependencies(speech_input_core_test speech_input_identity_probe)
 
   ament_add_gtest(
+    acoustic_wake_recognizer_test
+    test/acoustic_wake_recognizer_test.cpp
+  )
+  target_compile_features(acoustic_wake_recognizer_test PUBLIC cxx_std_17)
+  target_include_directories(acoustic_wake_recognizer_test PRIVATE include src)
+  target_link_libraries(acoustic_wake_recognizer_test acoustic_wake_recognizer)
+
+  ament_add_gtest(
     continuous_vad_session_test
     test/continuous_vad_session_test.cpp
   )
@@ -331,11 +342,13 @@ if(BUILD_TESTING)
   )
   target_compile_features(sensevoice_provider_test PUBLIC cxx_std_17)
   target_include_directories(sensevoice_provider_test PRIVATE include src)
-  target_link_libraries(sensevoice_provider_test sensevoice_provider)
+  target_link_libraries(
+    sensevoice_provider_test acoustic_wake_recognizer sensevoice_provider)
 
   if(VOICE_NAV_AUDIO_WITH_SHERPA_ONNX)
     set(_voice_nav_real_asset_root
       "${CMAKE_CURRENT_SOURCE_DIR}/../../models/weights/voice-assets")
+    set(_voice_nav_real_kws_root "$ENV{VOICE_NAV_KWS_ROOT}")
     set(_voice_nav_real_vad "$ENV{VOICE_NAV_SENSEVOICE_VAD_MODEL}")
     set(_voice_nav_real_model "$ENV{VOICE_NAV_SENSEVOICE_MODEL}")
     set(_voice_nav_real_tokens "$ENV{VOICE_NAV_SENSEVOICE_TOKENS}")
@@ -366,7 +379,7 @@ if(BUILD_TESTING)
       sensevoice_sherpa_adapter_test
       PROPERTIES
         ENVIRONMENT
-          "VOICE_NAV_SENSEVOICE_VAD_MODEL=${_voice_nav_real_vad};VOICE_NAV_SENSEVOICE_MODEL=${_voice_nav_real_model};VOICE_NAV_SENSEVOICE_TOKENS=${_voice_nav_real_tokens}")
+          "VOICE_NAV_KWS_ROOT=${_voice_nav_real_kws_root};VOICE_NAV_SENSEVOICE_VAD_MODEL=${_voice_nav_real_vad};VOICE_NAV_SENSEVOICE_MODEL=${_voice_nav_real_model};VOICE_NAV_SENSEVOICE_TOKENS=${_voice_nav_real_tokens}")
 
   endif()
 

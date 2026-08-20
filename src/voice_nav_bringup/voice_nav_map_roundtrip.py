@@ -812,9 +812,12 @@ class ProductionRoundtripObserver:
     ) -> None:
         process = self._process('mapping')
         package_root = map_root / map_id
+        ready_seen = False
 
         def package_and_ready_evidence(lines: tuple[str, ...]) -> bool:
-            if not _has_ready_json(lines):
+            nonlocal ready_seen
+            ready_seen = ready_seen or _has_ready_json(lines)
+            if not ready_seen:
                 return False
             try:
                 _load_descriptor(package_root, map_id)

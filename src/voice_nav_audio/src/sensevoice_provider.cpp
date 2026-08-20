@@ -331,7 +331,7 @@ private:
       admission_frames_ = 0U;
       utterance_sample_count_ = 0U;
       last_endpoint_sample_exclusive_ = 0U;
-      wake_sent_ = false;
+      scope_open_sent_ = false;
       quarantined_ = false;
       overflow_pending_ = false;
       failure_emitted_ = false;
@@ -434,8 +434,10 @@ private:
       emit(failure);
       return;
     }
+    const auto turn_kind = normalized == "小智停止" || normalized == "紧急停止" ?
+      VoiceTurnKind::kStop : VoiceTurnKind::kCommand;
     emit(SpeechRecognitionEvent::endpoint_final(
-      event_frame, scope, std::move(normalized), 1.0F, VoiceTurnKind::kCommand));
+      event_frame, scope, std::move(normalized), 1.0F, turn_kind));
   }
 
   void finish_on_worker() noexcept
@@ -476,9 +478,9 @@ private:
 
     finish_endpoint(flush.endpoint_sample_exclusive);
 
-    if (!wake_sent_) {
-      wake_sent_ = true;
-      emit(SpeechRecognitionEvent::wake_accepted(event_frame));
+    if (!scope_open_sent_) {
+      scope_open_sent_ = true;
+      emit(SpeechRecognitionEvent::activity(event_frame, TurnScopeIdentity{}));
     }
     if (stop_requested_.load(std::memory_order_acquire)) {
       return;
@@ -532,9 +534,9 @@ private:
       return;
     }
 
-    if (!wake_sent_) {
-      wake_sent_ = true;
-      emit(SpeechRecognitionEvent::wake_accepted(frame));
+    if (!scope_open_sent_) {
+      scope_open_sent_ = true;
+      emit(SpeechRecognitionEvent::activity(frame, TurnScopeIdentity{}));
     }
 
     if (stop_requested_.load(std::memory_order_acquire)) {
@@ -602,7 +604,7 @@ private:
   std::size_t admission_frames_{0U};
   std::size_t utterance_sample_count_{0U};
   std::size_t last_endpoint_sample_exclusive_{0U};
-  bool wake_sent_{false};
+  bool scope_open_sent_{false};
   bool quarantined_{false};
   bool overflow_pending_{false};
   bool failure_emitted_{false};

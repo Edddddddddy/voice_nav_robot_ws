@@ -119,6 +119,8 @@ def test_rule_mission_normalizes_text_and_captures_immutable_snapshot():
         ('后退半米', MissionStep.MOVE_DISTANCE, -0.5, 0.0),
         ('前进一米', MissionStep.MOVE_DISTANCE, 1.0, 0.0),
         ('前进一点五米', MissionStep.MOVE_DISTANCE, 1.5, 0.0),
+        ('走2米', MissionStep.MOVE_DISTANCE, 2.0, 0.0),
+        ('走两米', MissionStep.MOVE_DISTANCE, 2.0, 0.0),
         ('左转90度', MissionStep.ROTATE_ANGLE, 0.0, math.pi / 2),
         ('右转 5 度', MissionStep.ROTATE_ANGLE, 0.0, -math.radians(5)),
     ],

@@ -37,6 +37,7 @@ def generate_launch_description() -> LaunchDescription:
     """Run the continuous full-duplex voice_node profile."""
     input_profile = LaunchConfiguration('input_profile')
     chaowen_tts_root = LaunchConfiguration('chaowen_tts_root')
+    keyword_model_root = LaunchConfiguration('keyword_model_root')
     silero_vad_model = LaunchConfiguration('silero_vad_model')
     sensevoice_model = LaunchConfiguration('sensevoice_model')
     sensevoice_tokens = LaunchConfiguration('sensevoice_tokens')
@@ -50,6 +51,7 @@ def generate_launch_description() -> LaunchDescription:
         parameters=[{
             'input_profile': input_profile,
             'chaowen_tts_root': chaowen_tts_root,
+            'keyword_model_root': keyword_model_root,
             'silero_vad_model': silero_vad_model,
             'sensevoice_model': sensevoice_model,
             'sensevoice_tokens': sensevoice_tokens,
@@ -80,6 +82,10 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument(
             'chaowen_tts_root',
             default_value=_environment('VOICE_NAV_CHAOWEN_TTS_ROOT'),
+        ),
+        DeclareLaunchArgument(
+            'keyword_model_root',
+            default_value=_environment('VOICE_NAV_KWS_ROOT'),
         ),
         DeclareLaunchArgument(
             'silero_vad_model',

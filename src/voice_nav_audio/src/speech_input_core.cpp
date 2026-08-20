@@ -16,7 +16,6 @@
 
 #include <cmath>
 #include <cstdio>
-#include <string_view>
 
 #include <sys/random.h>
 
@@ -194,6 +193,7 @@ void SpeechInputCore::accept_cleaned_frame(const CleanedAudioFrame & frame) noex
   }
   if (!has_audio_generation_ || frame.audio_generation > audio_generation_) {
     retire_turn_scope();
+    command_session_active_ = false;
     has_audio_generation_ = true;
     audio_generation_ = frame.audio_generation;
     audio_generation_quarantined_ = false;
@@ -255,6 +255,7 @@ void SpeechInputCore::on_speech_event(const SpeechRecognitionEvent & event) noex
         (!has_wake_audio_seq_ || event.audio_seq > latest_wake_audio_seq_))
       {
         if (coordination_ == nullptr || coordination_->on_wake_accepted()) {
+          command_session_active_ = true;
           has_wake_audio_seq_ = true;
           latest_wake_audio_seq_ = event.audio_seq;
           open_turn_scope();
@@ -262,49 +263,61 @@ void SpeechInputCore::on_speech_event(const SpeechRecognitionEvent & event) noex
       }
       return;
     case SpeechEventKind::kActivity:
+      if (command_session_active_ && !has_active_scope_ && event.scope.id == 0U) {
+        if (coordination_ == nullptr ||
+          coordination_->on_wake_accepted())
+        {
+          open_turn_scope();
+        }
+      }
       return;
     case SpeechEventKind::kEndpointFinal: {
-      const bool privileged_stop_without_scope =
-        event.voice_turn_kind == VoiceTurnKind::kStop && !has_active_scope_ &&
-        event.scope.id == 0U;
-      if (privileged_stop_without_scope && is_duplicate_privileged_stop(event)) {
+        const bool privileged_stop_without_scope =
+          event.voice_turn_kind == VoiceTurnKind::kStop && !has_active_scope_ &&
+          event.scope.id == 0U;
+        if (privileged_stop_without_scope && is_duplicate_privileged_stop(event)) {
+          return;
+        }
+        if (!privileged_stop_without_scope && !matches_active_scope(event)) {
+          return;
+        }
+        const bool final_is_valid = valid_final(event);
+        bool admitted = final_is_valid &&
+          (privileged_stop_without_scope || command_session_active_);
+        if (admitted) {
+          if (privileged_stop_without_scope) {
+            has_accepted_stop_frame_ = true;
+            accepted_stop_generation_ = event.audio_generation;
+            accepted_stop_seq_ = event.audio_seq;
+          }
+          TurnScopeIdentity publication_scope = active_scope_;
+          if (privileged_stop_without_scope) {
+            publication_scope.id = next_scope_id_++;
+            publication_scope.audio_generation = audio_generation_;
+            publication_scope.session_id = session_id_;
+            publication_scope.turn_id = turn_identity(voice_instance_id_, publication_scope.id);
+          }
+          VoiceTurnPublication publication{};
+          publication.voice_instance_id = voice_instance_id_;
+          publication.voice_seq = next_voice_seq_++;
+          publication.session_id = publication_scope.session_id;
+          publication.turn_id = publication_scope.turn_id;
+          publication.kind = event.voice_turn_kind;
+          publication.text = event.final_text;
+          publication.confidence = event.confidence;
+          if (coordination_ != nullptr) {
+            coordination_->before_turn_published(publication);
+          }
+          sink_.publish(publication);
+        }
+        if (final_is_valid && event.voice_turn_kind == VoiceTurnKind::kStop) {
+          command_session_active_ = false;
+        }
+        if (!privileged_stop_without_scope) {
+          retire_turn_scope();
+        }
         return;
       }
-      if (!privileged_stop_without_scope && !matches_active_scope(event)) {
-        return;
-      }
-      const bool final_is_valid = valid_final(event);
-      if (final_is_valid) {
-        if (privileged_stop_without_scope) {
-          has_accepted_stop_frame_ = true;
-          accepted_stop_generation_ = event.audio_generation;
-          accepted_stop_seq_ = event.audio_seq;
-        }
-        TurnScopeIdentity publication_scope = active_scope_;
-        if (privileged_stop_without_scope) {
-          publication_scope.id = next_scope_id_++;
-          publication_scope.audio_generation = audio_generation_;
-          publication_scope.session_id = session_id_;
-          publication_scope.turn_id = turn_identity(voice_instance_id_, publication_scope.id);
-        }
-        VoiceTurnPublication publication{};
-        publication.voice_instance_id = voice_instance_id_;
-        publication.voice_seq = next_voice_seq_++;
-        publication.session_id = publication_scope.session_id;
-        publication.turn_id = publication_scope.turn_id;
-        publication.kind = event.voice_turn_kind;
-        publication.text = event.final_text;
-        publication.confidence = event.confidence;
-        if (coordination_ != nullptr) {
-          coordination_->before_turn_published(publication);
-        }
-        sink_.publish(publication);
-      }
-      if (!privileged_stop_without_scope) {
-        retire_turn_scope();
-      }
-      return;
-    }
     case SpeechEventKind::kTimeout:
     case SpeechEventKind::kFailure:
       if (matches_active_scope(event)) {

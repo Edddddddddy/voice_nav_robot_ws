@@ -487,6 +487,36 @@ def test_production_mapping_save_uses_ready_json_and_complete_package(
     )
 
 
+def test_production_mapping_save_retains_ready_before_long_mapping_output(
+    tmp_path: Path,
+):
+    module = _load_roundtrip_module()
+    map_root = tmp_path / 'voice_nav' / 'maps'
+    package = map_root / module.TRUSTED_MAP_ID
+
+    class _DelayedPackageProcess:
+        def wait_for_log(self, predicate, **kwargs):
+            del kwargs
+            assert not predicate(('stdout: {"status":"ready"}',))
+            _write_fake_package(package)
+            noisy_tail = tuple(
+                f'stderr: mapping-noise-{index}' for index in range(256)
+            )
+            if not predicate(noisy_tail):
+                raise RuntimeError('ready evidence was forgotten before SAVE_MAP')
+
+    observer = module.ProductionRoundtripObserver(
+        process_factory=_ProcessRegistry(_DelayedPackageProcess()),
+        clock=lambda: 0.0,
+    )
+
+    observer.wait_for_mapping_save(
+        map_root=map_root,
+        map_id=module.TRUSTED_MAP_ID,
+        deadline=1.0,
+    )
+
+
 def test_production_mapping_save_rejects_log_without_package(tmp_path: Path):
     module = _load_roundtrip_module()
     observer = module.ProductionRoundtripObserver(

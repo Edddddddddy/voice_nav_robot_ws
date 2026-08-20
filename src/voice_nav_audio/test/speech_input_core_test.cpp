@@ -205,6 +205,63 @@ TEST(SpeechInputCoreTest, FailsClosedWhenVoiceIdentityGenerationFails)
   EXPECT_TRUE(recognizer.opened_scopes.empty());
 }
 
+TEST(SpeechInputCoreTest, RequiresAcousticWakeToOpenAContinuousCommandSession)
+{
+  ManualRecognizer recognizer;
+  CollectingVoiceTurnSink sink;
+  SpeechInputCore core(recognizer, sink);
+
+  auto input = frame(7U, 1U);
+  core.accept_cleaned_frame(input);
+  recognizer.emit(SpeechRecognitionEvent::activity(input, TurnScopeIdentity{}));
+  EXPECT_EQ(recognizer.active_scope.id, 0U);
+  EXPECT_TRUE(sink.turns.empty());
+
+  input = frame(7U, 2U);
+  core.accept_cleaned_frame(input);
+  recognizer.emit(SpeechRecognitionEvent::wake_accepted(input));
+  ASSERT_NE(recognizer.active_scope.id, 0U);
+  recognizer.emit(SpeechRecognitionEvent::endpoint_final(
+      input, recognizer.active_scope, "向前走0.5米。", 1.0F));
+  ASSERT_EQ(sink.turns.size(), 1U);
+
+  input = frame(7U, 3U);
+  core.accept_cleaned_frame(input);
+  recognizer.emit(SpeechRecognitionEvent::activity(input, TurnScopeIdentity{}));
+  ASSERT_NE(recognizer.active_scope.id, 0U);
+  recognizer.emit(SpeechRecognitionEvent::endpoint_final(
+      input, recognizer.active_scope, "走2米。", 1.0F));
+  ASSERT_EQ(sink.turns.size(), 2U);
+
+  input = frame(7U, 4U);
+  core.accept_cleaned_frame(input);
+  recognizer.emit(SpeechRecognitionEvent::activity(input, TurnScopeIdentity{}));
+  recognizer.emit(SpeechRecognitionEvent::endpoint_final(
+      input, recognizer.active_scope, "小智停止", 1.0F, VoiceTurnKind::kStop));
+  ASSERT_EQ(sink.turns.size(), 3U);
+
+  input = frame(7U, 5U);
+  core.accept_cleaned_frame(input);
+  recognizer.emit(SpeechRecognitionEvent::activity(input, TurnScopeIdentity{}));
+  EXPECT_EQ(recognizer.active_scope.id, 0U);
+  EXPECT_EQ(sink.turns.size(), 3U);
+}
+
+TEST(SpeechInputCoreTest, AsrTextCannotReplaceTheAcousticWakeDecision)
+{
+  ManualRecognizer recognizer;
+  CollectingVoiceTurnSink sink;
+  SpeechInputCore core(recognizer, sink);
+  const auto input = frame(7U, 1U);
+
+  core.accept_cleaned_frame(input);
+  recognizer.emit(SpeechRecognitionEvent::activity(input, TurnScopeIdentity{}));
+  recognizer.emit(SpeechRecognitionEvent::endpoint_final(
+      input, recognizer.active_scope, "小智，向前走0.5米。", 1.0F));
+
+  EXPECT_TRUE(sink.turns.empty());
+}
+
 TEST(SpeechInputCoreTest, ContinuesAudioSequenceAcrossGenerations)
 {
   ManualRecognizer recognizer;

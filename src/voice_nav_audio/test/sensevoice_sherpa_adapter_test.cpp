@@ -31,12 +31,15 @@ const char * required_environment(const char * const name)
   return value == nullptr ? "" : value;
 }
 
-TEST(SenseVoiceSherpaAdapterTest, UsesOnlyThreeExplicitResolvedAssetPaths)
+TEST(SenseVoiceSherpaAdapterTest, ComposesExplicitKwsVadAndAsrAssets)
 {
   const SherpaSenseVoiceAssetPaths assets{
+    required_environment("VOICE_NAV_KWS_ROOT"),
     required_environment("VOICE_NAV_SENSEVOICE_VAD_MODEL"),
     required_environment("VOICE_NAV_SENSEVOICE_MODEL"),
     required_environment("VOICE_NAV_SENSEVOICE_TOKENS")};
+  ASSERT_FALSE(assets.keyword_model_root.empty())
+    << "the real adapter contract requires the explicit KWS model root";
   ASSERT_FALSE(assets.silero_vad_model.empty())
     << "the real adapter contract requires the resolved Silero VAD path";
   ASSERT_FALSE(assets.sensevoice_model.empty())
@@ -44,14 +47,14 @@ TEST(SenseVoiceSherpaAdapterTest, UsesOnlyThreeExplicitResolvedAssetPaths)
   ASSERT_FALSE(assets.tokens.empty())
     << "the real adapter contract requires the resolved SenseVoice tokens path";
 
-  auto provider = make_sherpa_sensevoice_provider(assets);
+  auto provider = make_sherpa_speech_recognizer(assets);
   ASSERT_NE(provider, nullptr);
 }
 
 TEST(SenseVoiceSherpaAdapterTest, RejectsAnIncompleteResolvedAssetSetBeforeLoading)
 {
   EXPECT_THROW(
-    make_sherpa_sensevoice_provider(SherpaSenseVoiceAssetPaths{}),
+    make_sherpa_speech_recognizer(SherpaSenseVoiceAssetPaths{}),
     std::invalid_argument);
 }
 

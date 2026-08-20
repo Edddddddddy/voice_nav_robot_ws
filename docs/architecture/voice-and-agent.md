@@ -156,9 +156,10 @@ bounded context、output、concurrency 与 request deadline。v1.0 acceptance �
 （version、immutable revision/asset ID、URL、size、SHA-256、normalized destination）、build options 与许可证状态；
 version/revision 不能是 `main`、`master`、`latest` 或 `HEAD`，ID 和 destination 跨两个 manifest 全局唯一。
 
-模型 lock 将 sherpa-onnx 等运行时/框架许可证与模型权重、训练数据 provenance 分开。KWS 及 ASR 当前为
-`unresolved`：没有权威模型/训练数据许可时，默认 provision 与 verify 会在创建 artifact directory 或发起下载前 fail-closed。
-它们不能进入 KWS/ASR Runtime，直至维护者取得并锁定权威许可。VAD 记录 Silero 上游 MIT 模型 provenance，不能以
+模型 lock 将 sherpa-onnx 等运行时/框架许可证与模型权重、训练数据 provenance 分开。ASR 已按上述
+SenseVoiceSmall 许可解析进入 Runtime。KWS 权重许可仍为 `unresolved`，因此默认 provision/verify 不下载或分发它；
+本机私有验收只能通过显式 `VOICE_NAV_KWS_ROOT` 注入已校验的模型目录。Voice 在休眠态只运行独立 acoustic KWS，
+识别固定“小智”后才打开持续 VAD/ASR command session；ASR 文本自身不能伪造 wake decision。VAD 记录 Silero 上游 MIT 模型 provenance，不能以
 sherpa-onnx Apache-2.0 混充；Chaowen 记录模型卡及 Xiao Ya/BZNSYP 非商业继承链，状态为 `restricted`。
 
 Chaowen TTS 使用不可变 GitHub release asset `406468505`：

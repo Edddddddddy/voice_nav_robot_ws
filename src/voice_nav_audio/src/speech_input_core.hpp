@@ -200,6 +200,7 @@ private:
   bool has_wake_audio_seq_{false};
   std::uint64_t latest_wake_audio_seq_{0U};
   bool has_active_scope_{false};
+  bool command_session_active_{false};
   TurnScopeIdentity active_scope_{};
   bool has_accepted_stop_frame_{false};
   std::uint64_t accepted_stop_generation_{0U};

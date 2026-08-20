@@ -24,6 +24,7 @@
 #include <utility>
 #include <vector>
 
+#include "acoustic_wake_recognizer.hpp"
 #include "gtest/gtest.h"
 #include "sensevoice_provider.hpp"
 
@@ -66,12 +67,12 @@ public:
   {
     std::unique_lock<std::mutex> lock(mutex_);
     return condition_.wait_for(lock, 2s, [this, kind]() {
-      for (const auto & event : events) {
-        if (event.kind == kind) {
-          return true;
-        }
-      }
-      return false;
+               for (const auto & event : events) {
+                 if (event.kind == kind) {
+                   return true;
+                 }
+               }
+               return false;
     });
   }
 
@@ -79,11 +80,11 @@ public:
   {
     std::unique_lock<std::mutex> lock(mutex_);
     return condition_.wait_for(lock, 2s, [this, kind, expected]() {
-      std::size_t actual = 0U;
-      for (const auto & event : events) {
-        actual += event.kind == kind ? 1U : 0U;
-      }
-      return actual >= expected;
+               std::size_t actual = 0U;
+               for (const auto & event : events) {
+                 actual += event.kind == kind ? 1U : 0U;
+               }
+               return actual >= expected;
     });
   }
 
@@ -108,6 +109,20 @@ public:
 private:
   mutable std::mutex mutex_;
   std::condition_variable condition_;
+};
+
+class FirstFrameKeywordSpotter final : public KeywordSpotterAdapter
+{
+public:
+  bool detected(const CleanedAudioFrame &) noexcept override
+  {
+    return detected_++ == 0U;
+  }
+
+  void reset() noexcept override {}
+
+private:
+  std::size_t detected_{0U};
 };
 
 class ScriptedSileroVad final : public SileroVadAdapter
@@ -581,14 +596,14 @@ private:
   std::shared_ptr<ShutdownAwareAsrState> state_;
 };
 
-class WakeBarrierSink final : public SpeechEventSink
+class ScopeOpenBarrierSink final : public SpeechEventSink
 {
 public:
   void on_speech_event(const SpeechRecognitionEvent & event) noexcept override
   {
     std::unique_lock<std::mutex> lock(mutex_);
     events.push_back(event.kind);
-    if (event.kind == SpeechEventKind::kWakeAccepted) {
+    if (event.kind == SpeechEventKind::kActivity && event.scope.id == 0U) {
       wake_entered_ = true;
       condition_.notify_all();
       condition_.wait(lock, [this]() {return wake_released_;});
@@ -639,7 +654,7 @@ public:
 
   void on_speech_event(const SpeechRecognitionEvent & event) noexcept override
   {
-    if (event.kind == SpeechEventKind::kWakeAccepted) {
+    if (event.kind == SpeechEventKind::kActivity && event.scope.id == 0U) {
       TurnScopeIdentity scope{};
       scope.id = 1U;
       scope.audio_generation = event.audio_generation;
@@ -658,12 +673,12 @@ public:
   {
     std::unique_lock<std::mutex> lock(mutex_);
     return condition_.wait_for(lock, 2s, [this, kind]() {
-      for (const auto & event : events) {
-        if (event.kind == kind) {
-          return true;
-        }
-      }
-      return false;
+               for (const auto & event : events) {
+                 if (event.kind == kind) {
+                   return true;
+                 }
+               }
+               return false;
     });
   }
 
@@ -671,11 +686,11 @@ public:
   {
     std::unique_lock<std::mutex> lock(mutex_);
     return condition_.wait_for(lock, 2s, [this, kind, expected]() {
-      std::size_t actual = 0U;
-      for (const auto & event : events) {
-        actual += event.kind == kind ? 1U : 0U;
-      }
-      return actual >= expected;
+               std::size_t actual = 0U;
+               for (const auto & event : events) {
+                 actual += event.kind == kind ? 1U : 0U;
+               }
+               return actual >= expected;
     });
   }
 
@@ -740,6 +755,8 @@ TEST(SenseVoiceProviderTest, ContinuousProviderReusesVadAndAsrAcrossTwoTurns)
 
   ASSERT_TRUE(sink.wait_for_kind(SpeechEventKind::kEndpointFinal));
   ASSERT_TRUE(asr_probe->wait_for_call());
+  EXPECT_EQ(sink.count(SpeechEventKind::kWakeAccepted), 0U);
+  EXPECT_GE(sink.count(SpeechEventKind::kActivity), 1U);
   EXPECT_EQ(sink.count(SpeechEventKind::kEndpointFinal), 1U);
   EXPECT_NE(asr_probe->inference_thread_id(), callback_thread);
   EXPECT_EQ(vad_probe->call_count(), 3U);
@@ -1076,9 +1093,9 @@ TEST(SenseVoiceProviderTest, ShutdownJoinsWorkerBeforeVadResetAndAsrShutdown)
   EXPECT_EQ(sink.total_count(), 0U);
 }
 
-TEST(SenseVoiceProviderTest, ShutdownFencesBlockedWakeBeforeAsrShutdown)
+TEST(SenseVoiceProviderTest, ShutdownFencesBlockedScopeOpenBeforeAsrShutdown)
 {
-  WakeBarrierSink sink;
+  ScopeOpenBarrierSink sink;
   auto vad = std::make_unique<ScriptedSileroVad>(1U);
   auto asr_state = std::make_shared<ShutdownAwareAsrState>();
   auto asr = std::make_unique<ShutdownAwareAsr>(asr_state);
@@ -1107,7 +1124,7 @@ TEST(SenseVoiceProviderTest, ShutdownFencesBlockedWakeBeforeAsrShutdown)
     EXPECT_EQ(asr_state->inference_calls, 0U);
     EXPECT_EQ(asr_state->late_inference_calls, 0U);
   }
-  EXPECT_EQ(sink.count(SpeechEventKind::kWakeAccepted), 1U);
+  EXPECT_EQ(sink.count(SpeechEventKind::kActivity), 1U);
   EXPECT_EQ(sink.count(SpeechEventKind::kEndpointFinal), 0U);
 }
 
@@ -1163,12 +1180,15 @@ TEST(SenseVoiceProviderTest, CorePublishesOneFinalFromSerialProviderDelivery)
 {
   auto vad = std::make_unique<ScriptedSileroVad>(2U);
   auto asr = std::make_unique<RecordingSenseVoice>("开放时间早上9点至下午5点。");
-  auto provider = std::make_unique<SenseVoiceProvider>(std::move(vad), std::move(asr));
+  auto commands = std::make_unique<SenseVoiceProvider>(std::move(vad), std::move(asr));
+  auto provider = std::make_unique<AcousticWakeRecognizer>(
+    std::make_unique<FirstFrameKeywordSpotter>(), std::move(commands));
   CollectingVoiceTurnSink turn_sink;
   SpeechInputCore core(*provider, turn_sink);
 
   core.accept_cleaned_frame(frame(1U));
   core.accept_cleaned_frame(frame(2U));
+  core.accept_cleaned_frame(frame(3U));
   core.finish_input();
 
   ASSERT_TRUE(turn_sink.wait_for_count(1U));

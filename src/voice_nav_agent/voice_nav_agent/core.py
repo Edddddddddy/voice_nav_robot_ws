@@ -968,7 +968,7 @@ class AgentCore:
             return _ClauseResult('cancel')
 
         movement = re.fullmatch(
-            r'(前进|向前走|后退)\s*(\S+)\s*米', clause
+            r'(前进|向前走|走|后退)\s*(\S+)\s*米', clause
         )
         if movement:
             value = _parse_number(movement.group(2))
@@ -982,10 +982,11 @@ class AgentCore:
                     distance_m=sign * value,
                 ),
             )
-        if any(clause.startswith(prefix) for prefix in ('前进', '向前走', '后退')):
+        move_prefixes = ('向前走', '前进', '后退', '走')
+        if any(clause.startswith(prefix) for prefix in move_prefixes):
             prefix = next(
                 prefix
-                for prefix in ('前进', '向前走', '后退')
+                for prefix in move_prefixes
                 if clause.startswith(prefix)
             )
             remainder = clause[len(prefix):].strip()
