@@ -112,6 +112,16 @@ bool normalize_sensevoice_text(const std::string & labeled, std::string & normal
   return !normalized.empty();
 }
 
+bool is_privileged_stop(const std::string & text) noexcept
+{
+  return text == "小智停止" || text == "紧急停止";
+}
+
+bool has_spoken_wake_prefix(const std::string & text) noexcept
+{
+  return text.rfind("小智", 0U) == 0U;
+}
+
 }  // namespace
 
 class SenseVoiceProvider::Implementation final
@@ -120,9 +130,11 @@ public:
   Implementation(
     std::unique_ptr<SileroVadAdapter> vad,
     std::unique_ptr<SenseVoiceAsrAdapter> asr,
+    std::unique_ptr<KeywordSpotterAdapter> keyword_spotter,
     const SenseVoiceProviderConfig config)
   : vad_(std::move(vad)),
     asr_(std::move(asr)),
+    keyword_spotter_(std::move(keyword_spotter)),
     maximum_utterance_frames_(std::min(
         config.maximum_utterance_frames == 0U ?
         SenseVoiceProviderConfig::kDefaultMaximumUtteranceFrames : config.maximum_utterance_frames,
@@ -130,8 +142,8 @@ public:
     queue_(maximum_utterance_frames_),
     utterance_samples_(maximum_utterance_frames_ * CleanedAudioFrame::kSamples)
   {
-    if (!vad_ || !asr_) {
-      throw std::invalid_argument("SenseVoiceProvider requires VAD and ASR adapters");
+    if (!vad_ || !asr_ || !keyword_spotter_) {
+      throw std::invalid_argument("SenseVoiceProvider requires KWS, VAD and ASR adapters");
     }
     armed_ = true;
     worker_ = std::thread([this]() {worker_loop();});
@@ -165,6 +177,7 @@ public:
       // The worker is joined before either adapter is reset or destroyed.
       // This keeps reset and ASR shutdown out of process/infer and fences all
       // late provider events after input has stopped.
+      keyword_spotter_->reset();
       vad_->reset();
       asr_->shutdown();
     }
@@ -332,6 +345,7 @@ private:
       utterance_sample_count_ = 0U;
       last_endpoint_sample_exclusive_ = 0U;
       wake_sent_ = false;
+      keyword_idle_frames_ = 0U;
       quarantined_ = false;
       overflow_pending_ = false;
       failure_emitted_ = false;
@@ -344,7 +358,8 @@ private:
       }
     }
     // Reset is serialized on the provider worker: no VAD call can overlap
-    // this reset, and the ASR instance remains alive for the next turn.
+    // this reset, and both model instances remain alive for the next turn.
+    keyword_spotter_->reset();
     vad_->reset();
   }
 
@@ -411,11 +426,11 @@ private:
 
   void infer_final(const CleanedAudioFrame & event_frame) noexcept
   {
-    const auto scope = active_scope();
+    auto scope = active_scope();
     std::string labeled_text{};
     const bool inferred = asr_->infer(
       utterance_samples_.data(), utterance_sample_count_, labeled_text);
-    if (!inferred || scope.id == 0U) {
+    if (!inferred) {
       SpeechRecognitionEvent failure{};
       failure.kind = SpeechEventKind::kFailure;
       failure.audio_generation = event_frame.audio_generation;
@@ -434,8 +449,17 @@ private:
       emit(failure);
       return;
     }
+    if (scope.id == 0U && has_spoken_wake_prefix(normalized)) {
+      emit(SpeechRecognitionEvent::wake_accepted(event_frame));
+      scope = active_scope();
+    }
+    const bool privileged_stop = is_privileged_stop(normalized);
+    if (scope.id == 0U && !privileged_stop) {
+      return;
+    }
     emit(SpeechRecognitionEvent::endpoint_final(
-      event_frame, scope, std::move(normalized), 1.0F, VoiceTurnKind::kCommand));
+      event_frame, scope, std::move(normalized), 1.0F,
+      privileged_stop ? VoiceTurnKind::kStop : VoiceTurnKind::kCommand));
   }
 
   void finish_on_worker() noexcept
@@ -476,10 +500,6 @@ private:
 
     finish_endpoint(flush.endpoint_sample_exclusive);
 
-    if (!wake_sent_) {
-      wake_sent_ = true;
-      emit(SpeechRecognitionEvent::wake_accepted(event_frame));
-    }
     if (stop_requested_.load(std::memory_order_acquire)) {
       return;
     }
@@ -498,6 +518,11 @@ private:
     if (!copy_frame(frame)) {
       emit_failure(frame);
       return;
+    }
+
+    if (!wake_sent_ && keyword_spotter_->process(frame)) {
+      wake_sent_ = true;
+      emit(SpeechRecognitionEvent::wake_accepted(frame));
     }
 
     const auto vad_result = vad_->process(frame);
@@ -529,13 +554,17 @@ private:
     }
 
     if (vad_result.decision == SileroVadDecision::kSilence) {
+      if (!wake_sent_) {
+        ++keyword_idle_frames_;
+        if (keyword_idle_frames_ >= SenseVoiceProviderConfig::kKeywordIdleRefreshFrames) {
+          keyword_spotter_->reset();
+          keyword_idle_frames_ = 0U;
+        }
+      }
       return;
     }
 
-    if (!wake_sent_) {
-      wake_sent_ = true;
-      emit(SpeechRecognitionEvent::wake_accepted(frame));
-    }
+    keyword_idle_frames_ = 0U;
 
     if (stop_requested_.load(std::memory_order_acquire)) {
       return;
@@ -585,6 +614,7 @@ private:
 
   std::unique_ptr<SileroVadAdapter> vad_;
   std::unique_ptr<SenseVoiceAsrAdapter> asr_;
+  std::unique_ptr<KeywordSpotterAdapter> keyword_spotter_;
   const std::size_t maximum_utterance_frames_;
   std::vector<CleanedAudioFrame> queue_;
   std::size_t queue_read_{0U};
@@ -603,6 +633,7 @@ private:
   std::size_t utterance_sample_count_{0U};
   std::size_t last_endpoint_sample_exclusive_{0U};
   bool wake_sent_{false};
+  std::size_t keyword_idle_frames_{0U};
   bool quarantined_{false};
   bool overflow_pending_{false};
   bool failure_emitted_{false};
@@ -619,8 +650,10 @@ private:
 SenseVoiceProvider::SenseVoiceProvider(
   std::unique_ptr<SileroVadAdapter> vad,
   std::unique_ptr<SenseVoiceAsrAdapter> asr,
+  std::unique_ptr<KeywordSpotterAdapter> keyword_spotter,
   const SenseVoiceProviderConfig config)
-: implementation_(std::make_unique<Implementation>(std::move(vad), std::move(asr), config))
+: implementation_(std::make_unique<Implementation>(
+    std::move(vad), std::move(asr), std::move(keyword_spotter), config))
 {
 }
 

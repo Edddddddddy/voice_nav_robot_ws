@@ -40,6 +40,7 @@ def generate_launch_description() -> LaunchDescription:
     silero_vad_model = LaunchConfiguration('silero_vad_model')
     sensevoice_model = LaunchConfiguration('sensevoice_model')
     sensevoice_tokens = LaunchConfiguration('sensevoice_tokens')
+    kws_root = LaunchConfiguration('kws_root')
     include_agent = LaunchConfiguration('include_agent')
 
     voice_node = Node(
@@ -53,6 +54,7 @@ def generate_launch_description() -> LaunchDescription:
             'silero_vad_model': silero_vad_model,
             'sensevoice_model': sensevoice_model,
             'sensevoice_tokens': sensevoice_tokens,
+            'kws_root': kws_root,
         }],
     )
     agent_node = Node(
@@ -92,6 +94,10 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument(
             'sensevoice_tokens',
             default_value=_environment('VOICE_NAV_SENSEVOICE_TOKENS'),
+        ),
+        DeclareLaunchArgument(
+            'kws_root',
+            default_value=_environment('VOICE_NAV_KWS_ROOT'),
         ),
         agent_node,
         voice_node,

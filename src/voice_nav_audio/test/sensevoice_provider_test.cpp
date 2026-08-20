@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -273,6 +274,103 @@ private:
   mutable std::mutex mutex_;
   std::condition_variable condition_;
 };
+
+class ScriptedKeywordSpotter final : public KeywordSpotterAdapter
+{
+public:
+  explicit ScriptedKeywordSpotter(const bool hit_each_utterance)
+  : hit_each_utterance_(hit_each_utterance)
+  {
+  }
+
+  bool process(const CleanedAudioFrame &) noexcept override
+  {
+    ++calls;
+    if (!hit_each_utterance_ || latched_) {
+      return false;
+    }
+    latched_ = true;
+    return true;
+  }
+
+  void reset() noexcept override
+  {
+    latched_ = false;
+    ++reset_calls;
+  }
+
+  std::size_t calls{0U};
+  std::size_t reset_calls{0U};
+
+private:
+  const bool hit_each_utterance_;
+  bool latched_{false};
+};
+
+class LongIdleThenEndpointVad final : public SileroVadAdapter
+{
+public:
+  SileroVadResult process(const CleanedAudioFrame &) noexcept override
+  {
+    ++turn_calls_;
+    const auto endpoint_after = turn_index_ == 0U ? 1U : kIdleFrames + 1U;
+    return turn_calls_ == endpoint_after ?
+           SileroVadResult{
+             SileroVadDecision::kEndpoint,
+             turn_calls_ * CleanedAudioFrame::kSamples} :
+           SileroVadResult{SileroVadDecision::kSilence, 0U};
+  }
+
+  SileroVadFlushResult finish_input() noexcept override
+  {
+    return {};
+  }
+
+  void reset() noexcept override
+  {
+    ++turn_index_;
+    turn_calls_ = 0U;
+  }
+
+  static constexpr std::size_t kIdleFrames =
+    SenseVoiceProviderConfig::kFramesPerSecond * 5U;
+
+private:
+  std::size_t turn_index_{0U};
+  std::size_t turn_calls_{0U};
+};
+
+class AgingKeywordSpotter final : public KeywordSpotterAdapter
+{
+public:
+  bool process(const CleanedAudioFrame &) noexcept override
+  {
+    ++calls_;
+    ++frames_since_reset_;
+    if (calls_ == 1U) {
+      return true;
+    }
+    return calls_ == LongIdleThenEndpointVad::kIdleFrames + 2U &&
+           frames_since_reset_ == 1U;
+  }
+
+  void reset() noexcept override
+  {
+    frames_since_reset_ = 0U;
+    ++reset_calls;
+  }
+
+  std::size_t reset_calls{0U};
+
+private:
+  std::size_t calls_{0U};
+  std::size_t frames_since_reset_{0U};
+};
+
+std::unique_ptr<KeywordSpotterAdapter> wake_every_utterance()
+{
+  return std::make_unique<ScriptedKeywordSpotter>(true);
+}
 
 class BlockingSenseVoice final : public SenseVoiceAsrAdapter
 {
@@ -697,6 +795,51 @@ private:
   std::condition_variable condition_;
 };
 
+class CyclingScopeSink final : public SpeechEventSink
+{
+public:
+  explicit CyclingScopeSink(SenseVoiceProvider & provider)
+  : provider_(provider)
+  {
+  }
+
+  void on_speech_event(const SpeechRecognitionEvent & event) noexcept override
+  {
+    if (event.kind == SpeechEventKind::kWakeAccepted) {
+      active_scope_.id = ++next_scope_id_;
+      active_scope_.audio_generation = event.audio_generation;
+      active_scope_.session_id = "idle-reset-session";
+      active_scope_.turn_id = "idle-reset-turn-" + std::to_string(next_scope_id_);
+      provider_.on_turn_scope_opened(active_scope_);
+    } else if (event.kind == SpeechEventKind::kEndpointFinal && active_scope_.id != 0U) {
+      provider_.on_turn_scope_retired(active_scope_);
+      active_scope_ = {};
+    }
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      events_.push_back(event.kind);
+    }
+    condition_.notify_all();
+  }
+
+  bool wait_for_kind_count(const SpeechEventKind kind, const std::size_t expected)
+  {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return condition_.wait_for(lock, 2s, [this, kind, expected]() {
+      return static_cast<std::size_t>(std::count(events_.cbegin(), events_.cend(), kind)) >=
+             expected;
+    });
+  }
+
+private:
+  SenseVoiceProvider & provider_;
+  std::mutex mutex_;
+  std::condition_variable condition_;
+  std::vector<SpeechEventKind> events_{};
+  TurnScopeIdentity active_scope_{};
+  std::uint64_t next_scope_id_{0U};
+};
+
 class CollectingVoiceTurnSink final : public VoiceTurnSink
 {
 public:
@@ -730,7 +873,7 @@ TEST(SenseVoiceProviderTest, ContinuousProviderReusesVadAndAsrAcrossTwoTurns)
   auto * const vad_probe = vad.get();
   auto asr = std::make_unique<RecordingSenseVoice>();
   auto * const asr_probe = asr.get();
-  SenseVoiceProvider provider(std::move(vad), std::move(asr));
+  SenseVoiceProvider provider(std::move(vad), std::move(asr), wake_every_utterance());
   ScopeWiringSink sink(provider);
 
   const auto callback_thread = std::this_thread::get_id();
@@ -758,13 +901,89 @@ TEST(SenseVoiceProviderTest, ContinuousProviderReusesVadAndAsrAcrossTwoTurns)
   EXPECT_EQ(asr_probe->call_count(), 2U);
 }
 
+TEST(SenseVoiceProviderTest, LongIdleSilenceRearmsKeywordStreamForTheNextTurn)
+{
+  auto keyword_spotter = std::make_unique<AgingKeywordSpotter>();
+  auto * const keyword_probe = keyword_spotter.get();
+  SenseVoiceProvider provider(
+    std::make_unique<LongIdleThenEndpointVad>(),
+    std::make_unique<RecordingSenseVoice>("小智开始建图。"),
+    std::move(keyword_spotter));
+  CyclingScopeSink sink(provider);
+
+  provider.process_frame(frame(1U), sink);
+  ASSERT_TRUE(sink.wait_for_kind_count(SpeechEventKind::kEndpointFinal, 1U));
+
+  for (std::uint64_t sequence = 2U;
+    sequence <= LongIdleThenEndpointVad::kIdleFrames + 2U; ++sequence)
+  {
+    provider.process_frame(frame(sequence), sink);
+  }
+
+  ASSERT_TRUE(sink.wait_for_kind_count(SpeechEventKind::kWakeAccepted, 2U));
+  ASSERT_TRUE(sink.wait_for_kind_count(SpeechEventKind::kEndpointFinal, 2U));
+  EXPECT_GE(keyword_probe->reset_calls, 3U);
+}
+
+TEST(SenseVoiceProviderTest, OrdinarySpeechWithoutAcousticWakePublishesNoTurn)
+{
+  auto vad = std::make_unique<ScriptedSileroVad>(1U);
+  auto asr = std::make_unique<RecordingSenseVoice>("向前走0.5米。");
+  auto * const asr_probe = asr.get();
+  SenseVoiceProvider provider(
+    std::move(vad), std::move(asr), std::make_unique<ScriptedKeywordSpotter>(false));
+  RecordingEventSink sink;
+
+  provider.process_frame(frame(1U), sink);
+
+  ASSERT_TRUE(asr_probe->wait_for_call());
+  EXPECT_EQ(sink.count(SpeechEventKind::kWakeAccepted), 0U);
+  EXPECT_EQ(sink.count(SpeechEventKind::kEndpointFinal), 0U);
+}
+
+TEST(SenseVoiceProviderTest, SpokenWakePrefixRecoversAnAcousticKeywordMiss)
+{
+  auto vad = std::make_unique<ScriptedSileroVad>(1U);
+  SenseVoiceProvider provider(
+    std::move(vad),
+    std::make_unique<RecordingSenseVoice>("小智停止并保存地图。"),
+    std::make_unique<ScriptedKeywordSpotter>(false));
+  ScopeWiringSink sink(provider);
+
+  provider.process_frame(frame(1U), sink);
+
+  ASSERT_TRUE(sink.wait_for_kind(SpeechEventKind::kEndpointFinal));
+  EXPECT_EQ(sink.count(SpeechEventKind::kWakeAccepted), 1U);
+  ASSERT_EQ(sink.events.back().kind, SpeechEventKind::kEndpointFinal);
+  EXPECT_EQ(sink.events.back().final_text, "小智停止并保存地图。");
+  EXPECT_EQ(sink.events.back().scope.id, 1U);
+}
+
+TEST(SenseVoiceProviderTest, PrivilegedStopRemainsAvailableWithoutAcousticWake)
+{
+  auto vad = std::make_unique<ScriptedSileroVad>(1U);
+  auto asr = std::make_unique<RecordingSenseVoice>("紧急停止");
+  SenseVoiceProvider provider(
+    std::move(vad), std::move(asr), std::make_unique<ScriptedKeywordSpotter>(false));
+  RecordingEventSink sink;
+
+  provider.process_frame(frame(1U), sink);
+
+  ASSERT_TRUE(sink.wait_for_kind(SpeechEventKind::kEndpointFinal));
+  EXPECT_EQ(sink.count(SpeechEventKind::kWakeAccepted), 0U);
+  ASSERT_EQ(sink.count(SpeechEventKind::kEndpointFinal), 1U);
+  EXPECT_EQ(sink.events.back().voice_turn_kind, VoiceTurnKind::kStop);
+  EXPECT_EQ(sink.events.back().final_text, "紧急停止");
+  EXPECT_EQ(sink.events.back().scope.id, 0U);
+}
+
 TEST(SenseVoiceProviderTest, ReArmsAfterAsrInferenceFailureForTheNextTurn)
 {
   auto vad = std::make_unique<ScriptedSileroVad>(1U);
   auto asr = std::make_unique<RecordingSenseVoice>();
   asr->inference_results = {false, true};
   auto * const asr_probe = asr.get();
-  SenseVoiceProvider provider(std::move(vad), std::move(asr));
+  SenseVoiceProvider provider(std::move(vad), std::move(asr), wake_every_utterance());
   ScopeWiringSink sink(provider);
 
   provider.process_frame(frame(1U), sink);
@@ -785,7 +1004,7 @@ TEST(SenseVoiceProviderTest, EndpointInferenceIncludesPreSpeechAndTrailingFrames
   auto * const vad_probe = vad.get();
   auto asr = std::make_unique<RecordingSenseVoice>();
   auto * const asr_probe = asr.get();
-  SenseVoiceProvider provider(std::move(vad), std::move(asr));
+  SenseVoiceProvider provider(std::move(vad), std::move(asr), wake_every_utterance());
   ScopeWiringSink sink(provider);
 
   auto prefix_one = frame(1U);
@@ -830,11 +1049,10 @@ TEST(SenseVoiceProviderTest, InvalidEndpointSampleFailsClosedWithoutInference)
     auto vad = std::make_unique<FixedEndpointSileroVad>(endpoint_sample_exclusive);
     auto asr = std::make_unique<RecordingSenseVoice>();
     auto * const asr_probe = asr.get();
-    SenseVoiceProvider provider(std::move(vad), std::move(asr));
+    SenseVoiceProvider provider(std::move(vad), std::move(asr), wake_every_utterance());
     RecordingEventSink sink;
 
     provider.process_frame(frame(1U), sink);
-    provider.finish_input();
 
     ASSERT_TRUE(sink.wait_for_kind(SpeechEventKind::kFailure));
     provider.process_frame(frame(2U), sink);
@@ -852,7 +1070,7 @@ TEST(SenseVoiceProviderTest, FlushKeepsValidTailAndExcludesPadding)
     SileroVadFlushStatus::kUnique, 192U};
   auto asr = std::make_unique<RecordingSenseVoice>();
   auto * const asr_probe = asr.get();
-  SenseVoiceProvider provider(std::move(vad), std::move(asr));
+  SenseVoiceProvider provider(std::move(vad), std::move(asr), wake_every_utterance());
   ScopeWiringSink sink(provider);
 
   auto first = frame(1U);
@@ -890,7 +1108,7 @@ TEST(SenseVoiceProviderTest, EmptyMultipleZeroAndOutOfRangeFlushFailClosed)
     vad->flush_result = flush;
     auto asr = std::make_unique<RecordingSenseVoice>();
     auto * const asr_probe = asr.get();
-    SenseVoiceProvider provider(std::move(vad), std::move(asr));
+    SenseVoiceProvider provider(std::move(vad), std::move(asr), wake_every_utterance());
     RecordingEventSink sink;
     provider.process_frame(frame(1U), sink);
     provider.finish_input();
@@ -910,7 +1128,7 @@ TEST(SenseVoiceProviderTest, DuplicateFinishInputFailsClosedWithoutSecondInferen
   auto * const vad_probe = vad.get();
   auto asr = std::make_unique<RecordingSenseVoice>();
   auto * const asr_probe = asr.get();
-  SenseVoiceProvider provider(std::move(vad), std::move(asr));
+  SenseVoiceProvider provider(std::move(vad), std::move(asr), wake_every_utterance());
   RecordingEventSink sink;
   provider.process_frame(frame(1U), sink);
   provider.finish_input();
@@ -936,7 +1154,7 @@ TEST(SenseVoiceProviderTest, RejectsUnknownOrMalformedSenseVoiceTagCombinations)
   for (const auto & invalid_label : invalid_labels) {
     auto vad = std::make_unique<ScriptedSileroVad>(1U);
     auto asr = std::make_unique<RecordingSenseVoice>(invalid_label);
-    SenseVoiceProvider provider(std::move(vad), std::move(asr));
+    SenseVoiceProvider provider(std::move(vad), std::move(asr), wake_every_utterance());
     ScopeWiringSink sink(provider);
     provider.process_frame(frame(1U), sink);
     provider.finish_input();
@@ -952,7 +1170,7 @@ TEST(SenseVoiceProviderTest, PlainUpstreamSenseVoiceTextRemainsAccepted)
 {
   auto vad = std::make_unique<ScriptedSileroVad>(1U);
   auto asr = std::make_unique<RecordingSenseVoice>("开放时间早上9点至下午5点。");
-  SenseVoiceProvider provider(std::move(vad), std::move(asr));
+  SenseVoiceProvider provider(std::move(vad), std::move(asr), wake_every_utterance());
   ScopeWiringSink sink(provider);
   provider.process_frame(frame(1U), sink);
   provider.finish_input();
@@ -972,7 +1190,8 @@ TEST(SenseVoiceProviderTest, FifteenSecondSilenceBudgetTimesOutAtExactFrame)
   auto asr = std::make_unique<RecordingSenseVoice>();
   auto * const asr_probe = asr.get();
   SenseVoiceProvider provider(
-    std::move(vad), std::move(asr), SenseVoiceProviderConfig{kMaximumUtteranceFrames});
+    std::move(vad), std::move(asr), std::make_unique<ScriptedKeywordSpotter>(false),
+    SenseVoiceProviderConfig{kMaximumUtteranceFrames});
   RecordingEventSink sink;
 
   for (std::uint64_t sequence = 1U; sequence <= kMaximumUtteranceFrames; ++sequence) {
@@ -997,7 +1216,8 @@ TEST(SenseVoiceProviderTest, QueueOverflowQuarantinesOnWorkerWithOneFailure)
   auto asr = std::make_unique<RecordingSenseVoice>();
   auto * const asr_probe = asr.get();
   SenseVoiceProvider provider(
-    std::move(vad), std::move(asr), SenseVoiceProviderConfig{kQueueCapacityFrames});
+    std::move(vad), std::move(asr), wake_every_utterance(),
+    SenseVoiceProviderConfig{kQueueCapacityFrames});
   RecordingEventSink sink;
 
   provider.process_frame(frame(1U), sink);
@@ -1029,7 +1249,8 @@ TEST(SenseVoiceProviderTest, ShutdownJoinsWorkerBeforeVadResetAndAsrShutdown)
   auto * const vad_probe = vad.get();
   auto asr_state = std::make_shared<ShutdownAwareAsrState>();
   auto asr = std::make_unique<ShutdownAwareAsr>(asr_state);
-  auto provider = std::make_unique<SenseVoiceProvider>(std::move(vad), std::move(asr));
+  auto provider = std::make_unique<SenseVoiceProvider>(
+    std::move(vad), std::move(asr), std::make_unique<ScriptedKeywordSpotter>(false));
   RecordingEventSink sink;
 
   provider->process_frame(frame(1U), sink);
@@ -1082,7 +1303,8 @@ TEST(SenseVoiceProviderTest, ShutdownFencesBlockedWakeBeforeAsrShutdown)
   auto vad = std::make_unique<ScriptedSileroVad>(1U);
   auto asr_state = std::make_shared<ShutdownAwareAsrState>();
   auto asr = std::make_unique<ShutdownAwareAsr>(asr_state);
-  auto provider = std::make_unique<SenseVoiceProvider>(std::move(vad), std::move(asr));
+  auto provider = std::make_unique<SenseVoiceProvider>(
+    std::move(vad), std::move(asr), wake_every_utterance());
 
   provider->process_frame(frame(1U), sink);
   ASSERT_TRUE(sink.wait_until_wake_entered());
@@ -1114,11 +1336,13 @@ TEST(SenseVoiceProviderTest, ShutdownFencesBlockedWakeBeforeAsrShutdown)
 TEST(SenseVoiceProviderTest, CoreFenceBlocksGapAndReorderFramesFromProviderAdapters)
 {
   auto verify_quarantine = [](const CleanedAudioFrame & first,
-    const CleanedAudioFrame & invalid_one, const CleanedAudioFrame & invalid_two) {
+    const CleanedAudioFrame & invalid_one, const CleanedAudioFrame & invalid_two,
+    const std::size_t expected_adapter_calls) {
       auto vad = std::make_unique<ScriptedSileroVad>(100U);
       auto * const vad_probe = vad.get();
       auto asr = std::make_unique<RecordingSenseVoice>();
-      auto provider = std::make_unique<SenseVoiceProvider>(std::move(vad), std::move(asr));
+      auto provider = std::make_unique<SenseVoiceProvider>(
+        std::move(vad), std::move(asr), wake_every_utterance());
       CollectingVoiceTurnSink turn_sink;
       SpeechInputCore core(*provider, turn_sink);
 
@@ -1126,15 +1350,21 @@ TEST(SenseVoiceProviderTest, CoreFenceBlocksGapAndReorderFramesFromProviderAdapt
       ASSERT_TRUE(vad_probe->wait_for_calls(1U));
       core.accept_cleaned_frame(invalid_one);
       core.accept_cleaned_frame(invalid_two);
+      if (expected_adapter_calls > 1U) {
+        ASSERT_TRUE(vad_probe->wait_for_calls(expected_adapter_calls));
+      }
 
-      EXPECT_EQ(vad_probe->call_count(), 1U);
+      provider->shutdown();
+      EXPECT_EQ(vad_probe->call_count(), expected_adapter_calls);
       EXPECT_TRUE(turn_sink.turns.empty());
       provider.reset();
     };
 
-  verify_quarantine(frame(1U), frame(1U, 3U), frame(1U, 2U));
-  verify_quarantine(frame(1U), frame(2U, 3U), frame(2U, 2U));
-  verify_quarantine(frame(1U), frame(0U, 2U), frame(1U, 2U));
+  verify_quarantine(frame(1U), frame(1U, 3U), frame(1U, 2U), 1U);
+  verify_quarantine(frame(1U), frame(2U, 3U), frame(2U, 2U), 1U);
+  // A stale older-generation frame has no side effect; the next contiguous
+  // frame in the current generation remains valid and reaches the adapters.
+  verify_quarantine(frame(1U), frame(0U, 2U), frame(1U, 2U), 2U);
 }
 
 TEST(SenseVoiceProviderTest, CoreDropsLateProviderFinalAfterContinuityRetiresScope)
@@ -1143,7 +1373,8 @@ TEST(SenseVoiceProviderTest, CoreDropsLateProviderFinalAfterContinuityRetiresSco
   auto * const vad_probe = vad.get();
   auto asr = std::make_unique<BlockingSenseVoice>();
   auto * const asr_probe = asr.get();
-  auto provider = std::make_unique<SenseVoiceProvider>(std::move(vad), std::move(asr));
+  auto provider = std::make_unique<SenseVoiceProvider>(
+    std::move(vad), std::move(asr), wake_every_utterance());
   CollectingVoiceTurnSink turn_sink;
   SpeechInputCore core(*provider, turn_sink);
 
@@ -1163,7 +1394,8 @@ TEST(SenseVoiceProviderTest, CorePublishesOneFinalFromSerialProviderDelivery)
 {
   auto vad = std::make_unique<ScriptedSileroVad>(2U);
   auto asr = std::make_unique<RecordingSenseVoice>("开放时间早上9点至下午5点。");
-  auto provider = std::make_unique<SenseVoiceProvider>(std::move(vad), std::move(asr));
+  auto provider = std::make_unique<SenseVoiceProvider>(
+    std::move(vad), std::move(asr), wake_every_utterance());
   CollectingVoiceTurnSink turn_sink;
   SpeechInputCore core(*provider, turn_sink);
 

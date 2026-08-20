@@ -308,6 +308,107 @@ private:
   const SherpaOnnxOfflineRecognizer * recognizer_{nullptr};
 };
 
+struct KeywordSpotterDeleter
+{
+  void operator()(const SherpaOnnxKeywordSpotter * spotter) const noexcept
+  {
+    if (spotter != nullptr) {
+      SherpaOnnxDestroyKeywordSpotter(spotter);
+    }
+  }
+};
+
+struct KeywordStreamDeleter
+{
+  void operator()(const SherpaOnnxOnlineStream * stream) const noexcept
+  {
+    if (stream != nullptr) {
+      SherpaOnnxDestroyOnlineStream(stream);
+    }
+  }
+};
+
+struct KeywordResultDeleter
+{
+  void operator()(const SherpaOnnxKeywordResult * result) const noexcept
+  {
+    if (result != nullptr) {
+      SherpaOnnxDestroyKeywordResult(result);
+    }
+  }
+};
+
+class SherpaKeywordSpotterAdapter final : public KeywordSpotterAdapter
+{
+public:
+  explicit SherpaKeywordSpotterAdapter(const SherpaSenseVoiceAssetPaths & assets)
+  {
+    SherpaOnnxKeywordSpotterConfig config{};
+    config.feat_config.sample_rate = kSampleRateHz;
+    config.feat_config.feature_dim = 80;
+    config.model_config.transducer.encoder = assets.kws_encoder.c_str();
+    config.model_config.transducer.decoder = assets.kws_decoder.c_str();
+    config.model_config.transducer.joiner = assets.kws_joiner.c_str();
+    config.model_config.tokens = assets.kws_tokens.c_str();
+    config.model_config.provider = "cpu";
+    config.model_config.num_threads = 1;
+    config.max_active_paths = 4;
+    config.keywords_score = 3.0F;
+    config.keywords_threshold = 0.1F;
+    config.keywords_file = assets.kws_keywords.c_str();
+
+    spotter_.reset(SherpaOnnxCreateKeywordSpotter(&config));
+    if (!spotter_) {
+      throw std::runtime_error("sherpa-onnx could not create the keyword spotter");
+    }
+    stream_.reset(SherpaOnnxCreateKeywordStream(spotter_.get()));
+    if (!stream_) {
+      throw std::runtime_error("sherpa-onnx could not create the keyword stream");
+    }
+  }
+
+  bool process(const CleanedAudioFrame & frame) noexcept override
+  {
+    if (latched_ || !stream_ || frame.sample_rate_hz != CleanedAudioFrame::kSampleRateHz ||
+      frame.channels != CleanedAudioFrame::kChannels || frame.valid_samples == 0U ||
+      frame.valid_samples > CleanedAudioFrame::kSamples)
+    {
+      return false;
+    }
+
+    std::array<float, CleanedAudioFrame::kSamples> waveform{};
+    for (std::size_t index = 0U; index < frame.valid_samples; ++index) {
+      waveform[index] = static_cast<float>(frame.samples[index]) / 32768.0F;
+    }
+    SherpaOnnxOnlineStreamAcceptWaveform(
+      stream_.get(), kSampleRateHz, waveform.data(), static_cast<int32_t>(frame.valid_samples));
+    while (SherpaOnnxIsKeywordStreamReady(spotter_.get(), stream_.get()) != 0) {
+      SherpaOnnxDecodeKeywordStream(spotter_.get(), stream_.get());
+    }
+
+    std::unique_ptr<const SherpaOnnxKeywordResult, KeywordResultDeleter> result{
+      SherpaOnnxGetKeywordResult(spotter_.get(), stream_.get())};
+    if (!result || result->keyword == nullptr || result->keyword[0] == '\0') {
+      return false;
+    }
+    latched_ = true;
+    return true;
+  }
+
+  void reset() noexcept override
+  {
+    latched_ = false;
+    if (spotter_) {
+      stream_.reset(SherpaOnnxCreateKeywordStream(spotter_.get()));
+    }
+  }
+
+private:
+  std::unique_ptr<const SherpaOnnxKeywordSpotter, KeywordSpotterDeleter> spotter_{};
+  std::unique_ptr<const SherpaOnnxOnlineStream, KeywordStreamDeleter> stream_{};
+  bool latched_{false};
+};
+
 }  // namespace
 
 std::unique_ptr<SenseVoiceProvider> make_sherpa_sensevoice_provider(
@@ -316,11 +417,18 @@ std::unique_ptr<SenseVoiceProvider> make_sherpa_sensevoice_provider(
   require_regular_file(assets.silero_vad_model, "Silero VAD model");
   require_regular_file(assets.sensevoice_model, "SenseVoice model");
   require_regular_file(assets.tokens, "SenseVoice tokens");
+  require_regular_file(assets.kws_encoder, "KWS encoder");
+  require_regular_file(assets.kws_decoder, "KWS decoder");
+  require_regular_file(assets.kws_joiner, "KWS joiner");
+  require_regular_file(assets.kws_tokens, "KWS tokens");
+  require_regular_file(assets.kws_keywords, "KWS keywords");
 
   auto vad = std::make_unique<SherpaSileroVadAdapter>(assets.silero_vad_model);
   auto asr = std::make_unique<SherpaSenseVoiceAsrAdapter>(
     assets.sensevoice_model, assets.tokens);
-  return std::make_unique<SenseVoiceProvider>(std::move(vad), std::move(asr), config);
+  auto keyword_spotter = std::make_unique<SherpaKeywordSpotterAdapter>(assets);
+  return std::make_unique<SenseVoiceProvider>(
+    std::move(vad), std::move(asr), std::move(keyword_spotter), config);
 }
 
 }  // namespace voice_nav_audio

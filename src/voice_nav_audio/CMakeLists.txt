@@ -244,6 +244,7 @@ if(VOICE_NAV_AUDIO_WITH_SHERPA_ONNX)
 endif()
 
 if(BUILD_TESTING)
+  find_package(Python3 REQUIRED COMPONENTS Interpreter)
   find_package(ament_cmake_ros REQUIRED)
   find_package(ament_cmake_gtest REQUIRED)
   find_package(ament_lint_auto REQUIRED)
@@ -339,6 +340,7 @@ if(BUILD_TESTING)
     set(_voice_nav_real_vad "$ENV{VOICE_NAV_SENSEVOICE_VAD_MODEL}")
     set(_voice_nav_real_model "$ENV{VOICE_NAV_SENSEVOICE_MODEL}")
     set(_voice_nav_real_tokens "$ENV{VOICE_NAV_SENSEVOICE_TOKENS}")
+    set(_voice_nav_real_kws_root "$ENV{VOICE_NAV_KWS_ROOT}")
     if(_voice_nav_real_vad STREQUAL "")
       set(_voice_nav_real_vad
         "${_voice_nav_real_asset_root}/vad/silero_vad.int8.onnx")
@@ -366,7 +368,7 @@ if(BUILD_TESTING)
       sensevoice_sherpa_adapter_test
       PROPERTIES
         ENVIRONMENT
-          "VOICE_NAV_SENSEVOICE_VAD_MODEL=${_voice_nav_real_vad};VOICE_NAV_SENSEVOICE_MODEL=${_voice_nav_real_model};VOICE_NAV_SENSEVOICE_TOKENS=${_voice_nav_real_tokens}")
+          "VOICE_NAV_SENSEVOICE_VAD_MODEL=${_voice_nav_real_vad};VOICE_NAV_SENSEVOICE_MODEL=${_voice_nav_real_model};VOICE_NAV_SENSEVOICE_TOKENS=${_voice_nav_real_tokens};VOICE_NAV_KWS_ROOT=${_voice_nav_real_kws_root}")
 
   endif()
 
@@ -521,6 +523,14 @@ if(BUILD_TESTING)
         "-DPACKAGE_PREFIX=${CMAKE_INSTALL_PREFIX}"
         -P "${CMAKE_CURRENT_SOURCE_DIR}/test/voice_node_install_contract.cmake"
     )
+    add_test(
+      NAME voice_node_missing_assets_reports_reason
+      COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test/test_voice_node_startup.py"
+        "$<TARGET_FILE:voice_node>"
+    )
+    set_tests_properties(
+      voice_node_missing_assets_reports_reason PROPERTIES TIMEOUT 15)
   endif()
 
   if(VOICE_NAV_AUDIO_WITH_WEBRTC_APM)

@@ -19,6 +19,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
+#include <iostream>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -60,6 +62,7 @@ public:
     declare_parameter("silero_vad_model", "");
     declare_parameter("sensevoice_model", "");
     declare_parameter("sensevoice_tokens", "");
+    declare_parameter("kws_root", "");
   }
 
   [[nodiscard]] bool wait_for_agent(const std::chrono::seconds timeout)
@@ -126,14 +129,28 @@ int main(int argc, char ** argv)
       *node, "sensevoice_model", "VOICE_NAV_SENSEVOICE_MODEL");
     const auto tokens_path = voice_nav_audio::parameter_or_environment(
       *node, "sensevoice_tokens", "VOICE_NAV_SENSEVOICE_TOKENS");
+    const auto kws_root_value = voice_nav_audio::parameter_or_environment(
+      *node, "kws_root", "VOICE_NAV_KWS_ROOT");
     const auto tts_root = voice_nav_audio::parameter_or_environment(
       *node, "chaowen_tts_root", "VOICE_NAV_CHAOWEN_TTS_ROOT");
-    if (vad_path.empty() || model_path.empty() || tokens_path.empty() || tts_root.empty()) {
+    if (vad_path.empty() || model_path.empty() || tokens_path.empty() || kws_root_value.empty() ||
+      tts_root.empty())
+    {
       throw std::invalid_argument("continuous voice assets are incomplete");
     }
 
+    const std::filesystem::path kws_root{kws_root_value};
+
     auto provider = voice_nav_audio::make_sherpa_sensevoice_provider(
-      voice_nav_audio::SherpaSenseVoiceAssetPaths{vad_path, model_path, tokens_path});
+      voice_nav_audio::SherpaSenseVoiceAssetPaths{
+      vad_path,
+      model_path,
+      tokens_path,
+      (kws_root / "encoder-epoch-13-avg-2-chunk-16-left-64.int8.onnx").string(),
+      (kws_root / "decoder-epoch-13-avg-2-chunk-16-left-64.onnx").string(),
+      (kws_root / "joiner-epoch-13-avg-2-chunk-16-left-64.int8.onnx").string(),
+      (kws_root / "tokens.txt").string(),
+      (kws_root / "keywords.txt").string()});
     dsp = voice_nav_audio::make_vad_auto_dsp_adapter();
     if (provider == nullptr || dsp == nullptr) {
       throw std::runtime_error("continuous voice requires verified VAD/DSP adapters");
@@ -178,7 +195,7 @@ int main(int argc, char ** argv)
     if (rclcpp::ok()) {
       rclcpp::shutdown();
     }
-    (void)error;
+    std::cerr << "voice_node: " << error.what() << '\n';
     return 1;
   }
 }
