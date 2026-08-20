@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import threading
+from types import SimpleNamespace
 
 import pytest
 import rclpy
@@ -21,6 +22,8 @@ from rclpy.event_handler import PublisherEventCallbacks
 from rclpy.executors import SingleThreadedExecutor
 
 from voice_nav_agent.agent_node import (
+    _is_control_turn,
+    _runtime_allows_patrol_renewal,
     _state_qos,
     _voice_turn_qos,
     AgentNode,
@@ -28,6 +31,34 @@ from voice_nav_agent.agent_node import (
 from voice_nav_interfaces.action import ExecuteMission, Speak
 from voice_nav_interfaces.msg import MissionState, VoiceTurn
 from voice_nav_interfaces.srv import StopMission
+
+
+def test_mapping_patrol_can_renew_at_same_safe_runtime_epoch():
+    token = SimpleNamespace(
+        runtime_instance_id='runtime-a', admission_epoch=7,
+    )
+    same_epoch = SimpleNamespace(
+        runtime_instance_id='runtime-a', admission_epoch=7,
+    )
+    stale_epoch = SimpleNamespace(
+        runtime_instance_id='runtime-a', admission_epoch=6,
+    )
+    replacement_runtime = SimpleNamespace(
+        runtime_instance_id='runtime-b', admission_epoch=8,
+    )
+
+    assert _runtime_allows_patrol_renewal(token, same_epoch)
+    assert not _runtime_allows_patrol_renewal(token, stale_epoch)
+    assert not _runtime_allows_patrol_renewal(token, replacement_runtime)
+
+
+def test_stop_and_save_sensevoice_transcript_is_a_control_turn():
+    turn = SimpleNamespace(
+        kind=VoiceTurn.COMMAND,
+        text='小智停止并保存地图。',
+    )
+
+    assert _is_control_turn(turn)
 
 
 class FakeEndpoints:
@@ -38,6 +69,7 @@ class FakeEndpoints:
         self.mission_goals = []
         self.speak_goals = []
         self.stop_requests = []
+        self.events = []
         self.mission_event = threading.Event()
         self.speak_event = threading.Event()
         self.stop_event = threading.Event()
@@ -82,6 +114,7 @@ class FakeEndpoints:
 
     def _execute_mission(self, goal_handle):
         self.mission_goals.append(goal_handle.request)
+        self.events.append(('mission', len(self.mission_goals)))
         self.mission_event.set()
         goal_handle.succeed()
         result = ExecuteMission.Result()
@@ -101,6 +134,7 @@ class FakeEndpoints:
 
     def _stop(self, request, response):
         self.stop_requests.append(request)
+        self.events.append(('stop', len(self.stop_requests)))
         self.stop_event.set()
         response.code = StopMission.Response.APPLIED
         response.motion_inhibited = True
@@ -126,11 +160,11 @@ def ros_context():
         rclpy.shutdown()
 
 
-def _state_message():
+def _state_message(*, mode=MissionState.NAVIGATION):
     message = MissionState()
     message.runtime_instance_id = 'runtime-a'
     message.admission_epoch = 7
-    message.operating_mode = MissionState.NAVIGATION
+    message.operating_mode = mode
     message.availability = MissionState.AVAILABLE
     message.gate_state = MissionState.GATE_INHIBITED
     message.active_step = 2**32 - 1
@@ -187,7 +221,7 @@ def test_formal_voice_turn_reaches_fake_mission_speak_and_stop(
         epoch_gid = publishers[0].endpoint_gid
         agent._state_subscription_epoch_gid = epoch_gid
         agent._on_state_message(
-            _state_message(),
+            _state_message(mode=MissionState.MAPPING),
             {
                 'source_timestamp': 1,
                 'received_timestamp': 1,
@@ -236,6 +270,7 @@ def test_formal_voice_turn_reaches_fake_mission_speak_and_stop(
         assert fake.speak_goals[1].text == '已停止。'
 
         fake.stop_event.clear()
+        fake.speak_event.clear()
         turn_publisher.publish(
             _voice_turn(
                 3,
@@ -245,6 +280,26 @@ def test_formal_voice_turn_reaches_fake_mission_speak_and_stop(
             )
         )
         assert fake.stop_event.wait(5.0)
+        assert fake.speak_event.wait(5.0)
+
+        fake.stop_event.clear()
+        fake.mission_event.clear()
+        fake.speak_event.clear()
+        turn_publisher.publish(
+            _voice_turn(4, '停止并保存地图', turn_id='save-formal')
+        )
+        assert fake.stop_event.wait(5.0)
+        assert fake.mission_event.wait(5.0)
+        assert fake.speak_event.wait(5.0)
+
+        save_goal = fake.mission_goals[1]
+        assert fake.events[-2:] == [('stop', 3), ('mission', 2)]
+        assert save_goal.runtime_instance_id == 'runtime-a'
+        assert save_goal.admission_epoch == 8
+        assert len(save_goal.steps) == 1
+        assert save_goal.steps[0].kind == save_goal.steps[0].SAVE_MAP
+        assert save_goal.steps[0].target_id == 'voice_mvp'
+        assert fake.speak_goals[-1].text == '地图已保存。'
     finally:
         executor.shutdown()
         spin_thread.join(5.0)

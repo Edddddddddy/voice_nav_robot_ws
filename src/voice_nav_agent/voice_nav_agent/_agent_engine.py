@@ -40,6 +40,7 @@ from .core import (
     MissionState,
     PlanningToken,
     ReplyDecision,
+    StopAndSaveDecision,
     StopDecision,
     VoiceTurn,
 )
@@ -50,7 +51,10 @@ from .planner_schema import (
 
 
 OUTCOME_KINDS = frozenset(
-    {'reply', 'clarify', 'mission', 'cancel', 'stop', 'rejected'}
+    {
+        'reply', 'clarify', 'mission', 'cancel', 'stop',
+        'stop_and_save', 'rejected',
+    }
 )
 
 
@@ -93,6 +97,7 @@ class OutcomeKind(str, Enum):
     MISSION = 'mission'
     CANCEL = 'cancel'
     STOP = 'stop'
+    STOP_AND_SAVE = 'stop_and_save'
     REJECTED = 'rejected'
 
 
@@ -217,6 +222,20 @@ class AgentEngine:
         if isinstance(decision, StopDecision):
             outcome = AgentOutcome(
                 'stop',
+                source_instance_id=decision.source_instance_id,
+                source_seq=decision.source_seq,
+                session_id=getattr(turn, 'session_id', ''),
+                turn_id=getattr(turn, 'turn_id', ''),
+                reason=decision.reason,
+                generation=generation,
+            )
+            return self._emit_immediate_outcome(outcome, turn)
+
+        if isinstance(decision, StopAndSaveDecision):
+            outcome = AgentOutcome(
+                'stop_and_save',
+                mission=decision.mission,
+                token=decision.mission.token,
                 source_instance_id=decision.source_instance_id,
                 source_seq=decision.source_seq,
                 session_id=getattr(turn, 'session_id', ''),
@@ -380,7 +399,7 @@ class AgentEngine:
         with self._lock:
             if (
                 self._closed
-                or outcome.kind != 'mission'
+                or outcome.kind not in ('mission', 'stop_and_save')
                 or outcome.mission is None
                 or outcome.token is None
                 or outcome.token.local_generation <= 0
@@ -401,6 +420,35 @@ class AgentEngine:
                 return False
             self._owned_mission = None
             return True
+
+    def renew_mapping_patrol(
+        self,
+        outcome: AgentOutcome,
+        snapshot: MissionState,
+    ) -> Optional[AgentOutcome]:
+        """Create the next patrol segment only from a fresh safe snapshot."""
+        with self._lock:
+            if (
+                self._closed
+                or outcome.kind != 'mission'
+                or outcome.reason != 'mapping_patrol'
+                or outcome.mission is None
+            ):
+                return None
+            generation = self._generation
+        validation = self._core.renew_mission(outcome.mission, snapshot)
+        if not validation.accepted or validation.mission is None:
+            return None
+        with self._lock:
+            if self._closed or generation != self._generation:
+                return None
+            return replace(
+                outcome,
+                mission=validation.mission,
+                token=validation.mission.token,
+                generation=generation,
+                delivery_lease=None,
+            )
 
     def _admit(self, request: PlannerRequest) -> bool:
         with self._lock:

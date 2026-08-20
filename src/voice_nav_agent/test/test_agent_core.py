@@ -453,6 +453,82 @@ def test_save_map_is_mapping_only_and_uses_a_logical_map_id():
     )
 
 
+def test_start_mapping_creates_one_bounded_autonomous_patrol_mission():
+    decision = make_core().handle_turn(
+        make_turn('小智，开始建图'),
+        make_state(operating_mode=OperatingMode.MAPPING),
+    )
+
+    assert decision.kind is DecisionKind.MISSION
+    assert decision.reason == 'mapping_patrol'
+    assert decision.steps == (
+        MissionStep(MissionStep.MOVE_DISTANCE, distance_m=0.35),
+        MissionStep(MissionStep.ROTATE_ANGLE, angle_rad=-math.pi / 2.0),
+    )
+
+
+@pytest.mark.parametrize(
+    'text',
+    [
+        '小智开始建图。',
+        '开始建图。',
+        '开始巡航建图。',
+        '自主建图。',
+    ],
+)
+def test_start_mapping_accepts_exact_sensevoice_transcripts(text):
+    decision = make_core().handle_turn(
+        make_turn(text),
+        make_state(operating_mode=OperatingMode.MAPPING),
+    )
+
+    assert decision.kind is DecisionKind.MISSION
+    assert decision.reason == 'mapping_patrol'
+
+
+def test_stop_and_save_map_is_one_typed_compound_decision():
+    decision = make_core().handle_turn(
+        make_turn('小智，停止并保存地图'),
+        make_state(operating_mode=OperatingMode.MAPPING),
+    )
+
+    assert decision.kind is DecisionKind.STOP_AND_SAVE
+    assert decision.request_id == 'turn-1'
+    assert decision.mission.steps == (
+        MissionStep(MissionStep.SAVE_MAP, target_id='voice_mvp'),
+    )
+
+
+def test_stop_and_save_accepts_exact_sensevoice_transcript():
+    decision = make_core().handle_turn(
+        make_turn('小智停止并保存地图。'),
+        make_state(
+            operating_mode=OperatingMode.MAPPING,
+            availability=Availability.BUSY,
+            gate_state=GateState.GATE_ARMED,
+        ),
+    )
+
+    assert decision.kind is DecisionKind.STOP_AND_SAVE
+    assert decision.mission.steps == (
+        MissionStep(MissionStep.SAVE_MAP, target_id='voice_mvp'),
+    )
+
+
+def test_mapping_session_commands_fail_closed_outside_mapping_mode():
+    core = make_core()
+
+    patrol = core.handle_turn(make_turn('开始建图'), make_state())
+    stop_and_save = core.handle_turn(
+        make_turn('停止并保存地图', sequence=2), make_state()
+    )
+
+    assert patrol.kind is DecisionKind.REPLY
+    assert patrol.reason == 'mode_mismatch'
+    assert stop_and_save.kind is DecisionKind.REPLY
+    assert stop_and_save.reason == 'mode_mismatch'
+
+
 @pytest.mark.parametrize(
     'text',
     [

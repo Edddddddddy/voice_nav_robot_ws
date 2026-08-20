@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from enum import Enum, IntEnum
 import math
@@ -46,6 +46,7 @@ class DecisionKind(str, Enum):
     MISSION = 'MISSION'
     CANCEL = 'CANCEL'
     STOP = 'STOP'
+    STOP_AND_SAVE = 'STOP_AND_SAVE'
     CLARIFY = 'CLARIFY'
     REPLY = 'REPLY'
     LLM_NEEDED = 'LLM_NEEDED'
@@ -470,6 +471,18 @@ class StopDecision:
 
 
 @dataclass(frozen=True, slots=True)
+class StopAndSaveDecision:
+    """Stop active Mapping motion, then save one logical map package."""
+
+    kind: ClassVar[DecisionKind] = DecisionKind.STOP_AND_SAVE
+    request_id: str
+    source_instance_id: str
+    source_seq: int
+    mission: Mission
+    reason: str = 'voice_stop_and_save'
+
+
+@dataclass(frozen=True, slots=True)
 class ClarifyDecision:
     """Bounded clarification request for one missing parameter."""
 
@@ -532,6 +545,7 @@ Decision = Union[
     MissionDecision,
     CancelDecision,
     StopDecision,
+    StopAndSaveDecision,
     ClarifyDecision,
     ReplyDecision,
     LLMNeededDecision,
@@ -635,7 +649,16 @@ class AgentCore:
             return IgnoreDecision('invalid_envelope')
 
         normalized = _normalize(envelope.text)
-        if envelope.kind == VoiceTurn.STOP or _contains_stop_clause(normalized):
+        stop_and_save, stop_and_save_target = _stop_and_save_map_target(
+            normalized
+        )
+        if (
+            not stop_and_save
+            and (
+                envelope.kind == VoiceTurn.STOP
+                or _contains_stop_clause(normalized)
+            )
+        ):
             self._observe_stop_voice(envelope)
             return StopDecision(
                 request_id=envelope.turn_id,
@@ -654,7 +677,8 @@ class AgentCore:
             )
         source_seq, local_generation = allocation
         snapshot, snapshot_reason = _freeze_runtime_snapshot(
-            runtime_snapshot_or_none
+            runtime_snapshot_or_none,
+            require_ready=not stop_and_save,
         )
         pending = self._pending.pop(envelope.session_id, None)
         plain_text = _strip_invocation(normalized)
@@ -688,6 +712,45 @@ class AgentCore:
             availability=snapshot.availability,
             gate_state=snapshot.gate_state,
         )
+        if stop_and_save:
+            if not stop_and_save_target:
+                return ReplyDecision(
+                    'invalid_map_id', _reply_text('invalid_map_id')
+                )
+            if token.operating_mode != OperatingMode.MAPPING:
+                return ReplyDecision('mode_mismatch', _reply_text('mode_mismatch'))
+            if token.availability not in (
+                Availability.AVAILABLE,
+                Availability.BUSY,
+            ) or token.gate_state == GateState.GATE_FAULTED:
+                return ReplyDecision(
+                    'runtime_not_available', _reply_text('runtime_not_available')
+                )
+            post_stop_token = replace(
+                token,
+                availability=Availability.AVAILABLE,
+                gate_state=GateState.GATE_INHIBITED,
+            )
+            validation = self._validator.validate(
+                MissionProposal((MissionStep(
+                    MissionStep.SAVE_MAP,
+                    target_id=stop_and_save_target,
+                ),), post_stop_token),
+                post_stop_token,
+            )
+            if not validation.accepted:
+                assert validation.rejection is not None
+                return ReplyDecision(
+                    validation.rejection.reason,
+                    _reply_text(validation.rejection.reason),
+                )
+            assert validation.mission is not None
+            return StopAndSaveDecision(
+                request_id=envelope.turn_id,
+                source_instance_id=envelope.voice_instance_id,
+                source_seq=envelope.voice_seq,
+                mission=validation.mission,
+            )
         parsed = self._parse_text(plain_text, snapshot)
 
         if parsed.kind == 'unknown' and pending is not None:
@@ -742,7 +805,54 @@ class AgentCore:
                 _reply_text(validation.rejection.reason),
             )
         assert validation.mission is not None
-        return MissionDecision(validation.mission)
+        return MissionDecision(
+            validation.mission,
+            reason=parsed.reason or 'rule',
+        )
+
+    def renew_mission(
+        self,
+        mission: Mission,
+        runtime_snapshot_or_none: object,
+    ) -> ValidationResult:
+        """Revalidate one autonomous segment against a fresh Runtime epoch."""
+        snapshot, snapshot_reason = _freeze_runtime_snapshot(
+            runtime_snapshot_or_none
+        )
+        if snapshot is None:
+            return ValidationResult(rejection=ValidationRejection(
+                snapshot_reason,
+                snapshot_reason,
+            ))
+        allocation = self._allocate_command()
+        if allocation is None:
+            return ValidationResult(rejection=ValidationRejection(
+                'source_sequence_exhausted',
+                'source_sequence_exhausted',
+            ))
+        source_seq, local_generation = allocation
+        previous = mission.token
+        token = PlanningToken(
+            source_instance_id=self._agent_instance_id,
+            source_seq=source_seq,
+            voice_instance_id=previous.voice_instance_id,
+            voice_seq=previous.voice_seq,
+            session_id=previous.session_id,
+            turn_id=previous.turn_id,
+            local_generation=local_generation,
+            runtime_instance_id=snapshot.runtime_instance_id,
+            admission_epoch=snapshot.admission_epoch,
+            operating_mode=snapshot.operating_mode,
+            supported_step_mask=snapshot.supported_step_mask,
+            max_steps=snapshot.max_steps,
+            named_place_ids=snapshot.named_place_ids,
+            availability=snapshot.availability,
+            gate_state=snapshot.gate_state,
+        )
+        return self._validator.validate(
+            MissionProposal(mission.steps, token),
+            token,
+        )
 
     def _validate_pending_siblings(
         self, pending: _PendingIntent, token: PlanningToken
@@ -896,11 +1006,25 @@ class AgentCore:
     def _parse_text(self, text: str, state: MissionState) -> _ParseResult:
         if not text:
             return _ParseResult('invalid', reason='empty_command')
-        if text == '取消任务':
-            return _ParseResult('cancel')
         clauses = [clause.strip() for clause in _split_clauses(text)]
         if clauses and not clauses[-1] and _has_single_terminal_ending(text):
             clauses.pop()
+        if len(clauses) == 1 and clauses[0] == '取消任务':
+            return _ParseResult('cancel')
+        if len(clauses) == 1 and clauses[0] in {
+            '开始建图',
+            '开始巡航建图',
+            '自主建图',
+        }:
+            if state.operating_mode != OperatingMode.MAPPING:
+                return _ParseResult('invalid', reason='mode_mismatch')
+            return _ParseResult('complete', steps=(
+                MissionStep(MissionStep.MOVE_DISTANCE, distance_m=0.35),
+                MissionStep(
+                    MissionStep.ROTATE_ANGLE,
+                    angle_rad=-math.pi / 2.0,
+                ),
+            ), reason='mapping_patrol')
         if len(clauses) > 3:
             return _ParseResult('invalid', reason='too_many_steps')
         if any(not clause for clause in clauses):
@@ -1383,6 +1507,33 @@ def _contains_stop_clause(text: str) -> bool:
     return False
 
 
+def is_control_text(text: str) -> bool:
+    """Return whether text bypasses ordinary Runtime-ready admission."""
+    normalized = _normalize(text)
+    stop_and_save, _target = _stop_and_save_map_target(normalized)
+    if stop_and_save or _contains_stop_clause(normalized):
+        return True
+    return any(
+        _strip_invocation(clause).replace(' ', '') == '取消任务'
+        for clause in _split_clauses(normalized)
+    )
+
+
+def _stop_and_save_map_target(text: str) -> tuple[bool, str]:
+    plain_text = _strip_invocation(text)
+    if _has_single_terminal_ending(plain_text):
+        plain_text = plain_text[:-1].rstrip()
+    match = re.fullmatch(
+        r'(?:停止|结束建图)(?:并|然后)?保存地图(?:为\s*(.*))?',
+        plain_text,
+    )
+    if match is None:
+        return False, ''
+    raw_target = match.group(1) or 'voice_mvp'
+    target = _normalize_save_map_target(raw_target)
+    return True, target if _valid_logical_id(target) else ''
+
+
 def _parse_number(token: str) -> Optional[float]:
     if token == '半':
         return 0.5
@@ -1460,6 +1611,8 @@ def _chinese_digit(character: str) -> int:
 
 def _freeze_runtime_snapshot(
     raw: object,
+    *,
+    require_ready: bool = True,
 ) -> tuple[Optional[MissionState], str]:
     if raw is None:
         return None, 'runtime_snapshot_missing'
@@ -1477,13 +1630,17 @@ def _freeze_runtime_snapshot(
         )
     except (AttributeError, KeyError, TypeError):
         return None, 'runtime_snapshot_malformed'
-    reason = _validate_runtime_state(state)
+    reason = _validate_runtime_state(state, require_ready=require_ready)
     if reason is not None:
         return None, reason
     return state, ''
 
 
-def _validate_runtime_state(state: MissionState) -> Optional[str]:
+def _validate_runtime_state(
+    state: MissionState,
+    *,
+    require_ready: bool = True,
+) -> Optional[str]:
     if not _bounded_id(state.runtime_instance_id, 36):
         return 'invalid_runtime_instance_id'
     if not _uint64(state.admission_epoch) or state.admission_epoch == 0:
@@ -1493,9 +1650,13 @@ def _validate_runtime_state(state: MissionState) -> Optional[str]:
         OperatingMode.NAVIGATION,
     ):
         return 'invalid_operating_mode'
-    if state.availability != Availability.AVAILABLE:
+    if state.availability not in tuple(Availability):
+        return 'invalid_runtime_availability'
+    if require_ready and state.availability != Availability.AVAILABLE:
         return 'runtime_not_available'
-    if state.gate_state != GateState.GATE_INHIBITED:
+    if state.gate_state not in tuple(GateState):
+        return 'invalid_gate_state'
+    if require_ready and state.gate_state != GateState.GATE_INHIBITED:
         return 'gate_not_inhibited'
     if not _uint8(state.max_steps) or not 1 <= state.max_steps <= 3:
         return 'invalid_max_steps'

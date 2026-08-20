@@ -383,6 +383,44 @@ def test_stop_invalidates_planner_without_submitting_http_for_stop():
     assert events[-1][0].kind == 'stop'
 
 
+def test_stop_and_save_is_one_immediate_mapping_outcome_without_planner():
+    planner = FakePlanner()
+    engine = AgentEngine('agent-a', planner=planner)
+
+    outcome = engine.handle_turn(
+        make_turn('停止并保存地图'),
+        make_state(operating_mode=OperatingMode.MAPPING),
+    )
+
+    assert outcome.kind == 'stop_and_save'
+    assert outcome.reason == 'voice_stop_and_save'
+    assert outcome.mission.steps == (
+        MissionStep(MissionStep.SAVE_MAP, target_id='voice_mvp'),
+    )
+    assert planner.requests == []
+
+
+def test_mapping_patrol_renews_against_the_fresh_runtime_epoch():
+    engine = AgentEngine('agent-a', planner=FakePlanner())
+    first = engine.handle_turn(
+        make_turn('开始建图'),
+        make_state(operating_mode=OperatingMode.MAPPING),
+    )
+    next_state = make_state(
+        admission_epoch=8,
+        operating_mode=OperatingMode.MAPPING,
+    )
+    engine.observe_runtime_snapshot(next_state)
+
+    renewed = engine.renew_mapping_patrol(first, next_state)
+
+    assert renewed is not None
+    assert renewed.reason == 'mapping_patrol'
+    assert renewed.token.admission_epoch == 8
+    assert renewed.token.source_seq == first.token.source_seq + 1
+    assert renewed.mission.steps == first.mission.steps
+
+
 def test_owned_cancel_only_cancels_the_exact_engine_mission():
     planner = FakePlanner()
     engine = AgentEngine('agent-a', planner=planner)

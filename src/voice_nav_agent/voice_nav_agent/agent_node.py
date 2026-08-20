@@ -16,13 +16,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 import re
 import secrets
 import threading
 from typing import Any, Callable, Optional
-import unicodedata
 
 from action_msgs.srv import CancelGoal
 import rclpy
@@ -46,7 +45,9 @@ from voice_nav_interfaces.msg import (
 from voice_nav_interfaces.srv import StopMission
 
 from ._agent_engine import AgentEngine, AgentOutcome
+from ._console_trace import format_event
 from .core import (
+    is_control_text,
     MissionState,
     PlanningToken,
     StopDecision,
@@ -64,7 +65,13 @@ SPEAK_DISCOVERY_RECHECK_SECONDS = 0.05
 MAX_UINT64 = (1 << 64) - 1
 _UNSET = object()
 
-_CONTROL_SEPARATOR_RE = re.compile(r'[，,。；;！!?、\s]+')
+
+def _runtime_allows_patrol_renewal(token: Any, state: MissionState) -> bool:
+    """Accept the current safe Runtime epoch, but never a stale/replaced one."""
+    return (
+        state.runtime_instance_id == token.runtime_instance_id
+        and state.admission_epoch >= token.admission_epoch
+    )
 
 
 class MissionSlotState(str, Enum):
@@ -95,6 +102,27 @@ class _MissionSlot:
     cancel_started: bool = False
     cancel_failure_spoken: bool = False
     terminal_speech_spoken: bool = False
+    success_text: str = '任务已完成。'
+
+
+@dataclass(slots=True)
+class _MissionContinuation:
+    """One Mission admitted only after a confirmed Operational Stop."""
+
+    outcome: AgentOutcome
+    mission: Any
+    turn: VoiceTurn
+    turn_generation: int
+    success_text: str
+
+
+@dataclass(slots=True)
+class _MappingPatrol:
+    """One user-owned patrol renewed only at safe Runtime boundaries."""
+
+    outcome: AgentOutcome
+    turn: VoiceTurn
+    turn_generation: int
 
 
 @dataclass(slots=True)
@@ -127,6 +155,7 @@ class _StopOperation:
     session_id: str
     turn_id: str
     response_timer: Any = None
+    continuation: Optional[_MissionContinuation] = None
 
 
 class _SerialSeam:
@@ -169,6 +198,8 @@ class AgentNode(Node):
         self._mission_slot: Optional[_MissionSlot] = None
         self._speak_operation: Optional[_SpeakOperation] = None
         self._stop_operation: Optional[_StopOperation] = None
+        self._mission_continuation: Optional[_MissionContinuation] = None
+        self._mapping_patrol: Optional[_MappingPatrol] = None
         self.declare_parameter('llm_endpoint', 'http://127.0.0.1:8080')
         self._engine = AgentEngine(
             self._agent_instance_id,
@@ -177,6 +208,7 @@ class AgentNode(Node):
         )
 
         self._latest_state: Optional[MissionState] = None
+        self._traced_state: Optional[tuple[Any, ...]] = None
         self._state_sample_signature: Optional[tuple[Any, ...]] = None
         self._state_subscription_generation = 0
         self._state_subscription_epoch_gid: Any = None
@@ -216,6 +248,10 @@ class AgentNode(Node):
     def agent_source_instance_id(self) -> str:
         """Return the CSPRNG-backed Agent source instance identity."""
         return self._agent_instance_id
+
+    def _trace(self, event: str, **fields: Any) -> None:
+        """Emit one compact product event to the app console."""
+        self.get_logger().info(format_event(event, **fields))
 
     def _on_state_message(
         self,
@@ -274,6 +310,7 @@ class AgentNode(Node):
         self._state_rebuild_scheduled = False
         self._latest_state = None
         self._state_sample_signature = None
+        self._traced_state = None
         self._engine.invalidate('runtime_state_subscription_rebuild')
         if self._state_subscription is not None:
             self.destroy_subscription(self._state_subscription)
@@ -314,7 +351,7 @@ class AgentNode(Node):
             self._state_sample_signature = None
             self._schedule_state_subscription_rebuild()
             return
-        self._latest_state = MissionState(
+        state = MissionState(
             runtime_instance_id=message.runtime_instance_id,
             admission_epoch=int(message.admission_epoch),
             operating_mode=int(message.operating_mode),
@@ -325,10 +362,31 @@ class AgentNode(Node):
             max_steps=int(message.max_steps),
             named_place_ids=tuple(message.named_place_ids),
         )
-        self._engine.observe_runtime_snapshot(self._latest_state)
+        self._latest_state = state
+        trace_state = (
+            state.runtime_instance_id,
+            state.admission_epoch,
+            state.operating_mode,
+            state.availability,
+            state.gate_state,
+            state.active_step,
+        )
+        if trace_state != self._traced_state:
+            self._traced_state = trace_state
+            self._trace(
+                'runtime_state',
+                runtime_instance_id=state.runtime_instance_id,
+                admission_epoch=state.admission_epoch,
+                mode=state.operating_mode,
+                availability=state.availability,
+                gate_state=state.gate_state,
+                active_step=state.active_step,
+            )
+        self._engine.observe_runtime_snapshot(state)
         self._state_sample_signature = _publisher_signature(
             publishers[0]
         )
+        self._resume_mapping_patrol()
 
     def _on_turn_message(self, message: VoiceTurnMessage) -> None:
         self._seam.invoke(self._handle_turn_message, message)
@@ -347,6 +405,17 @@ class AgentNode(Node):
         snapshot = self._planning_snapshot(
             require_execute_ready=not _is_control_turn(envelope)
         )
+        self._trace(
+            'voice_turn',
+            voice_seq=envelope.voice_seq,
+            kind=envelope.kind,
+            text=envelope.text,
+            confidence=round(envelope.confidence, 4),
+            during_playback=envelope.during_playback,
+            runtime_mode=(
+                int(snapshot.operating_mode) if snapshot is not None else None
+            ),
+        )
         self._engine.handle_turn(envelope, snapshot)
 
     def _on_engine_outcome(self, outcome: AgentOutcome, turn: VoiceTurn) -> None:
@@ -357,12 +426,37 @@ class AgentNode(Node):
         turn_generation = outcome.generation or (self._turn_generation + 1)
         if not self._engine.consume_delivery_lease(outcome.delivery_lease):
             return
+        self._trace(
+            'agent_decision',
+            voice_seq=turn.voice_seq,
+            kind=outcome.kind,
+            reason=outcome.reason,
+            text=outcome.text,
+            generation=turn_generation,
+        )
         self._turn_generation = max(self._turn_generation, turn_generation)
         self._stop_operation = None
+        self._mission_continuation = None
+        self._mapping_patrol = None
         self._retire_speak_operation()
         if outcome.kind == 'mission' and outcome.mission is not None:
-            slot = self._handle_mission(outcome.mission, turn, turn_generation)
+            success_text = '任务已完成。'
+            patrol = None
+            if outcome.reason == 'mapping_patrol':
+                success_text = ''
+                patrol = _MappingPatrol(
+                    outcome,
+                    turn,
+                    turn_generation,
+                )
+            slot = self._handle_mission(
+                outcome.mission,
+                turn,
+                turn_generation,
+                success_text,
+            )
             if slot is not None:
+                self._mapping_patrol = patrol
                 self._engine.record_owned_mission(outcome, slot)
         elif outcome.kind == 'cancel':
             self._handle_cancel(outcome, turn, turn_generation)
@@ -374,6 +468,25 @@ class AgentNode(Node):
                 reason=outcome.reason or 'voice_stop',
             )
             self._handle_stop(decision, turn, turn_generation)
+        elif outcome.kind == 'stop_and_save' and outcome.mission is not None:
+            decision = StopDecision(
+                request_id=outcome.turn_id,
+                source_instance_id=outcome.source_instance_id,
+                source_seq=outcome.source_seq,
+                reason=outcome.reason or 'voice_stop_and_save',
+            )
+            self._handle_stop(
+                decision,
+                turn,
+                turn_generation,
+                _MissionContinuation(
+                    outcome=outcome,
+                    mission=outcome.mission,
+                    turn=turn,
+                    turn_generation=turn_generation,
+                    success_text='地图已保存。',
+                ),
+            )
         elif outcome.kind in ('clarify', 'reply', 'rejected'):
             if outcome.text:
                 self._speak_text(
@@ -448,6 +561,7 @@ class AgentNode(Node):
         mission: Any,
         turn: VoiceTurn,
         turn_generation: int,
+        success_text: str = '任务已完成。',
     ) -> Optional[_MissionSlot]:
         if self._mission_slot is not None:
             self._speak_text(
@@ -469,9 +583,24 @@ class AgentNode(Node):
             terminal_turn_generation=turn_generation,
             terminal_session_id=turn.session_id,
             terminal_turn_id=turn.turn_id,
+            success_text=success_text,
         )
         self._mission_slot = slot
         goal = self._mission_goal(mission)
+        self._trace(
+            'mission_submit',
+            turn_id=turn.turn_id,
+            generation=turn_generation,
+            steps=[
+                {
+                    'kind': int(step.kind),
+                    'distance_m': round(float(step.distance_m), 4),
+                    'angle_rad': round(float(step.angle_rad), 4),
+                    'target_id': str(step.target_id),
+                }
+                for step in mission.steps
+            ],
+        )
         try:
             future = self._mission_client.send_goal_async(goal)
         except Exception as error:
@@ -550,6 +679,11 @@ class AgentNode(Node):
         self._cancel_timer(slot.send_timer)
         slot.send_timer = None
         slot.goal_handle = handle
+        self._trace(
+            'mission_accepted',
+            turn_id=slot.turn_id,
+            generation=slot.turn_generation,
+        )
         if slot.cancel_requested:
             slot.state = MissionSlotState.CANCEL_PENDING
             self._request_mission_cancel(slot)
@@ -706,20 +840,41 @@ class AgentNode(Node):
             wrapped = future.result()
             result = wrapped.result
             code = int(result.code)
+            detail = str(result.detail)
         except Exception as error:
             self.get_logger().warning(
                 f'Mission result was malformed: {error}'
             )
             code = ExecuteMission.Result.INTERNAL_ERROR
+            detail = 'malformed_result'
+        self._trace(
+            'mission_result',
+            turn_id=slot.turn_id,
+            generation=slot.turn_generation,
+            code=code,
+            detail=detail[:256],
+        )
         self._engine.record_cancelled_mission(slot)
         self._clear_mission_slot(slot)
+        self._resume_mission_continuation()
+        patrol = self._mapping_patrol
+        if (
+            code == ExecuteMission.Result.SUCCEEDED
+            and patrol is not None
+            and patrol.turn_generation == slot.turn_generation
+            and patrol.turn_generation == self._turn_generation
+        ):
+            self._resume_mapping_patrol()
+            return
+        if patrol is not None and patrol.turn_generation == slot.turn_generation:
+            self._mapping_patrol = None
         if slot.terminal_speech_spoken:
             return
         if slot.terminal_turn_generation != self._turn_generation:
             return
         slot.terminal_speech_spoken = True
         if code == ExecuteMission.Result.SUCCEEDED:
-            text = '任务已完成。'
+            text = slot.success_text
         elif code == ExecuteMission.Result.CANCELED:
             text = '任务已取消。'
         elif code == ExecuteMission.Result.STOPPED:
@@ -746,6 +901,7 @@ class AgentNode(Node):
         decision: StopDecision,
         turn: VoiceTurn,
         turn_generation: int,
+        continuation: Optional[_MissionContinuation] = None,
     ) -> None:
         self._stop_generation += 1
         operation = _StopOperation(
@@ -754,6 +910,7 @@ class AgentNode(Node):
             decision=decision,
             session_id=turn.session_id,
             turn_id=turn.turn_id,
+            continuation=continuation,
         )
         self._stop_operation = operation
         if not _service_ready(self._stop_client):
@@ -764,6 +921,13 @@ class AgentNode(Node):
         request.source_instance_id = decision.source_instance_id
         request.source_seq = decision.source_seq
         request.reason = decision.reason
+        self._trace(
+            'stop_request',
+            turn_id=turn.turn_id,
+            generation=turn_generation,
+            reason=decision.reason,
+            save_after_stop=continuation is not None,
+        )
         try:
             future = self._stop_client.call_async(request)
         except Exception as error:
@@ -793,10 +957,47 @@ class AgentNode(Node):
         self._cancel_timer(operation.response_timer)
         operation.response_timer = None
         self._stop_operation = None
+        self._trace(
+            'stop_result',
+            turn_id=operation.turn_id,
+            generation=operation.turn_generation,
+            code=code,
+            motion_inhibited=inhibited,
+        )
         if (
             code in (StopMission.Response.APPLIED, StopMission.Response.DUPLICATE)
             and inhibited
         ):
+            if operation.continuation is not None:
+                runtime_instance_id = str(response.runtime_instance_id)
+                admission_epoch = int(response.admission_epoch)
+                if not runtime_instance_id or admission_epoch <= 0:
+                    self._speak_text(
+                        '已停止，但地图未保存。',
+                        Speak.Goal.URGENT,
+                        operation.session_id,
+                        operation.turn_id,
+                        operation.turn_generation,
+                    )
+                    return
+                continuation = operation.continuation
+                token = replace(
+                    continuation.mission.token,
+                    runtime_instance_id=runtime_instance_id,
+                    admission_epoch=admission_epoch,
+                )
+                continuation.mission = replace(
+                    continuation.mission,
+                    token=token,
+                )
+                continuation.outcome = replace(
+                    continuation.outcome,
+                    mission=continuation.mission,
+                    token=token,
+                )
+                self._mission_continuation = continuation
+                self._resume_mission_continuation()
+                return
             self._speak_text(
                 '已停止。',
                 Speak.Goal.URGENT,
@@ -826,6 +1027,13 @@ class AgentNode(Node):
         operation.response_timer = None
         self._stop_operation = None
         self.get_logger().warning(f'STOP was not confirmed: {reason}')
+        self._trace(
+            'stop_result',
+            turn_id=operation.turn_id,
+            generation=operation.turn_generation,
+            code='failed',
+            reason=reason,
+        )
         self._speak_text(
             '停止请求未确认。',
             Speak.Goal.URGENT,
@@ -833,6 +1041,58 @@ class AgentNode(Node):
             operation.turn_id,
             operation.turn_generation,
         )
+
+    def _resume_mission_continuation(self) -> None:
+        continuation = self._mission_continuation
+        if continuation is None or self._mission_slot is not None:
+            return
+        self._mission_continuation = None
+        if continuation.turn_generation != self._turn_generation:
+            return
+        slot = self._handle_mission(
+            continuation.mission,
+            continuation.turn,
+            continuation.turn_generation,
+            continuation.success_text,
+        )
+        if slot is not None:
+            self._engine.record_owned_mission(continuation.outcome, slot)
+
+    def _resume_mapping_patrol(self) -> None:
+        patrol = self._mapping_patrol
+        if (
+            patrol is None
+            or self._mission_slot is not None
+            or patrol.turn_generation != self._turn_generation
+        ):
+            return
+        state = self._planning_snapshot(require_execute_ready=True)
+        if (
+            state is None
+            or state.operating_mode != MissionState.MAPPING
+            or state.availability != MissionState.AVAILABLE
+            or state.gate_state != MissionState.GATE_INHIBITED
+            or patrol.outcome.token is None
+            or not _runtime_allows_patrol_renewal(
+                patrol.outcome.token, state
+            )
+        ):
+            return
+        outcome = self._engine.renew_mapping_patrol(
+            patrol.outcome,
+            state,
+        )
+        if outcome is None or outcome.mission is None:
+            return
+        patrol.outcome = outcome
+        slot = self._handle_mission(
+            outcome.mission,
+            patrol.turn,
+            patrol.turn_generation,
+            '',
+        )
+        if slot is not None:
+            self._engine.record_owned_mission(outcome, slot)
 
     def _retire_speak_operation(self) -> None:
         operation = self._speak_operation
@@ -1226,18 +1486,7 @@ def _is_control_turn(turn: VoiceTurn) -> bool:
         return True
     if not isinstance(turn.text, str):
         return False
-    normalized = unicodedata.normalize('NFKC', turn.text).strip()
-    clauses = [clause.strip() for clause in _CONTROL_SEPARATOR_RE.split(normalized)]
-    return any(
-        bool(
-            re.fullmatch(
-                r'(?:小智\s*)?(?:请\s*)?(?:取消任务|停止|紧急停止)',
-                clause,
-            )
-        )
-        for clause in clauses
-        if clause
-    )
+    return is_control_text(turn.text)
 
 
 def main(args: Optional[list[str]] = None) -> None:

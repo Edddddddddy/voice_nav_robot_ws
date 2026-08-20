@@ -5,25 +5,26 @@
 
 """Source contract for the package-backed one-place Navigation MVP."""
 
-import importlib.util
 from collections import deque
+import importlib.util
 from pathlib import Path
 import sys
 import threading
 
 from geometry_msgs.msg import TwistStamped
+from launch.actions import TimerAction
+from launch_ros.actions import Node
 from nav_msgs.msg import Odometry
 import pytest
 from sensor_msgs.msg import JointState
 import yaml
-from launch_ros.actions import Node
 
 
 _TEST_DIRECTORY = str(Path(__file__).resolve().parent)
 if _TEST_DIRECTORY not in sys.path:
     sys.path.insert(0, _TEST_DIRECTORY)
 
-import crash_stop_support as support
+import crash_stop_support as support  # noqa: E402, I100
 
 
 def _package_root() -> Path:
@@ -79,6 +80,14 @@ def test_navigation_mvp_contract_is_one_place_and_single_nav2_writer():
 
     description = _load_launch_module().generate_launch_description()
     assert description.entities
+    rviz_nodes = [
+        entity for entity in description.entities
+        if isinstance(entity, Node)
+        and getattr(entity, '_Node__package', None) == 'rviz2'
+        and getattr(entity, '_Node__node_executable', None) == 'rviz2'
+    ]
+    assert len(rviz_nodes) == 1
+    assert (package_root / 'config' / 'voice_nav_navigation.rviz').is_file()
     map_server = next(
         entity for entity in description.entities
         if isinstance(entity, Node)
@@ -91,6 +100,27 @@ def test_navigation_mvp_contract_is_one_place_and_single_nav2_writer():
         if isinstance(parameters, dict)
         for value in parameters.values()
     )
+
+
+def test_lifecycle_managers_wait_for_discovery_before_autostart():
+    description = _load_launch_module().generate_launch_description()
+    timers = [
+        entity for entity in description.entities
+        if isinstance(entity, TimerAction)
+    ]
+
+    manager_names = {
+        getattr(action, '_Node__node_name', None)
+        for timer in timers
+        for action in timer.actions
+        if isinstance(action, Node)
+    }
+
+    assert manager_names == {
+        'lifecycle_manager_localization',
+        'lifecycle_manager_navigation',
+    }
+    assert all(float(timer.period) >= 2.0 for timer in timers)
 
 
 def test_navigation_observation_selects_last_nonzero_without_sleep():
