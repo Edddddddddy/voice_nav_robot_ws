@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include <cstdlib>
+#include <filesystem>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -31,18 +32,26 @@ const char * required_environment(const char * const name)
   return value == nullptr ? "" : value;
 }
 
-TEST(SenseVoiceSherpaAdapterTest, UsesOnlyThreeExplicitResolvedAssetPaths)
+TEST(SenseVoiceSherpaAdapterTest, LoadsExplicitAsrVadAndKeywordAssets)
 {
+  const std::filesystem::path kws_root{required_environment("VOICE_NAV_KWS_ROOT")};
   const SherpaSenseVoiceAssetPaths assets{
     required_environment("VOICE_NAV_SENSEVOICE_VAD_MODEL"),
     required_environment("VOICE_NAV_SENSEVOICE_MODEL"),
-    required_environment("VOICE_NAV_SENSEVOICE_TOKENS")};
+    required_environment("VOICE_NAV_SENSEVOICE_TOKENS"),
+    (kws_root / "encoder-epoch-13-avg-2-chunk-16-left-64.int8.onnx").string(),
+    (kws_root / "decoder-epoch-13-avg-2-chunk-16-left-64.onnx").string(),
+    (kws_root / "joiner-epoch-13-avg-2-chunk-16-left-64.int8.onnx").string(),
+    (kws_root / "tokens.txt").string(),
+    (kws_root / "keywords.txt").string()};
   ASSERT_FALSE(assets.silero_vad_model.empty())
     << "the real adapter contract requires the resolved Silero VAD path";
   ASSERT_FALSE(assets.sensevoice_model.empty())
     << "the real adapter contract requires the resolved SenseVoice model path";
   ASSERT_FALSE(assets.tokens.empty())
     << "the real adapter contract requires the resolved SenseVoice tokens path";
+  ASSERT_FALSE(kws_root.empty())
+    << "the real adapter contract requires the local KWS root";
 
   auto provider = make_sherpa_sensevoice_provider(assets);
   ASSERT_NE(provider, nullptr);
