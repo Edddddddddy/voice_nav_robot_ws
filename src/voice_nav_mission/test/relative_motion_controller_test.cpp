@@ -271,6 +271,24 @@ TEST(RelativeMotionController, MissingFreshOdomIsDependencyFailure)
   EXPECT_EQ(failed.failure, RelativeMotionFailure::DependencyUnavailable);
 }
 
+TEST(RelativeMotionController, ConfiguredLivenessBudgetToleratesSimulatorJitter)
+{
+  RelativeMotionPolicy policy;
+  policy.dependency_liveness_timeout = 500ms;
+  RelativeMotionController controller(policy);
+  const auto t0 = SteadyClockPort::TimePoint{};
+
+  EXPECT_EQ(controller.start(kToken, move(0.5F), t0).kind, RelativeMotionEventKind::Running);
+  EXPECT_EQ(
+    controller.observe_odom(odom(0.0, 0.0, 0.0), t0).kind,
+    RelativeMotionEventKind::Running);
+
+  EXPECT_EQ(controller.tick(t0 + 300ms).kind, RelativeMotionEventKind::Running);
+  const auto failed = controller.tick(t0 + 501ms);
+  EXPECT_EQ(failed.kind, RelativeMotionEventKind::Failed);
+  EXPECT_EQ(failed.failure, RelativeMotionFailure::DependencyUnavailable);
+}
+
 TEST(RelativeMotionController, DeadlineIsIndependentOfGoalMissionDeadline)
 {
   RelativeMotionPolicy policy;

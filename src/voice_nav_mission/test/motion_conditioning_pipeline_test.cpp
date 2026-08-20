@@ -1057,6 +1057,7 @@ public:
         }
         if (request->node_name == "collision_monitor") {
           collision_state_ = lifecycle_msgs::msg::State::PRIMARY_STATE_UNCONFIGURED;
+          collision_source_timeout_ = parameter_double(request, "source_timeout");
           collision_candidate_ = collision_->create_generic_publisher(
             parameter_string(request, "cmd_vel_out_topic"),
             "geometry_msgs/msg/TwistStamped", rclcpp::QoS(1));
@@ -1207,6 +1208,12 @@ public:
   {
     std::lock_guard<std::mutex> lock(graph_mutex_);
     return unload_count_;
+  }
+
+  double collision_source_timeout() const
+  {
+    std::lock_guard<std::mutex> lock(graph_mutex_);
+    return collision_source_timeout_;
   }
 
   bool wait_for_loaded_count(
@@ -1496,6 +1503,20 @@ private:
     return {};
   }
 
+  static double parameter_double(
+    const std::shared_ptr<LoadNode::Request> & request,
+    const std::string & name)
+  {
+    for (const auto & value : request->parameters) {
+      if (value.name == name && value.value.type ==
+        rcl_interfaces::msg::ParameterType::PARAMETER_DOUBLE)
+      {
+        return value.value.double_value;
+      }
+    }
+    return 0.0;
+  }
+
   void create_lifecycle_services(
     const rclcpp::Node::SharedPtr & node,
     const std::string & fqn,
@@ -1601,6 +1622,7 @@ private:
   bool smoother_lifecycle_failure_{false};
   bool wrong_fqn_{false};
   bool retain_candidate_writer_{false};
+  double collision_source_timeout_{0.0};
   bool publish_scan_{true};
   bool publish_odom_{true};
   bool publish_clock_{true};
@@ -1793,6 +1815,16 @@ TEST_F(MotionConditioningPipelineTest, StartupReconciliationCleanStartDoesNotUnl
   ASSERT_GE(calls.size(), 2U);
   EXPECT_EQ(calls[0], AuthorityOperationKind::Inhibit);
   EXPECT_EQ(calls[1], AuthorityOperationKind::Inhibit);
+}
+
+TEST_F(MotionConditioningPipelineTest, CollisionTimestampSkewBudgetCoversSimJitter)
+{
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+
+  const auto prepared = pipeline.prepare();
+
+  ASSERT_TRUE(prepared.ok) << prepared.detail;
+  EXPECT_GE(graph->collision_source_timeout(), 0.5);
 }
 
 TEST_F(
@@ -3658,6 +3690,22 @@ TEST_F(MotionConditioningPipelineTest, SensorLivenessLossFailsClosed)
     MotionConditioningFailure::DependencyUnavailable);
   EXPECT_TRUE(pipeline.last_result().zero_proven);
   EXPECT_GE(producer->stop_count, 1U);
+}
+
+TEST_F(MotionConditioningPipelineTest, SimulationSensorJitterWithinBudgetKeepsRunning)
+{
+  MotionConditioningPipeline pipeline(*client, authority, producer, config());
+  ASSERT_TRUE(pipeline.prepare().ok);
+  std::this_thread::sleep_for(50ms);
+  ASSERT_TRUE(pipeline.start().ok);
+
+  graph->set_health_sources(false, true, true);
+  std::this_thread::sleep_for(300ms);
+
+  EXPECT_EQ(pipeline.state(), MotionConditioningState::Running);
+  graph->set_health_sources(true, true, true);
+  graph->publish_health_once();
+  EXPECT_TRUE(pipeline.stop().ok);
 }
 
 TEST_F(MotionConditioningPipelineTest, OdomLivenessLossFailsClosed)

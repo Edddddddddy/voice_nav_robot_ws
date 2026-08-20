@@ -36,7 +36,7 @@ from voice_nav_sim._scenario_spec import (
 
 Mode = Literal['motion', 'mapping', 'navigation']
 Display = Literal['headless', 'gui']
-InputProfile = Literal['console', 'vad-auto']
+InputProfile = Literal['console', 'vad-auto', 'none']
 SESSION_LAUNCH_FILE = 'voice_nav_session.launch.py'
 
 
@@ -362,6 +362,14 @@ def _run_selected_input(
     stdout,
 ) -> int:
     """Run exactly the chosen frontend after shared readiness succeeds."""
+    if input_spec.profile == 'none':
+        try:
+            _process_lifecycle_module()['wait_for_frontend_or_owner_exit'](
+                process, owner_process,
+            )
+        except KeyboardInterrupt:
+            return 130
+        return 0 if _poll(owner_process) == 0 else 1
     if input_spec.profile == 'vad-auto':
         try:
             outcome = _process_lifecycle_module()[
@@ -696,7 +704,7 @@ def main(
     )
     parser.add_argument(
         '--input',
-        choices=('console', 'vad-auto'),
+        choices=('console', 'vad-auto', 'none'),
         default=None,
     )
     try:
@@ -715,11 +723,12 @@ def main(
     if production_process_factory:
         process_factory = _spawn_session
     if readiness is None:
-        readiness = (
-            _wait_for_command_gateway_readiness
-            if input_profile == 'console'
-            else _wait_for_voice_input_sink_readiness
-        )
+        if input_profile == 'console':
+            readiness = _wait_for_command_gateway_readiness
+        elif input_profile == 'vad-auto':
+            readiness = _wait_for_voice_input_sink_readiness
+        else:
+            readiness = lambda *_args: _stable_result('ready')
     if console_main is None:
         console_main = _run_existing_console
 

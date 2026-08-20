@@ -10,15 +10,25 @@ import os
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
+    ExecuteProcess,
     GroupAction,
     IncludeLaunchDescription,
     SetEnvironmentVariable,
+    TimerAction,
 )
+from launch.conditions import UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node, SetRemap
 from launch_ros.substitutions import FindPackageShare
 from voice_nav_sim._scenario_spec import resolve_scenario
+
+
+# Let Fast DDS discover every lifecycle service before the managers issue
+# their first transition.  The app's shared readiness deadline still bounds
+# the complete startup.
+_LIFECYCLE_DISCOVERY_SETTLE_S = 5.0
+_NAVIGATION_LIFECYCLE_SETTLE_S = 12.0
 
 
 def generate_launch_description():
@@ -46,6 +56,7 @@ def generate_launch_description():
             'headless': headless,
             'shutdown_on_gazebo_exit': shutdown_on_gazebo_exit,
             'runtime_config': runtime_config,
+            'runtime_start_delay': '30.0',
             'map_id': map_id,
         }.items(),
     )
@@ -70,16 +81,12 @@ def generate_launch_description():
         parameters=[nav2_params],
         remappings=tf_remappings,
     )
-    localization_manager = Node(
-        package='nav2_lifecycle_manager',
-        executable='lifecycle_manager',
-        name='lifecycle_manager_localization',
+    localization_manager = ExecuteProcess(
+        cmd=[
+            'ros2', 'run', 'nav2_util', 'lifecycle_bringup',
+            'map_server', 'amcl',
+        ],
         output='screen',
-        parameters=[{
-            'use_sim_time': True,
-            'autostart': True,
-            'node_names': ['map_server', 'amcl'],
-        }],
     )
 
     controller_server = Node(
@@ -114,21 +121,13 @@ def generate_launch_description():
         parameters=[nav2_params],
         remappings=tf_remappings,
     )
-    navigation_manager = Node(
-        package='nav2_lifecycle_manager',
-        executable='lifecycle_manager',
-        name='lifecycle_manager_navigation',
+    navigation_manager = ExecuteProcess(
+        cmd=[
+            'ros2', 'run', 'nav2_util', 'lifecycle_bringup',
+            'controller_server', 'planner_server',
+            'behavior_server', 'bt_navigator',
+        ],
         output='screen',
-        parameters=[{
-            'use_sim_time': True,
-            'autostart': True,
-            'node_names': [
-                'controller_server',
-                'planner_server',
-                'behavior_server',
-                'bt_navigator',
-            ],
-        }],
     )
     navigation = GroupAction([
         SetRemap('/cmd_vel', '/voice_nav/nav2_cmd_vel'),
@@ -136,8 +135,27 @@ def generate_launch_description():
         planner_server,
         behavior_server,
         bt_navigator,
-        navigation_manager,
     ])
+    localization_autostart = TimerAction(
+        period=_LIFECYCLE_DISCOVERY_SETTLE_S,
+        actions=[localization_manager],
+    )
+    navigation_autostart = TimerAction(
+        period=_NAVIGATION_LIFECYCLE_SETTLE_S,
+        actions=[navigation_manager],
+    )
+    rviz = Node(
+        package='rviz2',
+        executable='rviz2',
+        name='voice_nav_navigation_rviz',
+        output='screen',
+        condition=UnlessCondition(headless),
+        arguments=['-d', PathJoinSubstitution([
+            bringup_share, 'config', 'voice_nav_navigation.rviz'
+        ])],
+        additional_env={'LIBGL_ALWAYS_SOFTWARE': 'true'},
+        parameters=[{'use_sim_time': True}],
+    )
 
     return LaunchDescription([
         SetEnvironmentVariable('RMW_IMPLEMENTATION', 'rmw_fastrtps_cpp'),
@@ -172,6 +190,8 @@ def generate_launch_description():
         product,
         map_server,
         amcl,
-        localization_manager,
         navigation,
+        localization_autostart,
+        navigation_autostart,
+        rviz,
     ])

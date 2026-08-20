@@ -520,6 +520,16 @@ StopResponse RuntimeCore::stop(const StopRequest & request)
 
 void RuntimeCore::observe_gate(const GateSnapshot & snapshot)
 {
+  // Node construction can capture the pre-discovery placeholder before the
+  // transient-local Gate sample arrives, then enqueue that placeholder after
+  // the real sample.  A real endpoint loss retains the bound Gate identity;
+  // only the identity-free placeholder is stale once binding has completed.
+  if (
+    gate_bound_ && snapshot.gate_instance_id.empty() &&
+    snapshot.control_seq == 0U && !snapshot.endpoint_available)
+  {
+    return;
+  }
   // Gate control_seq is monotonic within one Gate identity.  Reject a
   // duplicate or delayed sample before it can roll the current generation
   // back after a trusted recovery; a genuinely new identity still enters the

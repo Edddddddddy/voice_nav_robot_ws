@@ -132,11 +132,15 @@ struct MotionConditioningConfig
   bool startup_reconciliation_on_prepare{true};
   std::chrono::milliseconds prepare_open_deadline{4000};
   std::chrono::milliseconds renew_period{100};
-  std::chrono::milliseconds dependency_liveness_timeout{200};
+  // GUI simulation can pause sensor callbacks for several scheduler slices.
+  // Keep the budget bounded while tolerating a measured 300 ms WSLg gap.
+  std::chrono::milliseconds dependency_liveness_timeout{500};
   // Collision Monitor compares sensor ROS timestamps with its simulation
   // clock.  This skew budget is distinct from the steady-clock dependency
   // liveness deadline above.
-  std::chrono::milliseconds collision_source_timeout{200};
+  // This is ROS timestamp skew tolerance.  Receipt liveness is checked
+  // independently, so a missing scan still fails closed after 500 ms.
+  std::chrono::milliseconds collision_source_timeout{500};
   std::chrono::milliseconds health_rpc_timeout{100};
   std::chrono::milliseconds control_response_deadline{100};
   std::chrono::milliseconds stop_barrier{250};

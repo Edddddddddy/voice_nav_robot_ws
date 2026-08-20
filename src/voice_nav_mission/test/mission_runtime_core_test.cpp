@@ -663,6 +663,20 @@ TEST(RuntimeCore, StartupConvergesLegacyPreparedGateToCurrentZeroProof)
   EXPECT_EQ(core.state().availability, RuntimeAvailability::Available);
 }
 
+TEST(RuntimeCore, DelayedUnboundStartupSnapshotCannotFaultBoundGate)
+{
+  Fixture fixture;
+  ASSERT_EQ(
+    fixture.core.state().availability, RuntimeAvailability::Available);
+
+  fixture.core.observe_gate(GateSnapshot{});
+
+  EXPECT_EQ(
+    fixture.core.state().availability, RuntimeAvailability::Available);
+  EXPECT_EQ(fixture.core.state().gate_state, GateState::Inhibited);
+  EXPECT_EQ(fixture.core.state().admission_epoch, 1U);
+}
+
 TEST(RuntimeCore, StartupAcceptsSameGateStaleInhibitWithCurrentZeroProof)
 {
   auto clock = std::make_shared<ScriptedSteadyClock>();

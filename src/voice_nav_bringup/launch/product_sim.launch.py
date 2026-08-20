@@ -18,6 +18,7 @@ from launch.actions import (
     IncludeLaunchDescription,
     OpaqueFunction,
     SetEnvironmentVariable,
+    TimerAction,
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
@@ -43,6 +44,7 @@ def generate_launch_description():
         'shutdown_on_gazebo_exit'
     )
     runtime_config = LaunchConfiguration('runtime_config')
+    runtime_start_delay = LaunchConfiguration('runtime_start_delay')
     map_id = LaunchConfiguration('map_id')
     trusted_named_places_file = LaunchConfiguration('trusted_named_places_file')
     simulation = IncludeLaunchDescription(
@@ -130,6 +132,15 @@ def generate_launch_description():
                 description='Trusted Mission Runtime configuration.',
             ),
             DeclareLaunchArgument(
+                'runtime_start_delay',
+                default_value='12.0',
+                choices=['12.0', '30.0'],
+                description=(
+                    'Closed startup delay for Mission Runtime; Navigation '
+                    'uses the longer value while Nav2 activates.'
+                ),
+            ),
+            DeclareLaunchArgument(
                 'map_id',
                 default_value='voice_mvp',
                 description='Trusted map package ID used by Runtime.',
@@ -146,6 +157,9 @@ def generate_launch_description():
             simulation,
             motion_conditioning_container,
             motion_gate,
-            mission_runtime,
+            TimerAction(
+                period=runtime_start_delay,
+                actions=[mission_runtime],
+            ),
         ]
     )

@@ -1046,7 +1046,7 @@ motion_gate_node:
   ros__parameters:
     use_sim_time: true
     output_frequency_hz: 50.0
-    authority_lease_ms: 250
+    authority_lease_ms: 1500
     candidate_freshness_ms: 150
     prepare_timeout_ms: 6000
     writer_graph_timeout_ms: 1000
@@ -2169,7 +2169,7 @@ class MotionGateContractTest(unittest.TestCase):
         mutations = (
             ("use_sim_time: true", "use_sim_time: false"),
             ("output_frequency_hz: 50.0", "output_frequency_hz: 20.0"),
-            ("authority_lease_ms: 250", "authority_lease_ms: 350"),
+            ("authority_lease_ms: 1500", "authority_lease_ms: 2100"),
             (
                 "candidate_freshness_ms: 150",
                 "candidate_freshness_ms: 250",

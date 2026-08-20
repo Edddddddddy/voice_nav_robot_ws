@@ -1426,7 +1426,7 @@ private:
     const auto startup_started_ns =
       std::chrono::duration_cast<std::chrono::nanoseconds>(
       startup_started.time_since_epoch()).count();
-    RCLCPP_DEBUG(
+    RCLCPP_INFO(
       node_.get_logger(),
       "VOICE_NAV_DIAGNOSTIC marker=startup actor=mission_runtime_node "
       "phase=startup_reconciliation_begin steady_ns=%" PRId64,
@@ -1449,7 +1449,7 @@ private:
     const auto startup_elapsed_ms = std::chrono::duration_cast<
       std::chrono::milliseconds>(
       std::chrono::steady_clock::now() - startup_started).count();
-    RCLCPP_DEBUG(
+    RCLCPP_INFO(
       node_.get_logger(),
       "VOICE_NAV_DIAGNOSTIC marker=startup actor=mission_runtime_node "
       "phase=startup_reconciliation_result result=%s elapsed_ms=%" PRId64 " "

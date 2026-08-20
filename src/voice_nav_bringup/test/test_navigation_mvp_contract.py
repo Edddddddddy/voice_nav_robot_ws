@@ -5,25 +5,28 @@
 
 """Source contract for the package-backed one-place Navigation MVP."""
 
-import importlib.util
 from collections import deque
+import importlib.util
 from pathlib import Path
 import sys
 import threading
 
 from geometry_msgs.msg import TwistStamped
+from launch import LaunchContext
+from launch.actions import ExecuteProcess, IncludeLaunchDescription, TimerAction
+from launch.utilities import perform_substitutions
+from launch_ros.actions import Node
 from nav_msgs.msg import Odometry
 import pytest
 from sensor_msgs.msg import JointState
 import yaml
-from launch_ros.actions import Node
 
 
 _TEST_DIRECTORY = str(Path(__file__).resolve().parent)
 if _TEST_DIRECTORY not in sys.path:
     sys.path.insert(0, _TEST_DIRECTORY)
 
-import crash_stop_support as support
+import crash_stop_support as support  # noqa: E402, I100
 
 
 def _package_root() -> Path:
@@ -63,7 +66,7 @@ def test_navigation_mvp_contract_is_one_place_and_single_nav2_writer():
     )
 
     assert "SetRemap('/cmd_vel', '/voice_nav/nav2_cmd_vel')" in launch_source
-    assert "'node_names': ['map_server', 'amcl']" in launch_source
+    assert "'map_server', 'amcl'" in launch_source
     runtime_parameters = runtime['mission_runtime_node']['ros__parameters']
     assert runtime_parameters['operating_mode'] == 'navigation'
     assert runtime_parameters['map_id'] == 'voice_mvp'
@@ -79,6 +82,26 @@ def test_navigation_mvp_contract_is_one_place_and_single_nav2_writer():
 
     description = _load_launch_module().generate_launch_description()
     assert description.entities
+    rviz_nodes = [
+        entity for entity in description.entities
+        if isinstance(entity, Node)
+        and getattr(entity, '_Node__package', None) == 'rviz2'
+        and getattr(entity, '_Node__node_executable', None) == 'rviz2'
+    ]
+    assert len(rviz_nodes) == 1
+    executable = getattr(
+        rviz_nodes[0], '_ExecuteLocal__process_description'
+    )
+    context = LaunchContext()
+    environment = {
+        perform_substitutions(context, key):
+            perform_substitutions(context, value)
+        for key, value in getattr(executable, '_Executable__additional_env')
+    }
+    assert environment == {
+        'LIBGL_ALWAYS_SOFTWARE': 'true',
+    }
+    assert (package_root / 'config' / 'voice_nav_navigation.rviz').is_file()
     map_server = next(
         entity for entity in description.entities
         if isinstance(entity, Node)
@@ -91,6 +114,50 @@ def test_navigation_mvp_contract_is_one_place_and_single_nav2_writer():
         if isinstance(parameters, dict)
         for value in parameters.values()
     )
+
+
+def test_lifecycle_managers_wait_for_discovery_before_autostart():
+    description = _load_launch_module().generate_launch_description()
+    timers = [
+        entity for entity in description.entities
+        if isinstance(entity, TimerAction)
+    ]
+
+    lifecycle_commands = {
+        tuple(value[0].text for value in action.process_description.cmd): float(timer.period)
+        for timer in timers
+        for action in timer.actions
+        if isinstance(action, ExecuteProcess)
+    }
+
+    localization = next(
+        period for command, period in lifecycle_commands.items()
+        if command[-2:] == ('map_server', 'amcl')
+    )
+    navigation = next(
+        period for command, period in lifecycle_commands.items()
+        if command[-4:] == (
+            'controller_server', 'planner_server',
+            'behavior_server', 'bt_navigator',
+        )
+    )
+    assert localization >= 5.0
+    assert (
+        navigation > localization
+    )
+
+
+def test_navigation_starts_runtime_after_nav2_lifecycle_activation():
+    description = _load_launch_module().generate_launch_description()
+    product = next(
+        entity for entity in description.entities
+        if isinstance(entity, IncludeLaunchDescription)
+    )
+    arguments = dict(
+        getattr(product, '_IncludeLaunchDescription__launch_arguments')
+    )
+
+    assert float(arguments['runtime_start_delay']) >= 30.0
 
 
 def test_navigation_observation_selects_last_nonzero_without_sleep():

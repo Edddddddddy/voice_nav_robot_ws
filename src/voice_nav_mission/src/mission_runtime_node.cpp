@@ -155,7 +155,6 @@ constexpr std::int64_t kTrustedControlResponseDeadlineMs = 100;
 constexpr std::int64_t kTrustedStopBarrierMs = 250;
 constexpr std::int64_t kTrustedCancelGraceMs = 250;
 constexpr std::int64_t kTrustedStationarityDeadlineMs = 1200;
-constexpr std::int64_t kTrustedCollisionSourceTimeoutMs = 300;
 constexpr float kTrustedMoveDistanceMinM = 0.05F;
 constexpr float kTrustedMoveDistanceMaxM = 2.0F;
 constexpr float kTrustedRotateAngleMinRad = 0.05F;
@@ -334,12 +333,8 @@ public:
         (void)enqueue_internal_event(RuntimeEvent{0U, GateSnapshotEvent{snapshot}});
       });
     const auto initial_gate_snapshot = authority_->snapshot();
-    RelativeMotionPolicy motion_policy;
-    motion_policy.stationarity_deadline = config_.stationarity_deadline;
     MotionConditioningConfig conditioning_config;
     conditioning_config.stop_barrier = config_.stop_barrier;
-    conditioning_config.collision_source_timeout = std::chrono::milliseconds(
-      kTrustedCollisionSourceTimeoutMs);
     conditioning_config.transaction_plane = admission_gate_.transaction_plane();
     conditioning_config.admission_fence_check = [this](const std::uint64_t epoch) {
         return admission_gate_.admission_allowed(
@@ -352,6 +347,10 @@ public:
         return execution_plane_ &&
                execution_plane_->completion_mailbox().relay(std::move(record));
       };
+    RelativeMotionPolicy motion_policy;
+    motion_policy.stationarity_deadline = config_.stationarity_deadline;
+    motion_policy.dependency_liveness_timeout =
+      conditioning_config.dependency_liveness_timeout;
     relative_motion_ = std::make_shared<RelativeMotionRosAdapter>(
       *this, authority_, motion_policy, conditioning_config, named_place_resolver);
     execution_plane_ = std::make_unique<RuntimeExecutionPlane>(

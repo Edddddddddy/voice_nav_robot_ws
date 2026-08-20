@@ -3,7 +3,7 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 
-"""Thin headless Mapping MVP composition for the fixed asymmetric world."""
+"""Mapping MVP composition with optional live RViz visualization."""
 
 from launch import LaunchDescription
 from launch.actions import (
@@ -13,10 +13,11 @@ from launch.actions import (
     LogInfo,
     RegisterEventHandler,
 )
+from launch.conditions import UnlessCondition
 from launch.events import matches_action
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
-from launch_ros.actions import LifecycleNode
+from launch_ros.actions import LifecycleNode, Node
 from launch_ros.event_handlers import OnStateTransition
 from launch_ros.events.lifecycle import ChangeState
 from launch_ros.substitutions import FindPackageShare
@@ -60,6 +61,20 @@ def generate_launch_description():
             {'use_lifecycle_manager': False, 'use_sim_time': True},
         ],
     )
+    rviz = Node(
+        package='rviz2',
+        executable='rviz2',
+        name='voice_nav_mapping_rviz',
+        output='screen',
+        condition=UnlessCondition(headless),
+        arguments=['-d', PathJoinSubstitution([
+            FindPackageShare('voice_nav_bringup'),
+            'config',
+            'voice_nav_mapping.rviz',
+        ])],
+        additional_env={'LIBGL_ALWAYS_SOFTWARE': 'true'},
+        parameters=[{'use_sim_time': True}],
+    )
     configure = EmitEvent(
         event=ChangeState(
             lifecycle_node_matcher=matches_action(slam),
@@ -102,6 +117,7 @@ def generate_launch_description():
         ),
         product,
         slam,
+        rviz,
         configure,
         activate,
     ])

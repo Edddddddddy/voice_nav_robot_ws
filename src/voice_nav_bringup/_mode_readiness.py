@@ -25,6 +25,7 @@ GATE_INHIBITED = 0
 MOTION_GATE_INHIBITED = 0
 NO_ACTIVE_STEP = 0xFFFFFFFF
 MOTION_SAFE_STATIONARY_HOLD_S = 2.0
+MAPPING_STATIONARY_HOLD_S = 0.2
 _MOTION_ODOMETRY_FRESHNESS_S = 0.1
 
 _MODE_LIFECYCLE_NODES = {
@@ -82,6 +83,8 @@ class _ModeReadinessState:
         mode: str,
         active_state_id: int = PRIMARY_STATE_ACTIVE,
         require_runtime: bool = False,
+        clock=None,
+        require_stationary_odometry: bool = False,
     ):
         if mode not in _MODE_LIFECYCLE_NODES:
             raise ValueError(f'unsupported mode: {mode}')
@@ -92,6 +95,13 @@ class _ModeReadinessState:
         self._active_nodes = set()
         self._map_seen = False
         self._map_odom_seen = False
+        self._clock = clock
+        self._require_stationary_odometry = require_stationary_odometry
+        if self._require_stationary_odometry and self._clock is None:
+            raise ValueError('stationary odometry readiness requires a clock')
+        self._odometry_received_at = None
+        self._odometry_stationary = False
+        self._stationary_since = None
 
     def observe_lifecycle(self, node_name: str, state_id: int) -> None:
         if (
@@ -119,6 +129,38 @@ class _ModeReadinessState:
     def observe_tf(self, message) -> None:
         self._map_odom_seen = self._map_odom_seen or _unique_map_odom(message)
 
+    def observe_odometry(self, message) -> None:
+        """Track one continuous fresh stationary window for Mapping startup."""
+        if not self._require_stationary_odometry:
+            return
+        received_at = _clock_now(self._clock)
+        if (
+            self._odometry_received_at is not None
+            and received_at - self._odometry_received_at
+            > _MOTION_ODOMETRY_FRESHNESS_S
+        ):
+            self._stationary_since = None
+        self._odometry_received_at = received_at
+        self._odometry_stationary = _is_stationary_odometry(message)
+        if not self._odometry_stationary:
+            self._stationary_since = None
+        elif self._stationary_since is None:
+            self._stationary_since = received_at
+
+    def _stationary_odometry_ready(self) -> bool:
+        if not self._require_stationary_odometry:
+            return True
+        now = _clock_now(self._clock)
+        return (
+            self._odometry_received_at is not None
+            and self._odometry_stationary
+            and now - self._odometry_received_at
+            <= _MOTION_ODOMETRY_FRESHNESS_S
+            and self._stationary_since is not None
+            and now - self._stationary_since
+            >= MAPPING_STATIONARY_HOLD_S
+        )
+
     def needs_lifecycle(self, node_name: str) -> bool:
         return node_name not in self._active_nodes
 
@@ -128,6 +170,7 @@ class _ModeReadinessState:
             and len(self._active_nodes) == len(self._required_nodes)
             and self._map_seen
             and self._map_odom_seen
+            and self._stationary_odometry_ready()
         )
 
     def failure_stage(self) -> str:
@@ -140,6 +183,19 @@ class _ModeReadinessState:
             return 'map'
         if not self._map_odom_seen:
             return 'map_odom_tf'
+        if self._require_stationary_odometry:
+            if (
+                self._odometry_received_at is None
+                or not self._odometry_stationary
+            ):
+                return 'odometry_stationary'
+            if (
+                _clock_now(self._clock) - self._odometry_received_at
+                > _MOTION_ODOMETRY_FRESHNESS_S
+            ):
+                return 'odometry_fresh'
+            if not self._stationary_odometry_ready():
+                return 'safe_stationary_hold'
         return ''
 
 
@@ -414,10 +470,11 @@ def wait_for_mode_readiness(session_spec, deadline, clock):
         import rclpy
         from lifecycle_msgs.msg import State
         from lifecycle_msgs.srv import GetState
-        from nav_msgs.msg import OccupancyGrid
+        from nav_msgs.msg import OccupancyGrid, Odometry
         from rclpy.qos import (
             DurabilityPolicy,
             HistoryPolicy,
+            qos_profile_sensor_data,
             QoSProfile,
             ReliabilityPolicy,
         )
@@ -431,7 +488,11 @@ def wait_for_mode_readiness(session_spec, deadline, clock):
 
     node = None
     state = _ModeReadinessState(
-        mode, State.PRIMARY_STATE_ACTIVE, require_runtime=True,
+        mode,
+        State.PRIMARY_STATE_ACTIVE,
+        require_runtime=True,
+        clock=clock,
+        require_stationary_odometry=mode == 'mapping',
     )
     pending = {}
     try:
@@ -463,6 +524,13 @@ def wait_for_mode_readiness(session_spec, deadline, clock):
         node.create_subscription(
             MissionState, '/mission/state', state.observe_runtime, map_qos,
         )
+        if mode == 'mapping':
+            node.create_subscription(
+                Odometry,
+                '/odom',
+                state.observe_odometry,
+                qos_profile_sensor_data,
+            )
         clients = {
             node_name: node.create_client(GetState, service_name)
             for node_name, service_name in _LIFECYCLE_SERVICES[mode].items()

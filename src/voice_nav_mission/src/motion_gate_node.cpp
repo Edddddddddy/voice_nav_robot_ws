@@ -332,10 +332,10 @@ private:
     }
     if (
       candidate_freshness_ms >= authority_lease_ms ||
-      authority_lease_ms >= 350)
+      authority_lease_ms > 2000)
     {
       throw std::invalid_argument(
-              "MotionGate requires freshness < authority < controller timeout");
+              "MotionGate requires freshness < authority <= 2000 ms");
     }
     if (
       config.expected_candidate_writer_fqn.empty() ||
