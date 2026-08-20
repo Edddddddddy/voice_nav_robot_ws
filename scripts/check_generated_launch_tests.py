@@ -31,14 +31,6 @@ EXPECTED_TESTS = {
         },
     },
     "voice_nav_sim": {
-        "test_test_simulation_control.py": {
-            "source": "test_simulation_control.py",
-            "timeout": 120.0,
-        },
-        "test_test_simulation_interfaces.py": {
-            "source": "test_simulation_interfaces.py",
-            "timeout": 120.0,
-        },
         "test_test_tf_ownership_conflict.py": {
             "source": "test_tf_ownership_conflict.py",
             "timeout": 30.0,

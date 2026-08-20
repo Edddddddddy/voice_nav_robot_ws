@@ -333,33 +333,9 @@ class ScopedTestResultsTest(unittest.TestCase):
                 / "voice_nav_sim"
             )
             write_launch_xunit(
-                results / "test_test_simulation_control.py.xunit.xml",
+                results / "test_test_tf_ownership_conflict.py.xunit.xml",
                 (
-                    (
-                        "voice_nav_sim.LaunchStartupPolicyTest",
-                        "test_startup_handler_stops_after_failed_stage",
-                    ),
-                    (
-                        "voice_nav_sim.SimulationControlTest",
-                        "test_stamped_drive_odometry_tf_and_consumer_timeout",
-                    ),
-                    (
-                        "voice_nav_sim.SimulationControlShutdownTest",
-                        "test_all_launch_managed_processes_exit_cleanly",
-                    ),
-                ),
-            )
-            write_launch_xunit(
-                results / "test_test_simulation_interfaces.py.xunit.xml",
-                (
-                    (
-                        "voice_nav_sim.SimulationInterfacesTest",
-                        "test_perception_odom_tf_and_ownership_contract",
-                    ),
-                    (
-                        "voice_nav_sim.SimulationInterfacesShutdownTest",
-                        "test_all_launch_managed_processes_exit_cleanly",
-                    ),
+                    ("voice_nav_sim.UnrelatedTest", "test_unrelated"),
                 ),
             )
 
@@ -368,7 +344,7 @@ class ScopedTestResultsTest(unittest.TestCase):
             self.assertEqual(completed.returncode, 2, completed.stdout)
             self.assertIn("critical launch evidence", completed.stderr)
 
-    def test_report_requires_simulation_startup_policy_inventory(
+    def test_report_accepts_tf_conflict_launch_inventory(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -378,32 +354,6 @@ class ScopedTestResultsTest(unittest.TestCase):
                 / "voice_nav_sim"
                 / "test_results"
                 / "voice_nav_sim"
-            )
-            write_launch_xunit(
-                results / "test_test_simulation_control.py.xunit.xml",
-                (
-                    (
-                        "voice_nav_sim.SimulationControlTest",
-                        "test_stamped_drive_odometry_tf_and_consumer_timeout",
-                    ),
-                    (
-                        "voice_nav_sim.SimulationControlShutdownTest",
-                        "test_all_launch_managed_processes_exit_cleanly",
-                    ),
-                ),
-            )
-            write_launch_xunit(
-                results / "test_test_simulation_interfaces.py.xunit.xml",
-                (
-                    (
-                        "voice_nav_sim.SimulationInterfacesTest",
-                        "test_perception_odom_tf_and_ownership_contract",
-                    ),
-                    (
-                        "voice_nav_sim.SimulationInterfacesShutdownTest",
-                        "test_all_launch_managed_processes_exit_cleanly",
-                    ),
-                ),
             )
             write_launch_xunit(
                 results / "test_test_tf_ownership_conflict.py.xunit.xml",
@@ -420,8 +370,8 @@ class ScopedTestResultsTest(unittest.TestCase):
 
             completed = self.run_reporter(build_base, "voice_nav_sim")
 
-            self.assertEqual(completed.returncode, 2, completed.stdout)
-            self.assertIn("inventory is incomplete", completed.stderr)
+            self.assertEqual(completed.returncode, 0, completed.stdout)
+            self.assertIn("Summary: 1 test,", completed.stdout)
 
     def test_report_rejects_inconsistent_critical_launch_inventory(
         self,

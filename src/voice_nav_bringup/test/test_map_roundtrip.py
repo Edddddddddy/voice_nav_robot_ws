@@ -19,6 +19,9 @@ import pytest
 
 def _load_roundtrip_module():
     package_root = Path(__file__).resolve().parents[1]
+    source_python = package_root.parent / 'voice_nav_sim' / 'python'
+    if str(source_python) not in sys.path:
+        sys.path.insert(0, str(source_python))
     module_path = package_root / 'voice_nav_map_roundtrip.py'
     specification = importlib.util.spec_from_file_location(
         'voice_nav_map_roundtrip', module_path,

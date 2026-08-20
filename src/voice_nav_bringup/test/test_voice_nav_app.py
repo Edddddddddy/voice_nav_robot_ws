@@ -22,10 +22,16 @@ import importlib.util
 from io import StringIO
 from pathlib import Path
 import signal
+import sys
 from types import SimpleNamespace
 
 
 def _load_app_module():
+    source_python = (
+        Path(__file__).resolve().parents[2] / 'voice_nav_sim' / 'python'
+    )
+    if str(source_python) not in sys.path:
+        sys.path.insert(0, str(source_python))
     source = Path(__file__).resolve().parents[1] / 'voice_nav_app.py'
     specification = importlib.util.spec_from_file_location(
         'voice_nav_app', source,
@@ -1369,6 +1375,7 @@ def test_app_static_authority_is_limited_to_process_and_gateway_readiness():
         '__future__', 'argparse', 'dataclasses', 'json', 'os',
         'rcl_interfaces', 'rclpy',
         'runpy', 'signal', 'subprocess', 'sys', 'time', 'typing',
+        'voice_nav_sim',
         'voice_nav_console',
     }
     imported_roots = set()

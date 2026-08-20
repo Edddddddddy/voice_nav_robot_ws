@@ -64,40 +64,6 @@ CRITICAL_LAUNCH_CASES: dict[
     "voice_nav_sim": {
         Path(
             "test_results/voice_nav_sim/"
-            "test_test_simulation_control.py.xunit.xml"
-        ): frozenset(
-            {
-                (
-                    "voice_nav_sim.LaunchStartupPolicyTest",
-                    "test_startup_handler_stops_after_failed_stage",
-                ),
-                (
-                    "voice_nav_sim.SimulationControlTest",
-                    "test_stamped_drive_odometry_tf_and_consumer_timeout",
-                ),
-                (
-                    "voice_nav_sim.SimulationControlShutdownTest",
-                    "test_all_launch_managed_processes_exit_cleanly",
-                ),
-            }
-        ),
-        Path(
-            "test_results/voice_nav_sim/"
-            "test_test_simulation_interfaces.py.xunit.xml"
-        ): frozenset(
-            {
-                (
-                    "voice_nav_sim.SimulationInterfacesTest",
-                    "test_perception_odom_tf_and_ownership_contract",
-                ),
-                (
-                    "voice_nav_sim.SimulationInterfacesShutdownTest",
-                    "test_all_launch_managed_processes_exit_cleanly",
-                ),
-            }
-        ),
-        Path(
-            "test_results/voice_nav_sim/"
             "test_test_tf_ownership_conflict.py.xunit.xml"
         ): frozenset(
             {

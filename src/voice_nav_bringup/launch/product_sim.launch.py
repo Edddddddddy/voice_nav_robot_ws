@@ -16,18 +16,29 @@ from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
+    OpaqueFunction,
     SetEnvironmentVariable,
 )
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
+from voice_nav_sim._scenario_spec import (
+    display_from_headless,
+    resolve_scenario,
+)
+
+
+def _validate_scenario(context):
+    scenario = context.perform_substitution(LaunchConfiguration('scenario'))
+    headless = context.perform_substitution(LaunchConfiguration('headless'))
+    resolve_scenario(scenario, display_from_headless(headless))
+    return []
 
 
 def generate_launch_description():
+    scenario = LaunchConfiguration('scenario')
     headless = LaunchConfiguration('headless')
-    world_name = LaunchConfiguration('world_name')
-    laser_update_rate = LaunchConfiguration('laser_update_rate')
     shutdown_on_gazebo_exit = LaunchConfiguration(
         'shutdown_on_gazebo_exit'
     )
@@ -46,8 +57,7 @@ def generate_launch_description():
         ),
         launch_arguments={
             'headless': headless,
-            'world_name': world_name,
-            'laser_update_rate': laser_update_rate,
+            'scenario': scenario,
             'shutdown_on_gazebo_exit': shutdown_on_gazebo_exit,
         }.items(),
     )
@@ -89,23 +99,18 @@ def generate_launch_description():
                 value='rmw_fastrtps_cpp',
             ),
             DeclareLaunchArgument(
+                'scenario',
+                default_value='motion',
+                description='Select one closed simulation scenario.',
+                choices=['motion', 'mapping', 'navigation'],
+            ),
+            DeclareLaunchArgument(
                 'headless',
                 default_value='true',
                 description='Run Gazebo server-only when true.',
                 choices=['true', 'false'],
             ),
-            DeclareLaunchArgument(
-                'world_name',
-                default_value='voice_nav_test_world',
-                description='Select one trusted VoiceNav simulation world.',
-                choices=['voice_nav_test_world', 'voice_nav_house_world'],
-            ),
-            DeclareLaunchArgument(
-                'laser_update_rate',
-                default_value='10',
-                description='Select one trusted LiDAR sampling profile.',
-                choices=['10', '20'],
-            ),
+            OpaqueFunction(function=_validate_scenario),
             DeclareLaunchArgument(
                 'shutdown_on_gazebo_exit',
                 default_value='true',

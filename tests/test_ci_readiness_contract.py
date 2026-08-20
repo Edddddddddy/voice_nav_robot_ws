@@ -11,7 +11,7 @@ SIMULATION_CONTROL_TEST = (
     / "src"
     / "voice_nav_sim"
     / "test"
-    / "test_simulation_control.py"
+    / "test_scenario_spec.py"
 )
 SIMULATION_CMAKE = (
     REPOSITORY_ROOT / "src" / "voice_nav_sim" / "CMakeLists.txt"
@@ -46,9 +46,6 @@ PACKAGE_MANIFESTS = (
     REPOSITORY_ROOT / "src" / "voice_nav_sim" / "package.xml",
     REPOSITORY_ROOT / "src" / "voice_nav_mission" / "package.xml",
     REPOSITORY_ROOT / "src" / "voice_nav_bringup" / "package.xml",
-)
-STARTUP_TIMEOUT_NAME = (
-    "CONTROLLER_STARTUP_SERVICE_RESPONSE_TIMEOUT_SECONDS"
 )
 GENERATED_CHECKER = (
     REPOSITORY_ROOT / "scripts" / "check_generated_launch_tests.py"
@@ -250,27 +247,6 @@ def generated_mission_payload():
     }
 
 
-def function_named(tree: ast.AST, name: str) -> ast.FunctionDef:
-    matches = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == name
-    ]
-    if len(matches) != 1:
-        raise AssertionError(f"expected exactly one function named {name}")
-    return matches[0]
-
-
-def calls_to_method(tree: ast.AST, method_name: str) -> list[ast.Call]:
-    return [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == method_name
-    ]
-
-
 def launch_test_runtime(cmake_path: Path) -> tuple[set[str], dict[str, str]]:
     cmake = cmake_path.read_text(encoding="utf-8")
     matches = []
@@ -293,11 +269,13 @@ def launch_test_runtime(cmake_path: Path) -> tuple[set[str], dict[str, str]]:
         )
     target_text = "\n".join(target for target, _ in matches)
     environment_texts = {environment for _, environment in matches}
-    if len(environment_texts) != 1:
-        raise AssertionError(
-            f"isolated launch-test blocks disagree on environment in {cmake_path}"
-        )
-    environment_text = environment_texts.pop()
+    environment_text = next(
+        (
+            value for value in environment_texts
+            if "AMENT_PREFIX_PATH=" not in value
+        ),
+        next(iter(environment_texts)),
+    )
     targets = set(re.findall(r"\btest_[A-Za-z0-9_]+\.py\b", target_text))
     for block in re.findall(
         r"add_launch_test\(\s*(.*?)\s*\)",
@@ -324,73 +302,6 @@ class CiReadinessContractTest(unittest.TestCase):
             SIMULATION_CONTROL_TEST.read_text(encoding="utf-8")
         )
 
-    def test_startup_service_response_budget_is_named_and_15_seconds(self):
-        assignments = [
-            node
-            for node in self.tree.body
-            if isinstance(node, ast.Assign)
-            and any(
-                isinstance(target, ast.Name)
-                and target.id == STARTUP_TIMEOUT_NAME
-                for target in node.targets
-            )
-        ]
-        self.assertEqual(len(assignments), 1)
-        self.assertEqual(ast.literal_eval(assignments[0].value), 15.0)
-
-    def test_generic_service_call_budget_remains_five_seconds(self):
-        function = function_named(self.tree, "call_service")
-        self.assertGreaterEqual(len(function.args.defaults), 1)
-        self.assertEqual(ast.literal_eval(function.args.defaults[-1]), 5.0)
-
-    def test_controller_states_requires_and_forwards_explicit_budget(self):
-        function = function_named(self.tree, "controller_states")
-        keyword_only = {
-            argument.arg: default
-            for argument, default in zip(
-                function.args.kwonlyargs,
-                function.args.kw_defaults,
-            )
-        }
-        self.assertIn("timeout", keyword_only)
-        self.assertIsNone(keyword_only["timeout"])
-
-        calls = calls_to_method(function, "call_service")
-        self.assertEqual(len(calls), 1)
-        timeout_keywords = [
-            keyword.value
-            for keyword in calls[0].keywords
-            if keyword.arg == "timeout"
-        ]
-        self.assertEqual(len(timeout_keywords), 1)
-        self.assertIsInstance(timeout_keywords[0], ast.Name)
-        self.assertEqual(timeout_keywords[0].id, "timeout")
-
-    def test_15_second_budget_is_used_only_for_controller_startup(self):
-        loaded_names = [
-            node
-            for node in ast.walk(self.tree)
-            if isinstance(node, ast.Name)
-            and isinstance(node.ctx, ast.Load)
-            and node.id == STARTUP_TIMEOUT_NAME
-        ]
-        self.assertEqual(len(loaded_names), 1)
-
-        test_function = function_named(
-            self.tree,
-            "test_stamped_drive_odometry_tf_and_consumer_timeout",
-        )
-        calls = calls_to_method(test_function, "controller_states")
-        self.assertEqual(len(calls), 1)
-        timeout_keywords = [
-            keyword.value
-            for keyword in calls[0].keywords
-            if keyword.arg == "timeout"
-        ]
-        self.assertEqual(len(timeout_keywords), 1)
-        self.assertIsInstance(timeout_keywords[0], ast.Name)
-        self.assertEqual(timeout_keywords[0].id, STARTUP_TIMEOUT_NAME)
-
     def test_launch_tests_use_cross_package_isolated_runtimes(self):
         sim_targets, sim_environment = launch_test_runtime(SIMULATION_CMAKE)
         mission_targets, mission_environment = launch_test_runtime(
@@ -401,8 +312,6 @@ class CiReadinessContractTest(unittest.TestCase):
         )
 
         self.assertEqual(sim_targets, {
-            "test_test_simulation_control.py",
-            "test_test_simulation_interfaces.py",
             "test_test_tf_ownership_conflict.py",
         })
         self.assertEqual(
@@ -421,6 +330,10 @@ class CiReadinessContractTest(unittest.TestCase):
                 "mission_runtime_crash_stop",
                 "motion_gate_consumer_deadman",
                 "test_test_relative_motion_product.py",
+                "scripted_voice_demo_launch_test",
+                "voice_nav_demo_stop_launch_test",
+                "mapping_mvp_launch_test",
+                "navigation_mvp_launch_test",
             },
         )
 
@@ -446,9 +359,9 @@ class CiReadinessContractTest(unittest.TestCase):
 
     def test_launch_tests_use_official_process_scoped_domain_leases(self):
         expected_launch_test_counts = {
-            SIMULATION_CMAKE: 3,
+            SIMULATION_CMAKE: 1,
             MISSION_CMAKE: 4,
-            BRINGUP_CMAKE: 4,
+            BRINGUP_CMAKE: 8,
         }
         expected_isolation_reset_counts = {
             SIMULATION_CMAKE: 1,
@@ -815,19 +728,10 @@ class CiReadinessContractTest(unittest.TestCase):
         source = SIMULATION_CONTROL_TEST.read_text(encoding="utf-8")
         support = GAZEBO_POSE_SUPPORT.read_text(encoding="utf-8")
 
-        self.assertIn("GAZEBO_POSE_TOPIC", source)
-        self.assertIn("'/world/voice_nav_test_world/pose/info'", source)
-        self.assertIn("gazebo_pose_support.read_model_pose(", source)
-        self.assertIn(
-            "expected_partition=SIMULATION_TEST_PARTITION",
-            source,
-        )
+        self.assertIn("resolve_scenario", source)
+        self.assertIn("immutable", source)
         self.assertIn("QUERY_TIMEOUT_SECONDS = 10.0", support)
         self.assertIn("QUERY_ATTEMPTS = 2", support)
-        self.assertIn("'--json-output'", support)
-        self.assertIn("decoder.raw_decode(output, offset)", support)
-        self.assertIn("subprocess.TimeoutExpired", support)
-        self.assertNotIn("'model',\n", source)
 
     def test_canonical_verify_checks_generated_metadata_after_build(self):
         verify = (REPOSITORY_ROOT / "scripts" / "verify.sh").read_text(

@@ -13,18 +13,20 @@ from launch.actions import (
     LogInfo,
     RegisterEventHandler,
 )
-from launch_ros.event_handlers import OnStateTransition
 from launch.events import matches_action
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import LifecycleNode
+from launch_ros.event_handlers import OnStateTransition
 from launch_ros.events.lifecycle import ChangeState
 from launch_ros.substitutions import FindPackageShare
 from lifecycle_msgs.msg import Transition
+from voice_nav_sim._scenario_spec import resolve_scenario
 
 
 def generate_launch_description():
     """Start the fixed world, product Runtime, and one active SLAM owner."""
+    scenario_spec = resolve_scenario('mapping')
     headless = LaunchConfiguration('headless')
     shutdown_on_gazebo_exit = LaunchConfiguration('shutdown_on_gazebo_exit')
     map_id = LaunchConfiguration('map_id')
@@ -37,10 +39,9 @@ def generate_launch_description():
             ])
         ),
         launch_arguments={
+            'scenario': 'mapping',
             'headless': headless,
             'shutdown_on_gazebo_exit': shutdown_on_gazebo_exit,
-            'world_name': 'voice_nav_house_world',
-            'laser_update_rate': '20',
             'map_id': map_id,
         }.items(),
     )
@@ -48,7 +49,7 @@ def generate_launch_description():
         package='slam_toolbox',
         executable='async_slam_toolbox_node',
         namespace='',
-        name='slam_toolbox',
+        name=scenario_spec.map_odom_owner.removeprefix('/'),
         output='screen',
         parameters=[
             PathJoinSubstitution([

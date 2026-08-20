@@ -18,16 +18,17 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node, SetRemap
 from launch_ros.substitutions import FindPackageShare
+from voice_nav_sim._scenario_spec import resolve_scenario
 
 
 def generate_launch_description():
     """Start simulation, localization, Nav2, and the navigation Runtime."""
+    scenario_spec = resolve_scenario('navigation')
     headless = LaunchConfiguration('headless')
     shutdown_on_gazebo_exit = LaunchConfiguration('shutdown_on_gazebo_exit')
     map_id = LaunchConfiguration('map_id')
     map_root = LaunchConfiguration('map_root')
     bringup_share = FindPackageShare('voice_nav_bringup')
-    nav2_share = FindPackageShare('nav2_bringup')
     runtime_config = PathJoinSubstitution([
         bringup_share, 'config', 'mission_navigation.yaml'
     ])
@@ -41,10 +42,9 @@ def generate_launch_description():
             bringup_share, 'launch', 'product_sim.launch.py'
         ])),
         launch_arguments={
+            'scenario': 'navigation',
             'headless': headless,
             'shutdown_on_gazebo_exit': shutdown_on_gazebo_exit,
-            'world_name': 'voice_nav_house_world',
-            'laser_update_rate': '20',
             'runtime_config': runtime_config,
             'map_id': map_id,
         }.items(),
@@ -65,7 +65,7 @@ def generate_launch_description():
     amcl = Node(
         package='nav2_amcl',
         executable='amcl',
-        name='amcl',
+        name=scenario_spec.map_odom_owner.removeprefix('/'),
         output='screen',
         parameters=[nav2_params],
         remappings=tf_remappings,

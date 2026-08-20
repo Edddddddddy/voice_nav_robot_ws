@@ -7,13 +7,23 @@
 
 import importlib.util
 from pathlib import Path
+import sys
 
 from launch.actions import IncludeLaunchDescription
 from launch_ros.actions import LifecycleNode
 
 
 def _load_mapping_launch():
-    launch_path = Path(__file__).resolve().parents[1] / 'launch' / 'mapping_mvp.launch.py'
+    source_python = (
+        Path(__file__).resolve().parents[2] / 'voice_nav_sim' / 'python'
+    )
+    if str(source_python) not in sys.path:
+        sys.path.insert(0, str(source_python))
+    launch_path = (
+        Path(__file__).resolve().parents[1]
+        / 'launch'
+        / 'mapping_mvp.launch.py'
+    )
     specification = importlib.util.spec_from_file_location('mapping_mvp_launch', launch_path)
     assert specification is not None and specification.loader is not None
     module = importlib.util.module_from_spec(specification)

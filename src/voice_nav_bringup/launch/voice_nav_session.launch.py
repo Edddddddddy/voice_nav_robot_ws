@@ -51,7 +51,10 @@ def generate_launch_description():
             'launch',
             'product_sim.launch.py',
         ])),
-        launch_arguments=common_arguments.items(),
+        launch_arguments={
+            **common_arguments,
+            'scenario': mode,
+        }.items(),
         condition=mode_condition('motion'),
     )
     mapping = IncludeLaunchDescription(

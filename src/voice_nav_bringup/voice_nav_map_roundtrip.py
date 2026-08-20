@@ -32,6 +32,8 @@ import threading
 import time
 from typing import Callable, Literal, Protocol
 
+from voice_nav_sim._scenario_spec import resolve_scenario, ScenarioSpecError
+
 
 TRUSTED_MAP_ID = 'voice_mvp'
 NAVIGATION_PHRASE = '去书房'
@@ -566,10 +568,12 @@ def build_production_command(
     display: Display = 'headless',
 ) -> tuple[str, ...]:
     """Return the fixed installed app command for one immutable mode."""
-    if mode not in (_MAPPING_MODE, _NAVIGATION_MODE):
+    try:
+        spec = resolve_scenario(mode, display)
+    except ScenarioSpecError as error:
+        raise RoundtripError(str(error)) from error
+    if spec.mode not in (_MAPPING_MODE, _NAVIGATION_MODE):
         raise RoundtripError(f'unsupported roundtrip mode: {mode}')
-    if display not in ('headless', 'gui'):
-        raise RoundtripError(f'unsupported roundtrip display: {display}')
     return (
         'ros2',
         'run',
