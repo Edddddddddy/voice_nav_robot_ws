@@ -23,14 +23,18 @@
 namespace voice_nav_audio
 {
 
-// Package-private resolved asset identity.  The factory deliberately accepts
-// only the selected Silero and SenseVoice files; it has no model discovery
-// path that could load unresolved KWS or Zipformer assets.
+// Package-private resolved asset identity. The caller selects exact local
+// files; the factory never discovers, downloads, or redistributes models.
 struct SherpaSenseVoiceAssetPaths
 {
   std::string silero_vad_model{};
   std::string sensevoice_model{};
   std::string tokens{};
+  std::string kws_encoder{};
+  std::string kws_decoder{};
+  std::string kws_joiner{};
+  std::string kws_tokens{};
+  std::string kws_keywords{};
 };
 
 [[nodiscard]] std::unique_ptr<SenseVoiceProvider> make_sherpa_sensevoice_provider(

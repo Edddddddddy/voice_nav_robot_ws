@@ -81,6 +81,17 @@ public:
     const Sample * samples, std::size_t sample_count, std::string & labeled_text) noexcept = 0;
 };
 
+// Package-private seam for the streaming acoustic keyword spotter. It sees
+// the same cleaned 16 kHz frames as VAD and latches one hit per utterance.
+class KeywordSpotterAdapter
+{
+public:
+  virtual ~KeywordSpotterAdapter() = default;
+
+  [[nodiscard]] virtual bool process(const CleanedAudioFrame & frame) noexcept = 0;
+  virtual void reset() noexcept = 0;
+};
+
 struct SenseVoiceProviderConfig
 {
   static constexpr std::size_t kFramesPerSecond = 100U;
@@ -100,6 +111,7 @@ public:
   SenseVoiceProvider(
     std::unique_ptr<SileroVadAdapter> vad,
     std::unique_ptr<SenseVoiceAsrAdapter> asr,
+    std::unique_ptr<KeywordSpotterAdapter> keyword_spotter,
     SenseVoiceProviderConfig config = {});
   ~SenseVoiceProvider() override;
 

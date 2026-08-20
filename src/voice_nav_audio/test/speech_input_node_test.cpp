@@ -97,16 +97,51 @@ private:
   std::size_t calls_{0U};
 };
 
+class NodeKeywordSpotter final : public KeywordSpotterAdapter
+{
+public:
+  bool process(const CleanedAudioFrame &) noexcept override
+  {
+    if (latched_) {
+      return false;
+    }
+    latched_ = true;
+    return true;
+  }
+
+  void reset() noexcept override
+  {
+    latched_ = false;
+  }
+
+private:
+  bool latched_{false};
+};
+
+struct NodeBarrierAsrState
+{
+  std::mutex mutex;
+  std::condition_variable condition;
+  bool entered{false};
+  bool released{false};
+  bool shutdown_requested{false};
+};
+
 class NodeBarrierAsr final : public SenseVoiceAsrAdapter
 {
 public:
+  explicit NodeBarrierAsr(std::shared_ptr<NodeBarrierAsrState> state)
+  : state_(std::move(state))
+  {
+  }
+
   bool infer(
     const Sample *, const std::size_t, std::string & labeled_text) noexcept override
   {
-    std::unique_lock<std::mutex> lock(mutex_);
-    entered_ = true;
-    condition_.notify_all();
-    condition_.wait(lock, [this]() {return released_;});
+    std::unique_lock<std::mutex> lock(state_->mutex);
+    state_->entered = true;
+    state_->condition.notify_all();
+    state_->condition.wait(lock, [this]() {return state_->released;});
     labeled_text = "开放时间早上9点至下午5点。";
     return true;
   }
@@ -114,42 +149,25 @@ public:
   void shutdown() noexcept override
   {
     {
-      std::lock_guard<std::mutex> lock(mutex_);
-      shutdown_requested_ = true;
+      std::lock_guard<std::mutex> lock(state_->mutex);
+      state_->shutdown_requested = true;
     }
-    condition_.notify_all();
-  }
-
-  bool wait_until_entered()
-  {
-    std::unique_lock<std::mutex> lock(mutex_);
-    return condition_.wait_for(lock, std::chrono::seconds(2), [this]() {return entered_;});
-  }
-
-  bool wait_until_shutdown()
-  {
-    std::unique_lock<std::mutex> lock(mutex_);
-    return condition_.wait_for(lock, std::chrono::seconds(2), [this]() {
-               return shutdown_requested_;
-      });
-  }
-
-  void release() noexcept
-  {
-    {
-      std::lock_guard<std::mutex> lock(mutex_);
-      released_ = true;
-    }
-    condition_.notify_all();
+    state_->condition.notify_all();
   }
 
 private:
-  std::mutex mutex_;
-  std::condition_variable condition_;
-  bool entered_{false};
-  bool released_{false};
-  bool shutdown_requested_{false};
+  std::shared_ptr<NodeBarrierAsrState> state_;
 };
+
+bool wait_for_asr_state(
+  const std::shared_ptr<NodeBarrierAsrState> & state,
+  const bool NodeBarrierAsrState::* member)
+{
+  std::unique_lock<std::mutex> lock(state->mutex);
+  return state->condition.wait_for(lock, std::chrono::seconds(2), [&state, member]() {
+             return state.get()->*member;
+    });
+}
 
 CleanedAudioFrame frame(const std::uint64_t sequence, const std::size_t valid_samples = 160U)
 {
@@ -253,9 +271,10 @@ TEST(SpeechInputNodeTest, DestructionWaitsForRecognizerBeforeAsrShutdownAndSuppr
 {
   rclcpp::init(0, nullptr);
   auto vad = std::make_unique<NodeBarrierVad>();
-  auto asr = std::make_unique<NodeBarrierAsr>();
-  auto * const asr_probe = asr.get();
-  auto provider = std::make_unique<SenseVoiceProvider>(std::move(vad), std::move(asr));
+  auto asr_state = std::make_shared<NodeBarrierAsrState>();
+  auto asr = std::make_unique<NodeBarrierAsr>(asr_state);
+  auto provider = std::make_unique<SenseVoiceProvider>(
+    std::move(vad), std::move(asr), std::make_unique<NodeKeywordSpotter>());
   auto speech = std::make_unique<SpeechInputNode>(std::move(provider));
   auto observer = std::make_shared<rclcpp::Node>("speech_input_teardown_observer");
   std::mutex count_mutex;
@@ -274,7 +293,7 @@ TEST(SpeechInputNodeTest, DestructionWaitsForRecognizerBeforeAsrShutdownAndSuppr
   speech->accept_cleaned_frame(frame(1U));
   speech->accept_cleaned_frame(frame(2U));
   speech->finish_input();
-  ASSERT_TRUE(asr_probe->wait_until_entered());
+  ASSERT_TRUE(wait_for_asr_state(asr_state, &NodeBarrierAsrState::entered));
 
   std::atomic<bool> destroyer_started{false};
   std::thread destroyer([&speech, &destroyer_started]() {
@@ -288,8 +307,12 @@ TEST(SpeechInputNodeTest, DestructionWaitsForRecognizerBeforeAsrShutdownAndSuppr
   // blocked long enough for that stop-input phase to acquire the provider
   // queue before releasing the in-flight VAD/ASR sequence.
   std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  asr_probe->release();
-  EXPECT_TRUE(asr_probe->wait_until_shutdown());
+  {
+    std::lock_guard<std::mutex> lock(asr_state->mutex);
+    asr_state->released = true;
+  }
+  asr_state->condition.notify_all();
+  EXPECT_TRUE(wait_for_asr_state(asr_state, &NodeBarrierAsrState::shutdown_requested));
   destroyer.join();
 
   {
