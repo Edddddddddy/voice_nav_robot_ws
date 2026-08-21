@@ -1103,7 +1103,7 @@ TEST(
 
 TEST(
   MotionConditioningPipelineIntegration,
-  RenewEndpointLossRetainsReplacementRearmAcrossCompletionRejection)
+  RenewEndpointLossRearmsBeforeFreshMotionStarts)
 {
   RclcppGuard rclcpp_guard;
   rclcpp::NodeOptions gate_options;
@@ -1209,6 +1209,22 @@ TEST(
   EXPECT_TRUE(rearmed);
   EXPECT_FALSE(adapter.safety_faulted());
   EXPECT_TRUE(adapter.healthy());
+
+  // A replacement Gate is not a usable recovery merely because the old
+  // transaction has drained.  The next Runtime admission must be able to
+  // drive a fresh Motion through its own renewal cycle; otherwise a ready
+  // observation can still turn into an aborted Goal.
+  const auto renew_before_recovery = renew_callbacks.value();
+  const MotionToken recovery_token{92U, 8U, 4U, 1U};
+  adapter.start(
+    recovery_token,
+    MissionStep{
+        static_cast<std::uint8_t>(MissionStepKind::MoveDistance),
+        0.5F, 0.0F, {}},
+    {}, {});
+  ASSERT_TRUE(renew_callbacks.wait_for_at_least(renew_before_recovery + 2U, 2s));
+  EXPECT_TRUE(adapter.cancel(
+      recovery_token, std::chrono::steady_clock::now() + 2s));
   adapter.shutdown();
 }
 

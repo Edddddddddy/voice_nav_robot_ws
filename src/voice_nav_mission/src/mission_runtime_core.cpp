@@ -938,10 +938,24 @@ bool RuntimeCore::try_rearm_pending_gate_replacement()
     return false;
   }
 
+  const auto replacement_candidate = gate_snapshot_;
   GateSnapshot accepted_replacement;
+  if (!relative_motion_->rearm_after_gate_replacement(
+      replacement_candidate, &accepted_replacement))
+  {
+    return false;
+  }
+
+  // Adapter success carries the steady-clock proof that Core cannot inspect
+  // directly.  Core must nevertheless bind that proof to the replacement
+  // identity it observed and reject an incomplete accepted snapshot before
+  // it advances the externally visible admission epoch.
   if (
-    !relative_motion_->rearm_after_gate_replacement(
-      gate_snapshot_, &accepted_replacement) ||
+    accepted_replacement.gate_instance_id !=
+    replacement_candidate.gate_instance_id ||
+    accepted_replacement.control_seq < replacement_candidate.control_seq ||
+    !replacement_gate_can_reassert(accepted_replacement) ||
+    !zero_is_proven(accepted_replacement) ||
     !rotate_epoch())
   {
     return false;
